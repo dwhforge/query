@@ -59,11 +59,14 @@ Analytics engineer: several CSV/Parquet/**Postgres** inputs → join/transform �
 
 | Surface | Role |
 |---------|------|
-| **Queries** | workspace query list (PQ-like query pane) |
-| **Change history** | steps of the active query (DnD later) |
+| **Explorer (left tree)** | Project → Sources / Queries / Export ([ADR-0009](adr/0009-project-explorer.md)) |
+| **Pipeline canvas** | visual graph of queries + join edges (killer feature) |
+| **Inspector** | Applied steps of active query + Filter/Join |
 | **Preview** | virtualized table for focus query |
-| **Export dbt** | generate project into a chosen folder |
+| **Export dbt** | from Explorer or toolbar |
 | **AI Chat** | NL → steps (after AST stabilizes) |
+
+**Entities (reuse, don’t invent):** Project · Source · Query · Workspace — see ADR-0009.
 
 ## 6. UX rules
 

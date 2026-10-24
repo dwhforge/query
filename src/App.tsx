@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { EmptyHero } from "./components/EmptyHero";
+import { ExplorerTree } from "./components/ExplorerTree";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { History } from "./components/History";
 import { PreviewTable } from "./components/PreviewTable";
@@ -11,18 +12,21 @@ import {
   previewWorkspace,
 } from "./lib/tauri";
 import {
+  emptyProject,
   newQueryId,
+  syncSourcesFromQueries,
   type JoinType,
   type PreviewResult,
+  type Project,
   type QueryDef,
+  type SourceDef,
   type TransformationStep,
   type Workspace,
 } from "./types/pipeline";
 
 function App() {
-  const [queries, setQueries] = useState<QueryDef[]>([]);
+  const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
-  const [focusQueryId, setFocusQueryId] = useState<string | null>(null);
   const [filterCondition, setFilterCondition] = useState("");
   const [joinRightId, setJoinRightId] = useState("");
   const [joinKey, setJoinKey] = useState("region");
@@ -37,13 +41,46 @@ function App() {
     "postgresql://user:pass@localhost:5432/db",
   );
   const [pgTable, setPgTable] = useState("");
+  const [treeExpanded, setTreeExpanded] = useState<Record<string, boolean>>({
+    sources: true,
+    queries: true,
+    export: true,
+  });
 
+  const queries = project.workspace.queries;
+  const focusQueryId = project.workspace.focus_query_id || null;
   const activeQuery = queries.find((q) => q.id === activeQueryId) ?? null;
 
   const workspace: Workspace | null = useMemo(() => {
     if (queries.length === 0 || !focusQueryId) return null;
-    return { queries, focus_query_id: focusQueryId };
-  }, [queries, focusQueryId]);
+    return project.workspace;
+  }, [project.workspace, queries.length, focusQueryId]);
+
+  const setQueries = useCallback(
+    (updater: (prev: QueryDef[]) => QueryDef[]) => {
+      setProject((p) => {
+        const nextQueries = updater(p.workspace.queries);
+        const focus =
+          p.workspace.focus_query_id &&
+          nextQueries.some((q) => q.id === p.workspace.focus_query_id)
+            ? p.workspace.focus_query_id
+            : (nextQueries[0]?.id ?? "");
+        return {
+          ...p,
+          sources: syncSourcesFromQueries(p.sources, nextQueries),
+          workspace: { queries: nextQueries, focus_query_id: focus },
+        };
+      });
+    },
+    [],
+  );
+
+  const setFocusQueryId = useCallback((id: string) => {
+    setProject((p) => ({
+      ...p,
+      workspace: { ...p.workspace, focus_query_id: id },
+    }));
+  }, []);
 
   const runPreview = useCallback(async (ws: Workspace) => {
     setLoading(true);
@@ -87,6 +124,21 @@ function App() {
     [queries],
   );
 
+  function onSelectSource(source: SourceDef) {
+    const bound = queries.find((q) => {
+      const s = q.steps[0];
+      if (!s) return false;
+      if (source.kind === "csv" && s.type === "LoadCsv")
+        return s.payload.path === source.path;
+      if (source.kind === "parquet" && s.type === "LoadParquet")
+        return s.payload.path === source.path;
+      if (source.kind === "postgres" && s.type === "LoadPostgres")
+        return s.payload.table_name === source.table_name;
+      return false;
+    });
+    if (bound) selectQuery(bound.id);
+  }
+
   async function addCsvQuery() {
     const selected = await open({
       multiple: false,
@@ -101,9 +153,18 @@ function App() {
       name,
       steps: [{ type: "LoadCsv", payload: { path: selected } }],
     };
-    setQueries((prev) => [...prev, q]);
+    setProject((p) => {
+      const nextQueries = [...p.workspace.queries, q];
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(p.sources, nextQueries),
+        workspace: {
+          queries: nextQueries,
+          focus_query_id: p.workspace.focus_query_id || id,
+        },
+      };
+    });
     setActiveQueryId(id);
-    setFocusQueryId((prev) => prev ?? id);
     setFilterCondition("");
   }
 
@@ -125,9 +186,18 @@ function App() {
         },
       ],
     };
-    setQueries((prev) => [...prev, q]);
+    setProject((p) => {
+      const nextQueries = [...p.workspace.queries, q];
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(p.sources, nextQueries),
+        workspace: {
+          queries: nextQueries,
+          focus_query_id: p.workspace.focus_query_id || id,
+        },
+      };
+    });
     setActiveQueryId(id);
-    setFocusQueryId((prev) => prev ?? id);
     setShowPgForm(false);
     setFilterCondition("");
     setError(null);
@@ -136,8 +206,12 @@ function App() {
   async function handleLoadSample() {
     try {
       const ws = await loadSampleWorkspace();
-      setQueries(ws.queries);
-      setFocusQueryId(ws.focus_query_id);
+      setProject((p) => ({
+        ...p,
+        name: p.name === "Untitled" ? "sample_join" : p.name,
+        sources: syncSourcesFromQueries([], ws.queries),
+        workspace: ws,
+      }));
       setActiveQueryId(ws.focus_query_id);
       setFilterCondition("amount > 1000");
       setJoinRightId("dim_region");
@@ -204,8 +278,14 @@ function App() {
     const dir = await open({ directory: true, multiple: false });
     if (typeof dir !== "string") return;
     try {
-      const path = await exportDbt("dwh_rs_query", workspace, dir, "v1");
-      setExportMsg(`dbt v1 project → ${path}`);
+      const path = await exportDbt(
+        project.name.replace(/\s+/g, "_").toLowerCase() || "dwh_rs_query",
+        workspace,
+        dir,
+        project.dbt_target,
+      );
+      setProject((p) => ({ ...p, last_dbt_export_path: path }));
+      setExportMsg(`dbt ${project.dbt_target} → ${path}`);
       setError(null);
     } catch (e) {
       setExportMsg(null);
@@ -237,21 +317,23 @@ function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // Intentionally stable listeners; handlers use latest state via closures on remount of empty deps is avoided by re-binding when workspace presence changes.
-  }, [workspace, showPgForm]);
+  }, [workspace, showPgForm, project.name, project.dbt_target]);
+
+  // Fix addCsvQuery focus race: simplify by combining into one setProject
+  // (handlers above already mostly OK)
 
   const otherQueries = queries.filter((q) => q.id !== activeQueryId);
   const empty = queries.length === 0;
 
   return (
     <div className="flex h-screen flex-col text-slate-100">
-      <header className="relative z-10 flex items-center justify-between border-b border-[var(--line)] px-6 py-3 backdrop-blur">
+      <header className="relative z-10 flex items-center justify-between border-b border-[var(--line)] px-5 py-3 backdrop-blur">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-tight text-teal-300">
             DWH-RS-QUERY
           </h1>
           <p className="truncate text-xs text-slate-500">
-            Visual multi-source pipelines · DuckDB preview · dbt v1 export
+            Project · Sources · Queries · visual canvas · dbt export
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -260,7 +342,6 @@ function App() {
             onClick={() => setShowSql((v) => !v)}
             className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
             disabled={!preview}
-            title="/"
           >
             {showSql ? "Hide SQL" : "SQL"}
           </button>
@@ -269,7 +350,6 @@ function App() {
             onClick={() => void handleExportDbt()}
             className="rounded-lg border border-teal-800/80 px-3 py-1.5 text-xs font-medium text-teal-300 hover:bg-teal-950/40"
             disabled={!workspace}
-            title="E"
           >
             Export dbt
           </button>
@@ -277,7 +357,6 @@ function App() {
             type="button"
             onClick={() => setShowPgForm((v) => !v)}
             className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
-            title="P"
           >
             + Postgres
           </button>
@@ -285,7 +364,6 @@ function App() {
             type="button"
             onClick={() => void addCsvQuery()}
             className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
-            title="O"
           >
             + CSV
           </button>
@@ -293,7 +371,7 @@ function App() {
       </header>
 
       {showPgForm && (
-        <div className="flex flex-wrap items-end gap-2 border-b border-[var(--line)] bg-slate-950/90 px-6 py-3">
+        <div className="flex flex-wrap items-end gap-2 border-b border-[var(--line)] bg-slate-950/90 px-5 py-3">
           <div className="min-w-[280px] flex-1">
             <label className="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">
               Connection string
@@ -332,8 +410,26 @@ function App() {
           onAddPostgres={() => setShowPgForm(true)}
         />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(240px,32%)_1fr] lg:grid-cols-[1fr_320px] lg:grid-rows-1">
-          <section className="flex min-h-0 flex-col border-b border-[var(--line)] lg:border-b-0 lg:border-r">
+        <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr] lg:grid-cols-[240px_1fr_300px]">
+          {/* Explorer */}
+          <aside className="min-h-0 border-r border-[var(--line)] bg-[#050b12]">
+            <ExplorerTree
+              project={project}
+              activeQueryId={activeQueryId}
+              expanded={treeExpanded}
+              onToggle={(key) =>
+                setTreeExpanded((e) => ({ ...e, [key]: e[key] === false }))
+              }
+              onSelectQuery={selectQuery}
+              onSelectSource={onSelectSource}
+              onExport={() => void handleExportDbt()}
+              onAddSourceCsv={() => void addCsvQuery()}
+              onAddSourcePostgres={() => setShowPgForm(true)}
+            />
+          </aside>
+
+          {/* Canvas */}
+          <section className="flex min-h-0 flex-col border-r border-[var(--line)]">
             <div className="flex items-center justify-between px-4 py-2">
               <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Pipeline canvas
@@ -346,7 +442,7 @@ function App() {
                 Reload sample
               </button>
             </div>
-            <div className="min-h-0 flex-1 px-3 pb-3">
+            <div className="min-h-0 flex-1 px-3 pb-2">
               <GraphCanvas
                 queries={queries}
                 activeQueryId={activeQueryId}
@@ -355,17 +451,64 @@ function App() {
                 onSetFocus={setFocusQueryId}
               />
             </div>
-            <p className="px-4 pb-2 text-[10px] text-slate-600">
-              Click node to edit · double-click to set focus · join edges pulse when
-              linked
-            </p>
+            <div className="min-h-[28vh] border-t border-[var(--line)] bg-[#060d14]">
+              <div className="flex items-center justify-between px-4 py-2">
+                <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  Preview
+                  {focusQueryId
+                    ? ` · ${queries.find((q) => q.id === focusQueryId)?.name ?? ""}`
+                    : ""}
+                </h2>
+                <span className="text-xs text-slate-500">
+                  {loading
+                    ? "running…"
+                    : preview
+                      ? `${preview.rows.length} rows · ${preview.columns.length} cols`
+                      : "—"}
+                </span>
+              </div>
+              {(error || exportMsg) && (
+                <div className="space-y-1 px-4 pb-2">
+                  {error && (
+                    <div className="rounded-lg border border-rose-900/50 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">
+                      {error}
+                    </div>
+                  )}
+                  {exportMsg && (
+                    <div className="rounded-lg border border-teal-900/50 bg-teal-950/30 px-3 py-2 text-sm text-teal-200">
+                      {exportMsg}
+                    </div>
+                  )}
+                </div>
+              )}
+              {showSql && preview?.sql && (
+                <pre className="mx-4 mb-2 max-h-24 overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3 text-[11px] text-slate-400">
+                  {preview.sql}
+                </pre>
+              )}
+              <div className="h-[22vh] px-3 pb-3">
+                <div className="h-full overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
+                  {preview ? (
+                    <PreviewTable
+                      columns={preview.columns}
+                      rows={preview.rows}
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-slate-600">
+                      Waiting for preview…
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </section>
 
-          <aside className="flex min-h-0 flex-col border-b border-[var(--line)] lg:border-b-0">
+          {/* Inspector */}
+          <aside className="hidden min-h-0 flex-col lg:flex">
             <div className="border-b border-[var(--line)] px-4 py-3">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="truncate text-sm font-semibold text-slate-100">
-                  {activeQuery?.name ?? "Select a node"}
+                  {activeQuery?.name ?? "Select a query"}
                 </h2>
                 {activeQuery && activeQuery.id !== focusQueryId && (
                   <button
@@ -388,18 +531,16 @@ function App() {
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                     Filter
                   </label>
-                  <div className="flex gap-1">
-                    <input
-                      type="text"
-                      value={filterCondition}
-                      onChange={(e) => setFilterCondition(e.target.value)}
-                      onBlur={applyFilter}
-                      onKeyDown={(e) => e.key === "Enter" && applyFilter()}
-                      disabled={!activeQuery}
-                      placeholder="amount > 1000"
-                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                    />
-                  </div>
+                  <input
+                    type="text"
+                    value={filterCondition}
+                    onChange={(e) => setFilterCondition(e.target.value)}
+                    onBlur={applyFilter}
+                    onKeyDown={(e) => e.key === "Enter" && applyFilter()}
+                    disabled={!activeQuery}
+                    placeholder="amount > 1000"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+                  />
                 </div>
                 <div>
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
@@ -449,56 +590,6 @@ function App() {
             </div>
           </aside>
         </div>
-      )}
-
-      {!empty && (
-        <section className="flex min-h-[36vh] flex-col border-t border-[var(--line)] bg-[#060d14]">
-          <div className="flex items-center justify-between px-4 py-2">
-            <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-              Preview
-              {focusQueryId
-                ? ` · ${queries.find((q) => q.id === focusQueryId)?.name ?? focusQueryId}`
-                : ""}
-            </h2>
-            <span className="text-xs text-slate-500">
-              {loading
-                ? "running…"
-                : preview
-                  ? `${preview.rows.length} rows · ${preview.columns.length} cols`
-                  : "—"}
-            </span>
-          </div>
-          {(error || exportMsg) && (
-            <div className="space-y-1 px-4 pb-2">
-              {error && (
-                <div className="rounded-lg border border-rose-900/50 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">
-                  {error}
-                </div>
-              )}
-              {exportMsg && (
-                <div className="rounded-lg border border-teal-900/50 bg-teal-950/30 px-3 py-2 text-sm text-teal-200">
-                  {exportMsg}
-                </div>
-              )}
-            </div>
-          )}
-          {showSql && preview?.sql && (
-            <pre className="mx-4 mb-2 max-h-28 overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3 text-[11px] leading-relaxed text-slate-400">
-              {preview.sql}
-            </pre>
-          )}
-          <div className="min-h-0 flex-1 overflow-hidden px-3 pb-3">
-            <div className="h-full overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
-              {preview ? (
-                <PreviewTable columns={preview.columns} rows={preview.rows} />
-              ) : (
-                <div className="flex h-full items-center justify-center text-slate-600">
-                  Waiting for preview…
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
       )}
     </div>
   );

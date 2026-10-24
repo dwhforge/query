@@ -3,26 +3,44 @@
 Canon: product name **DWH-RS-QUERY**. Positioning — [ADR-0001](adr/0001-product-positioning.md).  
 Docs language: English (OSS under consideration, not decided).
 
-## 1. Workspace contract
+## 1. Project + Workspace contract
 
-```rust
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Workspace {
-    pub queries: Vec<QueryDef>,
-    pub focus_query_id: String,
+Reuse industry names ([ADR-0009](adr/0009-project-explorer.md)):
+
+```typescript
+// Project = dbt/IDE project container
+interface Project {
+  id: string;
+  name: string;
+  root_path?: string;
+  sources: SourceDef[];      // dbt sources / PQ connections
+  workspace: Workspace;      // runtime graph
+  dbt_target: "v1" | "v2";
+  last_dbt_export_path?: string;
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct QueryDef {
-    pub id: String,
-    pub name: String,
-    pub steps: Vec<TransformationStep>,
+interface SourceDef {
+  id: string;
+  name: string;
+  kind: "csv" | "parquet" | "postgres";
+  path?: string;
+  connection_string?: string;
+  table_name?: string;
+}
+
+interface Workspace {
+  queries: QueryDef[];
+  focus_query_id: string;
 }
 ```
 
-TypeScript mirror: `src/types/pipeline.ts`.
+Rust runtime compile/preview still takes `Workspace`. Project is the FE/persistence unit (save `project.json` later).
+
+TypeScript: `src/types/pipeline.ts`.
 
 Compat: `preview_pipeline(steps)` ≡ workspace with a single query `id=main`, `focus=main`.
+
+Explorer tree: `Project → Sources | Queries | Export`.
 
 ## 2. TransformationStep
 

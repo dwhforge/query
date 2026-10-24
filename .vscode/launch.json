@@ -1,0 +1,118 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "DWH-RS-QUERY: Tauri Dev",
+      "cargo": {
+        "args": [
+          "build",
+          "--manifest-path=${workspaceFolder}/src-tauri/Cargo.toml",
+          "--no-default-features"
+        ],
+        "filter": {
+          "name": "dwh-rs-query",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "preLaunchTask": "ui:dev"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "DWH-RS-QUERY: Tauri Release Debug",
+      "cargo": {
+        "args": [
+          "build",
+          "--release",
+          "--manifest-path=${workspaceFolder}/src-tauri/Cargo.toml"
+        ],
+        "filter": {
+          "name": "dwh-rs-query",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "ui:build"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "dwh-preview (sample.csv)",
+      "cargo": {
+        "args": ["build", "--bin", "dwh-preview", "-p", "dwh-engine"],
+        "filter": {
+          "name": "dwh-preview",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "${workspaceFolder}/fixtures/sample.csv",
+        "amount > 1000"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "dwh-preview (pick CSV)",
+      "cargo": {
+        "args": ["build", "--bin", "dwh-preview", "-p", "dwh-engine"],
+        "filter": {
+          "name": "dwh-preview",
+          "kind": "bin"
+        }
+      },
+      "args": ["${input:csvPath}", "${input:filterCondition}"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "node-terminal",
+      "request": "launch",
+      "name": "Vite FE only",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "node-terminal",
+      "request": "launch",
+      "name": "npm: tauri dev",
+      "command": "npm run tauri dev",
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "csvPath",
+      "type": "promptString",
+      "description": "Absolute path to CSV",
+      "default": "${workspaceFolder}/fixtures/sample.csv"
+    },
+    {
+      "id": "filterCondition",
+      "type": "promptString",
+      "description": "Optional SQL WHERE condition (empty allowed)",
+      "default": "amount > 1000"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full stack: Vite + note",
+      "configurations": ["Vite FE only"],
+      "presentation": {
+        "order": 1,
+        "group": "dwh"
+      }
+    }
+  ]
+}

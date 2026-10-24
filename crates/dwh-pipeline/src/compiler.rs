@@ -14,7 +14,7 @@ impl<'a> GraphCompiler<'a> {
 
     pub fn to_sql(&self, is_preview: bool) -> Result<String, String> {
         if self.workspace.queries.is_empty() {
-            return Err("Workspace пуст".into());
+            return Err("Workspace is empty".into());
         }
 
         let order = topo_queries(self.workspace)?;

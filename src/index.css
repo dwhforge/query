@@ -1,5 +1,26 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: local("IBM Plex Sans");
+}
+
+:root {
+  --bg0: #071018;
+  --bg1: #0c1824;
+  --ink: #e8eef4;
+  --muted: #7a8b9c;
+  --accent: #2dd4bf;
+  --accent-dim: #0f766e;
+  --danger: #fb7185;
+  --line: rgba(148, 163, 184, 0.14);
+  --node: rgba(15, 23, 42, 0.82);
+  --glow: rgba(45, 212, 191, 0.18);
+}
+
 html,
 body,
 #root {
@@ -9,7 +30,44 @@ body,
 
 body {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-  background: #0b1220;
-  color: #e2e8f0;
+  background: var(--bg0);
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-edge {
+  0%,
+  100% {
+    stroke-opacity: 0.45;
+  }
+  50% {
+    stroke-opacity: 0.95;
+  }
+}
+
+.anim-rise {
+  animation: rise 0.45s ease-out both;
+}
+
+.anim-rise-delay-1 {
+  animation: rise 0.5s ease-out 0.08s both;
+}
+
+.anim-rise-delay-2 {
+  animation: rise 0.55s ease-out 0.16s both;
+}
+
+.edge-pulse {
+  animation: pulse-edge 2.4s ease-in-out infinite;
 }

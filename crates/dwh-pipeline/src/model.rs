@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_pg_schema() -> String {
+    "public".into()
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinType {
@@ -27,6 +31,9 @@ pub enum TransformationStep {
     LoadParquet { path: String },
     LoadPostgres {
         connection_string: String,
+        /// Database schema (e.g. `public`). Defaults for older payloads.
+        #[serde(default = "default_pg_schema")]
+        schema: String,
         table_name: String,
     },
     Filter { condition: String },

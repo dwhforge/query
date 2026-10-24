@@ -1,5 +1,7 @@
 use dwh_engine::{
-    preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace, DbSession,
+    list_postgres_objects as run_list_postgres_objects,
+    preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
+    test_postgres_connection as run_test_postgres_connection, DbSession, PostgresObject,
     PreviewResult,
 };
 use dwh_pipeline::{
@@ -33,6 +35,22 @@ fn export_dbt(
 ) -> Result<String, String> {
     let target = dbt_target.unwrap_or(DbtTarget::V1);
     DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target)
+}
+
+#[tauri::command]
+fn list_postgres_objects(
+    connection_string: String,
+    db: State<'_, DbSession>,
+) -> Result<Vec<PostgresObject>, String> {
+    run_list_postgres_objects(&db, &connection_string)
+}
+
+#[tauri::command]
+fn test_postgres_connection(
+    connection_string: String,
+    db: State<'_, DbSession>,
+) -> Result<(), String> {
+    run_test_postgres_connection(&db, &connection_string)
 }
 
 /// Resolve repo fixtures and return a ready sample workspace (fact ⋈ dim).
@@ -106,7 +124,9 @@ pub fn run() {
             preview_pipeline,
             preview_workspace,
             export_dbt,
-            load_sample_workspace
+            load_sample_workspace,
+            list_postgres_objects,
+            test_postgres_connection
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

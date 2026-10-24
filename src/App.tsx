@@ -4,6 +4,10 @@ import { EmptyHero } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { History } from "./components/History";
+import {
+  PostgresPicker,
+  type PostgresSelection,
+} from "./components/PostgresPicker";
 import { PreviewTable } from "./components/PreviewTable";
 import { debounce } from "./lib/debounce";
 import {
@@ -36,11 +40,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [showSql, setShowSql] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
-  const [showPgForm, setShowPgForm] = useState(false);
-  const [pgConn, setPgConn] = useState(
-    "postgresql://user:pass@localhost:5432/db",
-  );
-  const [pgTable, setPgTable] = useState("");
+  const [showPgPicker, setShowPgPicker] = useState(false);
   const [treeExpanded, setTreeExpanded] = useState<Record<string, boolean>>({
     sources: true,
     queries: true,
@@ -133,7 +133,10 @@ function App() {
       if (source.kind === "parquet" && s.type === "LoadParquet")
         return s.payload.path === source.path;
       if (source.kind === "postgres" && s.type === "LoadPostgres")
-        return s.payload.table_name === source.table_name;
+        return (
+          s.payload.table_name === source.table_name &&
+          (s.payload.schema || "public") === (source.schema || "public")
+        );
       return false;
     });
     if (bound) selectQuery(bound.id);
@@ -168,21 +171,19 @@ function App() {
     setFilterCondition("");
   }
 
-  function addPostgresQuery() {
-    const table = pgTable.trim();
-    const conn = pgConn.trim();
-    if (!table || !conn) {
-      setError("Postgres requires connection string and table name");
-      return;
-    }
+  function addPostgresFromPicker(sel: PostgresSelection) {
     const id = newQueryId();
     const q: QueryDef = {
       id,
-      name: table,
+      name: `${sel.schema}.${sel.table_name}`,
       steps: [
         {
           type: "LoadPostgres",
-          payload: { connection_string: conn, table_name: table },
+          payload: {
+            connection_string: sel.connection_string,
+            schema: sel.schema,
+            table_name: sel.table_name,
+          },
         },
       ],
     };
@@ -198,7 +199,7 @@ function App() {
       };
     });
     setActiveQueryId(id);
-    setShowPgForm(false);
+    setShowPgPicker(false);
     setFilterCondition("");
     setError(null);
   }
@@ -312,12 +313,12 @@ function App() {
         setShowSql((v) => !v);
       } else if (k === "p") {
         e.preventDefault();
-        setShowPgForm((v) => !v);
+        setShowPgPicker((v) => !v);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workspace, showPgForm, project.name, project.dbt_target]);
+  }, [workspace, showPgPicker, project.name, project.dbt_target]);
 
   // Fix addCsvQuery focus race: simplify by combining into one setProject
   // (handlers above already mostly OK)
@@ -355,7 +356,7 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setShowPgForm((v) => !v)}
+            onClick={() => setShowPgPicker(true)}
             className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
           >
             + Postgres
@@ -370,44 +371,17 @@ function App() {
         </div>
       </header>
 
-      {showPgForm && (
-        <div className="flex flex-wrap items-end gap-2 border-b border-[var(--line)] bg-slate-950/90 px-5 py-3">
-          <div className="min-w-[280px] flex-1">
-            <label className="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">
-              Connection string
-            </label>
-            <input
-              value={pgConn}
-              onChange={(e) => setPgConn(e.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-teal-700"
-            />
-          </div>
-          <div className="w-48">
-            <label className="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">
-              Table
-            </label>
-            <input
-              value={pgTable}
-              onChange={(e) => setPgTable(e.target.value)}
-              placeholder="orders"
-              className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-teal-700"
-            />
-          </div>
-          <button
-            type="button"
-            onClick={addPostgresQuery}
-            className="rounded-lg bg-teal-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-500"
-          >
-            Add query
-          </button>
-        </div>
-      )}
+      <PostgresPicker
+        open={showPgPicker}
+        onClose={() => setShowPgPicker(false)}
+        onSelect={addPostgresFromPicker}
+      />
 
       {empty ? (
         <EmptyHero
           onLoadSample={() => void handleLoadSample()}
           onAddCsv={() => void addCsvQuery()}
-          onAddPostgres={() => setShowPgForm(true)}
+          onAddPostgres={() => setShowPgPicker(true)}
         />
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr] lg:grid-cols-[240px_1fr_300px]">
@@ -424,7 +398,7 @@ function App() {
               onSelectSource={onSelectSource}
               onExport={() => void handleExportDbt()}
               onAddSourceCsv={() => void addCsvQuery()}
-              onAddSourcePostgres={() => setShowPgForm(true)}
+              onAddSourcePostgres={() => setShowPgPicker(true)}
             />
           </aside>
 

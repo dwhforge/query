@@ -97,10 +97,12 @@ fn compile_step(
         )),
         TransformationStep::LoadPostgres {
             connection_string,
+            schema,
             table_name,
         } => Ok(format!(
-            "SELECT * FROM postgres_scan('{}', 'public', '{}')",
+            "SELECT * FROM postgres_scan('{}', '{}', '{}')",
             escape_sql_string(connection_string),
+            escape_sql_string(schema),
             escape_sql_string(table_name)
         )),
         TransformationStep::Filter { condition } => {
@@ -320,11 +322,25 @@ mod tests {
     fn load_postgres_shape() {
         let steps = vec![TransformationStep::LoadPostgres {
             connection_string: "postgresql://u:p@localhost/db".into(),
+            schema: "sales".into(),
             table_name: "orders".into(),
         }];
         let sql = PipelineCompiler::new(&steps).to_sql(true).unwrap();
         assert!(sql.contains("postgres_scan("));
+        assert!(sql.contains("'sales'"));
         assert!(sql.contains("'orders'"));
         assert!(sql.contains("LIMIT 50"));
+    }
+
+    #[test]
+    fn load_postgres_schema_defaults_public() {
+        let step: TransformationStep = serde_json::from_str(
+            r#"{"type":"LoadPostgres","payload":{"connection_string":"x","table_name":"t"}}"#,
+        )
+        .unwrap();
+        match step {
+            TransformationStep::LoadPostgres { schema, .. } => assert_eq!(schema, "public"),
+            _ => panic!("expected LoadPostgres"),
+        }
     }
 }

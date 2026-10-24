@@ -12,6 +12,7 @@ Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **
 | [docs/DESIGN.md](docs/DESIGN.md) | Product design, horizons (dbt → PQ → two-way), UX north star |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules, Workspace IR, invariants |
 | [docs/SPEC.md](docs/SPEC.md) | Contracts, commands, dbt DoD |
+| [docs/COMPETITIVE.md](docs/COMPETITIVE.md) | Landscape, wedge, DE/DBA/developer positioning |
 | [docs/adr/](docs/adr/) | ADRs (positioning, multi-query, join, two-way, UX) |
 | [docs/TZ-EARLY.md](docs/TZ-EARLY.md) | Archived early design brief |
 

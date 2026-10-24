@@ -25,6 +25,7 @@ interface SourceDef {
   kind: "csv" | "parquet" | "postgres";
   path?: string;
   connection_string?: string;
+  schema?: string;           // postgres (default public)
   table_name?: string;
 }
 
@@ -50,7 +51,11 @@ Explorer tree: `Project → Sources | Queries | Export`.
 pub enum TransformationStep {
     LoadCsv { path: String },
     LoadParquet { path: String },
-    LoadPostgres { connection_string: String, table_name: String },
+    LoadPostgres {
+        connection_string: String,
+        schema: String,          // default "public" if omitted in JSON
+        table_name: String,
+    },
     Filter { condition: String },
     SelectColumns { columns: Vec<String> },
     RenameColumn { from: String, to: String },
@@ -94,9 +99,13 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 | `preview_workspace` | `Workspace` | `PreviewResult` |
 | `preview_pipeline` | `steps[]` | `PreviewResult` (compat) |
 | `export_dbt` | `pipeline_name`, `Workspace`, `output_dir` | `{ path }` |
+| `list_postgres_objects` | `connection_string` | `{ schema, name, kind }[]` |
+| `test_postgres_connection` | `connection_string` | `()` |
 | `describe_query` | `Workspace`, `query_id`, `upto_index` | `TableSchema` |
 | `validate_reorder` | … | later |
 | `export_python` / `ai_compile` | … | later / stub |
+
+Postgres UI: object picker — connect → browse catalog → select schema-qualified relation ([ADR-0010](adr/0010-postgres-object-picker.md)).
 
 ## 5. DbtProducer (v1 DoD)
 
@@ -148,7 +157,7 @@ Generates:
 
 1. Linux: DuckDB session; **`postgres` extension required when `LoadPostgres` is used** (hard actionable error if unavailable). Spatial may stay best-effort.  
 2. Workspace: ≥2 queries (CSV and/or Postgres), Join, preview ≤50.  
-3. UI can add a Postgres query (connection string + table).  
+3. UI can add a Postgres query via **object picker** (connection → list schemas/tables/views → select).  
 4. Export dbt → `dbt run` (multi-source + join; Postgres → `source()` + `sources.yml`) with no SQL hand-edits.  
 5. Compiler tests: linear + join; `LoadPostgres` SQL shape covered.  
 

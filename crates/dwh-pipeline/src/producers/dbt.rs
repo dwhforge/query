@@ -94,14 +94,20 @@ impl OutputProducer for DbtProducer {
             write_file(&folder.join(format!("{model_name}.sql")), &sql)?;
             model_name_by_query.insert(qid.clone(), model_name);
 
-            if let Some(TransformationStep::LoadPostgres { table_name, .. }) =
-                query.steps.first()
+            if let Some(TransformationStep::LoadPostgres {
+                schema,
+                table_name,
+                ..
+            }) = query.steps.first()
             {
                 if !has_pg {
                     sources_yml.push_str("  - name: postgres_raw\n    tables:\n");
                     has_pg = true;
                 }
-                sources_yml.push_str(&format!("      - name: {table_name}\n"));
+                let src_name = pg_dbt_source_name(schema, table_name);
+                sources_yml.push_str(&format!(
+                    "      - name: {src_name}\n        schema: {schema}\n        identifier: {table_name}\n"
+                ));
             }
         }
 
@@ -138,9 +144,14 @@ fn compile_query_as_dbt_model(
                 "-- source: parquet\nselect * from read_parquet('{}')\n",
                 escape_sql_string(path)
             ),
-            TransformationStep::LoadPostgres { table_name, .. } => format!(
-                "select * from {{{{ source('postgres_raw', '{table_name}') }}}}\n"
-            ),
+            TransformationStep::LoadPostgres {
+                schema,
+                table_name,
+                ..
+            } => {
+                let src = pg_dbt_source_name(schema, table_name);
+                format!("select * from {{{{ source('postgres_raw', '{src}') }}}}\n")
+            }
             _ => return Err("single-step query must be Load*".into()),
         });
     }
@@ -162,9 +173,14 @@ fn compile_query_as_dbt_model(
                 "select * from read_parquet('{}')",
                 escape_sql_string(path)
             ),
-            TransformationStep::LoadPostgres { table_name, .. } => format!(
-                "select * from {{{{ source('postgres_raw', '{table_name}') }}}}"
-            ),
+            TransformationStep::LoadPostgres {
+                schema,
+                table_name,
+                ..
+            } => {
+                let src = pg_dbt_source_name(schema, table_name);
+                format!("select * from {{{{ source('postgres_raw', '{src}') }}}}")
+            }
             TransformationStep::Filter { condition } => {
                 format!("select * from {prev} where {condition}")
             }
@@ -282,6 +298,15 @@ fn compile_query_as_dbt_model(
         "with\n{}\nselect * from {last}\n",
         ctes.join(",\n")
     ))
+}
+
+/// Unique dbt `source()` table name: `{schema}__{table}` (stable across schemas).
+fn pg_dbt_source_name(schema: &str, table: &str) -> String {
+    format!(
+        "{}__{}",
+        sanitize_id(schema),
+        sanitize_id(table)
+    )
 }
 
 fn write_file(path: &PathBuf, content: &str) -> Result<(), String> {

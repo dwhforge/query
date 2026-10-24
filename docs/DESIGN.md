@@ -44,7 +44,10 @@ v1 implementation may ship first; v2 is a hard follow-up, not optional. Do not c
 
 ## 3. Persona & problem
 
-Analytics engineer: several CSV/Parquet/**Postgres** inputs → join/transform → needs reproducible dbt without spaghetti SQL, with local preview.
+Primary hats (often one person): **data engineer + DBA + developer** who also wears analytics-engineer for dbt models.  
+Job: several CSV/Parquet/**Postgres** inputs → join/transform → **reproducible dbt in git**, with local DuckDB preview and inspectable SQL — not a black-box analyst canvas.
+
+Competitive wedge and how we lean DE/DBA/dev in product language: [COMPETITIVE.md](COMPETITIVE.md).
 
 **PostgreSQL is a mandatory first-class source** (not optional / not “CSV-only MVP”) — [ADR-0008](adr/0008-postgres-required.md).
 

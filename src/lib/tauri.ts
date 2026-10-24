@@ -34,3 +34,23 @@ export function exportDbt(
 export function loadSampleWorkspace(): Promise<Workspace> {
   return invoke<Workspace>("load_sample_workspace");
 }
+
+export interface PostgresObject {
+  schema: string;
+  name: string;
+  kind: string;
+}
+
+export function listPostgresObjects(
+  connectionString: string,
+): Promise<PostgresObject[]> {
+  return invoke<PostgresObject[]>("list_postgres_objects", {
+    connectionString,
+  });
+}
+
+export function testPostgresConnection(
+  connectionString: string,
+): Promise<void> {
+  return invoke<void>("test_postgres_connection", { connectionString });
+}

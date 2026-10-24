@@ -13,7 +13,7 @@ The UI needs a left **Explorer (tree)**. That implies a durable container above 
 | Our term | Reuses | Role |
 |----------|--------|------|
 | **Project** | dbt project / IDE project | Saved unit of work on disk: name, path, settings |
-| **Source** | dbt `sources` + PQ “Get Data” connection | Registered input: CSV/Parquet path or Postgres connection+table |
+| **Source** | dbt `sources` + PQ “Get Data” connection | Registered input: CSV/Parquet path or Postgres connection + schema.table |
 | **Query** | Power Query query / our `QueryDef` | Transform chain (Applied Steps); may start from a Source or Join |
 | **Workspace** | in-memory graph (keep) | Runtime view inside an open Project: `queries` + `focus_query_id` |
 

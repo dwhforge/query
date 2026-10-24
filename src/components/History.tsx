@@ -12,7 +12,7 @@ function stepLabel(step: TransformationStep, index: number): string {
     case "LoadParquet":
       return `LoadParquet · ${step.payload.path.split(/[/\\]/).pop() ?? step.payload.path}`;
     case "LoadPostgres":
-      return `LoadPostgres · ${step.payload.table_name}`;
+      return `LoadPostgres · ${step.payload.schema || "public"}.${step.payload.table_name}`;
     case "Filter":
       return `Filter · ${step.payload.condition || "(empty)"}`;
     case "SelectColumns":

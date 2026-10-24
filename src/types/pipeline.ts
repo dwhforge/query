@@ -16,7 +16,11 @@ export type TransformationStep =
   | { type: "LoadParquet"; payload: { path: string } }
   | {
       type: "LoadPostgres";
-      payload: { connection_string: string; table_name: string };
+      payload: {
+        connection_string: string;
+        schema: string;
+        table_name: string;
+      };
     }
   | { type: "Filter"; payload: { condition: string } }
   | { type: "SelectColumns"; payload: { columns: string[] } }
@@ -61,6 +65,8 @@ export interface SourceDef {
   kind: SourceKind;
   path?: string;
   connection_string?: string;
+  /** Postgres schema (e.g. public). */
+  schema?: string;
   table_name?: string;
 }
 
@@ -118,7 +124,7 @@ export function syncSourcesFromQueries(
   const next = [...sources];
   const keyOf = (s: SourceDef) =>
     s.kind === "postgres"
-      ? `pg:${s.connection_string}|${s.table_name}`
+      ? `pg:${s.connection_string}|${s.schema ?? "public"}.${s.table_name}`
       : `${s.kind}:${s.path}`;
 
   const seen = new Set(next.map(keyOf));
@@ -147,14 +153,16 @@ export function syncSourcesFromQueries(
         path: step.payload.path,
       });
     } else if (step.type === "LoadPostgres") {
-      const key = `pg:${step.payload.connection_string}|${step.payload.table_name}`;
+      const schema = step.payload.schema || "public";
+      const key = `pg:${step.payload.connection_string}|${schema}.${step.payload.table_name}`;
       if (seen.has(key)) continue;
       seen.add(key);
       next.push({
         id: newSourceId(),
-        name: step.payload.table_name,
+        name: `${schema}.${step.payload.table_name}`,
         kind: "postgres",
         connection_string: step.payload.connection_string,
+        schema,
         table_name: step.payload.table_name,
       });
     }

@@ -2,7 +2,7 @@ import type { TransformationStep } from "../types/pipeline";
 
 interface HistoryProps {
   steps: TransformationStep[];
-  onRemoveFilter: () => void;
+  onRemoveAt: (index: number) => void;
 }
 
 function stepLabel(step: TransformationStep, index: number): string {
@@ -25,6 +25,10 @@ function stepLabel(step: TransformationStep, index: number): string {
       return `GroupBy · ${step.payload.dimensions.join(", ")}`;
     case "SortBy":
       return `Sort · ${step.payload.column}`;
+    case "Join":
+      return `Join ${step.payload.join_type} · ${step.payload.right_query_id} ON ${step.payload.left_on.join(",")}`;
+    case "Append":
+      return `Append · ${step.payload.other_query_ids.join(", ")}`;
     case "CustomSql":
       return "CustomSql";
     default:
@@ -32,16 +36,14 @@ function stepLabel(step: TransformationStep, index: number): string {
   }
 }
 
-export function History({ steps, onRemoveFilter }: HistoryProps) {
+export function History({ steps, onRemoveAt }: HistoryProps) {
   return (
     <div className="flex h-full flex-col">
       <h2 className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
         История изменений
       </h2>
       {steps.length === 0 ? (
-        <p className="text-sm text-slate-500">
-          Откройте CSV, чтобы начать пайплайн.
-        </p>
+        <p className="text-sm text-slate-500">Нет шагов в этой query.</p>
       ) : (
         <ol className="flex flex-1 flex-col gap-2 overflow-auto">
           {steps.map((step, index) => (
@@ -52,21 +54,23 @@ export function History({ steps, onRemoveFilter }: HistoryProps) {
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <div className="text-[10px] uppercase tracking-wide text-teal-500/80">
-                    step_{index}
+                    s{index}
                   </div>
                   <div className="mt-0.5 text-sm text-slate-200">
                     {stepLabel(step, index)}
                   </div>
                 </div>
-                {step.type === "Filter" && (
-                  <button
-                    type="button"
-                    onClick={onRemoveFilter}
-                    className="text-xs text-slate-500 hover:text-rose-400"
-                  >
-                    убрать
-                  </button>
-                )}
+                {step.type !== "LoadCsv" &&
+                  step.type !== "LoadParquet" &&
+                  step.type !== "LoadPostgres" && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveAt(index)}
+                      className="text-xs text-slate-500 hover:text-rose-400"
+                    >
+                      убрать
+                    </button>
+                  )}
               </div>
             </li>
           ))}

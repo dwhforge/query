@@ -1,0 +1,324 @@
+use crate::graph::{direct_deps, sanitize_id, topo_queries};
+use crate::model::{JoinType, TransformationStep, Workspace};
+use crate::producers::OutputProducer;
+use crate::sql_escape::{escape_sql_string, quote_ident};
+use std::fs::{create_dir_all, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+pub struct DbtProducer;
+
+impl OutputProducer for DbtProducer {
+    fn produce(
+        &self,
+        pipeline_name: &str,
+        workspace: &Workspace,
+        output_dir: &str,
+    ) -> Result<String, String> {
+        let root = Path::new(output_dir).join(pipeline_name);
+        let models = root.join("models");
+        let staging = models.join("staging");
+        let intermediate = models.join("intermediate");
+        let marts = models.join("marts");
+        create_dir_all(&staging).map_err(|e| e.to_string())?;
+        create_dir_all(&intermediate).map_err(|e| e.to_string())?;
+        create_dir_all(&marts).map_err(|e| e.to_string())?;
+
+        write_file(
+            &root.join("dbt_project.yml"),
+            &format!(
+                "name: '{pipeline_name}'\nversion: '1.0.0'\nconfig-version: 2\nprofile: '{pipeline_name}'\nmodel-paths: [\"models\"]\nmodels:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    intermediate:\n      +materialized: view\n    marts:\n      +materialized: table\n"
+            ),
+        )?;
+
+        write_file(
+            &root.join("profiles.yml.example"),
+            &format!(
+                "{pipeline_name}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: 'local.duckdb'\n      threads: 4\n"
+            ),
+        )?;
+
+        let order = topo_queries(workspace)?;
+        let mut model_name_by_query: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut sources_yml = String::from("version: 2\nsources:\n");
+        let mut has_pg = false;
+
+        for qid in &order {
+            let query = workspace
+                .query(qid)
+                .ok_or_else(|| format!("missing query {qid}"))?;
+            let stem = sanitize_id(&query.name);
+            let is_source_only = matches!(
+                query.steps.first(),
+                Some(TransformationStep::LoadCsv { .. }
+                    | TransformationStep::LoadParquet { .. }
+                    | TransformationStep::LoadPostgres { .. })
+            ) && query.steps.len() == 1;
+
+            let is_focus = qid == &workspace.focus_query_id;
+            let (folder, prefix) = if is_focus {
+                (&marts, "mart")
+            } else if is_source_only {
+                (&staging, "stg")
+            } else {
+                (&intermediate, "int")
+            };
+
+            let model_name = format!("{prefix}_{stem}");
+            let sql = compile_query_as_dbt_model(query, &model_name_by_query)?;
+            write_file(&folder.join(format!("{model_name}.sql")), &sql)?;
+            model_name_by_query.insert(qid.clone(), model_name);
+
+            if let Some(TransformationStep::LoadPostgres { table_name, .. }) =
+                query.steps.first()
+            {
+                if !has_pg {
+                    sources_yml.push_str("  - name: postgres_raw\n    tables:\n");
+                    has_pg = true;
+                }
+                sources_yml.push_str(&format!("      - name: {table_name}\n"));
+            }
+        }
+
+        if has_pg {
+            write_file(&models.join("sources.yml"), &sources_yml)?;
+        } else {
+            write_file(
+                &models.join("sources.yml"),
+                "version: 2\n# No postgres sources in this export.\nsources: []\n",
+            )?;
+        }
+
+        Ok(root.to_string_lossy().into_owned())
+    }
+}
+
+fn compile_query_as_dbt_model(
+    query: &crate::model::QueryDef,
+    models: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    // v1: collapse query into one model SQL (WITH inside file) using ref() for deps.
+    if query.steps.is_empty() {
+        return Err(format!("query '{}' empty", query.id));
+    }
+
+    // If single Load* — staging select.
+    if query.steps.len() == 1 {
+        return Ok(match &query.steps[0] {
+            TransformationStep::LoadCsv { path } => format!(
+                "-- source: csv\nselect * from read_csv_auto('{}')\n",
+                escape_sql_string(path)
+            ),
+            TransformationStep::LoadParquet { path } => format!(
+                "-- source: parquet\nselect * from read_parquet('{}')\n",
+                escape_sql_string(path)
+            ),
+            TransformationStep::LoadPostgres { table_name, .. } => format!(
+                "select * from {{{{ source('postgres_raw', '{table_name}') }}}}\n"
+            ),
+            _ => return Err("single-step query must be Load*".into()),
+        });
+    }
+
+    let mut ctes = Vec::new();
+    for (idx, step) in query.steps.iter().enumerate() {
+        let name = format!("s{idx}");
+        let prev = if idx > 0 {
+            format!("s{}", idx - 1)
+        } else {
+            String::new()
+        };
+        let body = match step {
+            TransformationStep::LoadCsv { path } => format!(
+                "select * from read_csv_auto('{}')",
+                escape_sql_string(path)
+            ),
+            TransformationStep::LoadParquet { path } => format!(
+                "select * from read_parquet('{}')",
+                escape_sql_string(path)
+            ),
+            TransformationStep::LoadPostgres { table_name, .. } => format!(
+                "select * from {{{{ source('postgres_raw', '{table_name}') }}}}"
+            ),
+            TransformationStep::Filter { condition } => {
+                format!("select * from {prev} where {condition}")
+            }
+            TransformationStep::SelectColumns { columns } => {
+                let cols = columns
+                    .iter()
+                    .map(|c| quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("select {cols} from {prev}")
+            }
+            TransformationStep::RenameColumn { from, to } => format!(
+                "select * exclude ({}) , {} as {} from {prev}",
+                quote_ident(from),
+                quote_ident(from),
+                quote_ident(to)
+            ),
+            TransformationStep::DeriveColumn { name, expression } => format!(
+                "select *, ({expression}) as {} from {prev}",
+                quote_ident(name)
+            ),
+            TransformationStep::GroupBy {
+                dimensions,
+                aggregates,
+            } => {
+                let dims = dimensions
+                    .iter()
+                    .map(|c| quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "select {dims}, {} from {prev} group by {dims}",
+                    aggregates.join(", ")
+                )
+            }
+            TransformationStep::SortBy {
+                column,
+                descending,
+            } => {
+                let order = if *descending { "desc" } else { "asc" };
+                format!(
+                    "select * from {prev} order by {} {order}",
+                    quote_ident(column)
+                )
+            }
+            TransformationStep::Join {
+                right_query_id,
+                join_type,
+                left_on,
+                right_on,
+            } => {
+                let right_model = models.get(right_query_id).ok_or_else(|| {
+                    format!("dbt Join: missing model for '{right_query_id}'")
+                })?;
+                let right_ref = format!("{{{{ ref('{right_model}') }}}}");
+                let join_kw = match join_type {
+                    JoinType::Inner => "inner join",
+                    JoinType::Left => "left join",
+                    JoinType::Right => "right join",
+                    JoinType::Full => "full outer join",
+                };
+                if left_on == right_on {
+                    let using = left_on
+                        .iter()
+                        .map(|c| quote_ident(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "select * from {prev} as l {join_kw} {right_ref} as r using ({using})"
+                    )
+                } else {
+                    let ons: Vec<String> = left_on
+                        .iter()
+                        .zip(right_on.iter())
+                        .map(|(l, r)| {
+                            format!("l.{} = r.{}", quote_ident(l), quote_ident(r))
+                        })
+                        .collect();
+                    format!(
+                        "select * from {prev} as l {join_kw} {right_ref} as r on {}",
+                        ons.join(" and ")
+                    )
+                }
+            }
+            TransformationStep::Append { other_query_ids } => {
+                let mut sql = format!("select * from {prev}");
+                for oid in other_query_ids {
+                    let m = models
+                        .get(oid)
+                        .ok_or_else(|| format!("dbt Append: missing '{oid}'"))?;
+                    sql.push_str(&format!(
+                        " union all by name select * from {{{{ ref('{m}') }}}}"
+                    ));
+                }
+                sql
+            }
+            TransformationStep::CustomSql { raw_sql } => {
+                let mut sql = raw_sql.replace("{{prev_step}}", &prev);
+                for dep in direct_deps(std::slice::from_ref(step)) {
+                    if let Some(m) = models.get(&dep) {
+                        sql = sql.replace(
+                            &format!("{{{{query:{dep}}}}}"),
+                            &format!("{{{{ ref('{m}') }}}}"),
+                        );
+                    }
+                }
+                sql
+            }
+        };
+        ctes.push(format!("  {name} as (\n    {body}\n  )"));
+    }
+
+    let last = format!("s{}", query.steps.len() - 1);
+    Ok(format!(
+        "with\n{}\nselect * from {last}\n",
+        ctes.join(",\n")
+    ))
+}
+
+fn write_file(path: &PathBuf, content: &str) -> Result<(), String> {
+    let mut f = File::create(path).map_err(|e| e.to_string())?;
+    f.write_all(content.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{JoinType, QueryDef, TransformationStep};
+    use std::env::temp_dir;
+
+    #[test]
+    fn exports_join_workspace() {
+        let dir = temp_dir().join(format!("dwh_dbt_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        create_dir_all(&dir).unwrap();
+
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim_region".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "dim.csv".into(),
+                    }],
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact_sales".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: "fact.csv".into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region".into()],
+                        },
+                    ],
+                },
+            ],
+            focus_query_id: "fact".into(),
+        };
+
+        let path = DbtProducer
+            .produce("demo", &ws, dir.to_str().unwrap())
+            .unwrap();
+        assert!(Path::new(&path).join("dbt_project.yml").exists());
+        assert!(Path::new(&path)
+            .join("models/staging/stg_dim_region.sql")
+            .exists());
+        assert!(Path::new(&path)
+            .join("models/marts/mart_fact_sales.sql")
+            .exists());
+        let mart = std::fs::read_to_string(
+            Path::new(&path).join("models/marts/mart_fact_sales.sql"),
+        )
+        .unwrap();
+        assert!(mart.contains("ref('stg_dim_region')"));
+    }
+}

@@ -1,10 +1,30 @@
-# DWH-RS-QUERY — Engineering Spec
+# DWH-RS-QUERY — Engineering Spec (v1)
 
-Каноническая инженерная спецификация MVP. Именование: продукт **DWH-RS-QUERY**, packages **dwh-rs-query**, Tauri id `com.dwhrsquery.app`.
+Canon: product name **DWH-RS-QUERY**. Positioning — [ADR-0001](adr/0001-product-positioning.md).  
+Docs language: English (OSS under consideration, not decided).
 
-## 1. TransformationStep contract
+## 1. Workspace contract
 
-Wire format (Rust serde + TypeScript): tagged enum.
+```rust
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Workspace {
+    pub queries: Vec<QueryDef>,
+    pub focus_query_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct QueryDef {
+    pub id: String,
+    pub name: String,
+    pub steps: Vec<TransformationStep>,
+}
+```
+
+TypeScript mirror: `src/types/pipeline.ts`.
+
+Compat: `preview_pipeline(steps)` ≡ workspace with a single query `id=main`, `focus=main`.
+
+## 2. TransformationStep
 
 ```rust
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -19,176 +39,111 @@ pub enum TransformationStep {
     DeriveColumn { name: String, expression: String },
     GroupBy { dimensions: Vec<String>, aggregates: Vec<String> },
     SortBy { column: String, descending: bool },
+    Join {
+        right_query_id: String,
+        join_type: JoinType,
+        left_on: Vec<String>,
+        right_on: Vec<String>,
+    },
+    Append { other_query_ids: Vec<String> },
     CustomSql { raw_sql: String },
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinType { Inner, Left, Right, Full }
 ```
 
-```typescript
-export type ColumnType = 'INTEGER' | 'VARCHAR' | 'FLOAT' | 'TIMESTAMP' | 'BOOLEAN';
+Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-append-steps.md).
 
-export interface ColumnMetadata {
-  name: string;
-  type: ColumnType;
-}
+- `CustomSql` placeholders: `{{prev_step}}`; optional `{{query:<id>}}` → last CTE of that query.  
+- Cycles via Join/Append → compile error.
 
-export interface TableSchema {
-  columns: ColumnMetadata[];
-}
+## 3. GraphCompiler
 
-export type TransformationStep =
-  | { type: 'LoadCsv'; payload: { path: string } }
-  | { type: 'LoadParquet'; payload: { path: string } }
-  | { type: 'LoadPostgres'; payload: { connection_string: string; table_name: string } }
-  | { type: 'Filter'; payload: { condition: string } }
-  | { type: 'SelectColumns'; payload: { columns: string[] } }
-  | { type: 'RenameColumn'; payload: { from: string; to: string } }
-  | { type: 'DeriveColumn'; payload: { name: string; expression: string } }
-  | { type: 'GroupBy'; payload: { dimensions: string[]; aggregates: string[] } }
-  | { type: 'SortBy'; payload: { column: string; descending: boolean } }
-  | { type: 'CustomSql'; payload: { raw_sql: string } };
-```
+`GraphCompiler::to_sql(workspace, is_preview) -> Result<String, String>`
 
-Правила:
+- Topo-sort queries by Join/Append deps.  
+- CTE names: `q_<id>_s<idx>` (`id` sanitized to alnum/underscore).  
+- Preview: `LIMIT 50` on the focus query’s last step.
 
-- Первый шаг пайплайна — один из `Load*`
-- `Filter.condition` — SQL predicate для `WHERE`
-- `GroupBy.aggregates` — строки вида `SUM(amount) AS total_amount`
-- `CustomSql.raw_sql` содержит плейсхолдер `{{prev_step}}` (заменяется на CTE-имя или `{{ ref('...') }}` в dbt)
+`PipelineCompiler` (linear) remains a thin wrapper over a single-query workspace.
 
-## 2. Pipeline compiler
-
-`PipelineCompiler::to_sql(steps, is_preview) -> Result<String, String>`
-
-- Пустой `steps` → error
-- CTE: `step_0`, `step_1`, …
-- Финал: `SELECT * FROM step_N` + `LIMIT 50` если preview
-- Семантика шагов — как в [TZ-EARLY.md §2.2](TZ-EARLY.md); production-код обязан quoting путей/идентификаторов ([ARCHITECTURE.md §6](ARCHITECTURE.md))
-
-## 3. Tauri commands
+## 4. Tauri commands
 
 | Command | In | Out |
 |---------|----|-----|
-| `preview_pipeline` | `steps: TransformationStep[]` | `{ columns: ColumnMetadata[], rows: JsonValue[][], sql: string }` |
-| `describe_pipeline` | `steps`, `upto_index: number` | `TableSchema` |
-| `validate_reorder` | `steps`, `from: number`, `to: number` | `{ ok: true }` или `{ ok: false, error: string }` |
-| `export_dbt` | `pipeline_name`, `steps`, `output_dir` | `{ path: string }` |
-| `export_python` | `pipeline_name`, `steps`, `output_dir` | `{ path: string }` |
-| `ai_compile` | `prompt`, `schema`, `steps` | `TransformationStep[]` или error |
+| `preview_workspace` | `Workspace` | `PreviewResult` |
+| `preview_pipeline` | `steps[]` | `PreviewResult` (compat) |
+| `export_dbt` | `pipeline_name`, `Workspace`, `output_dir` | `{ path }` |
+| `describe_query` | `Workspace`, `query_id`, `upto_index` | `TableSchema` |
+| `validate_reorder` | … | later |
+| `export_python` / `ai_compile` | … | later / stub |
 
-`rows` в preview: максимум 50; значения JSON-compatible (числа, строки, bool, null).
+## 5. DbtProducer (v1 DoD)
 
-## 4. Schema validation (DnD)
-
-Алгоритм для кандидата `steps'` после reorder `from → to`:
-
-1. Если `steps'` пуст или первый шаг не `Load*` → reject
-2. Для `i` от `0` до `len-1`: скомпилировать префикс `steps'[0..=i]` с `is_preview=false`, выполнить эквивалент `SELECT * FROM step_i LIMIT 0` (или DESCRIBE результата) в DuckDB
-3. Любая ошибка DuckDB → `{ ok: false, error }` — UI **не** применяет reorder
-4. Успех всех префиксов → `{ ok: true }` — UI коммитит `steps'`
-
-## 5. Output producers
-
-### 5.1 Trait
+### 5.0 dbt major targets
 
 ```rust
-pub trait OutputProducer {
-    fn produce(
-        &self,
-        pipeline_name: &str,
-        steps: &[TransformationStep],
-        output_dir: &str,
-    ) -> Result<(), String>;
-}
+pub enum DbtTarget { V1, V2 }
 ```
 
-### 5.2 DbtProducer (DoD #3)
+| Target | Meaning | `require-dbt-version` (initial) | Ship order |
+|--------|---------|----------------------------------|------------|
+| `V1` | dbt Core / CLI **1.x** | `">=1.7.0,<2.0.0"` | **Now** |
+| `V2` | dbt **2.x** / Fusion-era | `">=2.0.0,<3.0.0"` | **Required follow-up** |
 
-Генерировать проект, готовый к `dbt run` без ручных правок `.sql`:
+See [ADR-0006](adr/0006-dbt-version-matrix.md). YAML `config-version: 2` ≠ dbt v2.
+
+`export_dbt` accepts `dbt_target: "v1" | "v2"`. Unsupported target → clear error until implemented.
+
+### 5.1 Layout
+
+Generates:
 
 ```
 {output_dir}/{pipeline_name}/
-  dbt_project.yml
-  profiles.yml.example
-  models/
-    sources.yml          # для LoadPostgres
-    staging/
-      stg_{pipeline_name}__source.sql   # Load* → source model
-    marts/
-      mart_{pipeline_name}__step_{k}.sql  # transform chain via {{ ref() }}
-    schema.yml
+  dbt_project.yml          # includes require-dbt-version for target
+  profiles.yml.example     # duckdb (v1); v2 may diverge
+  models/sources.yml
+  models/staging/stg_*.sql
+  models/intermediate/int_*.sql
+  models/marts/mart_*.sql
 ```
 
-Правила именования:
+- Each source-query (starts with Load*) → staging model.  
+- Join/transform work → intermediate (or collapsed per-query model in early slice).  
+- **Simplification (allowed early):** one dbt model per query = SQL for that query’s step chain with `ref()`/`source()`.  
+- Focus query’s last model → `mart_<name>.sql`.  
+- DoD **per target**: `dbt run` with no hand-edits on fixture 2 CSVs + Join. V1 DoD can land before V2.
 
-- Staging: один (или несколько) `stg_` моделей из Load*
-- Каждый последующий transform-шаг — модель в `marts/` с `{{ ref('previous_model') }}`
-- `LoadPostgres` → `{{ source('postgres_raw', '<table_name>') }}` + запись в `sources.yml`
-- `CustomSql`: заменить `{{prev_step}}` на `{{ ref('...') }}`
+## 6. Frontend (v1)
 
-Минимальный `dbt_project.yml` с `model-paths: ["models"]` и профилем, указанным в `profiles.yml.example` (duckdb или postgres — зафиксировать duckdb target для локального smoke).
+- Queries list: add query, set focus, open a 2nd CSV as a new query.  
+- **Add Postgres query** (connection string + table name) — required surface.  
+- Steps editor: Filter + Join (right query, type, keys).  
+- Virtualized preview; 150ms debounce.  
+- **Export dbt** button (`DbtTarget`).  
+- Read-only SQL panel (projection; see ADR-0004).
 
-### 5.3 PythonProducer (Polars)
+## 7. MVP Done Definition (v1)
 
-Один файл `{pipeline_name}.py`:
+1. Linux: DuckDB session; **`postgres` extension required when `LoadPostgres` is used** (hard actionable error if unavailable). Spatial may stay best-effort.  
+2. Workspace: ≥2 queries (CSV and/or Postgres), Join, preview ≤50.  
+3. UI can add a Postgres query (connection string + table).  
+4. Export dbt → `dbt run` (multi-source + join; Postgres → `source()` + `sources.yml`) with no SQL hand-edits.  
+5. Compiler tests: linear + join; `LoadPostgres` SQL shape covered.  
 
-| Step | Polars |
-|------|--------|
-| LoadCsv | `pl.read_csv(path)` |
-| LoadParquet | `pl.read_parquet(path)` |
-| LoadPostgres | comment + `NotImplementedError` или `pl.read_database_uri` если connection доступен |
-| Filter | `df.filter(...)` — для простых предикатов; иначе `pl.sql` / comment fallback |
-| SelectColumns | `df.select([...])` |
-| RenameColumn | `df.rename({from: to})` |
-| DeriveColumn | `df.with_columns([...])` |
-| GroupBy | `df.group_by(dimensions).agg([...])` |
-| SortBy | `df.sort(column, descending=...)` |
-| CustomSql | comment + `pl.sql` с подстановкой предыдущего relation если возможно |
+Postgres mandate: [ADR-0008](adr/0008-postgres-required.md).
 
-Целевой вид — method chaining в `run_pipeline()`.
+## 8. Two-way visual ↔ text (roadmap, not v1 DoD)
 
-## 6. AI Context Engine
+See [ADR-0004](adr/0004-two-way-visual-text.md).
 
-System prompt (обязательные правила ответа — только JSON):
+- **v1:** visual → AST → SQL/dbt (one-way). Optional read-only SQL panel.  
+- **H1:** editable SQL per step + parse-back whitelist.  
+- **H2:** Delphi-like sync visual ↔ dbt project / pure SQL bundle + conflict reconcile.
 
-```
-Ты — внутреннее ядро компиляции DWH-RS-QUERY AI Engine. Твоя единственная задача — переводить текстовые инструкции пользователя на естественном языке в строго валидные JSON-команды согласно типам данных приложения.
-Тебе доступны метаданные текущего состояния таблицы (Текущая схема):
-<current_schema>
-{JSON_CURRENT_SCHEMA}
-</current_schema>
-Тебе доступна текущая история примененных шагов:
-<applied_steps>
-{JSON_APPLIED_STEPS}
-</applied_steps>
-ПРАВИЛА ОТВЕТА:
-1. Выведи ТОЛЬКО валидный JSON (массив TransformationStep).
-2. Не пиши текст до или после JSON. Не используй markdown-обертки.
-3. Используй только имена колонок из <current_schema>.
-4. Для вычисляемых полей — валидный SQL DuckDB.
-```
+## 9. Non-goals (v1)
 
-Runtime:
-
-- API key и endpoint — локальные settings приложения
-- В запрос **не** включать preview rows / содержимое файлов
-- Parse → schema validate колонок → append к steps → `preview_pipeline`
-
-## 7. Frontend constraints
-
-- Preview table: TanStack Table + `@tanstack/react-virtual` (строки обязательны)
-- Запрет: полный render всех preview cells через обычные `<tr>/<td>` без virtualizer
-- Debounce **150ms** на preview-триггеры для Filter / CustomSql / Derive
-- FE не материализует полный результат пайплайна
-
-## 8. MVP Done Definition
-
-1. **Linux startup:** in-memory DuckDB session; extensions `postgres` и `spatial` загружаются без crash процесса.
-2. **History DnD:** reorder с валидацией схемы снизу вверх; ломающий reorder блокируется с текстом ошибки DuckDB.
-3. **dbt export:** сгенерированный проект выполняется `dbt run` без ручной модификации сгенерированных `.sql`.
-
-## 9. Non-goals (MVP)
-
-- Spatial query steps / map UI
-- Row-level streaming preview over IPC
-- Cloud sync / multi-user
-- Sending raw table data to LLM
+Fuzzy merge, full PQ catalog, AI (stub OK), Python producer polish, DnD validate, full two-way round-trip.

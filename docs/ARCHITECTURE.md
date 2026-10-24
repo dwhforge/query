@@ -5,99 +5,56 @@
 ```mermaid
 flowchart LR
   UI[React_UI] -->|Tauri_invoke| Core[Rust_Core]
-  Core --> Model[Vec_TransformationStep]
-  Core --> Compiler[PipelineCompiler]
+  Core --> WS[Workspace]
+  WS --> Compiler[GraphCompiler]
   Compiler --> SQL[CTE_SQL]
   SQL --> Duck[DuckDB]
-  Duck -->|Preview_50_rows| UI
-  Core --> Producers[OutputProducer]
-  Producers --> Dbt[dbt_project]
-  Producers --> Py[Python_Polars]
-  UI --> AI[AI_Context_Engine]
+  Duck -->|Preview_50| UI
+  Core --> Dbt[DbtProducer]
+  Dbt --> Project[dbt_project]
+  UI --> AI[AI_Engine]
   AI -->|JSON_steps| UI
 ```
 
-Локальный процесс Tauri: WebView (React) ↔ IPC ↔ Rust. DuckDB живёт в Rust-процессе. LLM (если настроен) вызывается с машины пользователя; в промпт уходят только метаданные схемы и шаги.
-
 ## 2. Invariants
 
-1. **Rust не хранит row data пайплайна.** В памяти ядра — `Vec<TransformationStep>` и эфемерный preview result set (≤50 строк) для ответа IPC.
-2. **Тяжёлая работа — в DuckDB** (out-of-core, spill хэш-таблиц при `GROUP BY`).
-3. **Один compiler path:** шаги → единый CTE SQL (`WITH step_0 AS (...), ... SELECT * FROM step_N [LIMIT 50]`).
-4. **Producers не трогают runtime DuckDB** — только генерация артефактов из того же AST.
-5. **Сырые данные не уходят в облако** как часть продукта; AI получает schema + steps + prompt.
+1. Rust does not hold the full row dataset — only the Workspace AST + ephemeral preview ≤50 rows.  
+2. Heavy lifting is DuckDB.  
+3. **Canonical model is Workspace (multi-query)**; a single query is a special case.  
+4. One compile path: Workspace → SQL CTEs **and** Workspace → dbt models.  
+5. Raw table data never goes to an LLM.
 
-## 3. Backend modules (`src-tauri/src/`)
+ADRs: [0001](adr/0001-product-positioning.md) … [0008](adr/0008-postgres-required.md) (see `docs/adr/`).
 
-| Path | Responsibility |
-|------|----------------|
-| `pipeline/model.rs` | `TransformationStep` enum (serde tagged) |
-| `pipeline/compiler.rs` | AST → CTE SQL |
-| `pipeline/validate.rs` | prefix compile + `LIMIT 0` / DESCRIBE walk для DnD |
-| `pipeline/sql_escape.rs` | quoting путей и идентификаторов |
-| `db/session.rs` | in-memory DuckDB; `INSTALL/LOAD postgres`, `spatial` |
-| `commands/` | Tauri commands (см. SPEC) |
-| `producers/mod.rs` | trait `OutputProducer` |
-| `producers/dbt.rs` | dbt project (stg_ / mart_) |
-| `producers/python.rs` | Polars method-chaining script |
+**IR rule (H0):** Workspace AST is the only source of truth; DuckDB SQL and dbt files are projections. Two-way parse-back is H1/H2, not a v1 DoD.
 
-## 4. Frontend modules (`src/`)
+## 3. Modules
 
-| Path | Responsibility |
-|------|----------------|
-| `types/pipeline.ts` | wire types, зеркало Rust enum |
-| `store/pipelineStore` | steps, schema, preview, errors |
-| `components/History` | DnD список шагов |
-| `components/PreviewTable` | TanStack Table + `@tanstack/react-virtual` |
-| `components/AiChat` | NL → invoke / parse JSON steps |
-| `lib/tauri.ts` | typed `invoke` wrappers |
-| `lib/debounce.ts` | 150ms preview debounce |
+| Path | Role |
+|------|------|
+| `crates/dwh-pipeline` | `TransformationStep`, `Workspace`, `GraphCompiler` |
+| `crates/dwh-pipeline/producers` | `OutputProducer`, `DbtProducer` |
+| `crates/dwh-engine` | DuckDB session, preview |
+| `src-tauri` | IPC commands |
+| `src/` | Queries UI, History, Preview, Export |
 
-## 5. Data flow
+## 4. Compile flow
 
-### 5.1 Preview
+1. Resolve query dependency order (Join/Append edges).  
+2. For each query in topo order: emit CTEs `q_<id>_s<i>`.  
+3. Final: `SELECT * FROM q_<focus>_sLAST [LIMIT 50]`.
 
-1. UI меняет `steps` (или параметры шага)
-2. Debounce 150ms (где применимо)
-3. `preview_pipeline(steps)` → compiler `to_sql(is_preview=true)` → DuckDB
-4. Ответ: колонки + ≤50 строк (+ опционально скомпилированный SQL для debug)
+dbt: Load* → `stg_` (+ `sources.yml`); intermediate Join/transforms → `int_`; focus last → `mart_`.
 
-### 5.2 DnD validate
+## 5. Threat model
 
-1. UI считает кандидата `steps'`
-2. `validate_reorder` / `describe_pipeline` по префиксам
-3. Ok → commit в store; Err → UI откат + сообщение DuckDB
+Local-trust; quote paths/idents; never log connection strings; never send preview rows to an LLM.
 
-### 5.3 Export
+## 6. Extensions
 
-1. UI выбирает producer + `output_dir` + `pipeline_name`
-2. Rust `OutputProducer::produce` пишет файлы
-3. Runtime DuckDB не вызывается (кроме опциональной pre-validate)
+- **`postgres`:** required capability. Eager `INSTALL/LOAD` at session start when possible. If load fails, CSV/Parquet may still run; any workspace using `LoadPostgres` must fail with a clear error ([ADR-0008](adr/0008-postgres-required.md)).  
+- **`spatial`:** best-effort only; must not block CSV/Postgres paths.
 
-## 6. Threat model (local-trust)
+## 7. Language & licensing note
 
-Приложение — single-user local tool. Пользователь может ввести произвольный SQL в Filter / Derive / CustomSql — это ожидаемо.
-
-Обязательные меры:
-
-- Пути файлов в `LoadCsv` / `LoadParquet` проходят через quoting helper (экранирование `'`)
-- Identifiers в Rename/Select — quote при необходимости
-- Connection strings Postgres **не логировать** в stdout/файлы приложения
-- AI transport: не включать preview rows / file contents в запрос к LLM
-
-## 7. Extension loading
-
-При старте `db/session.rs`:
-
-1. Открыть in-memory DuckDB
-2. `INSTALL postgres; LOAD postgres;`
-3. `INSTALL spatial; LOAD spatial;`
-4. Ошибка load → fatal startup error (DoD #1)
-
-Spatial в MVP только для успешного load; шагов geo в AST нет.
-
-## 8. Related docs
-
-- Продукт / UX: [DESIGN.md](DESIGN.md)
-- Контракты и DoD: [SPEC.md](SPEC.md)
-- Исходный ТЗ: [TZ-EARLY.md](TZ-EARLY.md)
+Canonical documentation is **English** (possible future OSS; decision pending).

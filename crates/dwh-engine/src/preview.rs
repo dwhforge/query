@@ -1,12 +1,12 @@
 use crate::session::DbSession;
-use dwh_pipeline::{PipelineCompiler, TransformationStep};
+use dwh_pipeline::{GraphCompiler, PipelineCompiler, TransformationStep, Workspace};
 use duckdb::arrow::array::{
     Array, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
     Int32Array, Int64Array, Int8Array, LargeStringArray, StringArray, TimestampMicrosecondArray,
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
     UInt32Array, UInt64Array, UInt8Array,
 };
-use duckdb::arrow::datatypes::{DataType, TimeUnit};
+use duckdb::arrow::datatypes::DataType;
 use duckdb::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value as JsonValue};
@@ -48,7 +48,6 @@ fn array_value_to_json(array: &dyn Array, row: usize) -> JsonValue {
     if array.is_null(row) {
         return JsonValue::Null;
     }
-
     if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
         return JsonValue::Bool(a.value(row));
     }
@@ -110,9 +109,6 @@ fn array_value_to_json(array: &dyn Array, row: usize) -> JsonValue {
     if let Some(a) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
         return JsonValue::from(a.value(row));
     }
-
-    // Fallback: rely on Debug for uncommon types
-    let _ = TimeUnit::Second;
     JsonValue::String(format!("{array:?}"))
 }
 
@@ -132,18 +128,12 @@ fn batches_to_rows(batches: &[RecordBatch]) -> Vec<Vec<JsonValue>> {
     rows
 }
 
-pub fn preview_pipeline(
-    db: &DbSession,
-    steps: &[TransformationStep],
-) -> Result<PreviewResult, String> {
-    let sql = PipelineCompiler::new(steps).to_sql(true)?;
-
+fn run_sql(db: &DbSession, sql: String) -> Result<PreviewResult, String> {
     db.with_conn(|conn| {
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
-
         let columns = schema
             .fields()
             .iter()
@@ -152,13 +142,30 @@ pub fn preview_pipeline(
                 col_type: map_arrow_type(f.data_type()),
             })
             .collect();
-
-        let rows = batches_to_rows(&batches);
-
         Ok(PreviewResult {
             columns,
-            rows,
-            sql: sql.clone(),
+            rows: batches_to_rows(&batches),
+            sql,
         })
     })
+}
+
+pub fn preview_workspace(db: &DbSession, workspace: &Workspace) -> Result<PreviewResult, String> {
+    if workspace.uses_postgres() {
+        db.ensure_postgres()?;
+    }
+    let sql = GraphCompiler::new(workspace).to_sql(true)?;
+    run_sql(db, sql)
+}
+
+pub fn preview_pipeline(
+    db: &DbSession,
+    steps: &[TransformationStep],
+) -> Result<PreviewResult, String> {
+    let ws = Workspace::from_linear_steps(steps.to_vec());
+    if ws.uses_postgres() {
+        db.ensure_postgres()?;
+    }
+    let sql = PipelineCompiler::new(steps).to_sql(true)?;
+    run_sql(db, sql)
 }

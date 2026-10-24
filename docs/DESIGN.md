@@ -2,57 +2,84 @@
 
 ## 1. Product
 
-**DWH-RS-QUERY** — локальное desktop-приложение для построения и превью data-пайплайнов (CSV / Parquet / Postgres → трансформации → экспорт в dbt или Polars).
+**DWH-RS-QUERY** is a local desktop workbench: build a transform graph from one or many sources, preview in DuckDB, and **export a real dbt project**.
 
-- Стек UI: Tauri + React + TypeScript + Tailwind
-- Исполнение: встроенный DuckDB (Rust core)
-- Данные не уходят в облако: процессинг только на машине пользователя (Linux / macOS / Windows)
+- Stack: Tauri + React/TS/Tailwind + Rust + DuckDB  
+- Repo: `dwh-rs-query` · App id: `com.dwhrsquery.app`  
+- Raw data never leaves the machine (AI receives only schema / steps / prompt)
 
-Repo / packages: `dwh-rs-query`. Tauri app id: `com.dwhrsquery.app`.
+Positioning: [ADR-0001](adr/0001-product-positioning.md).
 
-## 2. Problem & persona
+**Licensing:** Open-source release is **under consideration and not decided**. Specs and code should stay OSS-friendly (English docs, no proprietary assumptions).
 
-**Проблема:** собрать воспроизводимый transform-пайплайн без ручного SQL-спагетти и без выгрузки сырых таблиц во внешние сервисы.
+## 2. Horizons
 
-**Персона:** аналитик / data engineer, работает с локальными файлами и/или Postgres, хочет быстрый preview и экспорт в dbt/Polars.
+| Horizon | Priority | Focus |
+|---------|----------|--------|
+| **v1 (now)** | dbt help tool | multi-source, Join/Append, preview, `dbt run`-ready export |
+| **Path** | Power Query coverage | multi-query workspace = Applied Steps / Merge mental model |
+| **H1→H2** | Two-way editors | visual ↔ dbt/SQL like Delphi ([ADR-0004](adr/0004-two-way-visual-text.md)) |
+| **Later** | PQ closeness wins | richer UI transforms, profiling; dbt stays a strong exporter |
 
-## 3. Core loop
+Long-term UX reference — **Power Query**, not Power BI.  
+Long-term tooling reference — **two-way visual + text** (dbt and/or pure SQL), not one-shot export.
 
-1. Загрузить источник (Load*)
-2. Добавить шаги (вручную или через AI Chat)
-3. Смотреть Preview (≤50 строк) после каждого изменения
-4. Переупорядочить историю (DnD) — только если схема валидна
-5. Экспортировать пайплайн (dbt / Python Polars)
+**Now:** AST is canonical; SQL/dbt are projections (read-only SQL is fine).  
+**Later:** parse-back for a step whitelist → full round-trip with reconcile.
 
-## 4. MVP surfaces
+## 2.1 UX north star & killer feature
 
-Один экран — одно composition (не dashboard из виджетов):
+As a **visual** tool the bar is to **blow everyone away on usability** (not “reach PQ”, but beat it on speed-of-thought and delight).  
+Conflict rule: flow UX > feature completeness. Canon: [ADR-0005](adr/0005-ux-blow-away.md).
 
-| Surface | Роль |
+**Ultimate UI killer feature:** the **visual pipeline / workspace editor** (multi-source graph, direct Join/Append, instant preview, one-gesture export) — [ADR-0007](adr/0007-visual-pipeline-editor-killer.md).  
+Destination UX is a **graph canvas**, not a permanent list-of-forms. List+detail may be an early slice only.
+
+Gates: &lt;2 minutes to Join+preview; Join in ≤3 actions; snappy preview; empty state teaches; keyboard first-class.
+
+## 2.2 dbt version support
+
+Export must support **dbt v1 and dbt v2** ([ADR-0006](adr/0006-dbt-version-matrix.md)).  
+v1 implementation may ship first; v2 is a hard follow-up, not optional. Do not confuse YAML `config-version: 2` with dbt v2.
+
+## 3. Persona & problem
+
+Analytics engineer: several CSV/Parquet/**Postgres** inputs → join/transform → needs reproducible dbt without spaghetti SQL, with local preview.
+
+**PostgreSQL is a mandatory first-class source** (not optional / not “CSV-only MVP”) — [ADR-0008](adr/0008-postgres-required.md).
+
+## 4. Core loop (v1)
+
+1. Create a query and load a source (Load*) — repeat for N sources  
+2. Build a consumer query: Join / Append / Filter / GroupBy / …  
+3. Preview the focus query (≤50 rows)  
+4. Export dbt → `dbt run` with no hand-edits to generated `.sql`
+
+## 5. MVP surfaces
+
+| Surface | Role |
 |---------|------|
-| **История изменений** | Вертикальный список шагов, DnD reorder |
-| **Preview** | Виртуализированная таблица результата (≤50 строк) |
-| **AI Chat** | NL → JSON `TransformationStep[]` |
-| **Export** | dbt project / Polars script в выбранную папку |
+| **Queries** | workspace query list (PQ-like query pane) |
+| **Change history** | steps of the active query (DnD later) |
+| **Preview** | virtualized table for focus query |
+| **Export dbt** | generate project into a chosen folder |
+| **AI Chat** | NL → steps (after AST stabilizes) |
 
-Hero/brand в UI: имя продукта **DWH-RS-QUERY** как главный сигнал заголовка окна / стартового состояния (пустой пайплайн).
+## 6. UX rules
 
-## 5. UX rules
+- Debounce 150ms on Filter / CustomSql / Join key edits → preview  
+- AI: schema + workspace JSON only, no row data  
+- Product name **DWH-RS-QUERY** is the primary UI brand signal  
 
-- Preview refresh: **debounce 150ms** на правки Filter / CustomSql / Derive expression
-- DnD: до применения порядка — validate schema снизу вверх; при ошибке DuckDB — блок операции + текст ошибки
-- AI context: только `current_schema` + `applied_steps` + текст пользователя; **сырые строки таблицы не отправляются**
-- Широкие таблицы (>50 колонок): виртуализация строк обязательна; колонки — виртуализировать при необходимости, чтобы DOM не рос линейно
+## 7. Out of scope (v1)
 
-## 6. Out of scope (MVP)
+- Fuzzy merge, anti-join UI, M language  
+- Full PQ transform catalog (pivot/unpivot/fill/…) — path item, not a dbt v1 blocker  
+- Spatial UI (spatial extension may stay best-effort), cloud sync, auth  
+- Postgres is **in scope** (required) 
 
-- Spatial UI / geo-визуализация (расширение `spatial` только грузится при старте сессии)
-- Multi-pipeline workspace, облачный sync, auth
-- Полноценный streaming preview построчно по IPC (MVP = batch `LIMIT 50`)
-- Pandas producer (канон MVP — Polars)
+## 8. Success (v1)
 
-## 7. Success (user-facing)
+User loads 2 CSVs, Joins on a key, Filter/GroupBy, Export dbt, `dbt run` is green.
 
-Пользователь на Linux открывает приложение, грузит CSV, через чат или UI добавляет Filter + GroupBy, видит preview, перетаскивает шаги без поломки схемы, экспортирует dbt-проект и запускает `dbt run` без ручных правок SQL.
-
-См. инженерный DoD: [SPEC.md § MVP Done Definition](SPEC.md).
+See [SPEC.md](SPEC.md), [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-append-steps.md).

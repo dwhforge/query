@@ -45,10 +45,11 @@ Project
 - Postgres object picker & S3 path dialog **select an existing Connection** (or create one in the same flow, still saved as Connection).  
 - No `window.prompt` for credentials.
 
-### Persistence (follow-up)
+### Persistence
 
-- `project.json` may hold connection shells; secrets → OS keyring / encrypted vault later.  
-- Until vault: connections live in Project memory/disk with clear “secrets in project” warning — still better than scattering them across steps.
+- Project file holds connection **shells** (id, name, kind, non-secret S3 endpoint/region/TLS).  
+- Secrets (PG DSN, S3 keys) → `~/.dwhforge-query/secrets.json` keyed by `project_id` + `connection_id` (mode `0600`).  
+- OS keyring remains optional later; home-dir file is the v1 vault.
 
 ## Consequences
 

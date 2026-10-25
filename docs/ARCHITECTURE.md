@@ -1,4 +1,4 @@
-# DWH-RS-QUERY — Architecture
+# DWHForge Query — Architecture
 
 ## 1. System context
 

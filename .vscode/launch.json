@@ -4,7 +4,7 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "DWH-RS-QUERY: Tauri Dev",
+      "name": "DWHForge Query: Tauri Dev",
       "cargo": {
         "args": [
           "build",
@@ -27,7 +27,7 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "DWH-RS-QUERY: Tauri Release Debug",
+      "name": "DWHForge Query: Tauri Release Debug",
       "cargo": {
         "args": [
           "build",

@@ -1,6 +1,6 @@
 # Competitive landscape & positioning
 
-Canon name: **DWH-RS-QUERY**. Related: [ADR-0001](adr/0001-product-positioning.md), [DESIGN.md](DESIGN.md).
+Canon name: **DWHForge Query**. Related: [ADR-0001](adr/0001-product-positioning.md), [ADR-0016](adr/0016-product-rename-dwhforge-query.md), [DESIGN.md](DESIGN.md).
 
 Snapshot date: 2026-10. Treat names/features as moving targets; re-check before GTM claims.
 

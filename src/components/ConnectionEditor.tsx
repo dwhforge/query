@@ -14,6 +14,8 @@ interface Props {
   open: boolean;
   initial?: ConnectionDef | null;
   defaultKind?: ConnectionKind;
+  /** Existing connection ids — for stable slug uniqueness. */
+  existingIds?: string[];
   onClose: () => void;
   onSave: (conn: ConnectionDef) => void;
 }
@@ -22,6 +24,7 @@ export function ConnectionEditor({
   open,
   initial,
   defaultKind = "postgres",
+  existingIds = [],
   onClose,
   onSave,
 }: Props) {
@@ -57,8 +60,8 @@ export function ConnectionEditor({
   }, [open, onClose]);
 
   function save() {
-    const id = initial?.id ?? newConnectionId();
-    const trimmed = name.trim() || id;
+    const trimmed = name.trim() || (kind === "s3" ? "s3" : "postgres");
+    const id = initial?.id ?? newConnectionId(trimmed, existingIds);
     if (kind === "postgres") {
       const dsn = pgDsn.trim();
       if (!dsn) return;

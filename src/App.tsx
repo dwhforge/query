@@ -64,8 +64,12 @@ function App() {
   const [groupDims, setGroupDims] = useState("");
   const [groupAggs, setGroupAggs] = useState("count(*) as n");
   const [joinRightId, setJoinRightId] = useState("");
-  const [joinKey, setJoinKey] = useState("region");
+  /** Host (left) column — may differ from right (e.g. data_source_id = id). */
+  const [joinLeftKey, setJoinLeftKey] = useState("");
+  const [joinRightKey, setJoinRightKey] = useState("");
   const [joinType, setJoinType] = useState<JoinType>("inner");
+  /** FromQuery parent id (child / derived query root). */
+  const [fromQueryId, setFromQueryId] = useState("");
   const [appendOtherId, setAppendOtherId] = useState("");
   const [sortCol, setSortCol] = useState("");
   const [sortDesc, setSortDesc] = useState(true);
@@ -232,8 +236,10 @@ function App() {
         setGroupDims("");
         setGroupAggs("count(*) as n");
         setJoinRightId("");
-        setJoinKey("");
+        setJoinLeftKey("");
+        setJoinRightKey("");
         setJoinType("inner");
+        setFromQueryId("");
         return;
       }
       const f = q.steps.find((s) => s.type === "Filter");
@@ -253,13 +259,19 @@ function App() {
       const j = q.steps.find((s) => s.type === "Join");
       if (j && j.type === "Join") {
         setJoinRightId(j.payload.right_query_id);
-        setJoinKey(j.payload.left_on[0] ?? "");
+        setJoinLeftKey(j.payload.left_on[0] ?? "");
+        setJoinRightKey(j.payload.right_on[0] ?? j.payload.left_on[0] ?? "");
         setJoinType(j.payload.join_type);
       } else {
         setJoinRightId("");
-        setJoinKey("");
+        setJoinLeftKey("");
+        setJoinRightKey("");
         setJoinType("inner");
       }
+      const fq = q.steps.find((s) => s.type === "FromQuery");
+      setFromQueryId(
+        fq && fq.type === "FromQuery" ? fq.payload.query_id : "",
+      );
       const a = q.steps.find((s) => s.type === "Append");
       if (a && a.type === "Append") {
         setAppendOtherId(a.payload.other_query_ids[0] ?? "");
@@ -285,8 +297,14 @@ function App() {
         break;
       case "Join":
         setJoinRightId(step.payload.right_query_id);
-        setJoinKey(step.payload.left_on[0] ?? "");
+        setJoinLeftKey(step.payload.left_on[0] ?? "");
+        setJoinRightKey(
+          step.payload.right_on[0] ?? step.payload.left_on[0] ?? "",
+        );
         setJoinType(step.payload.join_type);
+        break;
+      case "FromQuery":
+        setFromQueryId(step.payload.query_id);
         break;
       case "Append":
         setAppendOtherId(step.payload.other_query_ids[0] ?? "");
@@ -426,12 +444,12 @@ function App() {
     kind: "csv" | "parquet",
     connectionId?: string,
   ) {
-    const id = newQueryId();
-    const base = path.split(/[/\\]/).pop() ?? id;
+    const base = path.split(/[/\\]/).pop() ?? "file";
     const name =
       kind === "csv"
         ? base.replace(/\.csv$/i, "")
         : base.replace(/\.parquet$/i, "");
+    const id = newQueryId(name, queries.map((q) => q.id));
     const step: TransformationStep =
       kind === "csv"
         ? { type: "LoadCsv", payload: { path } }
@@ -466,7 +484,6 @@ function App() {
 
   /** New query whose first step Loads an existing Source (same object, new model). */
   function addQueryFromSource(source: SourceDef) {
-    const id = newQueryId();
     let step: TransformationStep;
     let name = source.name;
     if (source.kind === "csv" && source.path) {
@@ -504,6 +521,7 @@ function App() {
       while (used.has(`${name}_${i}`)) i += 1;
       finalName = `${name}_${i}`;
     }
+    const id = newQueryId(finalName, queries.map((q) => q.id));
     const q: QueryDef = { id, name: finalName, steps: [step], source_id: source.id };
     setProject((p) => {
       const nextQueries = [...p.workspace.queries, q];
@@ -524,7 +542,6 @@ function App() {
 
   /** New query whose root is hand-written SQL (ready-made model). */
   function addSqlModelQuery() {
-    const id = newQueryId();
     const used = new Set(queries.map((q) => q.name));
     let name = "sql_model";
     if (used.has(name)) {
@@ -532,6 +549,7 @@ function App() {
       while (used.has(`sql_model_${i}`)) i += 1;
       name = `sql_model_${i}`;
     }
+    const id = newQueryId(name, queries.map((q) => q.id));
     const q: QueryDef = {
       id,
       name,
@@ -578,8 +596,11 @@ function App() {
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (typeof selected !== "string") return;
-    const id = newSourceId();
     const name = selected.split(/[/\\]/).pop() ?? "csv";
+    const id = newSourceId(
+      name,
+      project.sources.map((s) => s.id),
+    );
     setProject((p) => ({
       ...p,
       sources: [
@@ -597,8 +618,11 @@ function App() {
       filters: [{ name: "Parquet", extensions: ["parquet"] }],
     });
     if (typeof selected !== "string") return;
-    const id = newSourceId();
     const name = selected.split(/[/\\]/).pop() ?? "parquet";
+    const id = newSourceId(
+      name,
+      project.sources.map((s) => s.id),
+    );
     setProject((p) => ({
       ...p,
       sources: [
@@ -611,8 +635,11 @@ function App() {
   }
 
   function addSourceOnlyPostgres(sel: PostgresSelection) {
-    const id = newSourceId();
     const name = `${sel.schema}.${sel.table_name}`;
+    const id = newSourceId(
+      name,
+      project.sources.map((s) => s.id),
+    );
     setProject((p) => ({
       ...p,
       sources: [
@@ -633,8 +660,11 @@ function App() {
   }
 
   function addSourceOnlyS3(sel: { path: string; connection_id?: string }) {
-    const id = newSourceId();
     const name = sel.path.split(/[/\\]/).pop() ?? "parquet";
+    const id = newSourceId(
+      name,
+      project.sources.map((s) => s.id),
+    );
     setProject((p) => ({
       ...p,
       sources: [
@@ -689,10 +719,11 @@ function App() {
   }
 
   function addPostgresFromPicker(sel: PostgresSelection) {
-    const id = newQueryId();
+    const name = `${sel.schema}.${sel.table_name}`;
+    const id = newQueryId(name, queries.map((q) => q.id));
     const q: QueryDef = {
       id,
-      name: `${sel.schema}.${sel.table_name}`,
+      name,
       steps: [
         {
           type: "LoadPostgres",
@@ -771,15 +802,17 @@ function App() {
   function applyJoinTo(
     hostQueryId: string,
     rightQueryId: string,
-    key: string,
+    leftKey: string,
+    rightKey: string,
     type: JoinType = joinType,
   ) {
-    if (!rightQueryId || !key.trim()) return;
+    const lk = leftKey.trim();
+    const rk = rightKey.trim() || lk;
+    if (!rightQueryId || !lk) return;
     if (rightQueryId === hostQueryId) {
       setError("Cannot join a query to itself");
       return;
     }
-    const k = key.trim();
     let joinIndex = -1;
     let joinStep: TransformationStep | null = null;
     setQueries((prev) =>
@@ -791,8 +824,8 @@ function App() {
           payload: {
             right_query_id: rightQueryId,
             join_type: type,
-            left_on: [k],
-            right_on: [k],
+            left_on: [lk],
+            right_on: [rk],
           },
         };
         const steps = [...without, step];
@@ -802,18 +835,27 @@ function App() {
       }),
     );
     setJoinRightId(rightQueryId);
-    setJoinKey(k);
+    setJoinLeftKey(lk);
+    setJoinRightKey(rk);
     setJoinType(type);
     setActiveQueryId(hostQueryId);
-    if (joinIndex >= 0 && joinStep) {
-      setSelectedStepIndex(joinIndex);
-      loadStepIntoEditor(joinStep);
-    }
+    // Select Join step after queries commit (avoid race with sync useEffect).
+    const idx = joinIndex;
+    const step = joinStep;
+    queueMicrotask(() => {
+      if (idx >= 0 && step) {
+        setSelectedStepIndex(idx);
+        loadStepIntoEditor(step);
+      }
+    });
     setError(null);
   }
 
   function connectJoinOnCanvas(rightQueryId: string, hostQueryId: string) {
-    applyJoinTo(hostQueryId, rightQueryId, joinKey || "id", joinType);
+    // Prefer inspector keys; if empty, create Join with placeholder keys for edit.
+    const lk = joinLeftKey.trim() || joinRightKey.trim() || "id";
+    const rk = joinRightKey.trim() || lk;
+    applyJoinTo(hostQueryId, rightQueryId, lk, rk, joinType);
   }
 
   function selectEdgeOnCanvas(edge: GraphEdgeInfo) {
@@ -824,7 +866,10 @@ function App() {
       const idx = host?.steps.findIndex((s) => s.type === "Join") ?? -1;
       const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
-        setJoinKey(j.payload.left_on[0] ?? joinKey);
+        setJoinLeftKey(j.payload.left_on[0] ?? "");
+        setJoinRightKey(
+          j.payload.right_on[0] ?? j.payload.left_on[0] ?? "",
+        );
         setJoinType(j.payload.join_type);
         setSelectedStepIndex(idx);
         loadStepIntoEditor(j);
@@ -901,7 +946,6 @@ function App() {
   function deriveQueryFrom(fromQueryId: string) {
     const src = queries.find((q) => q.id === fromQueryId);
     if (!src) return;
-    const id = newQueryId();
     const used = new Set(queries.map((q) => q.name));
     let name = `${src.name}_derived`;
     if (used.has(name)) {
@@ -909,6 +953,7 @@ function App() {
       while (used.has(`${src.name}_${i}`)) i += 1;
       name = `${src.name}_${i}`;
     }
+    const id = newQueryId(name, queries.map((q) => q.id));
     const q: QueryDef = {
       id,
       name,
@@ -1283,15 +1328,19 @@ function App() {
           setError("Need another query to Join");
           return;
         }
-        appendStep({
-          type: "Join",
-          payload: {
-            right_query_id: peer,
-            join_type: "inner",
-            left_on: [joinKey || "id"],
-            right_on: [joinKey || "id"],
-          },
-        });
+        {
+          const lk = joinLeftKey.trim() || "id";
+          const rk = joinRightKey.trim() || lk;
+          appendStep({
+            type: "Join",
+            payload: {
+              right_query_id: peer,
+              join_type: "inner",
+              left_on: [lk],
+              right_on: [rk],
+            },
+          });
+        }
         break;
       case "Append":
         if (!peer) {
@@ -1426,6 +1475,7 @@ function App() {
         open={connEditorOpen}
         initial={editingConnection}
         defaultKind={connEditorKind}
+        existingIds={project.connections.map((c) => c.id)}
         onClose={() => {
           setConnEditorOpen(false);
           setEditingConnection(null);
@@ -1466,7 +1516,7 @@ function App() {
           onAddSqlModel={() => addSqlModelQuery()}
         />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr] lg:grid-cols-[240px_1fr_300px]">
+        <div className="grid min-h-0 flex-1 grid-cols-[200px_minmax(0,1fr)_280px] lg:grid-cols-[240px_minmax(0,1fr)_300px]">
           {/* Explorer */}
           <aside className="min-h-0 border-r border-[var(--line)] bg-[#050b12]">
             <ExplorerTree
@@ -1640,7 +1690,7 @@ function App() {
           </section>
 
           {/* Inspector: top = step order, bottom = edit selected step */}
-          <aside className="hidden min-h-0 flex-col lg:flex">
+          <aside className="flex min-h-0 min-w-0 flex-col border-l border-[var(--line)] bg-[#050b12]">
             <div className="shrink-0 border-b border-[var(--line)] px-4 py-3">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="truncate text-sm font-semibold text-slate-100">
@@ -1736,12 +1786,45 @@ function App() {
                   <div className="mb-3 space-y-2">
                     {(selectedStep.type === "LoadCsv" ||
                       selectedStep.type === "LoadParquet" ||
-                      selectedStep.type === "LoadPostgres" ||
-                      selectedStep.type === "FromQuery") && (
+                      selectedStep.type === "LoadPostgres") && (
                       <p className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2 font-mono text-[11px] text-slate-400">
-                        Source step (pinned at s0). Change via Sources / ↳
-                        FromQuery.
+                        Source step (pinned at s0). Change via Sources catalog.
                       </p>
+                    )}
+                    {selectedStep.type === "FromQuery" && (
+                      <>
+                        <p className="text-[10px] text-slate-500">
+                          Child query root — dbt <span className="font-mono">ref</span>{" "}
+                          to parent (pinned at s0).
+                        </p>
+                        <select
+                          value={fromQueryId}
+                          onChange={(e) => setFromQueryId(e.target.value)}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                        >
+                          <option value="">parent query…</option>
+                          {otherQueries.map((q) => (
+                            <option key={q.id} value={q.id}>
+                              {q.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!fromQueryId}
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          onClick={() => {
+                            if (selectedStepIndex === null || !fromQueryId)
+                              return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "FromQuery",
+                              payload: { query_id: fromQueryId },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
                     )}
                     {selectedStep.type === "SqlModel" && (
                       <>
@@ -1898,6 +1981,13 @@ function App() {
                     )}
                     {selectedStep.type === "Join" && (
                       <>
+                        <p className="text-[10px] text-slate-500">
+                          Join another query into this one (canvas drag or
+                          edit here).
+                        </p>
+                        <label className="block text-[10px] uppercase tracking-wide text-slate-500">
+                          Right query
+                        </label>
                         <select
                           value={joinRightId}
                           onChange={(e) => setJoinRightId(e.target.value)}
@@ -1911,40 +2001,65 @@ function App() {
                             </option>
                           ))}
                         </select>
+                        {otherQueries.length === 0 && (
+                          <p className="text-[11px] text-amber-500/90">
+                            Need another query in the project to join.
+                          </p>
+                        )}
+                        <label className="block text-[10px] uppercase tracking-wide text-slate-500">
+                          Type
+                        </label>
+                        <select
+                          value={joinType}
+                          onChange={(e) =>
+                            setJoinType(e.target.value as JoinType)
+                          }
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                        >
+                          <option value="inner">inner</option>
+                          <option value="left">left</option>
+                          <option value="right">right</option>
+                          <option value="full">full</option>
+                        </select>
+                        <label className="block text-[10px] uppercase tracking-wide text-slate-500">
+                          Left key (this query) = right key (other)
+                        </label>
                         <div className="flex gap-1">
-                          <select
-                            value={joinType}
-                            onChange={(e) =>
-                              setJoinType(e.target.value as JoinType)
-                            }
-                            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
-                          >
-                            <option value="inner">inner</option>
-                            <option value="left">left</option>
-                            <option value="right">right</option>
-                            <option value="full">full</option>
-                          </select>
                           <input
-                            value={joinKey}
-                            onChange={(e) => setJoinKey(e.target.value)}
-                            placeholder="join key"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                            value={joinLeftKey}
+                            onChange={(e) => setJoinLeftKey(e.target.value)}
+                            placeholder="data_source_id"
+                            list="inspector-cols"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                          />
+                          <span className="self-center text-slate-600">=</span>
+                          <input
+                            value={joinRightKey}
+                            onChange={(e) => setJoinRightKey(e.target.value)}
+                            placeholder="id"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                           />
                         </div>
+                        <p className="text-[10px] text-slate-600">
+                          FK example: data_source_id = id (not id = id).
+                        </p>
                         <button
                           type="button"
-                          disabled={!joinRightId || !joinKey.trim()}
+                          disabled={
+                            !joinRightId || !joinLeftKey.trim()
+                          }
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
-                            const k = joinKey.trim();
+                            const lk = joinLeftKey.trim();
+                            const rk = joinRightKey.trim() || lk;
                             replaceStepAt(selectedStepIndex, {
                               type: "Join",
                               payload: {
                                 right_query_id: joinRightId,
                                 join_type: joinType,
-                                left_on: [k],
-                                right_on: [k],
+                                left_on: [lk],
+                                right_on: [rk],
                               },
                             });
                           }}

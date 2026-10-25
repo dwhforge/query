@@ -1,6 +1,6 @@
-# DWH-RS-QUERY — Engineering Spec (v1)
+# DWHForge Query — Engineering Spec (v1)
 
-Canon: product name **DWH-RS-QUERY**. Positioning — [ADR-0001](adr/0001-product-positioning.md).  
+Canon: product name **DWHForge Query** ([ADR-0016](adr/0016-product-rename-dwhforge-query.md)). Positioning — [ADR-0001](adr/0001-product-positioning.md).  
 Docs language: English (OSS under consideration, not decided).
 
 ## 1. Project + Workspace contract

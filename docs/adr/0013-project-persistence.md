@@ -14,8 +14,9 @@ ADR-0009 deferred save/load. Connections (ADR-0012), Sources, and Workspace must
 2. Suggested extension: `.dwhproj.json` (still valid JSON).  
 3. Tauri commands: `save_project(path, project)`, `load_project(path)`.  
 4. UI: **Save** / **Open** (+ Ctrl/Cmd+S / Ctrl/Cmd+O).  
-5. `root_path` updated on save/load.  
-6. Secrets may still be inside the file until a vault lands — same warning as ADR-0012.
+5. `root_path` is **runtime-only** (set from Open/Save path; **not** written into the file).  
+6. Entity ids are **slug-based** (`src_sample`, `q_sales`, `conn_postgres`) — not random tokens.  
+7. Connection secrets are stripped on save into `~/.dwhforge-query/secrets.json` ([ADR-0012](0012-connections.md), [ADR-0016](0016-product-rename-dwhforge-query.md)).
 
 ## Consequences
 

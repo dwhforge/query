@@ -1,4 +1,5 @@
 use crate::session::DbSession;
+use dwh_pipeline::postgres_attach_alias;
 use dwh_pipeline::sql_escape::escape_sql_string;
 use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -21,20 +22,10 @@ pub struct PostgresColumn {
     pub ordinal_position: i64,
 }
 
-/// DuckDB 2.0+: `postgres_query(alias, sql)` needs a prior
+/// DuckDB 2.0+: `postgres_query(alias, sql)` / qualified tables need a prior
 /// `ATTACH '…' AS alias (TYPE postgres)`. First arg is **not** the DSN.
-fn attach_alias(conn_str: &str) -> String {
-    // FNV-1a — stable within process; alias is an opaque DuckDB identifier.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in conn_str.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("dwh_pg_{h:016x}")
-}
-
-fn ensure_pg_attached(conn: &Connection, conn_str: &str) -> Result<String, String> {
-    let alias = attach_alias(conn_str);
+pub fn ensure_pg_attached(conn: &Connection, conn_str: &str) -> Result<String, String> {
+    let alias = postgres_attach_alias(conn_str);
     let sql = format!(
         "ATTACH IF NOT EXISTS '{}' AS {alias} (TYPE postgres, READ_ONLY);",
         escape_sql_string(conn_str),

@@ -48,7 +48,9 @@ pub struct CanvasPosition {
 pub struct Project {
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    /// Absolute path of the open project file — **runtime only**, never written to disk
+    /// (derived from Open/Save path). Old files may still contain it; load ignores it.
+    #[serde(default, skip_serializing)]
     pub root_path: Option<String>,
     #[serde(default)]
     pub connections: Vec<ConnectionDef>,

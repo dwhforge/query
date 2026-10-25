@@ -5,6 +5,8 @@ use dwh_engine::{
     test_postgres_connection as run_test_postgres_connection, DbSession, PostgresColumn,
     PostgresObject, PreviewResult,
 };
+mod secrets_io;
+
 use dwh_pipeline::{
     list_export_tree as walk_export_tree, preview_dbt_model_sql, ConnectionDef, DbtProducer,
     DbtTarget, ExportResult, OutputProducer, PreviewDbtModel, Project, QueryDef,
@@ -118,21 +120,14 @@ fn test_postgres_connection(
 
 #[tauri::command]
 fn save_project(app: AppHandle, path: String, project: Project) -> Result<(), String> {
-    let mut project = project;
-    project.root_path = Some(path.clone());
-    let json = project.to_json_pretty()?;
-    if let Some(parent) = PathBuf::from(&path).parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&path, json).map_err(|e| e.to_string())?;
+    secrets_io::save_project_with_secrets(&path, &project)?;
     remember_project_path(&app, &path)?;
     Ok(())
 }
 
 #[tauri::command]
 fn load_project(app: AppHandle, path: String) -> Result<Project, String> {
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut project = Project::from_json(&raw)?;
+    let mut project = secrets_io::load_project_with_secrets(&path)?;
     project.root_path = Some(path.clone());
     let _ = remember_project_path(&app, &path);
     Ok(project)

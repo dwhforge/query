@@ -27,7 +27,7 @@ export function EmptyHero({
         Visual pipeline workspace
       </p>
       <h2 className="anim-rise-delay-1 mt-3 max-w-xl text-4xl font-semibold tracking-tight text-slate-50 sm:text-5xl">
-        DWH-RS-QUERY
+        DWHForge Query
       </h2>
       <p className="anim-rise-delay-2 mt-4 max-w-md text-base leading-relaxed text-slate-400">
         Drop sources on the canvas, join in a few clicks, preview instantly, export

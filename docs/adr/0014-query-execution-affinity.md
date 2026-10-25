@@ -24,7 +24,7 @@ Optional `Project.target_connection_id`: postgres Connection for profiles hint a
 
 `dbt_target` remains **dbt version** (v1/v2), not warehouse dialect.
 
-Source DB type may differ from target (e.g. PG source, DuckDB or later MSSQL target) — normal.
+Source DB type may differ from target (e.g. PG source, DuckDB or later MSSQL target) — normal. Canon for many sources / one target: [ADR-0015](0015-sources-vs-target-extensibility.md).
 
 ### 2. Query execution affinity (one Query → one engine)
 

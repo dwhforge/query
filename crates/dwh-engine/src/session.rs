@@ -2,9 +2,11 @@ use crate::extensions::{
     extensions_dir_display, load_aws_extension, load_httpfs_extension, load_postgres_extension,
     path_needs_httpfs, try_load_spatial_extension,
 };
+use crate::postgres_catalog::ensure_pg_attached;
 use crate::secrets::apply_s3_connections;
 use duckdb::{Config, Connection};
 use dwh_pipeline::{ConnectionDef, ConnectionKind, TransformationStep, Workspace};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 pub struct DbSession {
@@ -131,7 +133,7 @@ impl DbSession {
         }
     }
 
-    /// Extensions + secrets for a workspace run (ADR-0012).
+    /// Extensions + secrets + Postgres ATTACH for a workspace run (ADR-0012).
     pub fn prepare_workspace(
         &self,
         workspace: &Workspace,
@@ -140,6 +142,27 @@ impl DbSession {
         let resolved = workspace.resolve_postgres_dsns(connections)?;
         if resolved.uses_postgres() {
             self.ensure_postgres()?;
+            // DuckDB 2.0: LoadPostgres SQL uses alias.schema.table after ATTACH (not postgres_scan).
+            let mut dsns = HashSet::new();
+            for q in &resolved.queries {
+                for s in &q.steps {
+                    if let TransformationStep::LoadPostgres {
+                        connection_string, ..
+                    } = s
+                    {
+                        let dsn = connection_string.trim();
+                        if !dsn.is_empty() {
+                            dsns.insert(dsn.to_string());
+                        }
+                    }
+                }
+            }
+            self.with_conn(|conn| {
+                for dsn in &dsns {
+                    ensure_pg_attached(conn, dsn)?;
+                }
+                Ok(())
+            })?;
         }
         if workspace_needs_httpfs(&resolved, connections) {
             self.ensure_httpfs()?;

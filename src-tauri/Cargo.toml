@@ -1,8 +1,8 @@
 [package]
 name = "dwh-rs-query"
 version = "0.1.0"
-description = "DWH-RS-QUERY local pipeline workbench"
-authors = ["dwh-rs-query"]
+description = "DWHForge Query local pipeline workbench"
+authors = ["dwhforge-query"]
 edition = "2021"
 
 [lib]

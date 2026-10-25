@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DWH-RS-QUERY",
+  "productName": "DWHForge Query",
   "version": "0.1.0",
-  "identifier": "com.dwhrsquery.app",
+  "identifier": "com.dwhforge.query",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "DWH-RS-QUERY",
+        "title": "DWHForge Query",
         "width": 1280,
         "height": 800
       }

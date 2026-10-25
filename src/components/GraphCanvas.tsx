@@ -253,7 +253,12 @@ function buildGraph(
           id,
           source: right,
           target: q.id,
-          label: `${step.payload.join_type} · ${step.payload.left_on.join(",")}`,
+          label: (() => {
+            const l = step.payload.left_on.join(",");
+            const r = step.payload.right_on.join(",");
+            const keys = l === r ? l : `${l}=${r}`;
+            return `${step.payload.join_type} · ${keys}`;
+          })(),
           data: {
             kind: "join",
             hostQueryId: q.id,

@@ -145,24 +145,52 @@ export interface PreviewResult {
   sql: string;
 }
 
-export function newId(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+/** Slug fragment from a human name / filename (stable, readable ids). */
+export function slugify(name: string, maxLen = 40): string {
+  const base = name
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, maxLen);
+  return base || "item";
 }
 
-export function newQueryId(): string {
-  return newId("q");
+/** `prefix_slug`, uniquified against `existing` (e.g. `src_sample`, `src_sample_2`). */
+export function newId(
+  prefix: string,
+  nameHint = "item",
+  existing: Iterable<string> = [],
+): string {
+  const taken = new Set(existing);
+  const slug = slugify(nameHint);
+  let id = `${prefix}_${slug}`;
+  let n = 2;
+  while (taken.has(id)) {
+    id = `${prefix}_${slug}_${n}`;
+    n += 1;
+  }
+  return id;
 }
 
-export function newSourceId(): string {
-  return newId("src");
+export function newQueryId(nameHint = "query", existing: Iterable<string> = []): string {
+  return newId("q", nameHint, existing);
 }
 
-export function newConnectionId(): string {
-  return newId("conn");
+export function newSourceId(nameHint = "source", existing: Iterable<string> = []): string {
+  return newId("src", nameHint, existing);
 }
 
-export function newProjectId(): string {
-  return newId("proj");
+export function newConnectionId(
+  nameHint = "connection",
+  existing: Iterable<string> = [],
+): string {
+  return newId("conn", nameHint, existing);
+}
+
+export function newProjectId(nameHint = "project"): string {
+  return newId("proj", nameHint);
 }
 
 export function emptyS3Params(): S3Params {
@@ -177,7 +205,7 @@ export function emptyS3Params(): S3Params {
 
 export function emptyProject(name = "Untitled"): Project {
   return {
-    id: newProjectId(),
+    id: newProjectId(name),
     name,
     connections: [],
     sources: [],
@@ -223,9 +251,10 @@ export function syncSourcesFromQueries(
       const key = `csv::${step.payload.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const fileName = step.payload.path.split(/[/\\]/).pop() ?? q.name;
       next.push({
-        id: newSourceId(),
-        name: step.payload.path.split(/[/\\]/).pop() ?? q.name,
+        id: newSourceId(fileName, next.map((s) => s.id)),
+        name: fileName,
         kind: "csv",
         path: step.payload.path,
       });
@@ -233,9 +262,10 @@ export function syncSourcesFromQueries(
       const key = `parquet:${step.payload.connection_id ?? ""}:${step.payload.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const fileName = step.payload.path.split(/[/\\]/).pop() ?? q.name;
       next.push({
-        id: newSourceId(),
-        name: step.payload.path.split(/[/\\]/).pop() ?? q.name,
+        id: newSourceId(fileName, next.map((s) => s.id)),
+        name: fileName,
         kind: "parquet",
         path: step.payload.path,
         connection_id: step.payload.connection_id,
@@ -245,9 +275,10 @@ export function syncSourcesFromQueries(
       const key = `pg:${step.payload.connection_id ?? step.payload.connection_string}|${schema}.${step.payload.table_name}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const tableLabel = `${schema}.${step.payload.table_name}`;
       next.push({
-        id: newSourceId(),
-        name: `${schema}.${step.payload.table_name}`,
+        id: newSourceId(tableLabel, next.map((s) => s.id)),
+        name: tableLabel,
         kind: "postgres",
         connection_id: step.payload.connection_id,
         connection_string: step.payload.connection_string,

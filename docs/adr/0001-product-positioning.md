@@ -6,7 +6,7 @@ Accepted (2026-10-24)
 
 ## Context
 
-DWH-RS-QUERY started as a linear DuckDB transform preview. Goals were refined:
+**DWHForge Query** (formerly referred to as DWH-RS-QUERY in early docs — [ADR-0016](0016-product-rename-dwhforge-query.md)) started as a linear DuckDB transform preview. Goals were refined:
 
 1. **Near-term:** a tool to build **real, complex dbt** from one or many sources.  
 2. **Required architectural approach:** cover the Power Query model (multi-query, Merge/Append).  

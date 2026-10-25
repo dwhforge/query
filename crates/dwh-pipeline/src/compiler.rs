@@ -1,6 +1,9 @@
-use crate::graph::{cte_name, direct_deps, topo_queries};
-use crate::model::{JoinType, TransformationStep, Workspace};
-use crate::sql_escape::{escape_sql_string, quote_ident};
+use crate::dialect::WarehouseDialect;
+use crate::emit::{emit_transform_step, substitute_query_placeholders};
+use crate::graph::{cte_name, topo_queries};
+use crate::model::{TransformationStep, Workspace};
+use crate::postgres_attach::duckdb_postgres_relation;
+use crate::sql_escape::escape_sql_string;
 use std::collections::HashMap;
 
 pub struct GraphCompiler<'a> {
@@ -100,20 +103,20 @@ fn compile_step(
             schema,
             table_name,
             ..
-        } => Ok(format!(
-            "SELECT * FROM postgres_scan('{}', '{}', '{}')",
-            escape_sql_string(connection_string),
-            escape_sql_string(schema),
-            escape_sql_string(table_name)
-        )),
+        } => {
+            // DuckDB 2.0+: ATTACH (TYPE postgres) then qualified relation — not postgres_scan.
+            Ok(format!(
+                "SELECT * FROM {}",
+                duckdb_postgres_relation(connection_string, schema, table_name)
+            ))
+        }
         TransformationStep::FromQuery { query_id } => {
             if !prev_step.is_empty() {
                 return Err("FromQuery must be the first step of a query".into());
             }
             let src = last_cte.get(query_id).ok_or_else(|| {
                 format!(
-                    "FromQuery: query '{}' not compiled yet (check deps / cycles)",
-                    query_id
+                    "FromQuery: query '{query_id}' not compiled yet (check deps / cycles)"
                 )
             })?;
             Ok(format!("SELECT * FROM {src}"))
@@ -122,161 +125,10 @@ fn compile_step(
             if !prev_step.is_empty() {
                 return Err("SqlModel must be the first step of a query".into());
             }
-            let mut sql = raw_sql.trim().trim_end_matches(';').to_string();
-            for dep in direct_deps(std::slice::from_ref(step)) {
-                if let Some(cte) = last_cte.get(&dep) {
-                    sql = sql.replace(&format!("{{{{query:{dep}}}}}"), cte);
-                }
-            }
-            Ok(sql)
+            Ok(substitute_query_placeholders(raw_sql, last_cte))
         }
-        TransformationStep::Filter { condition } => {
-            require_prev(prev_step, "Filter")?;
-            Ok(format!(
-                "SELECT * FROM {prev_step} WHERE {condition}"
-            ))
-        }
-        TransformationStep::SelectColumns { columns } => {
-            require_prev(prev_step, "SelectColumns")?;
-            let cols = columns
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Ok(format!("SELECT {cols} FROM {prev_step}"))
-        }
-        TransformationStep::RenameColumn { from, to } => {
-            require_prev(prev_step, "RenameColumn")?;
-            Ok(format!(
-                "SELECT * EXCLUDE ({}) , {} AS {} FROM {}",
-                quote_ident(from),
-                quote_ident(from),
-                quote_ident(to),
-                prev_step
-            ))
-        }
-        TransformationStep::DeriveColumn { name, expression } => {
-            require_prev(prev_step, "DeriveColumn")?;
-            Ok(format!(
-                "SELECT *, ({expression}) AS {} FROM {prev_step}",
-                quote_ident(name)
-            ))
-        }
-        TransformationStep::GroupBy {
-            dimensions,
-            aggregates,
-        } => {
-            require_prev(prev_step, "GroupBy")?;
-            let dims = dimensions
-                .iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Ok(format!(
-                "SELECT {dims}, {} FROM {prev_step} GROUP BY {dims}",
-                aggregates.join(", ")
-            ))
-        }
-        TransformationStep::SortBy {
-            column,
-            descending,
-        } => {
-            require_prev(prev_step, "SortBy")?;
-            let order = if *descending { "DESC" } else { "ASC" };
-            Ok(format!(
-                "SELECT * FROM {prev_step} ORDER BY {} {order}",
-                quote_ident(column)
-            ))
-        }
-        TransformationStep::Limit { n } => {
-            require_prev(prev_step, "Limit")?;
-            if *n == 0 {
-                return Err("Limit: n must be >= 1".into());
-            }
-            Ok(format!("SELECT * FROM {prev_step} LIMIT {n}"))
-        }
-        TransformationStep::Join {
-            right_query_id,
-            join_type,
-            left_on,
-            right_on,
-        } => {
-            require_prev(prev_step, "Join")?;
-            if left_on.is_empty() || left_on.len() != right_on.len() {
-                return Err("Join: left_on/right_on must be non-empty and same length".into());
-            }
-            let right = last_cte.get(right_query_id).ok_or_else(|| {
-                format!(
-                    "Join: right query '{}' not compiled yet (check deps)",
-                    right_query_id
-                )
-            })?;
-            let join_kw = join_type.sql_keyword();
-            if left_on == right_on {
-                let using = left_on
-                    .iter()
-                    .map(|c| quote_ident(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Ok(format!(
-                    "SELECT * FROM {prev_step} AS l {join_kw} {right} AS r USING ({using})"
-                ))
-            } else {
-                let ons: Vec<String> = left_on
-                    .iter()
-                    .zip(right_on.iter())
-                    .map(|(l, r)| {
-                        format!(
-                            "l.{} = r.{}",
-                            quote_ident(l),
-                            quote_ident(r)
-                        )
-                    })
-                    .collect();
-                Ok(format!(
-                    "SELECT * FROM {prev_step} AS l {join_kw} {right} AS r ON {}",
-                    ons.join(" AND ")
-                ))
-            }
-        }
-        TransformationStep::Append { other_query_ids } => {
-            require_prev(prev_step, "Append")?;
-            if other_query_ids.is_empty() {
-                return Err("Append: other_query_ids empty".into());
-            }
-            let mut sql = format!("SELECT * FROM {prev_step}");
-            for oid in other_query_ids {
-                let other = last_cte.get(oid).ok_or_else(|| {
-                    format!("Append: query '{oid}' not compiled yet")
-                })?;
-                sql.push_str(&format!(" UNION ALL BY NAME SELECT * FROM {other}"));
-            }
-            Ok(sql)
-        }
-        TransformationStep::CustomSql { raw_sql } => {
-            require_prev(prev_step, "CustomSql")?;
-            let mut sql = raw_sql.replace("{{prev_step}}", prev_step);
-            for dep in direct_deps(std::slice::from_ref(step)) {
-                if let Some(cte) = last_cte.get(&dep) {
-                    sql = sql.replace(&format!("{{{{query:{dep}}}}}"), cte);
-                }
-            }
-            Ok(sql)
-        }
+        other => emit_transform_step(other, prev_step, last_cte, WarehouseDialect::Duckdb),
     }
-}
-
-fn require_prev(prev: &str, op: &str) -> Result<(), String> {
-    if prev.is_empty() {
-        Err(format!("{op} требует предыдущий шаг в той же query"))
-    } else {
-        Ok(())
-    }
-}
-
-#[allow(dead_code)]
-fn _join_type_use(j: &JoinType) {
-    let _ = j.sql_keyword();
 }
 
 #[cfg(test)]
@@ -397,9 +249,10 @@ mod tests {
             table_name: "orders".into(),
         }];
         let sql = PipelineCompiler::new(&steps).to_sql(true).unwrap();
-        assert!(sql.contains("postgres_scan("));
-        assert!(sql.contains("'sales'"));
-        assert!(sql.contains("'orders'"));
+        assert!(sql.contains("dwh_pg_"));
+        assert!(sql.contains("\"sales\""));
+        assert!(sql.contains("\"orders\""));
+        assert!(!sql.contains("postgres_scan"));
         assert!(sql.contains("LIMIT 50"));
     }
 

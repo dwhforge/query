@@ -1,4 +1,4 @@
-# DWH-RS-QUERY
+# DWHForge Query
 
 Local desktop ETL/transform workbench: **Tauri + React/TS + Rust + DuckDB**.  
 Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **CSV, Parquet, PostgreSQL (required)**. Raw data stays on-device.  
@@ -9,6 +9,8 @@ Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **
 ```
 
 DuckDB **v2.0** via `duckdb-rs` **prebuilt** shared lib (not the `bundled` Cargo feature — that recompiles C++ for ages). After first `cargo build -p dwh-engine`, run `./scripts/sync-duckdb-lib.sh` so `libduckdb.so` sits next to binaries. Layout at runtime: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)). Local Parquet = core; **S3** needs `httpfs`.
+
+Connection secrets: `~/.dwhforge-query/secrets.json` (not inside `.dwhproj.json`).
 
 **Licensing:** open-source is under consideration and **not decided**. Documentation is in English to stay OSS-ready.
 
@@ -28,9 +30,10 @@ DuckDB **v2.0** via `duckdb-rs` **prebuilt** shared lib (not the `bundled` Cargo
 
 | Layer | Name |
 |-------|------|
-| Product / UI / docs | **DWH-RS-QUERY** |
-| Repo / npm / Cargo | `dwh-rs-query` |
-| Tauri identifier | `com.dwhrsquery.app` |
+| Product / UI / docs | **DWHForge Query** |
+| Local config / secrets | `~/.dwhforge-query/` |
+| Tauri identifier | `com.dwhforge.query` |
+| Repo / npm / Cargo (legacy path) | `dwh-rs-query` |
 
 ## Layout
 
@@ -69,7 +72,7 @@ npm run tauri dev
 
 See [`.vscode/launch.json`](.vscode/launch.json):
 
-- **DWH-RS-QUERY: Tauri Dev** — LLDB + `ui:dev` (Vite :1420)
+- **DWHForge Query: Tauri Dev** — LLDB + `ui:dev` (Vite :1420)
 - **dwh-preview (sample.csv)** — headless DuckDB smoke
 - **npm: tauri dev** — full desktop without LLDB
 - Tasks: `cargo: test dwh-pipeline`, `smoke: dwh-preview sample`

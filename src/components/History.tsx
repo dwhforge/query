@@ -86,7 +86,12 @@ export function stepSummaryLine(
     case "Join":
       return {
         kind: `Join ${step.payload.join_type}`,
-        detail: `${qname(step.payload.right_query_id)} on ${step.payload.left_on.join(",")}`,
+        detail: (() => {
+          const l = step.payload.left_on.join(",");
+          const r = step.payload.right_on.join(",");
+          const keys = l === r ? l : `${l}=${r}`;
+          return `${qname(step.payload.right_query_id)} on ${keys}`;
+        })(),
       };
     case "Append":
       return {

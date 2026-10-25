@@ -11,7 +11,7 @@ v1 UI collected a free-typed table name plus connection string and always scanne
 ## Decision
 
 1. **`LoadPostgres` includes `schema`** (default `"public"` for backward-compatible JSON).  
-2. Compiler emits `postgres_scan(dsn, schema, table)`.  
+2. Preview: `ATTACH … (TYPE postgres)` then `SELECT * FROM alias."schema"."table"` (DuckDB 2.0+; not `postgres_scan`).  
 3. UI **must** browse the live catalog and **select** a relation — not invent the name by typing alone.  
 4. Backend command `list_postgres_objects(connection_string)` uses DuckDB `postgres_query` + `pg_catalog` (tables, partitioned tables, views, matviews, foreign tables).  
 5. Optional `test_postgres_connection` for a cheap `SELECT 1`.  

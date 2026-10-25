@@ -117,6 +117,8 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 | `export_dbt` | `pipeline_name`, `Workspace`, `output_dir` | `{ path }` |
 | `list_postgres_objects` | `connection_string` | `{ schema, name, kind }[]` |
 | `test_postgres_connection` | `connection_string` | `()` |
+| `save_project` | `path`, `Project` | `()` — writes `project.json` / `.dwhproj.json` |
+| `load_project` | `path` | `Project` |
 | `describe_query` | `Workspace`, `query_id`, `upto_index` | `TableSchema` |
 | `validate_reorder` | … | later |
 | `export_python` / `ai_compile` | … | later / stub |

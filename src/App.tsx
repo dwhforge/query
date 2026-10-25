@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { ConnectionEditor } from "./components/ConnectionEditor";
 import { EmptyHero } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
@@ -14,8 +14,10 @@ import { S3SourceDialog } from "./components/S3SourceDialog";
 import { debounce } from "./lib/debounce";
 import {
   exportDbt,
+  loadProject,
   loadSampleWorkspace,
   previewWorkspace,
+  saveProject,
 } from "./lib/tauri";
 import {
   emptyProject,
@@ -40,6 +42,8 @@ function App() {
   const [joinRightId, setJoinRightId] = useState("");
   const [joinKey, setJoinKey] = useState("region");
   const [joinType, setJoinType] = useState<JoinType>("inner");
+  const [appendOtherId, setAppendOtherId] = useState("");
+  const [sqlCopied, setSqlCopied] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -150,6 +154,12 @@ function App() {
         setJoinRightId("");
         setJoinKey("");
         setJoinType("inner");
+      }
+      const a = q.steps.find((s) => s.type === "Append");
+      if (a && a.type === "Append") {
+        setAppendOtherId(a.payload.other_query_ids[0] ?? "");
+      } else {
+        setAppendOtherId("");
       }
     },
     [],
@@ -372,8 +382,78 @@ function App() {
     setError(null);
   }
 
+  function applyAppend() {
+    if (!appendOtherId) return;
+    if (appendOtherId === activeQueryId) {
+      setError("Cannot append a query to itself");
+      return;
+    }
+    updateActiveSteps((steps) => {
+      const without = steps.filter((s) => s.type !== "Append");
+      return [
+        ...without,
+        {
+          type: "Append",
+          payload: { other_query_ids: [appendOtherId] },
+        },
+      ];
+    });
+    setError(null);
+  }
+
   function removeStepAt(index: number) {
     updateActiveSteps((steps) => steps.filter((_, i) => i !== index));
+  }
+
+  async function handleSaveProject() {
+    const path =
+      (await save({
+        defaultPath:
+          project.root_path ??
+          `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+        filters: [{ name: "DWH Project", extensions: ["json"] }],
+      })) ?? null;
+    if (typeof path !== "string") return;
+    try {
+      await saveProject(path, project);
+      setProject((p) => ({ ...p, root_path: path }));
+      setExportMsg(`Project saved → ${path}`);
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleOpenProject() {
+    const path = await open({
+      multiple: false,
+      filters: [{ name: "DWH Project", extensions: ["json"] }],
+    });
+    if (typeof path !== "string") return;
+    try {
+      const loaded = await loadProject(path);
+      const withConnections = {
+        ...loaded,
+        connections: loaded.connections ?? [],
+      };
+      setProject(withConnections);
+      setActiveQueryId(withConnections.workspace.focus_query_id || null);
+      setError(null);
+      setExportMsg(`Opened ${path}`);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function copySql() {
+    if (!preview?.sql) return;
+    try {
+      await navigator.clipboard.writeText(preview.sql);
+      setSqlCopied(true);
+      window.setTimeout(() => setSqlCopied(false), 1500);
+    } catch {
+      setError("Could not copy SQL to clipboard");
+    }
   }
 
   async function handleExportDbt() {
@@ -416,6 +496,12 @@ function App() {
       } else if (k === "p") {
         e.preventDefault();
         setShowPgPicker((v) => !v);
+      } else if ((e.ctrlKey || e.metaKey) && k === "s") {
+        e.preventDefault();
+        void handleSaveProject();
+      } else if ((e.ctrlKey || e.metaKey) && k === "o") {
+        e.preventDefault();
+        void handleOpenProject();
       }
     }
     window.addEventListener("keydown", onKey);
@@ -428,6 +514,7 @@ function App() {
   const otherQueries = queries.filter((q) => q.id !== activeQueryId);
   const empty = queries.length === 0;
   const activeJoin = activeQuery?.steps.find((s) => s.type === "Join");
+  const activeAppend = activeQuery?.steps.find((s) => s.type === "Append");
   const activeSelect = activeQuery?.steps.find((s) => s.type === "SelectColumns");
   const joinRightName =
     otherQueries.find((q) => q.id === joinRightId)?.name ??
@@ -468,11 +555,33 @@ function App() {
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
+            onClick={() => void handleOpenProject()}
+            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
+          >
+            Open
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSaveProject()}
+            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
+          >
+            Save
+          </button>
+          <button
+            type="button"
             onClick={() => setShowSql((v) => !v)}
             className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-            disabled={!preview}
+            disabled={!preview?.sql}
           >
             {showSql ? "Hide SQL" : "SQL"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void copySql()}
+            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
+            disabled={!preview?.sql}
+          >
+            {sqlCopied ? "Copied" : "Copy SQL"}
           </button>
           <button
             type="button"
@@ -636,9 +745,23 @@ function App() {
                 </div>
               )}
               {showSql && preview?.sql && (
-                <pre className="mx-4 mb-2 max-h-24 overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3 text-[11px] text-slate-400">
-                  {preview.sql}
-                </pre>
+                <div className="mx-4 mb-2">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Compiled SQL
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void copySql()}
+                      className="text-[11px] text-teal-400 hover:text-teal-300"
+                    >
+                      {sqlCopied ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <pre className="max-h-28 overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3 text-[11px] text-slate-400">
+                    {preview.sql}
+                  </pre>
+                </div>
               )}
               <div className="h-[22vh] px-3 pb-3">
                 <div className="h-full overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
@@ -824,6 +947,43 @@ function App() {
                     className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
                   >
                     {activeJoin ? "Update Join" : "Apply Join"}
+                  </button>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    Append
+                  </label>
+                  {activeAppend && activeAppend.type === "Append" && (
+                    <p className="mb-2 rounded-md border border-teal-900/40 bg-teal-950/30 px-2 py-1.5 font-mono text-[11px] text-teal-200/90">
+                      Applied: ∪{" "}
+                      {activeAppend.payload.other_query_ids
+                        .map(
+                          (id) =>
+                            queries.find((q) => q.id === id)?.name ?? id,
+                        )
+                        .join(", ")}
+                    </p>
+                  )}
+                  <select
+                    value={appendOtherId}
+                    onChange={(e) => setAppendOtherId(e.target.value)}
+                    disabled={!activeQuery || otherQueries.length === 0}
+                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+                  >
+                    <option value="">other query…</option>
+                    {otherQueries.map((q) => (
+                      <option key={q.id} value={q.id}>
+                        {q.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={applyAppend}
+                    disabled={!activeQuery || !appendOtherId}
+                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                  >
+                    {activeAppend ? "Update Append" : "Apply Append"}
                   </button>
                 </div>
               </div>

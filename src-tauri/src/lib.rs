@@ -5,9 +5,10 @@ use dwh_engine::{
     PreviewResult,
 };
 use dwh_pipeline::{
-    ConnectionDef, DbtProducer, DbtTarget, OutputProducer, QueryDef, TransformationStep,
-    Workspace,
+    ConnectionDef, DbtProducer, DbtTarget, OutputProducer, Project, QueryDef,
+    TransformationStep, Workspace,
 };
+use std::fs;
 use std::path::PathBuf;
 use tauri::{Manager, State};
 
@@ -56,6 +57,26 @@ fn test_postgres_connection(
     db: State<'_, DbSession>,
 ) -> Result<(), String> {
     run_test_postgres_connection(&db, &connection_string)
+}
+
+#[tauri::command]
+fn save_project(path: String, project: Project) -> Result<(), String> {
+    let mut project = project;
+    project.root_path = Some(path.clone());
+    let json = project.to_json_pretty()?;
+    if let Some(parent) = PathBuf::from(&path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_project(path: String) -> Result<Project, String> {
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut project = Project::from_json(&raw)?;
+    project.root_path = Some(path);
+    Ok(project)
 }
 
 /// Resolve repo fixtures and return a ready sample workspace (fact ⋈ dim).
@@ -177,7 +198,9 @@ pub fn run() {
             export_dbt,
             load_sample_workspace,
             list_postgres_objects,
-            test_postgres_connection
+            test_postgres_connection,
+            save_project,
+            load_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

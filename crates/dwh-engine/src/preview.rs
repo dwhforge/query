@@ -1,7 +1,5 @@
 use crate::session::DbSession;
-use dwh_pipeline::{
-    ConnectionDef, GraphCompiler, PipelineCompiler, TransformationStep, Workspace,
-};
+use dwh_pipeline::{ConnectionDef, GraphCompiler, TransformationStep, Workspace};
 use duckdb::arrow::array::{
     Array, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
     Int32Array, Int64Array, Int8Array, LargeStringArray, StringArray, TimestampMicrosecondArray,

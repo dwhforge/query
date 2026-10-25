@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ConnectionDef,
   PreviewResult,
+  Project,
   TransformationStep,
   Workspace,
 } from "../types/pipeline";
@@ -58,4 +59,12 @@ export function testPostgresConnection(
   connectionString: string,
 ): Promise<void> {
   return invoke<void>("test_postgres_connection", { connectionString });
+}
+
+export function saveProject(path: string, project: Project): Promise<void> {
+  return invoke<void>("save_project", { path, project });
+}
+
+export function loadProject(path: string): Promise<Project> {
+  return invoke<Project>("load_project", { path });
 }

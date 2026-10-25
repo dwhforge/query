@@ -164,6 +164,13 @@ fn compile_step(
                 quote_ident(column)
             ))
         }
+        TransformationStep::Limit { n } => {
+            require_prev(prev_step, "Limit")?;
+            if *n == 0 {
+                return Err("Limit: n must be >= 1".into());
+            }
+            Ok(format!("SELECT * FROM {prev_step} LIMIT {n}"))
+        }
         TransformationStep::Join {
             right_query_id,
             join_type,

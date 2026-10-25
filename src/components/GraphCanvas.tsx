@@ -76,6 +76,7 @@ interface GraphCanvasProps {
   onConnectJoin?: (rightQueryId: string, leftQueryId: string) => void;
   onSelectEdge?: (edge: GraphEdgeInfo) => void;
   onRemoveEdge?: (edge: GraphEdgeInfo) => void;
+  onRemoveQuery?: (queryId: string) => void;
 }
 
 function sourceKind(q: QueryDef): string {
@@ -111,6 +112,8 @@ function shortStepLabel(step: TransformationStep, index: number): string {
       return `s${index} GroupBy`;
     case "SortBy":
       return `s${index} Sort`;
+    case "Limit":
+      return `s${index} Limit ${step.payload.n}`;
     case "CustomSql":
       return `s${index} SQL`;
     default:
@@ -139,6 +142,8 @@ function stepSummary(q: QueryDef): string {
           return "Group";
         case "SortBy":
           return "Sort";
+        case "Limit":
+          return "Limit";
         case "CustomSql":
           return "SQL";
         default:
@@ -385,6 +390,7 @@ function GraphCanvasInner({
   onConnectJoin,
   onSelectEdge,
   onRemoveEdge,
+  onRemoveQuery,
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow();
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
@@ -533,18 +539,31 @@ function GraphCanvasInner({
     setSelectedEdge(null);
   }, [selectedEdge, onRemoveEdge]);
 
+  const removeActiveQuery = useCallback(() => {
+    if (!activeQueryId || !onRemoveQuery) return;
+    onRemoveQuery(activeQueryId);
+    setSelectedEdgeId(null);
+    setSelectedEdge(null);
+  }, [activeQueryId, onRemoveQuery]);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (!selectedEdge) return;
       e.preventDefault();
-      removeSelectedEdge();
+      // Edge selection wins over node.
+      if (selectedEdge) {
+        removeSelectedEdge();
+        return;
+      }
+      if (activeQueryId) {
+        removeActiveQuery();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedEdge, removeSelectedEdge]);
+  }, [selectedEdge, activeQueryId, removeSelectedEdge, removeActiveQuery]);
 
   if (queries.length === 0) return null;
 
@@ -612,6 +631,21 @@ function GraphCanvasInner({
           </button>
         </div>
       )}
+
+      {!selectedEdge && activeQueryId && onRemoveQuery && (
+        <div className="absolute right-3 top-3 z-10 flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/95 px-2.5 py-1.5 shadow-lg">
+          <span className="max-w-[140px] truncate text-[11px] text-slate-200">
+            {queries.find((q) => q.id === activeQueryId)?.name ?? activeQueryId}
+          </span>
+          <button
+            type="button"
+            onClick={removeActiveQuery}
+            className="rounded bg-rose-500/15 px-2 py-0.5 text-[11px] font-semibold text-rose-300 hover:bg-rose-500/25"
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </CanvasActionsCtx.Provider>
   );
 }
@@ -623,7 +657,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
         <GraphCanvasInner {...props} />
       </ReactFlowProvider>
       <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-slate-600">
-        Drag · zoom · dblclick=focus · ▸ steps · edge=Join/Append (Del)
+        Drag · zoom · dblclick=focus · ▸ steps · Del=delete node/edge
         {props.onConnectJoin ? " · handle→Join" : ""}
       </p>
     </div>

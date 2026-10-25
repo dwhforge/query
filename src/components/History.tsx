@@ -32,6 +32,8 @@ function stepLabel(
       return `GroupBy · ${step.payload.dimensions.join(", ")}`;
     case "SortBy":
       return `Sort · ${step.payload.column}`;
+    case "Limit":
+      return `Limit · ${step.payload.n}`;
     case "Join":
       return `Join ${step.payload.join_type} · ${qname(step.payload.right_query_id)} ON ${step.payload.left_on.join(",")}`;
     case "Append":

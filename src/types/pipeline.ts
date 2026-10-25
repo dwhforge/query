@@ -64,6 +64,7 @@ export type TransformationStep =
       payload: { dimensions: string[]; aggregates: string[] };
     }
   | { type: "SortBy"; payload: { column: string; descending: boolean } }
+  | { type: "Limit"; payload: { n: number } }
   | {
       type: "Join";
       payload: {

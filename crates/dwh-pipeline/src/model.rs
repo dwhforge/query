@@ -55,6 +55,8 @@ pub enum TransformationStep {
         aggregates: Vec<String>,
     },
     SortBy { column: String, descending: bool },
+    /// Keep first N rows after prior steps (typically after SortBy).
+    Limit { n: u64 },
     Join {
         right_query_id: String,
         join_type: JoinType,

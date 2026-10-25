@@ -22,6 +22,10 @@ interface ExplorerTreeProps {
   onAddSourceParquet: () => void;
   onAddSourceS3: () => void;
   onAddSourcePostgres: () => void;
+  /** New query that Loads this source (for a second model on the same object). */
+  onNewQueryFromSource: (source: SourceDef) => void;
+  /** Queries + : from selected source, or CSV picker if none. */
+  onNewQuery: () => void;
 }
 
 function SectionHeader({
@@ -100,6 +104,8 @@ export function ExplorerTree({
   onAddSourceParquet,
   onAddSourceS3,
   onAddSourcePostgres,
+  onNewQueryFromSource,
+  onNewQuery,
 }: ExplorerTreeProps) {
   const connectionsOpen = expanded.connections !== false;
   const sourcesOpen = expanded.sources !== false;
@@ -189,11 +195,11 @@ export function ExplorerTree({
               {project.sources.map((s) => {
                 const selected = s.id === selectedSourceId;
                 return (
-                  <li key={s.id}>
+                  <li key={s.id} className="group/src flex items-center gap-0.5">
                     <button
                       type="button"
                       onClick={() => onSelectSource(s)}
-                      className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs ${
+                      className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs ${
                         selected
                           ? "bg-teal-500/15 text-teal-100"
                           : "text-slate-300 hover:bg-slate-800/80"
@@ -204,6 +210,12 @@ export function ExplorerTree({
                       </span>
                       <span className="truncate">{s.name}</span>
                     </button>
+                    <IconBtn
+                      title="New query from this source"
+                      onClick={() => onNewQueryFromSource(s)}
+                    >
+                      +
+                    </IconBtn>
                   </li>
                 );
               })}
@@ -218,7 +230,10 @@ export function ExplorerTree({
             count={project.workspace.queries.length}
             onToggle={() => onToggle("queries")}
             actions={
-              <IconBtn title="New query from CSV" onClick={onAddSourceCsv}>
+              <IconBtn
+                title="New query (from selected source, or pick CSV)"
+                onClick={onNewQuery}
+              >
                 +
               </IconBtn>
             }

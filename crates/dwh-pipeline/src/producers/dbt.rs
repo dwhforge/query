@@ -226,6 +226,12 @@ fn compile_query_as_dbt_model(
                     quote_ident(column)
                 )
             }
+            TransformationStep::Limit { n } => {
+                if *n == 0 {
+                    return Err("dbt Limit: n must be >= 1".into());
+                }
+                format!("select * from {prev} limit {n}")
+            }
             TransformationStep::Join {
                 right_query_id,
                 join_type,

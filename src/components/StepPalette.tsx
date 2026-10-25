@@ -5,6 +5,7 @@ export type PaletteStepKind =
   | "DeriveColumn"
   | "GroupBy"
   | "SortBy"
+  | "Limit"
   | "CustomSql";
 
 interface StepPaletteProps {
@@ -14,6 +15,7 @@ interface StepPaletteProps {
   onAddDerive: (name: string, expression: string) => void;
   onAddGroupBy: (dimensions: string[], aggregates: string[]) => void;
   onAddSort: (column: string, descending: boolean) => void;
+  onAddLimit: (n: number) => void;
   onAddCustomSql: (rawSql: string) => void;
 }
 
@@ -22,6 +24,7 @@ const KINDS: { id: PaletteStepKind; label: string }[] = [
   { id: "DeriveColumn", label: "Derive" },
   { id: "GroupBy", label: "GroupBy" },
   { id: "SortBy", label: "Sort" },
+  { id: "Limit", label: "Limit" },
   { id: "CustomSql", label: "SQL" },
 ];
 
@@ -32,6 +35,7 @@ export function StepPalette({
   onAddDerive,
   onAddGroupBy,
   onAddSort,
+  onAddLimit,
   onAddCustomSql,
 }: StepPaletteProps) {
   const [kind, setKind] = useState<PaletteStepKind>("RenameColumn");
@@ -43,6 +47,7 @@ export function StepPalette({
   const [groupAggs, setGroupAggs] = useState("count(*) as n");
   const [sortCol, setSortCol] = useState("");
   const [sortDesc, setSortDesc] = useState(false);
+  const [limitN, setLimitN] = useState("10");
   const [customSql, setCustomSql] = useState(
     "select * from {{prev_step}}",
   );
@@ -81,6 +86,12 @@ export function StepPalette({
         const column = sortCol.trim();
         if (!column) return;
         onAddSort(column, sortDesc);
+        break;
+      }
+      case "Limit": {
+        const n = Number.parseInt(limitN, 10);
+        if (!Number.isFinite(n) || n < 1) return;
+        onAddLimit(n);
         break;
       }
       case "CustomSql": {
@@ -202,6 +213,18 @@ export function StepPalette({
             desc
           </label>
         </div>
+      )}
+
+      {kind === "Limit" && (
+        <input
+          type="number"
+          min={1}
+          value={limitN}
+          onChange={(e) => setLimitN(e.target.value)}
+          disabled={disabled}
+          placeholder="n"
+          className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+        />
       )}
 
       {kind === "CustomSql" && (

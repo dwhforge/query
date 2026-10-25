@@ -97,3 +97,8 @@ export function saveProject(path: string, project: Project): Promise<void> {
 export function loadProject(path: string): Promise<Project> {
   return invoke<Project>("load_project", { path });
 }
+
+/** Last Save/Open `.dwhproj.json` path (app session) — for restore on launch. */
+export function getLastProjectPath(): Promise<string | null> {
+  return invoke<string | null>("get_last_project_path");
+}

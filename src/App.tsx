@@ -23,6 +23,7 @@ import {
   describePostgresObject,
   exportDbt,
   listExportTree,
+  getLastProjectPath,
   loadProject,
   loadSampleWorkspace,
   previewWorkspace,
@@ -316,6 +317,75 @@ function App() {
     addFileQuery(selected, "csv");
   }
 
+  /** New query whose first step Loads an existing Source (same object, new model). */
+  function addQueryFromSource(source: SourceDef) {
+    const id = newQueryId();
+    let step: TransformationStep;
+    let name = source.name;
+    if (source.kind === "csv" && source.path) {
+      step = { type: "LoadCsv", payload: { path: source.path } };
+      name = source.name.replace(/\.csv$/i, "") || name;
+    } else if (source.kind === "parquet" && source.path) {
+      step = {
+        type: "LoadParquet",
+        payload: {
+          path: source.path,
+          connection_id: source.connection_id,
+        },
+      };
+      name = source.name.replace(/\.parquet$/i, "") || name;
+    } else if (source.kind === "postgres" && source.table_name) {
+      step = {
+        type: "LoadPostgres",
+        payload: {
+          connection_id: source.connection_id,
+          connection_string: source.connection_string,
+          schema: source.schema || "public",
+          table_name: source.table_name,
+        },
+      };
+      name = `${source.schema || "public"}.${source.table_name}`;
+    } else {
+      setError("Source is incomplete — cannot create query");
+      return;
+    }
+    // Disambiguate if name already used (e.g. second query on sample.csv).
+    const used = new Set(queries.map((q) => q.name));
+    let finalName = name;
+    if (used.has(finalName)) {
+      let i = 2;
+      while (used.has(`${name}_${i}`)) i += 1;
+      finalName = `${name}_${i}`;
+    }
+    const q: QueryDef = { id, name: finalName, steps: [step], source_id: source.id };
+    setProject((p) => {
+      const nextQueries = [...p.workspace.queries, q];
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(p.sources, nextQueries),
+        workspace: {
+          queries: nextQueries,
+          focus_query_id: p.workspace.focus_query_id || id,
+        },
+      };
+    });
+    setActiveQueryId(id);
+    setSelectedSourceId(source.id);
+    setFilterCondition("");
+    setError(null);
+  }
+
+  function addQueryFromSelectedSourceOrCsv() {
+    const src =
+      selectedSourceId &&
+      project.sources.find((s) => s.id === selectedSourceId);
+    if (src) {
+      addQueryFromSource(src);
+      return;
+    }
+    void addCsvQuery();
+  }
+
   async function addParquetQuery() {
     const selected = await open({
       multiple: false,
@@ -513,6 +583,54 @@ function App() {
     setError(null);
   }
 
+  /** Drop a query node: remove from workspace, scrub Join/Append refs, fix focus. */
+  function removeQueryOnCanvas(queryId: string) {
+    const remaining = queries.filter((q) => q.id !== queryId);
+    const scrubbed = remaining.map((q) => ({
+      ...q,
+      steps: q.steps
+        .map((s) => {
+          if (s.type === "Join" && s.payload.right_query_id === queryId) {
+            return null;
+          }
+          if (s.type === "Append") {
+            const others = s.payload.other_query_ids.filter(
+              (id) => id !== queryId,
+            );
+            if (others.length === 0) return null;
+            return {
+              type: "Append" as const,
+              payload: { other_query_ids: others },
+            };
+          }
+          return s;
+        })
+        .filter((s): s is TransformationStep => s !== null),
+    }));
+    const focus =
+      focusQueryId === queryId
+        ? (scrubbed[0]?.id ?? "")
+        : focusQueryId && scrubbed.some((q) => q.id === focusQueryId)
+          ? focusQueryId
+          : (scrubbed[0]?.id ?? "");
+    setProject((p) => {
+      const positions = { ...(p.canvas?.positions ?? {}) };
+      delete positions[queryId];
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(p.sources, scrubbed),
+        workspace: { queries: scrubbed, focus_query_id: focus },
+        canvas: { positions },
+      };
+    });
+    if (activeQueryId === queryId) {
+      setActiveQueryId(scrubbed[0]?.id ?? null);
+    }
+    if (joinRightId === queryId) setJoinRightId("");
+    if (appendOtherId === queryId) setAppendOtherId("");
+    setError(null);
+  }
+
   const persistCanvasPositions = useMemo(
     () =>
       debounce((positions: CanvasPositions) => {
@@ -552,14 +670,16 @@ function App() {
   }
 
   async function handleSaveProject() {
-    const path =
-      (await save({
-        defaultPath:
-          project.root_path ??
-          `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
-        filters: [{ name: "DWH Project", extensions: ["json"] }],
-      })) ?? null;
-    if (typeof path !== "string") return;
+    let path = project.root_path;
+    if (!path) {
+      const picked =
+        (await save({
+          defaultPath: `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+          filters: [{ name: "DWH Project", extensions: ["json"] }],
+        })) ?? null;
+      if (typeof picked !== "string") return;
+      path = picked;
+    }
     try {
       await saveProject(path, project);
       setProject((p) => ({ ...p, root_path: path }));
@@ -568,6 +688,18 @@ function App() {
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     }
+  }
+
+  function applyLoadedProject(loaded: Project, pathHint?: string) {
+    const withConnections: Project = {
+      ...loaded,
+      connections: loaded.connections ?? [],
+      root_path: loaded.root_path ?? pathHint,
+    };
+    setProject(withConnections);
+    setActiveQueryId(withConnections.workspace.focus_query_id || null);
+    void refreshExportTree(withConnections.last_dbt_export_path);
+    setError(null);
   }
 
   async function refreshExportTree(exportPath: string | undefined) {
@@ -590,19 +722,33 @@ function App() {
     if (typeof path !== "string") return;
     try {
       const loaded = await loadProject(path);
-      const withConnections = {
-        ...loaded,
-        connections: loaded.connections ?? [],
-      };
-      setProject(withConnections);
-      setActiveQueryId(withConnections.workspace.focus_query_id || null);
-      await refreshExportTree(withConnections.last_dbt_export_path);
-      setError(null);
+      applyLoadedProject(loaded, path);
       setExportMsg(`Opened ${path}`);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     }
   }
+
+  // Restore last project (connections included) on app launch.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const path = await getLastProjectPath();
+        if (!path || cancelled) return;
+        const loaded = await loadProject(path);
+        if (cancelled) return;
+        applyLoadedProject(loaded, path);
+        setExportMsg(`Restored ${path}`);
+      } catch {
+        // Missing/corrupt session — stay on empty Untitled.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once on mount
+  }, []);
 
   async function copySql() {
     if (!preview?.sql) return;
@@ -864,6 +1010,8 @@ function App() {
               onAddSourceParquet={() => void addParquetQuery()}
               onAddSourceS3={() => setShowS3Dialog(true)}
               onAddSourcePostgres={() => setShowPgPicker(true)}
+              onNewQueryFromSource={addQueryFromSource}
+              onNewQuery={addQueryFromSelectedSourceOrCsv}
             />
           </aside>
 
@@ -893,6 +1041,7 @@ function App() {
                 onConnectJoin={connectJoinOnCanvas}
                 onSelectEdge={selectEdgeOnCanvas}
                 onRemoveEdge={removeEdgeOnCanvas}
+                onRemoveQuery={removeQueryOnCanvas}
               />
             </div>
             <div className="min-h-[28vh] border-t border-[var(--line)] bg-[#060d14]">
@@ -1200,6 +1349,12 @@ function App() {
                     appendStep({
                       type: "SortBy",
                       payload: { column, descending },
+                    })
+                  }
+                  onAddLimit={(n) =>
+                    appendStep({
+                      type: "Limit",
+                      payload: { n },
                     })
                   }
                   onAddCustomSql={(raw_sql) =>

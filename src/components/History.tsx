@@ -2,10 +2,17 @@ import type { TransformationStep } from "../types/pipeline";
 
 interface HistoryProps {
   steps: TransformationStep[];
+  /** query id → display name (for Join/Append labels) */
+  queryNames?: Record<string, string>;
   onRemoveAt: (index: number) => void;
 }
 
-function stepLabel(step: TransformationStep, index: number): string {
+function stepLabel(
+  step: TransformationStep,
+  index: number,
+  queryNames: Record<string, string>,
+): string {
+  const qname = (id: string) => queryNames[id] ?? id;
   switch (step.type) {
     case "LoadCsv":
       return `LoadCsv · ${step.payload.path.split(/[/\\]/).pop() ?? step.payload.path}`;
@@ -26,9 +33,9 @@ function stepLabel(step: TransformationStep, index: number): string {
     case "SortBy":
       return `Sort · ${step.payload.column}`;
     case "Join":
-      return `Join ${step.payload.join_type} · ${step.payload.right_query_id} ON ${step.payload.left_on.join(",")}`;
+      return `Join ${step.payload.join_type} · ${qname(step.payload.right_query_id)} ON ${step.payload.left_on.join(",")}`;
     case "Append":
-      return `Append · ${step.payload.other_query_ids.join(", ")}`;
+      return `Append · ${step.payload.other_query_ids.map(qname).join(", ")}`;
     case "CustomSql":
       return "CustomSql";
     default:
@@ -36,7 +43,7 @@ function stepLabel(step: TransformationStep, index: number): string {
   }
 }
 
-export function History({ steps, onRemoveAt }: HistoryProps) {
+export function History({ steps, queryNames = {}, onRemoveAt }: HistoryProps) {
   return (
     <div>
       <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
@@ -57,7 +64,7 @@ export function History({ steps, onRemoveAt }: HistoryProps) {
                     s{index}
                   </div>
                   <div className="mt-0.5 text-sm text-slate-200">
-                    {stepLabel(step, index)}
+                    {stepLabel(step, index, queryNames)}
                   </div>
                 </div>
                 {step.type !== "LoadCsv" &&

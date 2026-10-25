@@ -28,11 +28,34 @@ body,
   margin: 0;
 }
 
+html {
+  /* Native <select>/<option> stay readable in WebKitGTK / Tauri */
+  color-scheme: dark;
+}
+
 body {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   background: var(--bg0);
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Explicit colors — WebKit often paints white select chrome with invisible text */
+select,
+input,
+textarea,
+button {
+  color: var(--ink);
+}
+
+select {
+  background-color: #020617;
+  border-color: rgb(51 65 85);
+}
+
+select option {
+  background-color: #0f172a;
+  color: #e2e8f0;
 }
 
 @keyframes rise {

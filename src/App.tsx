@@ -32,6 +32,7 @@ function App() {
   const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [filterCondition, setFilterCondition] = useState("");
+  const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
   const [joinRightId, setJoinRightId] = useState("");
   const [joinKey, setJoinKey] = useState("region");
   const [joinType, setJoinType] = useState<JoinType>("inner");
@@ -108,21 +109,49 @@ function App() {
     if (workspace) debouncedPreview(workspace);
   }, [workspace, debouncedPreview]);
 
+  const syncInspectorFromQuery = useCallback(
+    (q: QueryDef | undefined) => {
+      if (!q) {
+        setFilterCondition("");
+        setSelectedColumns([]);
+        setJoinRightId("");
+        setJoinKey("");
+        setJoinType("inner");
+        return;
+      }
+      const f = q.steps.find((s) => s.type === "Filter");
+      setFilterCondition(f && f.type === "Filter" ? f.payload.condition : "");
+      const sc = q.steps.find((s) => s.type === "SelectColumns");
+      setSelectedColumns(
+        sc && sc.type === "SelectColumns" ? [...sc.payload.columns] : [],
+      );
+      const j = q.steps.find((s) => s.type === "Join");
+      if (j && j.type === "Join") {
+        setJoinRightId(j.payload.right_query_id);
+        setJoinKey(j.payload.left_on[0] ?? "");
+        setJoinType(j.payload.join_type);
+      } else {
+        setJoinRightId("");
+        setJoinKey("");
+        setJoinType("inner");
+      }
+    },
+    [],
+  );
+
   const selectQuery = useCallback(
     (id: string) => {
       setActiveQueryId(id);
-      const q = queries.find((x) => x.id === id);
-      const f = q?.steps.find((s) => s.type === "Filter");
-      setFilterCondition(f && f.type === "Filter" ? f.payload.condition : "");
-      const j = q?.steps.find((s) => s.type === "Join");
-      if (j && j.type === "Join") {
-        setJoinRightId(j.payload.right_query_id);
-        setJoinKey(j.payload.left_on[0] ?? "region");
-        setJoinType(j.payload.join_type);
-      }
+      syncInspectorFromQuery(queries.find((x) => x.id === id));
     },
-    [queries],
+    [queries, syncInspectorFromQuery],
   );
+
+  // Keep Join/Filter form in sync when steps change (sample load, remove, etc.)
+  useEffect(() => {
+    if (!activeQueryId) return;
+    syncInspectorFromQuery(queries.find((q) => q.id === activeQueryId));
+  }, [activeQueryId, queries, syncInspectorFromQuery]);
 
   function onSelectSource(source: SourceDef) {
     const bound = queries.find((q) => {
@@ -214,10 +243,6 @@ function App() {
         workspace: ws,
       }));
       setActiveQueryId(ws.focus_query_id);
-      setFilterCondition("amount > 1000");
-      setJoinRightId("dim_region");
-      setJoinKey("region");
-      setJoinType("inner");
       setError(null);
       setExportMsg(null);
     } catch (e) {
@@ -243,6 +268,24 @@ function App() {
       if (!cond) return without;
       return [...without, { type: "Filter", payload: { condition: cond } }];
     });
+  }
+
+  function applySelectColumns() {
+    const cols = selectedColumns.map((c) => c.trim()).filter(Boolean);
+    updateActiveSteps((steps) => {
+      const without = steps.filter((s) => s.type !== "SelectColumns");
+      if (cols.length === 0) return without;
+      return [
+        ...without,
+        { type: "SelectColumns", payload: { columns: cols } },
+      ];
+    });
+  }
+
+  function toggleColumn(name: string) {
+    setSelectedColumns((prev) =>
+      prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name],
+    );
   }
 
   function applyJoin() {
@@ -325,6 +368,32 @@ function App() {
 
   const otherQueries = queries.filter((q) => q.id !== activeQueryId);
   const empty = queries.length === 0;
+  const activeJoin = activeQuery?.steps.find((s) => s.type === "Join");
+  const activeSelect = activeQuery?.steps.find((s) => s.type === "SelectColumns");
+  const joinRightName =
+    otherQueries.find((q) => q.id === joinRightId)?.name ??
+    queries.find((q) => q.id === joinRightId)?.name ??
+    (joinRightId || null);
+  /** Columns to pick from — prefer live preview of the active/focus query. */
+  const columnChoices = useMemo(() => {
+    const fromPreview =
+      preview &&
+      (activeQueryId === focusQueryId || !focusQueryId) &&
+      preview.columns.length > 0
+        ? preview.columns.map((c) => c.name)
+        : [];
+    const fromStep =
+      activeSelect && activeSelect.type === "SelectColumns"
+        ? activeSelect.payload.columns
+        : [];
+    return [...new Set([...fromPreview, ...fromStep, ...selectedColumns])];
+  }, [
+    preview,
+    activeQueryId,
+    focusQueryId,
+    activeSelect,
+    selectedColumns,
+  ]);
 
   return (
     <div className="flex h-screen flex-col text-slate-100">
@@ -498,9 +567,14 @@ function App() {
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
               <History
                 steps={activeQuery?.steps ?? []}
+                queryNames={Object.fromEntries(queries.map((q) => [q.id, q.name]))}
                 onRemoveAt={removeStepAt}
               />
-              <div className="mt-4 space-y-3">
+              <div className="mt-4 space-y-4">
+                <p className="text-[11px] leading-relaxed text-slate-500">
+                  Steps are edited here for the selected query (right panel).
+                  Enter / Apply adds them to Applied steps above.
+                </p>
                 <div>
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                     Filter
@@ -509,22 +583,96 @@ function App() {
                     type="text"
                     value={filterCondition}
                     onChange={(e) => setFilterCondition(e.target.value)}
-                    onBlur={applyFilter}
                     onKeyDown={(e) => e.key === "Enter" && applyFilter()}
                     disabled={!activeQuery}
                     placeholder="amount > 1000"
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
                   />
+                  <button
+                    type="button"
+                    onClick={applyFilter}
+                    disabled={!activeQuery}
+                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                  >
+                    {filterCondition.trim() ? "Apply Filter" : "Clear Filter"}
+                  </button>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    Columns
+                  </label>
+                  {columnChoices.length === 0 ? (
+                    <p className="mb-1 text-[11px] text-slate-600">
+                      Run preview (set focus) to list columns, or type names
+                      below.
+                    </p>
+                  ) : (
+                    <ul className="mb-1 max-h-36 space-y-0.5 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
+                      {columnChoices.map((name) => {
+                        const checked = selectedColumns.includes(name);
+                        return (
+                          <li key={name}>
+                            <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-200 hover:bg-slate-900">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleColumn(name)}
+                                disabled={!activeQuery}
+                                className="rounded border-slate-600"
+                              />
+                              <span className="font-mono">{name}</span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <input
+                    type="text"
+                    value={selectedColumns.join(", ")}
+                    onChange={(e) =>
+                      setSelectedColumns(
+                        e.target.value
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      )
+                    }
+                    disabled={!activeQuery}
+                    placeholder="or type: date, region, amount"
+                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+                  />
+                  <button
+                    type="button"
+                    onClick={applySelectColumns}
+                    disabled={!activeQuery}
+                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                  >
+                    {selectedColumns.length > 0
+                      ? activeSelect
+                        ? "Update Columns"
+                        : "Apply Columns"
+                      : "Clear Columns"}
+                  </button>
                 </div>
                 <div>
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                     Join
                   </label>
+                  {activeJoin && activeJoin.type === "Join" && (
+                    <p className="mb-2 rounded-md border border-teal-900/40 bg-teal-950/30 px-2 py-1.5 font-mono text-[11px] text-teal-200/90">
+                      Applied: {activeJoin.payload.join_type} ⋈{" "}
+                      {queries.find(
+                        (q) => q.id === activeJoin.payload.right_query_id,
+                      )?.name ?? activeJoin.payload.right_query_id}{" "}
+                      ON {activeJoin.payload.left_on.join(", ")}
+                    </p>
+                  )}
                   <select
                     value={joinRightId}
                     onChange={(e) => setJoinRightId(e.target.value)}
                     disabled={!activeQuery || otherQueries.length === 0}
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm disabled:opacity-40"
+                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
                   >
                     <option value="">right query…</option>
                     {otherQueries.map((q) => (
@@ -533,11 +681,17 @@ function App() {
                       </option>
                     ))}
                   </select>
+                  {joinRightId && !otherQueries.some((q) => q.id === joinRightId) && (
+                    <p className="mb-1 text-[11px] text-amber-400/90">
+                      Right query “{joinRightName}” missing from workspace
+                    </p>
+                  )}
                   <div className="mb-1 flex gap-1">
                     <select
                       value={joinType}
                       onChange={(e) => setJoinType(e.target.value as JoinType)}
-                      className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
+                      disabled={!activeQuery}
+                      className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
                     >
                       <option value="inner">inner</option>
                       <option value="left">left</option>
@@ -547,17 +701,18 @@ function App() {
                     <input
                       value={joinKey}
                       onChange={(e) => setJoinKey(e.target.value)}
-                      placeholder="key"
-                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm"
+                      disabled={!activeQuery}
+                      placeholder="join key"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
                     />
                   </div>
                   <button
                     type="button"
                     onClick={applyJoin}
-                    disabled={!activeQuery || !joinRightId}
+                    disabled={!activeQuery || !joinRightId || !joinKey.trim()}
                     className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
                   >
-                    Apply Join
+                    {activeJoin ? "Update Join" : "Apply Join"}
                   </button>
                 </div>
               </div>

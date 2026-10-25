@@ -25,7 +25,7 @@ const KINDS: { id: PaletteStepKind; label: string }[] = [
   { id: "GroupBy", label: "GroupBy" },
   { id: "SortBy", label: "Sort" },
   { id: "Limit", label: "Limit" },
-  { id: "CustomSql", label: "SQL" },
+  { id: "CustomSql", label: "Custom SQL" },
 ];
 
 export function StepPalette({

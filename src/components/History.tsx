@@ -15,7 +15,8 @@ function isRootStep(step: TransformationStep): boolean {
     step.type === "LoadCsv" ||
     step.type === "LoadParquet" ||
     step.type === "LoadPostgres" ||
-    step.type === "FromQuery"
+    step.type === "FromQuery" ||
+    step.type === "SqlModel"
   );
 }
 
@@ -43,6 +44,13 @@ export function stepSummaryLine(
       };
     case "FromQuery":
       return { kind: "From", detail: qname(step.payload.query_id) };
+    case "SqlModel":
+      return {
+        kind: "SQL model",
+        detail:
+          step.payload.raw_sql.trim().split(/\s+/).slice(0, 6).join(" ") ||
+          "…",
+      };
     case "Filter":
       return {
         kind: "Filter",
@@ -86,7 +94,7 @@ export function stepSummaryLine(
         detail: step.payload.other_query_ids.map(qname).join(", "),
       };
     case "CustomSql":
-      return { kind: "SQL", detail: "custom" };
+      return { kind: "Custom SQL", detail: "snippet" };
     default:
       return { kind: "Step", detail: "" };
   }
@@ -140,7 +148,7 @@ export function History({
                   <span className="w-5 shrink-0 font-mono text-[10px] text-slate-600">
                     s{index}
                   </span>
-                  <span className="w-[4.5rem] shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-teal-500/90">
+                  <span className="w-[5.5rem] shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-teal-500/90">
                     {kind}
                   </span>
                   <span

@@ -90,6 +90,7 @@ function sourceKind(q: QueryDef): string {
   if (s.type === "LoadParquet") return "Parquet";
   if (s.type === "LoadPostgres") return "Postgres";
   if (s.type === "FromQuery") return "REF";
+  if (s.type === "SqlModel") return "SQL";
   return s.type;
 }
 
@@ -103,6 +104,8 @@ function shortStepLabel(step: TransformationStep, index: number): string {
       return `s${index} LoadPostgres`;
     case "FromQuery":
       return `s${index} FromQuery`;
+    case "SqlModel":
+      return `s${index} SQL model`;
     case "Filter":
       return `s${index} Filter`;
     case "SelectColumns":
@@ -122,7 +125,7 @@ function shortStepLabel(step: TransformationStep, index: number): string {
     case "Limit":
       return `s${index} Limit ${step.payload.n}`;
     case "CustomSql":
-      return `s${index} SQL`;
+      return `s${index} Custom SQL`;
     default:
       return `s${index}`;
   }
@@ -152,7 +155,7 @@ function stepSummary(q: QueryDef): string {
         case "Limit":
           return "Limit";
         case "CustomSql":
-          return "SQL";
+          return "Custom SQL";
         default:
           return s.type;
       }
@@ -361,14 +364,14 @@ const QueryNode = memo(function QueryNode({
           )}
           <button
             type="button"
-            title="New query from this (FromQuery / ref)"
+            title="Branch: new query = FromQuery / dbt ref(this)"
             className="nodrag nopan rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-violet-300"
             onClick={(e) => {
               e.stopPropagation();
               deriveQuery(id);
             }}
           >
-            ↳
+            ref↳
           </button>
           <button
             type="button"
@@ -718,8 +721,9 @@ export function GraphCanvas(props: GraphCanvasProps) {
         <GraphCanvasInner {...props} />
       </ReactFlowProvider>
       <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-slate-600">
-        Drag · zoom · dblclick=focus · ↳=FromQuery · ▸ steps · Del=delete
-        {props.onConnectJoin ? " · handle→Join" : ""}
+        Drag · zoom · dblclick=focus · ref↳=FromQuery/dbt ref · ▸ steps ·
+        Del=delete
+        {props.onConnectJoin ? " · drag handle→Join" : ""}
       </p>
     </div>
   );

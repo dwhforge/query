@@ -15,7 +15,8 @@ pub fn direct_deps(steps: &[TransformationStep]) -> Vec<String> {
             TransformationStep::Append { other_query_ids } => {
                 deps.extend(other_query_ids.iter().cloned());
             }
-            TransformationStep::CustomSql { raw_sql } => {
+            TransformationStep::SqlModel { raw_sql }
+            | TransformationStep::CustomSql { raw_sql } => {
                 // {{query:id}}
                 for cap in extract_query_placeholders(raw_sql) {
                     deps.push(cap);

@@ -56,6 +56,7 @@ export type TransformationStep =
       };
     }
   | { type: "FromQuery"; payload: { query_id: string } }
+  | { type: "SqlModel"; payload: { raw_sql: string } }
   | { type: "Filter"; payload: { condition: string } }
   | { type: "SelectColumns"; payload: { columns: string[] } }
   | { type: "RenameColumn"; payload: { from: string; to: string } }

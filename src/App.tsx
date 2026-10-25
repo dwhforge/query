@@ -35,6 +35,7 @@ import {
   connectionById,
   emptyProject,
   newQueryId,
+  newSourceId,
   syncSourcesFromQueries,
   type ConnectionDef,
   type ConnectionKind,
@@ -89,6 +90,8 @@ function App() {
   );
   const [showPgPicker, setShowPgPicker] = useState(false);
   const [showS3Dialog, setShowS3Dialog] = useState(false);
+  /** Dialog outcome: catalog-only source vs source+query. */
+  const [pickerIntent, setPickerIntent] = useState<"source" | "query">("query");
   const [connEditorOpen, setConnEditorOpen] = useState(false);
   const [connEditorKind, setConnEditorKind] =
     useState<ConnectionKind>("postgres");
@@ -291,6 +294,7 @@ function App() {
         setDeriveName(step.payload.name);
         setDeriveExpr(step.payload.expression);
         break;
+      case "SqlModel":
       case "CustomSql":
         setCustomSql(step.payload.raw_sql);
         break;
@@ -506,15 +510,44 @@ function App() {
     setError(null);
   }
 
-  function addQueryFromSelectedSourceOrCsv() {
-    const src =
-      selectedSourceId &&
-      project.sources.find((s) => s.id === selectedSourceId);
-    if (src) {
-      addQueryFromSource(src);
-      return;
+  /** New query whose root is hand-written SQL (ready-made model). */
+  function addSqlModelQuery() {
+    const id = newQueryId();
+    const used = new Set(queries.map((q) => q.name));
+    let name = "sql_model";
+    if (used.has(name)) {
+      let i = 2;
+      while (used.has(`sql_model_${i}`)) i += 1;
+      name = `sql_model_${i}`;
     }
-    void addCsvQuery();
+    const q: QueryDef = {
+      id,
+      name,
+      steps: [
+        {
+          type: "SqlModel",
+          payload: {
+            raw_sql: "select 1 as n",
+          },
+        },
+      ],
+    };
+    setProject((p) => {
+      const nextQueries = [...p.workspace.queries, q];
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(p.sources, nextQueries),
+        workspace: {
+          queries: nextQueries,
+          focus_query_id: p.workspace.focus_query_id || id,
+        },
+      };
+    });
+    setActiveQueryId(id);
+    setSelectedStepIndex(0);
+    setCustomSql("select 1 as n");
+    setFilterCondition("");
+    setError(null);
   }
 
   async function addParquetQuery() {
@@ -524,6 +557,123 @@ function App() {
     });
     if (typeof selected !== "string") return;
     addFileQuery(selected, "parquet");
+  }
+
+  /** Sources catalog only — no query until user asks. */
+  async function addSourceOnlyCsv() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (typeof selected !== "string") return;
+    const id = newSourceId();
+    const name = selected.split(/[/\\]/).pop() ?? "csv";
+    setProject((p) => ({
+      ...p,
+      sources: [
+        ...p.sources,
+        { id, name, kind: "csv", path: selected },
+      ],
+    }));
+    setSelectedSourceId(id);
+    setError(null);
+  }
+
+  async function addSourceOnlyParquet() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Parquet", extensions: ["parquet"] }],
+    });
+    if (typeof selected !== "string") return;
+    const id = newSourceId();
+    const name = selected.split(/[/\\]/).pop() ?? "parquet";
+    setProject((p) => ({
+      ...p,
+      sources: [
+        ...p.sources,
+        { id, name, kind: "parquet", path: selected },
+      ],
+    }));
+    setSelectedSourceId(id);
+    setError(null);
+  }
+
+  function addSourceOnlyPostgres(sel: PostgresSelection) {
+    const id = newSourceId();
+    const name = `${sel.schema}.${sel.table_name}`;
+    setProject((p) => ({
+      ...p,
+      sources: [
+        ...p.sources,
+        {
+          id,
+          name,
+          kind: "postgres",
+          connection_id: sel.connection_id,
+          schema: sel.schema,
+          table_name: sel.table_name,
+        },
+      ],
+    }));
+    setSelectedSourceId(id);
+    setShowPgPicker(false);
+    setError(null);
+  }
+
+  function addSourceOnlyS3(sel: { path: string; connection_id?: string }) {
+    const id = newSourceId();
+    const name = sel.path.split(/[/\\]/).pop() ?? "parquet";
+    setProject((p) => ({
+      ...p,
+      sources: [
+        ...p.sources,
+        {
+          id,
+          name,
+          kind: "parquet",
+          path: sel.path,
+          connection_id: sel.connection_id,
+        },
+      ],
+    }));
+    setSelectedSourceId(id);
+    setShowS3Dialog(false);
+    setError(null);
+  }
+
+  function renameQuery(queryId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setProject((p) => ({
+      ...p,
+      workspace: {
+        ...p.workspace,
+        queries: p.workspace.queries.map((q) =>
+          q.id === queryId ? { ...q, name: trimmed } : q,
+        ),
+      },
+    }));
+  }
+
+  function renameSource(sourceId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setProject((p) => ({
+      ...p,
+      sources: p.sources.map((s) =>
+        s.id === sourceId ? { ...s, name: trimmed } : s,
+      ),
+    }));
+  }
+
+  function openPgPicker(intent: "source" | "query") {
+    setPickerIntent(intent);
+    setShowPgPicker(true);
+  }
+
+  function openS3Dialog(intent: "source" | "query") {
+    setPickerIntent(intent);
+    setShowS3Dialog(true);
   }
 
   function addPostgresFromPicker(sel: PostgresSelection) {
@@ -605,31 +755,35 @@ function App() {
       return;
     }
     const k = key.trim();
+    let joinIndex = -1;
+    let joinStep: TransformationStep | null = null;
     setQueries((prev) =>
       prev.map((q) => {
         if (q.id !== hostQueryId) return q;
         const without = q.steps.filter((s) => s.type !== "Join");
-        return {
-          ...q,
-          steps: [
-            ...without,
-            {
-              type: "Join",
-              payload: {
-                right_query_id: rightQueryId,
-                join_type: type,
-                left_on: [k],
-                right_on: [k],
-              },
-            },
-          ],
+        const step: TransformationStep = {
+          type: "Join",
+          payload: {
+            right_query_id: rightQueryId,
+            join_type: type,
+            left_on: [k],
+            right_on: [k],
+          },
         };
+        const steps = [...without, step];
+        joinIndex = steps.length - 1;
+        joinStep = step;
+        return { ...q, steps };
       }),
     );
     setJoinRightId(rightQueryId);
     setJoinKey(k);
     setJoinType(type);
     setActiveQueryId(hostQueryId);
+    if (joinIndex >= 0 && joinStep) {
+      setSelectedStepIndex(joinIndex);
+      loadStepIntoEditor(joinStep);
+    }
     setError(null);
   }
 
@@ -638,17 +792,35 @@ function App() {
   }
 
   function selectEdgeOnCanvas(edge: GraphEdgeInfo) {
-    selectQuery(edge.hostQueryId);
+    const host = queries.find((q) => q.id === edge.hostQueryId);
+    setActiveQueryId(edge.hostQueryId);
     if (edge.kind === "join") {
       setJoinRightId(edge.otherQueryId);
-      const host = queries.find((q) => q.id === edge.hostQueryId);
-      const j = host?.steps.find((s) => s.type === "Join");
+      const idx = host?.steps.findIndex((s) => s.type === "Join") ?? -1;
+      const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
         setJoinKey(j.payload.left_on[0] ?? joinKey);
         setJoinType(j.payload.join_type);
+        setSelectedStepIndex(idx);
+        loadStepIntoEditor(j);
       }
-    } else {
+    } else if (edge.kind === "append") {
       setAppendOtherId(edge.otherQueryId);
+      const idx = host?.steps.findIndex((s) => s.type === "Append") ?? -1;
+      if (idx >= 0 && host) {
+        setSelectedStepIndex(idx);
+        loadStepIntoEditor(host.steps[idx]);
+      }
+    } else if (edge.kind === "from") {
+      const idx =
+        host?.steps.findIndex(
+          (s) =>
+            s.type === "FromQuery" && s.payload.query_id === edge.otherQueryId,
+        ) ?? -1;
+      if (idx >= 0 && host) {
+        setSelectedStepIndex(idx);
+        loadStepIntoEditor(host.steps[idx]);
+      }
     }
   }
 
@@ -729,6 +901,11 @@ function App() {
       };
     });
     setActiveQueryId(id);
+    setSelectedStepIndex(0);
+    loadStepIntoEditor({
+      type: "FromQuery",
+      payload: { query_id: fromQueryId },
+    });
     setFilterCondition("");
     setError(null);
   }
@@ -813,7 +990,8 @@ function App() {
         s.type === "LoadCsv" ||
         s.type === "LoadParquet" ||
         s.type === "LoadPostgres" ||
-        s.type === "FromQuery";
+        s.type === "FromQuery" ||
+        s.type === "SqlModel";
       if (index === 0 && root(steps[0]!)) return steps;
       if (j === 0 && root(steps[0]!) && index === 1) return steps;
       const next = [...steps];
@@ -1121,7 +1299,21 @@ function App() {
           payload: { query_id: peer },
         });
         break;
+      case "SqlModel":
+        if (activeQuery.steps.length > 0) {
+          setError("SQL model only as first step — use + SQL model for a new query");
+          return;
+        }
+        appendStep({
+          type: "SqlModel",
+          payload: { raw_sql: "select 1 as n" },
+        });
+        break;
       case "CustomSql":
+        if (activeQuery.steps.length === 0) {
+          setError("Custom SQL needs a prior step — or use + SQL model as root");
+          return;
+        }
         appendStep({
           type: "CustomSql",
           payload: { raw_sql: "select * from {{prev_step}}" },
@@ -1142,8 +1334,21 @@ function App() {
     { id: "Limit", label: "Limit" },
     { id: "RenameColumn", label: "Rename" },
     { id: "DeriveColumn", label: "Derived/Calculated" },
-    { id: "CustomSql", label: "SQL" },
+    { id: "CustomSql", label: "Custom SQL" },
   ];
+
+  function stepEditorTitle(step: TransformationStep): string {
+    switch (step.type) {
+      case "SqlModel":
+        return "SQL model";
+      case "CustomSql":
+        return "Custom SQL";
+      case "DeriveColumn":
+        return "Derived/Calculated";
+      default:
+        return step.type;
+    }
+  }
 
   return (
     <div className="flex h-screen flex-col text-slate-100">
@@ -1197,41 +1402,6 @@ function App() {
           >
             Export dbt
           </button>
-          <button
-            type="button"
-            onClick={() => openNewConnection("postgres")}
-            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
-          >
-            + Connection
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowPgPicker(true)}
-            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
-          >
-            + Postgres
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowS3Dialog(true)}
-            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
-          >
-            + S3
-          </button>
-          <button
-            type="button"
-            onClick={() => void addParquetQuery()}
-            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
-          >
-            + Parquet
-          </button>
-          <button
-            type="button"
-            onClick={() => void addCsvQuery()}
-            className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
-          >
-            + CSV
-          </button>
         </div>
       </header>
 
@@ -1250,7 +1420,10 @@ function App() {
         connections={project.connections}
         onClose={() => setShowPgPicker(false)}
         onRequestNewConnection={() => openNewConnection("postgres")}
-        onSelect={addPostgresFromPicker}
+        onSelect={(sel) => {
+          if (pickerIntent === "source") addSourceOnlyPostgres(sel);
+          else addPostgresFromPicker(sel);
+        }}
       />
       <S3SourceDialog
         open={showS3Dialog}
@@ -1258,8 +1431,12 @@ function App() {
         onClose={() => setShowS3Dialog(false)}
         onRequestNewConnection={() => openNewConnection("s3")}
         onSelect={(sel) => {
-          addFileQuery(sel.path, "parquet", sel.connection_id);
-          setShowS3Dialog(false);
+          if (pickerIntent === "source") {
+            addSourceOnlyS3(sel);
+          } else {
+            addFileQuery(sel.path, "parquet", sel.connection_id);
+            setShowS3Dialog(false);
+          }
         }}
       />
 
@@ -1268,7 +1445,8 @@ function App() {
           onLoadSample={() => void handleLoadSample()}
           onAddCsv={() => void addCsvQuery()}
           onAddParquet={() => void addParquetQuery()}
-          onAddPostgres={() => setShowPgPicker(true)}
+          onAddPostgres={() => openPgPicker("query")}
+          onAddSqlModel={() => addSqlModelQuery()}
         />
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr] lg:grid-cols-[240px_1fr_300px]">
@@ -1293,12 +1471,18 @@ function App() {
               onRevealExport={() => void handleRevealExport()}
               exportFiles={exportFiles}
               onAddConnection={() => openNewConnection("postgres")}
-              onAddSourceCsv={() => void addCsvQuery()}
-              onAddSourceParquet={() => void addParquetQuery()}
-              onAddSourceS3={() => setShowS3Dialog(true)}
-              onAddSourcePostgres={() => setShowPgPicker(true)}
+              onAddSourceCsv={() => void addSourceOnlyCsv()}
+              onAddSourceParquet={() => void addSourceOnlyParquet()}
+              onAddSourceS3={() => openS3Dialog("source")}
+              onAddSourcePostgres={() => openPgPicker("source")}
+              onNewQueryCsv={() => void addCsvQuery()}
+              onNewQueryParquet={() => void addParquetQuery()}
+              onNewQueryS3={() => openS3Dialog("query")}
+              onNewQueryPostgres={() => openPgPicker("query")}
               onNewQueryFromSource={addQueryFromSource}
-              onNewQuery={addQueryFromSelectedSourceOrCsv}
+              onNewSqlModel={addSqlModelQuery}
+              onRenameQuery={renameQuery}
+              onRenameSource={renameSource}
             />
           </aside>
 
@@ -1489,7 +1673,7 @@ function App() {
               <div className="flex min-h-0 flex-[1_1_50%] flex-col overflow-auto px-3 py-2">
                 <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                   {selectedStep
-                    ? `Edit · s${selectedStepIndex} ${selectedStep.type}`
+                    ? `Edit · s${selectedStepIndex} ${stepEditorTitle(selectedStep)}`
                     : "Step editor"}
                 </h3>
                 {!activeQuery ? (
@@ -1508,6 +1692,34 @@ function App() {
                         Source step (pinned at s0). Change via Sources / ↳
                         FromQuery.
                       </p>
+                    )}
+                    {selectedStep.type === "SqlModel" && (
+                      <>
+                        <p className="text-[10px] text-slate-500">
+                          Root model SQL (prod dialect). Preview runs in-app;
+                          export is this body.
+                        </p>
+                        <textarea
+                          value={customSql}
+                          onChange={(e) => setCustomSql(e.target.value)}
+                          rows={8}
+                          spellCheck={false}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "SqlModel",
+                              payload: { raw_sql: customSql.trim() },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
                     )}
                     {selectedStep.type === "Filter" && (
                       <>
@@ -1854,10 +2066,14 @@ function App() {
                     )}
                     {selectedStep.type === "CustomSql" && (
                       <>
+                        <p className="text-[10px] text-slate-500">
+                          Mid-chain snippet. Use {"{{prev_step}}"} for prior CTE;
+                          optional {"{{query:id}}"}.
+                        </p>
                         <textarea
                           value={customSql}
                           onChange={(e) => setCustomSql(e.target.value)}
-                          rows={4}
+                          rows={5}
                           spellCheck={false}
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
                         />

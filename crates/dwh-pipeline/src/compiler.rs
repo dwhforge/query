@@ -118,6 +118,18 @@ fn compile_step(
             })?;
             Ok(format!("SELECT * FROM {src}"))
         }
+        TransformationStep::SqlModel { raw_sql } => {
+            if !prev_step.is_empty() {
+                return Err("SqlModel must be the first step of a query".into());
+            }
+            let mut sql = raw_sql.trim().trim_end_matches(';').to_string();
+            for dep in direct_deps(std::slice::from_ref(step)) {
+                if let Some(cte) = last_cte.get(&dep) {
+                    sql = sql.replace(&format!("{{{{query:{dep}}}}}"), cte);
+                }
+            }
+            Ok(sql)
+        }
         TransformationStep::Filter { condition } => {
             require_prev(prev_step, "Filter")?;
             Ok(format!(
@@ -242,6 +254,7 @@ fn compile_step(
             Ok(sql)
         }
         TransformationStep::CustomSql { raw_sql } => {
+            require_prev(prev_step, "CustomSql")?;
             let mut sql = raw_sql.replace("{{prev_step}}", prev_step);
             for dep in direct_deps(std::slice::from_ref(step)) {
                 if let Some(cte) = last_cte.get(&dep) {
@@ -396,5 +409,27 @@ mod tests {
             TransformationStep::LoadPostgres { schema, .. } => assert_eq!(schema, "public"),
             _ => panic!("expected LoadPostgres"),
         }
+    }
+
+    #[test]
+    fn sql_model_root_and_custom_sql_mid() {
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "m".into(),
+                name: "m".into(),
+                steps: vec![
+                    TransformationStep::SqlModel {
+                        raw_sql: "select 1 as n".into(),
+                    },
+                    TransformationStep::CustomSql {
+                        raw_sql: "select * from {{prev_step}} where n > 0".into(),
+                    },
+                ],
+            }],
+            focus_query_id: "m".into(),
+        };
+        let sql = GraphCompiler::new(&ws).to_sql(false).unwrap();
+        assert!(sql.contains("select 1 as n"));
+        assert!(sql.contains("where n > 0"));
     }
 }

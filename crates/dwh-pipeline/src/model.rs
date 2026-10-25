@@ -48,6 +48,9 @@ pub enum TransformationStep {
     },
     /// Start from another query’s output (`ref` in dbt). Must be the first step.
     FromQuery { query_id: String },
+    /// Hand-written SQL as the query root (ready-made model body). Must be first.
+    /// Dialect = author’s prod warehouse; DuckDB is preview-only.
+    SqlModel { raw_sql: String },
     Filter { condition: String },
     SelectColumns { columns: Vec<String> },
     RenameColumn { from: String, to: String },

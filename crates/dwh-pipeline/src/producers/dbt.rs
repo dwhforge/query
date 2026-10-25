@@ -216,7 +216,26 @@ fn compile_query_as_dbt_model(
                 })?;
                 format!("select * from {{{{ ref('{m}') }}}}\n")
             }
-            _ => return Err("single-step query must be Load* or FromQuery".into()),
+            TransformationStep::SqlModel { raw_sql } => {
+                let mut sql = raw_sql.trim().trim_end_matches(';').to_string();
+                for dep in direct_deps(std::slice::from_ref(&query.steps[0])) {
+                    if let Some(m) = models.get(&dep) {
+                        sql = sql.replace(
+                            &format!("{{{{query:{dep}}}}}"),
+                            &format!("{{{{ ref('{m}') }}}}"),
+                        );
+                    }
+                }
+                if !sql.ends_with('\n') {
+                    sql.push('\n');
+                }
+                sql
+            }
+            _ => {
+                return Err(
+                    "single-step query must be Load*, FromQuery, or SqlModel".into(),
+                )
+            }
         });
     }
 
@@ -253,6 +272,21 @@ fn compile_query_as_dbt_model(
                     format!("dbt FromQuery: missing model for '{query_id}'")
                 })?;
                 format!("select * from {{{{ ref('{m}') }}}}")
+            }
+            TransformationStep::SqlModel { raw_sql } => {
+                if !prev.is_empty() {
+                    return Err("dbt SqlModel must be the first step".into());
+                }
+                let mut sql = raw_sql.trim().trim_end_matches(';').to_string();
+                for dep in direct_deps(std::slice::from_ref(step)) {
+                    if let Some(m) = models.get(&dep) {
+                        sql = sql.replace(
+                            &format!("{{{{query:{dep}}}}}"),
+                            &format!("{{{{ ref('{m}') }}}}"),
+                        );
+                    }
+                }
+                sql
             }
             TransformationStep::Filter { condition } => {
                 format!("select * from {prev} where {condition}")

@@ -3,6 +3,7 @@ interface EmptyHeroProps {
   onAddCsv: () => void;
   onAddParquet: () => void;
   onAddPostgres: () => void;
+  onAddSqlModel: () => void;
 }
 
 export function EmptyHero({
@@ -10,6 +11,7 @@ export function EmptyHero({
   onAddCsv,
   onAddParquet,
   onAddPostgres,
+  onAddSqlModel,
 }: EmptyHeroProps) {
   return (
     <div className="flex h-full flex-col items-center justify-center px-8 text-center">
@@ -51,6 +53,13 @@ export function EmptyHero({
           className="rounded-lg border border-slate-700 px-4 py-2.5 text-sm text-slate-400 hover:border-slate-500"
         >
           Connect Postgres
+        </button>
+        <button
+          type="button"
+          onClick={onAddSqlModel}
+          className="rounded-lg border border-slate-700 px-4 py-2.5 text-sm text-slate-400 hover:border-slate-500"
+        >
+          SQL model
         </button>
       </div>
       <p className="mt-6 text-[11px] text-slate-600">

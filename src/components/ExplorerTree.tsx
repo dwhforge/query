@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type {
   ConnectionDef,
   Project,
@@ -18,14 +19,20 @@ interface ExplorerTreeProps {
   onRevealExport?: () => void;
   exportFiles?: string[];
   onAddConnection: () => void;
+  /** Catalog only — no query. */
   onAddSourceCsv: () => void;
   onAddSourceParquet: () => void;
   onAddSourceS3: () => void;
   onAddSourcePostgres: () => void;
-  /** New query that Loads this source (for a second model on the same object). */
+  /** New source + query in one go (Queries menu). */
+  onNewQueryCsv: () => void;
+  onNewQueryParquet: () => void;
+  onNewQueryS3: () => void;
+  onNewQueryPostgres: () => void;
   onNewQueryFromSource: (source: SourceDef) => void;
-  /** Queries + : from selected source, or CSV picker if none. */
-  onNewQuery: () => void;
+  onNewSqlModel: () => void;
+  onRenameQuery: (queryId: string, name: string) => void;
+  onRenameSource: (sourceId: string, name: string) => void;
 }
 
 function SectionHeader({
@@ -87,6 +94,120 @@ function IconBtn({
   );
 }
 
+function MenuItem({
+  label,
+  hint,
+  onClick,
+}: {
+  label: string;
+  hint?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-slate-200 hover:bg-teal-500/15 hover:text-teal-100"
+    >
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {hint && (
+        <span className="shrink-0 text-[9px] uppercase text-slate-500">
+          {hint}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function MenuDivider() {
+  return <div className="my-1 border-t border-slate-800" />;
+}
+
+function PlusMenu({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+  return (
+    <div
+      ref={ref}
+      className="absolute right-0 top-full z-40 mt-0.5 max-h-72 w-56 overflow-auto rounded-lg border border-slate-700 bg-[#0a1219] py-1 shadow-xl shadow-black/50"
+      role="menu"
+    >
+      {children}
+    </div>
+  );
+}
+
+function InlineRename({
+  value,
+  onCommit,
+  onCancel,
+}: {
+  value: string;
+  onCommit: (next: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  return (
+    <input
+      ref={ref}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={() => {
+        if (draft.trim() && draft.trim() !== value) onCommit(draft);
+        else onCancel();
+      }}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (draft.trim()) onCommit(draft);
+          else onCancel();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      className="min-w-0 flex-1 rounded border border-teal-700/60 bg-slate-950 px-1 py-0.5 font-mono text-[11px] text-slate-100 outline-none"
+    />
+  );
+}
+
+function sourceKindHint(s: SourceDef): string {
+  if (s.kind === "postgres") return "pg";
+  return s.kind;
+}
+
 export function ExplorerTree({
   project,
   activeQueryId,
@@ -104,14 +225,111 @@ export function ExplorerTree({
   onAddSourceParquet,
   onAddSourceS3,
   onAddSourcePostgres,
+  onNewQueryCsv,
+  onNewQueryParquet,
+  onNewQueryS3,
+  onNewQueryPostgres,
   onNewQueryFromSource,
-  onNewQuery,
+  onNewSqlModel,
+  onRenameQuery,
+  onRenameSource,
 }: ExplorerTreeProps) {
   const connectionsOpen = expanded.connections !== false;
   const sourcesOpen = expanded.sources !== false;
   const queriesOpen = expanded.queries !== false;
   const exportOpen = expanded.export !== false;
   const focus = project.workspace.focus_query_id;
+
+  const [sourcesMenuOpen, setSourcesMenuOpen] = useState(false);
+  const [queriesMenuOpen, setQueriesMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState<
+    { kind: "query" | "source"; id: string } | null
+  >(null);
+
+  function closeMenus() {
+    setSourcesMenuOpen(false);
+    setQueriesMenuOpen(false);
+  }
+
+  const sourceOnlyItems = (
+    <>
+      <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+        New source
+      </div>
+      <MenuItem
+        label="CSV…"
+        hint="file"
+        onClick={() => {
+          closeMenus();
+          onAddSourceCsv();
+        }}
+      />
+      <MenuItem
+        label="Parquet…"
+        hint="file"
+        onClick={() => {
+          closeMenus();
+          onAddSourceParquet();
+        }}
+      />
+      <MenuItem
+        label="S3 Parquet…"
+        hint="s3"
+        onClick={() => {
+          closeMenus();
+          onAddSourceS3();
+        }}
+      />
+      <MenuItem
+        label="Postgres table…"
+        hint="pg"
+        onClick={() => {
+          closeMenus();
+          onAddSourcePostgres();
+        }}
+      />
+    </>
+  );
+
+  const newSourceAndQueryItems = (
+    <>
+      <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+        New source + query
+      </div>
+      <MenuItem
+        label="CSV…"
+        hint="file"
+        onClick={() => {
+          closeMenus();
+          onNewQueryCsv();
+        }}
+      />
+      <MenuItem
+        label="Parquet…"
+        hint="file"
+        onClick={() => {
+          closeMenus();
+          onNewQueryParquet();
+        }}
+      />
+      <MenuItem
+        label="S3 Parquet…"
+        hint="s3"
+        onClick={() => {
+          closeMenus();
+          onNewQueryS3();
+        }}
+      />
+      <MenuItem
+        label="Postgres table…"
+        hint="pg"
+        onClick={() => {
+          closeMenus();
+          onNewQueryPostgres();
+        }}
+      />
+    </>
+  );
 
   return (
     <nav className="flex h-full flex-col text-sm">
@@ -169,47 +387,73 @@ export function ExplorerTree({
             count={project.sources.length}
             onToggle={() => onToggle("sources")}
             actions={
-              <>
-                <IconBtn title="Add CSV" onClick={onAddSourceCsv}>
+              <div className="relative">
+                <IconBtn
+                  title="Add source (catalog only)"
+                  onClick={() => {
+                    setQueriesMenuOpen(false);
+                    setSourcesMenuOpen((o) => !o);
+                  }}
+                >
                   +
                 </IconBtn>
-                <IconBtn title="Add local Parquet" onClick={onAddSourceParquet}>
-                  <span className="text-[9px] font-bold">PQ</span>
-                </IconBtn>
-                <IconBtn title="Add S3 Parquet" onClick={onAddSourceS3}>
-                  <span className="text-[9px] font-bold">S3</span>
-                </IconBtn>
-                <IconBtn title="Add Postgres table" onClick={onAddSourcePostgres}>
-                  <span className="text-[9px] font-bold">PG</span>
-                </IconBtn>
-              </>
+                <PlusMenu
+                  open={sourcesMenuOpen}
+                  onClose={() => setSourcesMenuOpen(false)}
+                >
+                  {sourceOnlyItems}
+                </PlusMenu>
+              </div>
             }
           />
           {sourcesOpen && (
             <ul className="mb-2 ml-3 border-l border-[var(--line)] pl-2">
               {project.sources.length === 0 && (
                 <li className="py-1 text-xs text-slate-600">
-                  Objects bound to connections — use +
+                  No sources — + to add
                 </li>
               )}
               {project.sources.map((s) => {
                 const selected = s.id === selectedSourceId;
+                const editing =
+                  renaming?.kind === "source" && renaming.id === s.id;
                 return (
                   <li key={s.id} className="group/src flex items-center gap-0.5">
-                    <button
-                      type="button"
-                      onClick={() => onSelectSource(s)}
-                      className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs ${
-                        selected
-                          ? "bg-teal-500/15 text-teal-100"
-                          : "text-slate-300 hover:bg-slate-800/80"
-                      }`}
-                    >
-                      <span className="w-8 shrink-0 text-[9px] uppercase text-teal-600">
-                        {s.kind === "postgres" ? "pg" : s.kind}
-                      </span>
-                      <span className="truncate">{s.name}</span>
-                    </button>
+                    {editing ? (
+                      <div className="flex min-w-0 flex-1 items-center gap-1 px-1.5 py-0.5">
+                        <span className="w-8 shrink-0 text-[9px] uppercase text-teal-600">
+                          {sourceKindHint(s)}
+                        </span>
+                        <InlineRename
+                          value={s.name}
+                          onCommit={(name) => {
+                            onRenameSource(s.id, name);
+                            setRenaming(null);
+                          }}
+                          onCancel={() => setRenaming(null)}
+                        />
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onSelectSource(s)}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setRenaming({ kind: "source", id: s.id });
+                        }}
+                        title="Double-click to rename"
+                        className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs ${
+                          selected
+                            ? "bg-teal-500/15 text-teal-100"
+                            : "text-slate-300 hover:bg-slate-800/80"
+                        }`}
+                      >
+                        <span className="w-8 shrink-0 text-[9px] uppercase text-teal-600">
+                          {sourceKindHint(s)}
+                        </span>
+                        <span className="truncate">{s.name}</span>
+                      </button>
+                    )}
                     <IconBtn
                       title="New query from this source"
                       onClick={() => onNewQueryFromSource(s)}
@@ -230,42 +474,101 @@ export function ExplorerTree({
             count={project.workspace.queries.length}
             onToggle={() => onToggle("queries")}
             actions={
-              <IconBtn
-                title="New query (from selected source, or pick CSV)"
-                onClick={onNewQuery}
-              >
-                +
-              </IconBtn>
+              <div className="relative">
+                <IconBtn
+                  title="New query — pick source or create"
+                  onClick={() => {
+                    setSourcesMenuOpen(false);
+                    setQueriesMenuOpen((o) => !o);
+                  }}
+                >
+                  +
+                </IconBtn>
+                <PlusMenu
+                  open={queriesMenuOpen}
+                  onClose={() => setQueriesMenuOpen(false)}
+                >
+                  {project.sources.length > 0 && (
+                    <>
+                      <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                        From source
+                      </div>
+                      {project.sources.map((s) => (
+                        <MenuItem
+                          key={s.id}
+                          label={s.name}
+                          hint={sourceKindHint(s)}
+                          onClick={() => {
+                            closeMenus();
+                            onNewQueryFromSource(s);
+                          }}
+                        />
+                      ))}
+                      <MenuDivider />
+                    </>
+                  )}
+                  {newSourceAndQueryItems}
+                  <MenuDivider />
+                  <MenuItem
+                    label="SQL model"
+                    hint="root"
+                    onClick={() => {
+                      closeMenus();
+                      onNewSqlModel();
+                    }}
+                  />
+                </PlusMenu>
+              </div>
             }
           />
           {queriesOpen && (
             <ul className="mb-2 ml-3 border-l border-[var(--line)] pl-2">
               {project.workspace.queries.length === 0 && (
                 <li className="py-1 text-xs text-slate-600">
-                  No queries — use +
+                  + → pick source or new
                 </li>
               )}
               {project.workspace.queries.map((q: QueryDef) => {
                 const active = q.id === activeQueryId;
                 const isFocus = q.id === focus;
+                const editing =
+                  renaming?.kind === "query" && renaming.id === q.id;
                 return (
                   <li key={q.id}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectQuery(q.id)}
-                      className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs ${
-                        active
-                          ? "bg-teal-500/15 text-teal-100"
-                          : "text-slate-300 hover:bg-slate-800/80"
-                      }`}
-                    >
-                      <span className="truncate">{q.name}</span>
-                      {isFocus && (
-                        <span className="ml-auto text-[9px] text-teal-400">
-                          ★
-                        </span>
-                      )}
-                    </button>
+                    {editing ? (
+                      <div className="flex w-full items-center gap-1 px-1.5 py-0.5">
+                        <InlineRename
+                          value={q.name}
+                          onCommit={(name) => {
+                            onRenameQuery(q.id, name);
+                            setRenaming(null);
+                          }}
+                          onCancel={() => setRenaming(null)}
+                        />
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onSelectQuery(q.id)}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setRenaming({ kind: "query", id: q.id });
+                        }}
+                        title="Double-click to rename"
+                        className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs ${
+                          active
+                            ? "bg-teal-500/15 text-teal-100"
+                            : "text-slate-300 hover:bg-slate-800/80"
+                        }`}
+                      >
+                        <span className="truncate">{q.name}</span>
+                        {isFocus && (
+                          <span className="ml-auto text-[9px] text-teal-400">
+                            ★
+                          </span>
+                        )}
+                      </button>
+                    )}
                   </li>
                 );
               })}

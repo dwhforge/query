@@ -1,5 +1,5 @@
 use crate::dialect::{validate_target_execution, workspace_needs_s3_landing, WarehouseDialect};
-use crate::emit::{emit_transform_step, substitute_query_placeholders};
+use crate::emit::{emit_transform_step_ex, substitute_query_placeholders};
 use crate::graph::{sanitize_id, topo_queries};
 use crate::model::TransformationStep;
 use crate::model::Workspace;
@@ -84,14 +84,17 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
             ),
         )?;
 
+        // Local dbt: write profiles.yml next to dbt_project.yml (run with --profiles-dir ./).
+        // Postgres defaults match common local installs (user=password=postgres).
         let profiles = match dialect {
             WarehouseDialect::Duckdb => format!(
-                "{pipeline_name}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: 'local.duckdb'\n      threads: 4\n"
+                "{pipeline_name}:\n  outputs:\n    dev:\n      type: duckdb\n      path: 'local.duckdb'\n      threads: 4\n  target: dev\n"
             ),
             WarehouseDialect::Postgres => format!(
-                "{pipeline_name}:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      host: localhost\n      user: USER\n      password: PASS\n      port: 5432\n      dbname: DB\n      schema: analytics\n      threads: 4\n"
+                "{pipeline_name}: # must match profile: in dbt_project.yml\n  outputs:\n    dev:\n      type: postgres\n      host: localhost\n      user: postgres\n      password: postgres\n      port: 5432\n      dbname: dwh\n      schema: sys\n      threads: 4\n  target: dev\n"
             ),
         };
+        write_file(&root.join("profiles.yml"), &profiles)?;
         write_file(&root.join("profiles.yml.example"), &profiles)?;
 
         let order = topo_queries(workspace)?;
@@ -281,6 +284,8 @@ fn compile_query_as_dbt_model(
 
     let relations = dbt_ref_relations(models);
     let mut ctes = Vec::new();
+    // Bare dbt call for left-side columns (join merge); cleared after Join.
+    let mut left_dbt: Option<String> = None;
     for (idx, step) in query.steps.iter().enumerate() {
         let name = format!("s{idx}");
         let prev = if idx > 0 {
@@ -289,20 +294,27 @@ fn compile_query_as_dbt_model(
             String::new()
         };
         let body = match step {
-            TransformationStep::LoadCsv { path } => format!(
-                "select * from read_csv_auto('{}')",
-                escape_sql_string(path)
-            ),
-            TransformationStep::LoadParquet { path, .. } => format!(
-                "select * from read_parquet('{}')",
-                escape_sql_string(path)
-            ),
+            TransformationStep::LoadCsv { path } => {
+                left_dbt = None;
+                format!(
+                    "select * from read_csv_auto('{}')",
+                    escape_sql_string(path)
+                )
+            }
+            TransformationStep::LoadParquet { path, .. } => {
+                left_dbt = None;
+                format!(
+                    "select * from read_parquet('{}')",
+                    escape_sql_string(path)
+                )
+            }
             TransformationStep::LoadPostgres {
                 schema,
                 table_name,
                 ..
             } => {
                 let (src, tbl) = pg_dbt_source_ref(schema, table_name);
+                left_dbt = Some(format!("source('{src}', '{tbl}')"));
                 format!("select * from {{{{ source('{src}', '{tbl}') }}}}")
             }
             TransformationStep::FromQuery { query_id } => {
@@ -312,15 +324,29 @@ fn compile_query_as_dbt_model(
                 let m = models.get(query_id).ok_or_else(|| {
                     format!("dbt FromQuery: missing model for '{query_id}'")
                 })?;
+                left_dbt = Some(format!("ref('{m}')"));
                 format!("select * from {{{{ ref('{m}') }}}}")
             }
             TransformationStep::SqlModel { raw_sql } => {
                 if !prev.is_empty() {
                     return Err("dbt SqlModel must be the first step".into());
                 }
+                left_dbt = None;
                 substitute_query_placeholders(raw_sql, &relations)
             }
-            other => emit_transform_step(other, &prev, &relations, dialect)?,
+            other => {
+                let sql = emit_transform_step_ex(
+                    other,
+                    &prev,
+                    &relations,
+                    dialect,
+                    left_dbt.as_deref(),
+                )?;
+                if matches!(other, TransformationStep::Join { .. }) {
+                    left_dbt = None;
+                }
+                sql
+            }
         };
         ctes.push(format!("  {name} as (\n    {body}\n  )"));
     }
@@ -394,10 +420,13 @@ mod tests {
             )
             .unwrap();
         assert!(Path::new(&path).join("dbt_project.yml").exists());
+        assert!(Path::new(&path).join("profiles.yml").exists());
         let project = std::fs::read_to_string(Path::new(&path).join("dbt_project.yml")).unwrap();
         assert!(!project.contains("require-dbt-version"));
         // YAML indent: models.<name> at 2 spaces, folder keys at 4, +materialized at 6.
         assert!(project.contains("models:\n  demo:\n    staging:\n      +materialized: view\n"));
+        let profiles = std::fs::read_to_string(Path::new(&path).join("profiles.yml")).unwrap();
+        assert!(profiles.contains("type: duckdb"));
         assert!(Path::new(&path)
             .join("models/staging/stg_dim_region.sql")
             .exists());
@@ -501,5 +530,11 @@ mod tests {
             stg.trim(),
             "select * from {{ source('sys', 'data_source_items') }}"
         );
+        let profiles = std::fs::read_to_string(Path::new(&path).join("profiles.yml")).unwrap();
+        assert!(profiles.contains("type: postgres"));
+        assert!(profiles.contains("user: postgres"));
+        assert!(profiles.contains("password: postgres"));
+        assert!(profiles.contains("dbname: dwh"));
+        assert!(profiles.contains("schema: sys"));
     }
 }

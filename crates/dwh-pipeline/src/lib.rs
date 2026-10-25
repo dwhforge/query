@@ -17,7 +17,7 @@ pub use dialect::{
     sql_rename_column, sql_union_all, validate_target_execution, workspace_needs_s3_landing,
     QueryExecution, WarehouseDialect,
 };
-pub use emit::{emit_transform_step, substitute_query_placeholders};
+pub use emit::{emit_transform_step, emit_transform_step_ex, substitute_query_placeholders};
 pub use postgres_attach::{duckdb_postgres_relation, postgres_attach_alias};
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{JoinType, QueryDef, TransformationStep, Workspace};

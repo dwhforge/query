@@ -17,7 +17,6 @@ import {
 import { PreviewTable } from "./components/PreviewTable";
 import { S3SourceDialog } from "./components/S3SourceDialog";
 import { SourceSchemaPanel } from "./components/SourceSchemaPanel";
-import { StepPalette } from "./components/StepPalette";
 import { debounce } from "./lib/debounce";
 import {
   describePostgresObject,
@@ -51,6 +50,9 @@ import {
 function App() {
   const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
+  const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
+    null,
+  );
   const [filterCondition, setFilterCondition] = useState("");
   const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
   const [groupDims, setGroupDims] = useState("");
@@ -59,6 +61,14 @@ function App() {
   const [joinKey, setJoinKey] = useState("region");
   const [joinType, setJoinType] = useState<JoinType>("inner");
   const [appendOtherId, setAppendOtherId] = useState("");
+  const [sortCol, setSortCol] = useState("");
+  const [sortDesc, setSortDesc] = useState(true);
+  const [limitN, setLimitN] = useState("10");
+  const [renameFrom, setRenameFrom] = useState("");
+  const [renameTo, setRenameTo] = useState("");
+  const [deriveName, setDeriveName] = useState("");
+  const [deriveExpr, setDeriveExpr] = useState("");
+  const [customSql, setCustomSql] = useState("select * from {{prev_step}}");
   const [sqlCopied, setSqlCopied] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [modelPreview, setModelPreview] = useState<PreviewDbtModel | null>(null);
@@ -245,19 +255,81 @@ function App() {
     [],
   );
 
+  const loadStepIntoEditor = useCallback((step: TransformationStep | undefined) => {
+    if (!step) return;
+    switch (step.type) {
+      case "Filter":
+        setFilterCondition(step.payload.condition);
+        break;
+      case "SelectColumns":
+        setSelectedColumns([...step.payload.columns]);
+        break;
+      case "GroupBy":
+        setGroupDims(step.payload.dimensions.join(", "));
+        setGroupAggs(step.payload.aggregates.join(", "));
+        break;
+      case "Join":
+        setJoinRightId(step.payload.right_query_id);
+        setJoinKey(step.payload.left_on[0] ?? "");
+        setJoinType(step.payload.join_type);
+        break;
+      case "Append":
+        setAppendOtherId(step.payload.other_query_ids[0] ?? "");
+        break;
+      case "SortBy":
+        setSortCol(step.payload.column);
+        setSortDesc(step.payload.descending);
+        break;
+      case "Limit":
+        setLimitN(String(step.payload.n));
+        break;
+      case "RenameColumn":
+        setRenameFrom(step.payload.from);
+        setRenameTo(step.payload.to);
+        break;
+      case "DeriveColumn":
+        setDeriveName(step.payload.name);
+        setDeriveExpr(step.payload.expression);
+        break;
+      case "CustomSql":
+        setCustomSql(step.payload.raw_sql);
+        break;
+      default:
+        break;
+    }
+  }, []);
+
   const selectQuery = useCallback(
     (id: string) => {
       setActiveQueryId(id);
-      syncInspectorFromQuery(queries.find((x) => x.id === id));
+      const q = queries.find((x) => x.id === id);
+      syncInspectorFromQuery(q);
+      const last = q && q.steps.length > 0 ? q.steps.length - 1 : null;
+      setSelectedStepIndex(last);
+      if (last !== null && q) loadStepIntoEditor(q.steps[last]);
     },
-    [queries, syncInspectorFromQuery],
+    [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
 
-  // Keep Join/Filter form in sync when steps change (sample load, remove, etc.)
+  // Keep forms in sync when steps change; clamp selected step index.
   useEffect(() => {
-    if (!activeQueryId) return;
-    syncInspectorFromQuery(queries.find((q) => q.id === activeQueryId));
-  }, [activeQueryId, queries, syncInspectorFromQuery]);
+    if (!activeQueryId) {
+      setSelectedStepIndex(null);
+      return;
+    }
+    const q = queries.find((x) => x.id === activeQueryId);
+    syncInspectorFromQuery(q);
+    if (!q || q.steps.length === 0) {
+      setSelectedStepIndex(null);
+      return;
+    }
+    setSelectedStepIndex((prev) => {
+      const next =
+        prev === null || prev >= q.steps.length ? q.steps.length - 1 : prev;
+      loadStepIntoEditor(q.steps[next]);
+      return next;
+    });
+  }, [activeQueryId, queries, syncInspectorFromQuery, loadStepIntoEditor]);
 
   async function loadPostgresSchema(source: SourceDef) {
     if (source.kind !== "postgres") {
@@ -515,53 +587,6 @@ function App() {
     );
   }
 
-  function applyFilter() {
-    const cond = filterCondition.trim();
-    updateActiveSteps((steps) => {
-      const without = steps.filter((s) => s.type !== "Filter");
-      if (!cond) return without;
-      return [...without, { type: "Filter", payload: { condition: cond } }];
-    });
-  }
-
-  function applyGroupBy(
-    dimsCsv: string = groupDims,
-    aggsCsv: string = groupAggs,
-  ) {
-    const dimensions = dimsCsv
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const aggregates = aggsCsv
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    setGroupDims(dimensions.join(", "));
-    setGroupAggs(
-      aggregates.length > 0 ? aggregates.join(", ") : "count(*) as n",
-    );
-    updateActiveSteps((steps) => {
-      const without = steps.filter((s) => s.type !== "GroupBy");
-      if (dimensions.length === 0 || aggregates.length === 0) return without;
-      return [
-        ...without,
-        { type: "GroupBy", payload: { dimensions, aggregates } },
-      ];
-    });
-  }
-
-  function applySelectColumns() {
-    const cols = selectedColumns.map((c) => c.trim()).filter(Boolean);
-    updateActiveSteps((steps) => {
-      const without = steps.filter((s) => s.type !== "SelectColumns");
-      if (cols.length === 0) return without;
-      return [
-        ...without,
-        { type: "SelectColumns", payload: { columns: cols } },
-      ];
-    });
-  }
-
   function toggleColumn(name: string) {
     setSelectedColumns((prev) =>
       prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name],
@@ -606,11 +631,6 @@ function App() {
     setJoinType(type);
     setActiveQueryId(hostQueryId);
     setError(null);
-  }
-
-  function applyJoin() {
-    if (!activeQueryId) return;
-    applyJoinTo(activeQueryId, joinRightId, joinKey, joinType);
   }
 
   function connectJoinOnCanvas(rightQueryId: string, hostQueryId: string) {
@@ -775,31 +795,56 @@ function App() {
     [],
   );
 
-  function applyAppend() {
-    if (!appendOtherId) return;
-    if (appendOtherId === activeQueryId) {
-      setError("Cannot append a query to itself");
-      return;
-    }
-    updateActiveSteps((steps) => {
-      const without = steps.filter((s) => s.type !== "Append");
-      return [
-        ...without,
-        {
-          type: "Append",
-          payload: { other_query_ids: [appendOtherId] },
-        },
-      ];
-    });
-    setError(null);
-  }
-
   function removeStepAt(index: number) {
     updateActiveSteps((steps) => steps.filter((_, i) => i !== index));
+    setSelectedStepIndex((prev) => {
+      if (prev === null) return null;
+      if (prev === index) return Math.max(0, index - 1);
+      if (prev > index) return prev - 1;
+      return prev;
+    });
+  }
+
+  function moveStepAt(index: number, dir: -1 | 1) {
+    const j = index + dir;
+    updateActiveSteps((steps) => {
+      if (j < 0 || j >= steps.length) return steps;
+      const root = (s: TransformationStep) =>
+        s.type === "LoadCsv" ||
+        s.type === "LoadParquet" ||
+        s.type === "LoadPostgres" ||
+        s.type === "FromQuery";
+      if (index === 0 && root(steps[0]!)) return steps;
+      if (j === 0 && root(steps[0]!) && index === 1) return steps;
+      const next = [...steps];
+      const a = next[index]!;
+      const b = next[j]!;
+      next[index] = b;
+      next[j] = a;
+      return next;
+    });
+    setSelectedStepIndex(j);
+  }
+
+  function replaceStepAt(index: number, step: TransformationStep) {
+    updateActiveSteps((steps) =>
+      steps.map((s, i) => (i === index ? step : s)),
+    );
   }
 
   function appendStep(step: TransformationStep) {
-    updateActiveSteps((steps) => [...steps, step]);
+    updateActiveSteps((steps) => {
+      const next = [...steps, step];
+      setSelectedStepIndex(next.length - 1);
+      loadStepIntoEditor(step);
+      return next;
+    });
+  }
+
+  function selectStepAt(index: number) {
+    setSelectedStepIndex(index);
+    const step = activeQuery?.steps[index];
+    loadStepIntoEditor(step);
   }
 
   async function handleSaveProject() {
@@ -967,34 +1012,138 @@ function App() {
 
   const otherQueries = queries.filter((q) => q.id !== activeQueryId);
   const empty = queries.length === 0;
-  const activeJoin = activeQuery?.steps.find((s) => s.type === "Join");
-  const activeAppend = activeQuery?.steps.find((s) => s.type === "Append");
-  const activeSelect = activeQuery?.steps.find((s) => s.type === "SelectColumns");
-  const activeGroup = activeQuery?.steps.find((s) => s.type === "GroupBy");
-  const joinRightName =
-    otherQueries.find((q) => q.id === joinRightId)?.name ??
-    queries.find((q) => q.id === joinRightId)?.name ??
-    (joinRightId || null);
+  const selectedStep =
+    activeQuery &&
+    selectedStepIndex !== null &&
+    activeQuery.steps[selectedStepIndex]
+      ? activeQuery.steps[selectedStepIndex]
+      : null;
+
   /** Columns to pick from — prefer live preview of the active/focus query. */
   const columnChoices = useMemo(() => {
     const fromPreview =
-      preview &&
-      (activeQueryId === focusQueryId || !focusQueryId) &&
-      preview.columns.length > 0
+      preview && preview.columns.length > 0
         ? preview.columns.map((c) => c.name)
         : [];
     const fromStep =
-      activeSelect && activeSelect.type === "SelectColumns"
-        ? activeSelect.payload.columns
+      selectedStep?.type === "SelectColumns"
+        ? selectedStep.payload.columns
         : [];
     return [...new Set([...fromPreview, ...fromStep, ...selectedColumns])];
-  }, [
-    preview,
-    activeQueryId,
-    focusQueryId,
-    activeSelect,
-    selectedColumns,
-  ]);
+  }, [preview, selectedStep, selectedColumns]);
+
+  function addAvailableStep(kind: string) {
+    if (!activeQuery) return;
+    const peer = otherQueries[0]?.id ?? "";
+    switch (kind) {
+      case "Filter":
+        appendStep({ type: "Filter", payload: { condition: "" } });
+        break;
+      case "SelectColumns":
+        appendStep({
+          type: "SelectColumns",
+          payload: { columns: columnChoices.slice(0, 5) },
+        });
+        break;
+      case "GroupBy":
+        appendStep({
+          type: "GroupBy",
+          payload: {
+            dimensions: columnChoices[0] ? [columnChoices[0]] : ["region"],
+            aggregates: ["count(*) as n"],
+          },
+        });
+        break;
+      case "Join":
+        if (!peer) {
+          setError("Need another query to Join");
+          return;
+        }
+        appendStep({
+          type: "Join",
+          payload: {
+            right_query_id: peer,
+            join_type: "inner",
+            left_on: [joinKey || "id"],
+            right_on: [joinKey || "id"],
+          },
+        });
+        break;
+      case "Append":
+        if (!peer) {
+          setError("Need another query to Append");
+          return;
+        }
+        appendStep({
+          type: "Append",
+          payload: { other_query_ids: [peer] },
+        });
+        break;
+      case "SortBy":
+        appendStep({
+          type: "SortBy",
+          payload: {
+            column: columnChoices[0] ?? "qty",
+            descending: true,
+          },
+        });
+        break;
+      case "Limit":
+        appendStep({ type: "Limit", payload: { n: 10 } });
+        break;
+      case "RenameColumn":
+        appendStep({
+          type: "RenameColumn",
+          payload: {
+            from: columnChoices[0] ?? "col",
+            to: "renamed",
+          },
+        });
+        break;
+      case "DeriveColumn":
+        appendStep({
+          type: "DeriveColumn",
+          payload: { name: "derived", expression: "1" },
+        });
+        break;
+      case "FromQuery":
+        if (!peer) {
+          setError("Need another query for FromQuery");
+          return;
+        }
+        // FromQuery must be first — only if query empty or replace? append only if empty root
+        if (activeQuery.steps.length > 0) {
+          setError("FromQuery only as first step — use ↳ on a canvas node");
+          return;
+        }
+        appendStep({
+          type: "FromQuery",
+          payload: { query_id: peer },
+        });
+        break;
+      case "CustomSql":
+        appendStep({
+          type: "CustomSql",
+          payload: { raw_sql: "select * from {{prev_step}}" },
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  const availableSteps: { id: string; label: string }[] = [
+    { id: "Filter", label: "Filter" },
+    { id: "SelectColumns", label: "Columns" },
+    { id: "GroupBy", label: "GroupBy" },
+    { id: "Join", label: "Join" },
+    { id: "Append", label: "Append" },
+    { id: "SortBy", label: "Sort" },
+    { id: "Limit", label: "Limit" },
+    { id: "RenameColumn", label: "Rename" },
+    { id: "DeriveColumn", label: "Derived/Calculated" },
+    { id: "CustomSql", label: "SQL" },
+  ];
 
   return (
     <div className="flex h-screen flex-col text-slate-100">
@@ -1296,9 +1445,9 @@ function App() {
             </div>
           </section>
 
-          {/* Inspector */}
+          {/* Inspector: top = step order, bottom = edit selected step */}
           <aside className="hidden min-h-0 flex-col lg:flex">
-            <div className="border-b border-[var(--line)] px-4 py-3">
+            <div className="shrink-0 border-b border-[var(--line)] px-4 py-3">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="truncate text-sm font-semibold text-slate-100">
                   {activeQuery?.name ?? "Select a query"}
@@ -1314,279 +1463,445 @@ function App() {
                 )}
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
-              {selectedSource?.kind === "postgres" && (
+            {selectedSource?.kind === "postgres" && (
+              <div className="max-h-28 shrink-0 overflow-auto border-b border-[var(--line)] px-4 py-2">
                 <SourceSchemaPanel
                   source={selectedSource}
                   columns={sourceColumns}
                   loading={sourceSchemaLoading}
                   error={sourceSchemaError}
                 />
-              )}
-              <History
-                steps={activeQuery?.steps ?? []}
-                queryNames={Object.fromEntries(queries.map((q) => [q.id, q.name]))}
-                onRemoveAt={removeStepAt}
-              />
-              <div className="mt-4 space-y-4">
-                <p className="text-[11px] leading-relaxed text-slate-500">
-                  Steps are edited here for the selected query (right panel).
-                  Enter / Apply adds them to Applied steps above.
-                </p>
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    Filter
-                  </label>
-                  <input
-                    type="text"
-                    value={filterCondition}
-                    onChange={(e) => setFilterCondition(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && applyFilter()}
-                    disabled={!activeQuery}
-                    placeholder="amount > 1000"
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                  />
-                  <button
-                    type="button"
-                    onClick={applyFilter}
-                    disabled={!activeQuery}
-                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                  >
-                    {filterCondition.trim() ? "Apply Filter" : "Clear Filter"}
-                  </button>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    Columns
-                  </label>
-                  {columnChoices.length === 0 ? (
-                    <p className="mb-1 text-[11px] text-slate-600">
-                      Run preview (set focus) to list columns, or type names
-                      below.
-                    </p>
-                  ) : (
-                    <ul className="mb-1 max-h-36 space-y-0.5 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
-                      {columnChoices.map((name) => {
-                        const checked = selectedColumns.includes(name);
-                        return (
-                          <li key={name}>
-                            <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-200 hover:bg-slate-900">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleColumn(name)}
-                                disabled={!activeQuery}
-                                className="rounded border-slate-600"
-                              />
-                              <span className="font-mono">{name}</span>
-                            </label>
-                          </li>
-                        );
-                      })}
-                    </ul>
+              </div>
+            )}
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex min-h-0 flex-[1_1_50%] flex-col border-b border-[var(--line)] px-3 py-2">
+                <History
+                  steps={activeQuery?.steps ?? []}
+                  queryNames={Object.fromEntries(
+                    queries.map((q) => [q.id, q.name]),
                   )}
-                  <input
-                    type="text"
-                    value={selectedColumns.join(", ")}
-                    onChange={(e) =>
-                      setSelectedColumns(
-                        e.target.value
-                          .split(",")
-                          .map((s) => s.trim())
-                          .filter(Boolean),
-                      )
-                    }
-                    disabled={!activeQuery}
-                    placeholder="or type: date, region, amount"
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                  />
-                  <button
-                    type="button"
-                    onClick={applySelectColumns}
-                    disabled={!activeQuery}
-                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                  >
-                    {selectedColumns.length > 0
-                      ? activeSelect
-                        ? "Update Columns"
-                        : "Apply Columns"
-                      : "Clear Columns"}
-                  </button>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    GroupBy
-                  </label>
-                  {activeGroup && activeGroup.type === "GroupBy" && (
-                    <p className="mb-2 rounded-md border border-teal-900/40 bg-teal-950/30 px-2 py-1.5 font-mono text-[11px] text-teal-200/90">
-                      Applied: {activeGroup.payload.dimensions.join(", ")} ·{" "}
-                      {activeGroup.payload.aggregates.join(", ")}
-                    </p>
-                  )}
-                  <input
-                    type="text"
-                    value={groupDims}
-                    onChange={(e) => setGroupDims(e.target.value)}
-                    disabled={!activeQuery}
-                    placeholder="dimensions: region, date"
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                  />
-                  <input
-                    type="text"
-                    value={groupAggs}
-                    onChange={(e) => setGroupAggs(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && applyGroupBy()}
-                    disabled={!activeQuery}
-                    placeholder="aggregates: sum(qty) as qty"
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => applyGroupBy()}
-                    disabled={!activeQuery}
-                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                  >
-                    {groupDims.trim() && groupAggs.trim()
-                      ? activeGroup
-                        ? "Update GroupBy"
-                        : "Apply GroupBy"
-                      : "Clear GroupBy"}
-                  </button>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    Join
-                  </label>
-                  {activeJoin && activeJoin.type === "Join" && (
-                    <p className="mb-2 rounded-md border border-teal-900/40 bg-teal-950/30 px-2 py-1.5 font-mono text-[11px] text-teal-200/90">
-                      Applied: {activeJoin.payload.join_type} ⋈{" "}
-                      {queries.find(
-                        (q) => q.id === activeJoin.payload.right_query_id,
-                      )?.name ?? activeJoin.payload.right_query_id}{" "}
-                      ON {activeJoin.payload.left_on.join(", ")}
-                    </p>
-                  )}
-                  <select
-                    value={joinRightId}
-                    onChange={(e) => setJoinRightId(e.target.value)}
-                    disabled={!activeQuery || otherQueries.length === 0}
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                  >
-                    <option value="">right query…</option>
-                    {otherQueries.map((q) => (
-                      <option key={q.id} value={q.id}>
-                        {q.name}
-                      </option>
-                    ))}
-                  </select>
-                  {joinRightId && !otherQueries.some((q) => q.id === joinRightId) && (
-                    <p className="mb-1 text-[11px] text-amber-400/90">
-                      Right query “{joinRightName}” missing from workspace
-                    </p>
-                  )}
-                  <div className="mb-1 flex gap-1">
-                    <select
-                      value={joinType}
-                      onChange={(e) => setJoinType(e.target.value as JoinType)}
-                      disabled={!activeQuery}
-                      className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                    >
-                      <option value="inner">inner</option>
-                      <option value="left">left</option>
-                      <option value="right">right</option>
-                      <option value="full">full</option>
-                    </select>
-                    <input
-                      value={joinKey}
-                      onChange={(e) => setJoinKey(e.target.value)}
-                      disabled={!activeQuery}
-                      placeholder="join key"
-                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={applyJoin}
-                    disabled={!activeQuery || !joinRightId || !joinKey.trim()}
-                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                  >
-                    {activeJoin ? "Update Join" : "Apply Join"}
-                  </button>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    Append
-                  </label>
-                  {activeAppend && activeAppend.type === "Append" && (
-                    <p className="mb-2 rounded-md border border-teal-900/40 bg-teal-950/30 px-2 py-1.5 font-mono text-[11px] text-teal-200/90">
-                      Applied: ∪{" "}
-                      {activeAppend.payload.other_query_ids
-                        .map(
-                          (id) =>
-                            queries.find((q) => q.id === id)?.name ?? id,
-                        )
-                        .join(", ")}
-                    </p>
-                  )}
-                  <select
-                    value={appendOtherId}
-                    onChange={(e) => setAppendOtherId(e.target.value)}
-                    disabled={!activeQuery || otherQueries.length === 0}
-                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
-                  >
-                    <option value="">other query…</option>
-                    {otherQueries.map((q) => (
-                      <option key={q.id} value={q.id}>
-                        {q.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={applyAppend}
-                    disabled={!activeQuery || !appendOtherId}
-                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                  >
-                    {activeAppend ? "Update Append" : "Apply Append"}
-                  </button>
-                </div>
-                <StepPalette
-                  disabled={!activeQuery}
-                  columnChoices={columnChoices}
-                  onAddRename={(from, to) =>
-                    appendStep({
-                      type: "RenameColumn",
-                      payload: { from, to },
-                    })
-                  }
-                  onAddDerive={(name, expression) =>
-                    appendStep({
-                      type: "DeriveColumn",
-                      payload: { name, expression },
-                    })
-                  }
-                  onAddGroupBy={(dimensions, aggregates) =>
-                    applyGroupBy(dimensions.join(", "), aggregates.join(", "))
-                  }
-                  onAddSort={(column, descending) =>
-                    appendStep({
-                      type: "SortBy",
-                      payload: { column, descending },
-                    })
-                  }
-                  onAddLimit={(n) =>
-                    appendStep({
-                      type: "Limit",
-                      payload: { n },
-                    })
-                  }
-                  onAddCustomSql={(raw_sql) =>
-                    appendStep({
-                      type: "CustomSql",
-                      payload: { raw_sql },
-                    })
-                  }
+                  selectedIndex={selectedStepIndex}
+                  onSelect={selectStepAt}
+                  onRemoveAt={removeStepAt}
+                  onMove={moveStepAt}
                 />
+              </div>
+              <div className="flex min-h-0 flex-[1_1_50%] flex-col overflow-auto px-3 py-2">
+                <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                  {selectedStep
+                    ? `Edit · s${selectedStepIndex} ${selectedStep.type}`
+                    : "Step editor"}
+                </h3>
+                {!activeQuery ? (
+                  <p className="text-sm text-slate-600">Select a query.</p>
+                ) : selectedStepIndex === null || !selectedStep ? (
+                  <p className="mb-3 text-[11px] text-slate-500">
+                    Select a step above, or add one below.
+                  </p>
+                ) : (
+                  <div className="mb-3 space-y-2">
+                    {(selectedStep.type === "LoadCsv" ||
+                      selectedStep.type === "LoadParquet" ||
+                      selectedStep.type === "LoadPostgres" ||
+                      selectedStep.type === "FromQuery") && (
+                      <p className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2 font-mono text-[11px] text-slate-400">
+                        Source step (pinned at s0). Change via Sources / ↳
+                        FromQuery.
+                      </p>
+                    )}
+                    {selectedStep.type === "Filter" && (
+                      <>
+                        <input
+                          type="text"
+                          value={filterCondition}
+                          onChange={(e) => setFilterCondition(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && selectedStepIndex !== null) {
+                              replaceStepAt(selectedStepIndex, {
+                                type: "Filter",
+                                payload: {
+                                  condition: filterCondition.trim(),
+                                },
+                              });
+                            }
+                          }}
+                          placeholder="amount > 1000"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                        />
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "Filter",
+                              payload: { condition: filterCondition.trim() },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "SelectColumns" && (
+                      <>
+                        {columnChoices.length > 0 && (
+                          <ul className="max-h-28 space-y-0.5 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
+                            {columnChoices.map((name) => {
+                              const checked = selectedColumns.includes(name);
+                              return (
+                                <li key={name}>
+                                  <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-200 hover:bg-slate-900">
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={() => toggleColumn(name)}
+                                      className="rounded border-slate-600"
+                                    />
+                                    <span className="font-mono">{name}</span>
+                                  </label>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                        <input
+                          type="text"
+                          value={selectedColumns.join(", ")}
+                          onChange={(e) =>
+                            setSelectedColumns(
+                              e.target.value
+                                .split(",")
+                                .map((s) => s.trim())
+                                .filter(Boolean),
+                            )
+                          }
+                          placeholder="date, region, amount"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                        />
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "SelectColumns",
+                              payload: { columns: [...selectedColumns] },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "GroupBy" && (
+                      <>
+                        <input
+                          type="text"
+                          value={groupDims}
+                          onChange={(e) => setGroupDims(e.target.value)}
+                          placeholder="dimensions: region"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                        />
+                        <input
+                          type="text"
+                          value={groupAggs}
+                          onChange={(e) => setGroupAggs(e.target.value)}
+                          placeholder="sum(qty) as qty"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                        />
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            const dimensions = groupDims
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter(Boolean);
+                            const aggregates = groupAggs
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter(Boolean);
+                            if (!dimensions.length || !aggregates.length) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "GroupBy",
+                              payload: { dimensions, aggregates },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "Join" && (
+                      <>
+                        <select
+                          value={joinRightId}
+                          onChange={(e) => setJoinRightId(e.target.value)}
+                          disabled={otherQueries.length === 0}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                        >
+                          <option value="">right query…</option>
+                          {otherQueries.map((q) => (
+                            <option key={q.id} value={q.id}>
+                              {q.name}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="flex gap-1">
+                          <select
+                            value={joinType}
+                            onChange={(e) =>
+                              setJoinType(e.target.value as JoinType)
+                            }
+                            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                          >
+                            <option value="inner">inner</option>
+                            <option value="left">left</option>
+                            <option value="right">right</option>
+                            <option value="full">full</option>
+                          </select>
+                          <input
+                            value={joinKey}
+                            onChange={(e) => setJoinKey(e.target.value)}
+                            placeholder="join key"
+                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!joinRightId || !joinKey.trim()}
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            const k = joinKey.trim();
+                            replaceStepAt(selectedStepIndex, {
+                              type: "Join",
+                              payload: {
+                                right_query_id: joinRightId,
+                                join_type: joinType,
+                                left_on: [k],
+                                right_on: [k],
+                              },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "Append" && (
+                      <>
+                        <select
+                          value={appendOtherId}
+                          onChange={(e) => setAppendOtherId(e.target.value)}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
+                        >
+                          <option value="">other query…</option>
+                          {otherQueries.map((q) => (
+                            <option key={q.id} value={q.id}>
+                              {q.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!appendOtherId}
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          onClick={() => {
+                            if (selectedStepIndex === null || !appendOtherId)
+                              return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "Append",
+                              payload: { other_query_ids: [appendOtherId] },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "SortBy" && (
+                      <>
+                        <div className="flex gap-1">
+                          <input
+                            list="inspector-cols"
+                            value={sortCol}
+                            onChange={(e) => setSortCol(e.target.value)}
+                            placeholder="column"
+                            className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                          />
+                          <label className="flex items-center gap-1 rounded-lg border border-slate-700 px-2 text-[11px] text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={sortDesc}
+                              onChange={(e) => setSortDesc(e.target.checked)}
+                            />
+                            desc
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!sortCol.trim()}
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "SortBy",
+                              payload: {
+                                column: sortCol.trim(),
+                                descending: sortDesc,
+                              },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "Limit" && (
+                      <>
+                        <input
+                          type="number"
+                          min={1}
+                          value={limitN}
+                          onChange={(e) => setLimitN(e.target.value)}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            const n = Number.parseInt(limitN, 10);
+                            if (!Number.isFinite(n) || n < 1) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "Limit",
+                              payload: { n },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "RenameColumn" && (
+                      <>
+                        <input
+                          value={renameFrom}
+                          onChange={(e) => setRenameFrom(e.target.value)}
+                          placeholder="from"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                        />
+                        <input
+                          value={renameTo}
+                          onChange={(e) => setRenameTo(e.target.value)}
+                          placeholder="to"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          disabled={!renameFrom.trim() || !renameTo.trim()}
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "RenameColumn",
+                              payload: {
+                                from: renameFrom.trim(),
+                                to: renameTo.trim(),
+                              },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "DeriveColumn" && (
+                      <>
+                        <input
+                          value={deriveName}
+                          onChange={(e) => setDeriveName(e.target.value)}
+                          placeholder="name"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                        />
+                        <input
+                          value={deriveExpr}
+                          onChange={(e) => setDeriveExpr(e.target.value)}
+                          placeholder="expression"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          disabled={!deriveName.trim() || !deriveExpr.trim()}
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "DeriveColumn",
+                              payload: {
+                                name: deriveName.trim(),
+                                expression: deriveExpr.trim(),
+                              },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "CustomSql" && (
+                      <>
+                        <textarea
+                          value={customSql}
+                          onChange={(e) => setCustomSql(e.target.value)}
+                          rows={4}
+                          spellCheck={false}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
+                        />
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            if (selectedStepIndex === null) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "CustomSql",
+                              payload: { raw_sql: customSql.trim() },
+                            });
+                          }}
+                        >
+                          Apply
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+                <datalist id="inspector-cols">
+                  {columnChoices.map((c) => (
+                    <option key={c} value={c} />
+                  ))}
+                </datalist>
+                <div className="mt-auto shrink-0 border-t border-slate-800 pt-2">
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    Add step
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {availableSteps.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        disabled={!activeQuery}
+                        title={`Add ${s.label}`}
+                        className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-teal-600/60 hover:bg-teal-500/10 hover:text-teal-200 disabled:opacity-40"
+                        onClick={() => addAvailableStep(s.id)}
+                      >
+                        + {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           </aside>

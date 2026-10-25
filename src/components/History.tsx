@@ -2,90 +2,196 @@ import type { TransformationStep } from "../types/pipeline";
 
 interface HistoryProps {
   steps: TransformationStep[];
-  /** query id → display name (for Join/Append labels) */
+  /** query id → display name (for Join/Append/FromQuery) */
   queryNames?: Record<string, string>;
+  selectedIndex: number | null;
+  onSelect: (index: number) => void;
   onRemoveAt: (index: number) => void;
+  onMove: (index: number, dir: -1 | 1) => void;
 }
 
-function stepLabel(
+function isRootStep(step: TransformationStep): boolean {
+  return (
+    step.type === "LoadCsv" ||
+    step.type === "LoadParquet" ||
+    step.type === "LoadPostgres" ||
+    step.type === "FromQuery"
+  );
+}
+
+/** One-line key props — meaning, not a SQL dump. */
+export function stepSummaryLine(
   step: TransformationStep,
-  index: number,
   queryNames: Record<string, string>,
-): string {
-  const qname = (id: string) => queryNames[id] ?? id;
+): { kind: string; detail: string } {
+  const qname = (id: string) => queryNames[id] ?? id.slice(0, 10);
   switch (step.type) {
     case "LoadCsv":
-      return `LoadCsv · ${step.payload.path.split(/[/\\]/).pop() ?? step.payload.path}`;
+      return {
+        kind: "CSV",
+        detail: step.payload.path.split(/[/\\]/).pop() ?? step.payload.path,
+      };
     case "LoadParquet":
-      return `LoadParquet · ${step.payload.path.split(/[/\\]/).pop() ?? step.payload.path}`;
+      return {
+        kind: "Parquet",
+        detail: step.payload.path.split(/[/\\]/).pop() ?? step.payload.path,
+      };
     case "LoadPostgres":
-      return `LoadPostgres · ${step.payload.schema || "public"}.${step.payload.table_name}`;
+      return {
+        kind: "Postgres",
+        detail: `${step.payload.schema || "public"}.${step.payload.table_name}`,
+      };
     case "FromQuery":
-      return `FromQuery · ${qname(step.payload.query_id)}`;
+      return { kind: "From", detail: qname(step.payload.query_id) };
     case "Filter":
-      return `Filter · ${step.payload.condition || "(empty)"}`;
+      return {
+        kind: "Filter",
+        detail: step.payload.condition.trim() || "…",
+      };
     case "SelectColumns":
-      return `Select · ${step.payload.columns.join(", ")}`;
+      return {
+        kind: "Columns",
+        detail:
+          step.payload.columns.length <= 3
+            ? step.payload.columns.join(", ")
+            : `${step.payload.columns.length} cols`,
+      };
     case "RenameColumn":
-      return `Rename · ${step.payload.from} → ${step.payload.to}`;
+      return {
+        kind: "Rename",
+        detail: `${step.payload.from} → ${step.payload.to}`,
+      };
     case "DeriveColumn":
-      return `Derive · ${step.payload.name}`;
+      return { kind: "Derived/Calc", detail: step.payload.name };
     case "GroupBy":
-      return `GroupBy · ${step.payload.dimensions.join(", ")}`;
+      return {
+        kind: "GroupBy",
+        detail: `${step.payload.dimensions.join(", ")} · ${step.payload.aggregates.length} agg`,
+      };
     case "SortBy":
-      return `Sort · ${step.payload.column}`;
+      return {
+        kind: "Sort",
+        detail: `${step.payload.column} ${step.payload.descending ? "↓" : "↑"}`,
+      };
     case "Limit":
-      return `Limit · ${step.payload.n}`;
+      return { kind: "Limit", detail: String(step.payload.n) };
     case "Join":
-      return `Join ${step.payload.join_type} · ${qname(step.payload.right_query_id)} ON ${step.payload.left_on.join(",")}`;
+      return {
+        kind: `Join ${step.payload.join_type}`,
+        detail: `${qname(step.payload.right_query_id)} on ${step.payload.left_on.join(",")}`,
+      };
     case "Append":
-      return `Append · ${step.payload.other_query_ids.map(qname).join(", ")}`;
+      return {
+        kind: "Append",
+        detail: step.payload.other_query_ids.map(qname).join(", "),
+      };
     case "CustomSql":
-      return "CustomSql";
+      return { kind: "SQL", detail: "custom" };
     default:
-      return `Step ${index}`;
+      return { kind: "Step", detail: "" };
   }
 }
 
-export function History({ steps, queryNames = {}, onRemoveAt }: HistoryProps) {
+export function History({
+  steps,
+  queryNames = {},
+  selectedIndex,
+  onSelect,
+  onRemoveAt,
+  onMove,
+}: HistoryProps) {
   return (
-    <div>
-      <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+    <div className="flex h-full min-h-0 flex-col">
+      <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
         Applied steps
       </h3>
       {steps.length === 0 ? (
-        <p className="text-sm text-slate-600">No steps in this query.</p>
+        <p className="text-sm text-slate-600">No steps — add below.</p>
       ) : (
-        <ol className="flex flex-col gap-1.5">
-          {steps.map((step, index) => (
-            <li
-              key={`${step.type}-${index}`}
-              className="rounded-lg border border-[var(--line)] bg-slate-950/50 px-2.5 py-2"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-[9px] uppercase tracking-wide text-teal-500/70">
+        <ol className="min-h-0 flex-1 space-y-0.5 overflow-auto">
+          {steps.map((step, index) => {
+            const { kind, detail } = stepSummaryLine(step, queryNames);
+            const selected = selectedIndex === index;
+            const root = isRootStep(step);
+            // Keep Load*/FromQuery pinned at s0.
+            const moveUpOk =
+              index > 0 && !(index === 1 && isRootStep(steps[0]!));
+            const moveDownOk =
+              index < steps.length - 1 && !(index === 0 && root);
+
+            return (
+              <li key={`${step.type}-${index}`}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onSelect(index)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelect(index);
+                    }
+                  }}
+                  className={`flex w-full cursor-pointer items-center gap-1 rounded-md border px-1.5 py-1 text-left transition ${
+                    selected
+                      ? "border-teal-500/50 bg-teal-500/10"
+                      : "border-transparent hover:border-[var(--line)] hover:bg-slate-900/80"
+                  }`}
+                >
+                  <span className="w-5 shrink-0 font-mono text-[10px] text-slate-600">
                     s{index}
-                  </div>
-                  <div className="mt-0.5 text-sm text-slate-200">
-                    {stepLabel(step, index, queryNames)}
-                  </div>
-                </div>
-                {step.type !== "LoadCsv" &&
-                  step.type !== "LoadParquet" &&
-                  step.type !== "LoadPostgres" &&
-                  step.type !== "FromQuery" && (
+                  </span>
+                  <span className="w-[4.5rem] shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-teal-500/90">
+                    {kind}
+                  </span>
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300"
+                    title={detail}
+                  >
+                    {detail}
+                  </span>
+                  <div className="flex shrink-0 items-center gap-0.5">
                     <button
                       type="button"
-                      onClick={() => onRemoveAt(index)}
-                      className="text-[11px] text-slate-600 hover:text-rose-400"
+                      title="Move up"
+                      disabled={!moveUpOk}
+                      className="rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-teal-300 disabled:opacity-20"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMove(index, -1);
+                      }}
                     >
-                      remove
+                      ↑
                     </button>
-                  )}
-              </div>
-            </li>
-          ))}
+                    <button
+                      type="button"
+                      title="Move down"
+                      disabled={!moveDownOk}
+                      className="rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-teal-300 disabled:opacity-20"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMove(index, 1);
+                      }}
+                    >
+                      ↓
+                    </button>
+                    {!root && (
+                      <button
+                        type="button"
+                        title="Remove"
+                        className="rounded px-1 text-[10px] text-slate-600 hover:text-rose-400"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemoveAt(index);
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

@@ -21,7 +21,7 @@ interface StepPaletteProps {
 
 const KINDS: { id: PaletteStepKind; label: string }[] = [
   { id: "RenameColumn", label: "Rename" },
-  { id: "DeriveColumn", label: "Derive" },
+  { id: "DeriveColumn", label: "Derived/Calculated" },
   { id: "GroupBy", label: "GroupBy" },
   { id: "SortBy", label: "Sort" },
   { id: "Limit", label: "Limit" },

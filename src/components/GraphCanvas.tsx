@@ -114,7 +114,7 @@ function shortStepLabel(step: TransformationStep, index: number): string {
     case "RenameColumn":
       return `s${index} Rename`;
     case "DeriveColumn":
-      return `s${index} Derive`;
+      return `s${index} Derived/Calc`;
     case "GroupBy":
       return `s${index} GroupBy`;
     case "SortBy":
@@ -144,7 +144,7 @@ function stepSummary(q: QueryDef): string {
         case "RenameColumn":
           return "Rename";
         case "DeriveColumn":
-          return "Derive";
+          return "Derived/Calc";
         case "GroupBy":
           return "Group";
         case "SortBy":

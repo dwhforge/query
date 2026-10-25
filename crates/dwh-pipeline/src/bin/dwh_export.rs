@@ -87,6 +87,7 @@ fn main() {
             &project.workspace,
             &output_dir,
             target,
+            project.target_dialect,
         )
         .unwrap_or_else(|e| {
             eprintln!("export failed: {e}");

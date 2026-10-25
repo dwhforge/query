@@ -44,12 +44,14 @@ fn main() {
                     id: "right".into(),
                     name: "right".into(),
                     steps: vec![TransformationStep::LoadCsv { path: right }],
-                },
+                 execution: Default::default(),
+},
                 QueryDef {
                     id: "left".into(),
                     name: "left".into(),
                     steps: fact_steps,
-                },
+                 execution: Default::default(),
+},
             ],
             focus_query_id: "left".into(),
         };

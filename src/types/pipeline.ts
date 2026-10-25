@@ -79,11 +79,19 @@ export type TransformationStep =
   | { type: "Append"; payload: { other_query_ids: string[] } }
   | { type: "CustomSql"; payload: { raw_sql: string } };
 
+/** Preview engine for this Query node only (ADR-0014). */
+export type QueryExecution = "local" | "target";
+
+/** Warehouse dialect for dbt export + `execution=target` preview. */
+export type WarehouseDialect = "duckdb" | "postgres";
+
 export interface QueryDef {
   id: string;
   name: string;
   steps: TransformationStep[];
   source_id?: string;
+  /** Default `local` (DuckDB). */
+  execution?: QueryExecution;
 }
 
 export interface Workspace {
@@ -121,7 +129,12 @@ export interface Project {
   connections: ConnectionDef[];
   sources: SourceDef[];
   workspace: Workspace;
+  /** dbt Core line (v1/v2) — not warehouse dialect. */
   dbt_target: "v1" | "v2";
+  /** Export emit + target preview dialect (ADR-0014). */
+  target_dialect?: WarehouseDialect;
+  /** Postgres connection when `target_dialect=postgres`. */
+  target_connection_id?: string;
   last_dbt_export_path?: string;
   canvas?: CanvasLayout;
 }
@@ -170,7 +183,16 @@ export function emptyProject(name = "Untitled"): Project {
     sources: [],
     workspace: { queries: [], focus_query_id: "" },
     dbt_target: "v1",
+    target_dialect: "duckdb",
   };
+}
+
+export function queryExecution(q: QueryDef): QueryExecution {
+  return q.execution ?? "local";
+}
+
+export function projectDialect(p: Project): WarehouseDialect {
+  return p.target_dialect ?? "duckdb";
 }
 
 export function connectionById(

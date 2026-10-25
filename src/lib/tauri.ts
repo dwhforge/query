@@ -4,6 +4,7 @@ import type {
   PreviewResult,
   Project,
   TransformationStep,
+  WarehouseDialect,
   Workspace,
 } from "../types/pipeline";
 
@@ -26,10 +27,12 @@ export type PreviewDbtModel = {
 export function previewDbtModel(
   workspace: Workspace,
   queryId: string,
+  targetDialect: WarehouseDialect = "duckdb",
 ): Promise<PreviewDbtModel> {
   return invoke<PreviewDbtModel>("preview_dbt_model", {
     workspace,
     queryId,
+    targetDialect,
   });
 }
 
@@ -51,12 +54,14 @@ export function exportDbt(
   workspace: Workspace,
   outputDir: string,
   dbtTarget: DbtTarget = "v1",
+  targetDialect: WarehouseDialect = "duckdb",
 ): Promise<ExportResult> {
   return invoke<ExportResult>("export_dbt", {
     pipelineName,
     workspace,
     outputDir,
     dbtTarget,
+    targetDialect,
   });
 }
 

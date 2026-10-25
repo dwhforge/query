@@ -150,7 +150,8 @@ mod tests {
                     steps: vec![TransformationStep::LoadCsv {
                         path: "o.csv".into(),
                     }],
-                },
+                 execution: Default::default(),
+},
                 QueryDef {
                     id: "joined".into(),
                     name: "joined".into(),
@@ -165,7 +166,8 @@ mod tests {
                             right_on: vec!["id".into()],
                         },
                     ],
-                },
+                 execution: Default::default(),
+},
             ],
             focus_query_id: "joined".into(),
         };

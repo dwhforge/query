@@ -1,3 +1,6 @@
+use crate::dialect::{
+    sql_rename_column, validate_target_execution, workspace_needs_s3_landing, WarehouseDialect,
+};
 use crate::graph::{direct_deps, sanitize_id, topo_queries};
 use crate::model::{JoinType, TransformationStep, Workspace};
 use crate::producers::{DbtTarget, OutputProducer};
@@ -15,12 +18,35 @@ impl OutputProducer for DbtProducer {
         workspace: &Workspace,
         output_dir: &str,
         target: DbtTarget,
+        dialect: WarehouseDialect,
     ) -> Result<String, String> {
         if matches!(target, DbtTarget::V2) {
             return Err(
                 "dbt v2 export is reserved (ADR-0006) but not implemented yet. Use dbt_target: v1."
                     .into(),
             );
+        }
+
+        if dialect == WarehouseDialect::Postgres {
+            if workspace_needs_s3_landing(&workspace.queries)
+                || workspace.queries.iter().any(|q| {
+                    q.steps.iter().any(|s| {
+                        matches!(
+                            s,
+                            TransformationStep::LoadCsv { .. }
+                                | TransformationStep::LoadParquet { .. }
+                        )
+                    })
+                })
+            {
+                return Err(
+                    "target_dialect=postgres: file/S3 sources need landing into Postgres before dbt export (ADR-0014). Use target_dialect=duckdb for live file reads, or land data first."
+                        .into(),
+                );
+            }
+            for q in &workspace.queries {
+                validate_target_execution(q, dialect)?;
+            }
         }
 
         let root = Path::new(output_dir).join(pipeline_name);
@@ -55,12 +81,15 @@ impl OutputProducer for DbtProducer {
             ),
         )?;
 
-        write_file(
-            &root.join("profiles.yml.example"),
-            &format!(
+        let profiles = match dialect {
+            WarehouseDialect::Duckdb => format!(
                 "{pipeline_name}:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: 'local.duckdb'\n      threads: 4\n"
             ),
-        )?;
+            WarehouseDialect::Postgres => format!(
+                "{pipeline_name}:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      host: localhost\n      user: USER\n      password: PASS\n      port: 5432\n      dbname: DB\n      schema: analytics\n      threads: 4\n"
+            ),
+        };
+        write_file(&root.join("profiles.yml.example"), &profiles)?;
 
         let order = topo_queries(workspace)?;
         let mut model_name_by_query: std::collections::HashMap<String, String> =
@@ -83,7 +112,7 @@ impl OutputProducer for DbtProducer {
                 };
                 (folder, name)
             };
-            let sql = compile_query_as_dbt_model(query, &model_name_by_query)?;
+            let sql = compile_query_as_dbt_model(query, &model_name_by_query, dialect)?;
             write_file(&folder.join(format!("{model_name}.sql")), &sql)?;
             model_name_by_query.insert(qid.clone(), model_name);
 
@@ -163,12 +192,13 @@ pub fn dbt_model_names(workspace: &Workspace) -> Result<std::collections::HashMa
 pub fn preview_dbt_model_sql(
     workspace: &Workspace,
     query_id: &str,
+    dialect: WarehouseDialect,
 ) -> Result<PreviewDbtModel, String> {
     let query = workspace
         .query(query_id)
         .ok_or_else(|| format!("query '{query_id}' not found"))?;
     let names = dbt_model_names(workspace)?;
-    let sql = compile_query_as_dbt_model(query, &names)?;
+    let sql = compile_query_as_dbt_model(query, &names, dialect)?;
     let model_name = names
         .get(query_id)
         .cloned()
@@ -190,6 +220,7 @@ pub struct PreviewDbtModel {
 fn compile_query_as_dbt_model(
     query: &crate::model::QueryDef,
     models: &std::collections::HashMap<String, String>,
+    dialect: WarehouseDialect,
 ) -> Result<String, String> {
     // v1: collapse query into one model SQL (WITH inside file) using ref() for deps.
     if query.steps.is_empty() {
@@ -304,12 +335,9 @@ fn compile_query_as_dbt_model(
                     .join(", ");
                 format!("select {cols} from {prev}")
             }
-            TransformationStep::RenameColumn { from, to } => format!(
-                "select * exclude ({}) , {} as {} from {prev}",
-                quote_ident(from),
-                quote_ident(from),
-                quote_ident(to)
-            ),
+            TransformationStep::RenameColumn { from, to } => {
+                sql_rename_column(dialect, &prev, from, to)?
+            }
             TransformationStep::DeriveColumn { name, expression } => format!(
                 "select *, ({expression}) as {} from {prev}",
                 quote_ident(name)
@@ -384,16 +412,22 @@ fn compile_query_as_dbt_model(
                 }
             }
             TransformationStep::Append { other_query_ids } => {
-                let mut sql = format!("select * from {prev}");
+                let mut acc = format!("select * from {prev}");
                 for oid in other_query_ids {
                     let m = models
                         .get(oid)
                         .ok_or_else(|| format!("dbt Append: missing '{oid}'"))?;
-                    sql.push_str(&format!(
-                        " union all by name select * from {{{{ ref('{m}') }}}}"
-                    ));
+                    let right = format!("{{{{ ref('{m}') }}}}");
+                    acc = match dialect {
+                        WarehouseDialect::Duckdb => {
+                            format!("{acc} union all by name select * from {right}")
+                        }
+                        WarehouseDialect::Postgres => {
+                            format!("{acc} union all select * from {right}")
+                        }
+                    };
                 }
-                sql
+                acc
             }
             TransformationStep::CustomSql { raw_sql } => {
                 let mut sql = raw_sql.replace("{{prev_step}}", &prev);
@@ -452,7 +486,8 @@ mod tests {
                     steps: vec![TransformationStep::LoadCsv {
                         path: "dim.csv".into(),
                     }],
-                },
+                 execution: Default::default(),
+},
                 QueryDef {
                     id: "fact".into(),
                     name: "fact_sales".into(),
@@ -467,13 +502,20 @@ mod tests {
                             right_on: vec!["region".into()],
                         },
                     ],
-                },
+                 execution: Default::default(),
+},
             ],
             focus_query_id: "fact".into(),
         };
 
         let path = DbtProducer
-            .produce("demo", &ws, dir.to_str().unwrap(), DbtTarget::V1)
+            .produce(
+                "demo",
+                &ws,
+                dir.to_str().unwrap(),
+                DbtTarget::V1,
+                WarehouseDialect::Duckdb,
+            )
             .unwrap();
         assert!(Path::new(&path).join("dbt_project.yml").exists());
         let project = std::fs::read_to_string(Path::new(&path).join("dbt_project.yml")).unwrap();
@@ -491,7 +533,13 @@ mod tests {
         .unwrap();
         assert!(mart.contains("ref('stg_dim_region')"));
 
-        let v2 = DbtProducer.produce("demo_v2", &ws, dir.to_str().unwrap(), DbtTarget::V2);
+        let v2 = DbtProducer.produce(
+            "demo_v2",
+            &ws,
+            dir.to_str().unwrap(),
+            DbtTarget::V2,
+            WarehouseDialect::Duckdb,
+        );
         assert!(v2.is_err());
     }
 
@@ -504,7 +552,8 @@ mod tests {
                 steps: vec![TransformationStep::LoadCsv {
                     path: "x.csv".into(),
                 }],
-            }],
+             execution: Default::default(),
+}],
             focus_query_id: "q".into(),
         };
         let q = ws.query("q").unwrap();

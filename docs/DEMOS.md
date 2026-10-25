@@ -55,7 +55,7 @@ Incremental / snapshot / SCD2, tests & docs as first-class, macros/packages, exp
 
 ## Workspaces
 
-Load via EmptyHero **Load demo** or canvas **Demo** links. Command: `load_demo_workspace(name)`.
+Load via EmptyHero **Load demo**, or later **Help → Load demo**. Command: `load_demo_workspace(name)`. Not on the canvas chrome.
 
 ### 1. `sales` — Medallion + fan-out
 

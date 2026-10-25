@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConnectionEditor } from "./components/ConnectionEditor";
+import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
 import {
@@ -36,6 +37,8 @@ import {
   emptyProject,
   newQueryId,
   newSourceId,
+  projectDialect,
+  queryExecution,
   syncSourcesFromQueries,
   type ConnectionDef,
   type ConnectionKind,
@@ -43,8 +46,10 @@ import {
   type PreviewResult,
   type Project,
   type QueryDef,
+  type QueryExecution,
   type SourceDef,
   type TransformationStep,
+  type WarehouseDialect,
   type Workspace,
 } from "./types/pipeline";
 
@@ -152,6 +157,20 @@ function App() {
 
   const runPreview = useCallback(
     async (ws: Workspace, conns: ConnectionDef[]) => {
+      const focus = ws.queries.find((q) => q.id === ws.focus_query_id);
+      const dialect = projectDialect(project);
+      if (
+        focus &&
+        queryExecution(focus) === "target" &&
+        dialect === "postgres"
+      ) {
+        setLoading(false);
+        setPreview(null);
+        setError(
+          `Query "${focus.name}" has execution=target on postgres — native warehouse preview is not wired yet. Set execution=local for DuckDB preview, or wait for target live path (ADR-0014).`,
+        );
+        return;
+      }
       setLoading(true);
       try {
         const result = await previewWorkspace(ws, conns);
@@ -164,7 +183,7 @@ function App() {
         setLoading(false);
       }
     },
-    [],
+    [project],
   );
 
   const debouncedPreview = useMemo(
@@ -188,7 +207,7 @@ function App() {
       return;
     }
     let cancelled = false;
-    void previewDbtModel(project.workspace, id)
+    void previewDbtModel(project.workspace, id, projectDialect(project))
       .then((m) => {
         if (!cancelled) {
           setModelPreview(m);
@@ -210,7 +229,13 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [project.workspace, activeQueryId, focusQueryId, queries.length]);
+  }, [
+    project.workspace,
+    project.target_dialect,
+    activeQueryId,
+    focusQueryId,
+    queries.length,
+  ]);
 
   const syncInspectorFromQuery = useCallback(
     (q: QueryDef | undefined) => {
@@ -1038,6 +1063,23 @@ function App() {
     loadStepIntoEditor(step);
   }
 
+  async function writeProjectTo(path: string) {
+    try {
+      const base =
+        path
+          .split(/[/\\]/)
+          .pop()
+          ?.replace(/\.dwhproj\.json$/i, "")
+          .replace(/\.json$/i, "") ?? project.name;
+      await saveProject(path, { ...project, root_path: path, name: base });
+      setProject((p) => ({ ...p, root_path: path, name: base }));
+      setExportMsg(`Project saved → ${path}`);
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
   async function handleSaveProject() {
     let path = project.root_path;
     if (!path) {
@@ -1049,14 +1091,19 @@ function App() {
       if (typeof picked !== "string") return;
       path = picked;
     }
-    try {
-      await saveProject(path, project);
-      setProject((p) => ({ ...p, root_path: path }));
-      setExportMsg(`Project saved → ${path}`);
-      setError(null);
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    }
+    await writeProjectTo(path);
+  }
+
+  async function handleSaveProjectAs() {
+    const picked =
+      (await save({
+        defaultPath:
+          project.root_path?.split(/[/\\]/).pop() ??
+          `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+        filters: [{ name: "DWH Project", extensions: ["json"] }],
+      })) ?? null;
+    if (typeof picked !== "string") return;
+    await writeProjectTo(picked);
   }
 
   function applyLoadedProject(loaded: Project, pathHint?: string) {
@@ -1137,17 +1184,19 @@ function App() {
     const dir = await open({ directory: true, multiple: false });
     if (typeof dir !== "string") return;
     try {
+      const dialect = projectDialect(project);
       const result = await exportDbt(
         project.name.replace(/\s+/g, "_").toLowerCase() || "dwh_rs_query",
         workspace,
         dir,
         project.dbt_target,
+        dialect,
       );
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
       setTreeExpanded((e) => ({ ...e, export: true }));
       setExportMsg(
-        `dbt ${project.dbt_target} → ${result.path} (${result.files.filter((f) => !f.endsWith("/")).length} files)`,
+        `dbt ${project.dbt_target} · ${dialect} → ${result.path} (${result.files.filter((f) => !f.endsWith("/")).length} files)`,
       );
       setError(null);
     } catch (e) {
@@ -1171,12 +1220,9 @@ function App() {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       const k = e.key.toLowerCase();
-      if (k === "o") {
+      if (k === "o" && !(e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         void addCsvQuery();
-      } else if (k === "s") {
-        e.preventDefault();
-        void handleLoadDemo("sales");
       } else if (k === "e") {
         e.preventDefault();
         void handleExportDbt();
@@ -1363,60 +1409,31 @@ function App() {
     }
   }
 
+  const canCopySql =
+    bottomTab === "model" ? Boolean(modelPreview?.sql) : Boolean(preview?.sql);
+
   return (
     <div className="flex h-screen flex-col text-slate-100">
-      <header className="relative z-10 flex items-center justify-between border-b border-[var(--line)] px-5 py-3 backdrop-blur">
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight text-teal-300">
-            DWH-RS-QUERY
-          </h1>
-          <p className="truncate text-xs text-slate-500">
-            Project · Sources · Queries · visual canvas · dbt export
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => void handleOpenProject()}
-            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-          >
-            Open
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleSaveProject()}
-            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-          >
-            Save
-          </button>
-          <button
-            type="button"
-            onClick={() => setBottomTab("model")}
-            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-            disabled={!modelPreview?.sql}
-          >
-            Model
-          </button>
-          <button
-            type="button"
-            onClick={() => void copySql()}
-            className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-            disabled={
-              bottomTab === "model" ? !modelPreview?.sql : !preview?.sql
-            }
-          >
-            {sqlCopied ? "Copied" : "Copy SQL"}
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleExportDbt()}
-            className="rounded-lg border border-teal-800/80 px-3 py-1.5 text-xs font-medium text-teal-300 hover:bg-teal-950/40"
-            disabled={!workspace}
-          >
-            Export dbt
-          </button>
-        </div>
-      </header>
+      <AppMenu
+        projectName={project.name}
+        projectPath={project.root_path}
+        targetDialect={projectDialect(project)}
+        canExport={Boolean(workspace)}
+        canCopySql={canCopySql}
+        sqlCopied={sqlCopied}
+        onOpen={() => void handleOpenProject()}
+        onSave={() => void handleSaveProject()}
+        onSaveAs={() => void handleSaveProjectAs()}
+        onExport={() => void handleExportDbt()}
+        onViewData={() => setBottomTab("data")}
+        onViewModel={() => setBottomTab("model")}
+        onCopySql={() => void copySql()}
+        onNewConnection={() => openNewConnection("postgres")}
+        onSetTargetDialect={(d: WarehouseDialect) =>
+          setProject((p) => ({ ...p, target_dialect: d }))
+        }
+        onLoadDemo={(id) => void handleLoadDemo(id)}
+      />
 
       <ConnectionEditor
         open={connEditorOpen}
@@ -1505,25 +1522,6 @@ function App() {
               <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Pipeline canvas
               </h2>
-              <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
-                <span className="text-slate-600">Demo</span>
-                {(
-                  [
-                    ["sales", "Sales"],
-                    ["union", "Union"],
-                    ["sql", "SQL"],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => void handleLoadDemo(id)}
-                    className="text-teal-500/90 hover:text-teal-300"
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
             </div>
             <div className="min-h-0 flex-1 px-3 pb-2">
               <GraphCanvas
@@ -1671,6 +1669,46 @@ function App() {
                   </button>
                 )}
               </div>
+              {activeQuery && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wide text-slate-500">
+                    Preview
+                  </span>
+                  {(["local", "target"] as QueryExecution[]).map((ex) => {
+                    const on = queryExecution(activeQuery) === ex;
+                    return (
+                      <button
+                        key={ex}
+                        type="button"
+                        title={
+                          ex === "local"
+                            ? "All steps in DuckDB (default; ≈ dbt-on-duckdb when export→duckdb)"
+                            : `All steps on project warehouse (${projectDialect(project)}); does not spread to other queries`
+                        }
+                        onClick={() =>
+                          setQueries((prev) =>
+                            prev.map((q) =>
+                              q.id === activeQuery.id
+                                ? { ...q, execution: ex }
+                                : q,
+                            ),
+                          )
+                        }
+                        className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                          on
+                            ? "border-teal-600/60 bg-teal-950/40 text-teal-200"
+                            : "border-slate-700 text-slate-400 hover:border-slate-500"
+                        }`}
+                      >
+                        {ex}
+                      </button>
+                    );
+                  })}
+                  <span className="font-mono text-[10px] text-slate-600">
+                    export → {projectDialect(project)}
+                  </span>
+                </div>
+              )}
             </div>
             {selectedSource?.kind === "postgres" && (
               <div className="max-h-28 shrink-0 overflow-auto border-b border-[var(--line)] px-4 py-2">

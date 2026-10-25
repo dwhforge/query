@@ -7,8 +7,8 @@ use dwh_engine::{
 };
 use dwh_pipeline::{
     list_export_tree as walk_export_tree, preview_dbt_model_sql, ConnectionDef, DbtProducer,
-    DbtTarget, ExportResult, GraphCompiler, OutputProducer, PreviewDbtModel, Project, QueryDef,
-    TransformationStep, Workspace,
+    DbtTarget, ExportResult, OutputProducer, PreviewDbtModel, Project, QueryDef,
+    TransformationStep, WarehouseDialect, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -64,8 +64,10 @@ fn preview_workspace(
 fn preview_dbt_model(
     workspace: Workspace,
     query_id: String,
+    target_dialect: Option<WarehouseDialect>,
 ) -> Result<PreviewDbtModel, String> {
-    preview_dbt_model_sql(&workspace, &query_id)
+    let dialect = target_dialect.unwrap_or_default();
+    preview_dbt_model_sql(&workspace, &query_id, dialect)
 }
 
 #[tauri::command]
@@ -74,9 +76,11 @@ fn export_dbt(
     workspace: Workspace,
     output_dir: String,
     dbt_target: Option<DbtTarget>,
+    target_dialect: Option<WarehouseDialect>,
 ) -> Result<ExportResult, String> {
     let target = dbt_target.unwrap_or(DbtTarget::V1);
-    let path = DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target)?;
+    let dialect = target_dialect.unwrap_or_default();
+    let path = DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target, dialect)?;
     let files = walk_export_tree(&path)?;
     Ok(ExportResult { path, files })
 }
@@ -167,12 +171,14 @@ fn demo_sales(fixtures: &std::path::Path) -> Result<Workspace, String> {
                 id: "dim_region".into(),
                 name: "dim_region".into(),
                 steps: vec![TransformationStep::LoadCsv { path: dim }],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
                 steps: vec![TransformationStep::LoadCsv { path: fact }],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales_clean".into(),
                 name: "sales_clean".into(),
@@ -197,7 +203,8 @@ fn demo_sales(fixtures: &std::path::Path) -> Result<Workspace, String> {
                         expression: "revenue / nullif(qty, 0)".into(),
                     },
                 ],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "fact_sales".into(),
                 name: "fact_sales".into(),
@@ -215,7 +222,8 @@ fn demo_sales(fixtures: &std::path::Path) -> Result<Workspace, String> {
                         condition: "amount > 1000".into(),
                     },
                 ],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "top_sales".into(),
                 name: "top_sales".into(),
@@ -229,7 +237,8 @@ fn demo_sales(fixtures: &std::path::Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::Limit { n: 10 },
                 ],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "top_by_region".into(),
                 name: "top_by_region".into(),
@@ -251,7 +260,8 @@ fn demo_sales(fixtures: &std::path::Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::Limit { n: 10 },
                 ],
-            },
+             execution: Default::default(),
+},
         ],
         // Focus → mart_* at export; other non-Load queries → int_*.
         focus_query_id: "top_by_region".into(),
@@ -268,12 +278,14 @@ fn demo_union(fixtures: &std::path::Path) -> Result<Workspace, String> {
                 id: "sales_eu".into(),
                 name: "sales_eu".into(),
                 steps: vec![TransformationStep::LoadCsv { path: eu }],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales_us".into(),
                 name: "sales_us".into(),
                 steps: vec![TransformationStep::LoadCsv { path: us }],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales_all".into(),
                 name: "sales_all".into(),
@@ -285,7 +297,8 @@ fn demo_union(fixtures: &std::path::Path) -> Result<Workspace, String> {
                         other_query_ids: vec!["sales_us".into()],
                     },
                 ],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "by_region".into(),
                 name: "by_region".into(),
@@ -306,7 +319,8 @@ fn demo_union(fixtures: &std::path::Path) -> Result<Workspace, String> {
                         descending: true,
                     },
                 ],
-            },
+             execution: Default::default(),
+},
         ],
         focus_query_id: "by_region".into(),
     })
@@ -335,12 +349,14 @@ fn demo_sql(fixtures: &std::path::Path) -> Result<Workspace, String> {
                     ) as t(day, region)"
                         .into(),
                 }],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
                 steps: vec![TransformationStep::LoadCsv { path: fact }],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales_enriched".into(),
                 name: "sales_enriched".into(),
@@ -355,7 +371,8 @@ fn demo_sql(fixtures: &std::path::Path) -> Result<Workspace, String> {
                             .into(),
                     },
                 ],
-            },
+             execution: Default::default(),
+},
             QueryDef {
                 id: "sales_top3".into(),
                 name: "sales_top3".into(),
@@ -367,7 +384,8 @@ fn demo_sql(fixtures: &std::path::Path) -> Result<Workspace, String> {
                         condition: "region_rank <= 3".into(),
                     },
                 ],
-            },
+             execution: Default::default(),
+},
         ],
         focus_query_id: "sales_enriched".into(),
     })

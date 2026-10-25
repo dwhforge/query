@@ -1,6 +1,7 @@
 //! Durable Project document (`project.json`) — ADR-0009 / ADR-0012.
 
 use crate::connection::ConnectionDef;
+use crate::dialect::WarehouseDialect;
 use crate::model::Workspace;
 use crate::producers::DbtTarget;
 use serde::{Deserialize, Serialize};
@@ -54,8 +55,15 @@ pub struct Project {
     #[serde(default)]
     pub sources: Vec<SourceDef>,
     pub workspace: Workspace,
+    /// dbt Core major line (v1/v2) — not warehouse dialect.
     #[serde(default)]
     pub dbt_target: DbtTarget,
+    /// Warehouse dialect for export emit + `execution=target` preview (ADR-0014).
+    #[serde(default)]
+    pub target_dialect: WarehouseDialect,
+    /// Postgres Connection id when `target_dialect=postgres`.
+    #[serde(default)]
+    pub target_connection_id: Option<String>,
     #[serde(default)]
     pub last_dbt_export_path: Option<String>,
     /// Visual pipeline editor layout (ADR-0007).
@@ -102,10 +110,13 @@ mod tests {
                     steps: vec![TransformationStep::LoadCsv {
                         path: "/tmp/a.csv".into(),
                     }],
+                    execution: Default::default(),
                 }],
                 focus_query_id: "q1".into(),
             },
             dbt_target: DbtTarget::V1,
+            target_dialect: WarehouseDialect::Duckdb,
+            target_connection_id: None,
             last_dbt_export_path: None,
             canvas: Some(CanvasLayout {
                 positions: [(

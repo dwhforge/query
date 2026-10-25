@@ -1,4 +1,5 @@
 use crate::connection::ConnectionDef;
+use crate::dialect::QueryExecution;
 use serde::{Deserialize, Serialize};
 
 fn default_pg_schema() -> String {
@@ -77,6 +78,9 @@ pub struct QueryDef {
     pub id: String,
     pub name: String,
     pub steps: Vec<TransformationStep>,
+    /// Preview engine for this node only (ADR-0014). Default `local` (DuckDB).
+    #[serde(default)]
+    pub execution: QueryExecution,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -92,6 +96,7 @@ impl Workspace {
                 id: "main".into(),
                 name: "main".into(),
                 steps,
+                execution: QueryExecution::default(),
             }],
             focus_query_id: "main".into(),
         }

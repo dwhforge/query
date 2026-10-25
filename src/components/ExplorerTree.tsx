@@ -603,7 +603,7 @@ export function ExplorerTree({
                   onClick={onExport}
                   className="w-full rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80 hover:text-teal-200"
                 >
-                  dbt ({project.dbt_target})
+                  dbt ({project.dbt_target}) · {project.target_dialect ?? "duckdb"}
                 </button>
               </li>
               {project.last_dbt_export_path && (

@@ -2,6 +2,7 @@ pub mod dbt;
 
 pub use dbt::{preview_dbt_model_sql, DbtProducer, PreviewDbtModel};
 
+use crate::dialect::WarehouseDialect;
 use crate::model::Workspace;
 use serde::{Deserialize, Serialize};
 
@@ -36,5 +37,6 @@ pub trait OutputProducer {
         workspace: &Workspace,
         output_dir: &str,
         target: DbtTarget,
+        dialect: WarehouseDialect,
     ) -> Result<String, String>;
 }

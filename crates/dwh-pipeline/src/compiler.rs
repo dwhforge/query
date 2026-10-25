@@ -310,7 +310,8 @@ mod tests {
                     steps: vec![TransformationStep::LoadCsv {
                         path: "sales.csv".into(),
                     }],
-                },
+                 execution: Default::default(),
+},
                 QueryDef {
                     id: "top".into(),
                     name: "top".into(),
@@ -322,7 +323,8 @@ mod tests {
                             condition: "qty > 1".into(),
                         },
                     ],
-                },
+                 execution: Default::default(),
+},
             ],
             focus_query_id: "top".into(),
         };
@@ -343,7 +345,8 @@ mod tests {
                     steps: vec![TransformationStep::LoadCsv {
                         path: "dim.csv".into(),
                     }],
-                },
+                 execution: Default::default(),
+},
                 QueryDef {
                     id: "fact".into(),
                     name: "fact".into(),
@@ -358,7 +361,8 @@ mod tests {
                             right_on: vec!["region".into()],
                         },
                     ],
-                },
+                 execution: Default::default(),
+},
             ],
             focus_query_id: "fact".into(),
         };
@@ -425,7 +429,8 @@ mod tests {
                         raw_sql: "select * from {{prev_step}} where n > 0".into(),
                     },
                 ],
-            }],
+             execution: Default::default(),
+}],
             focus_query_id: "m".into(),
         };
         let sql = GraphCompiler::new(&ws).to_sql(false).unwrap();

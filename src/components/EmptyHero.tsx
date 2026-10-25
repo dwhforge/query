@@ -84,8 +84,9 @@ export function EmptyHero({
         </button>
       </div>
       <p className="mt-6 text-[11px] text-slate-600">
-        Shortcuts: <kbd className="text-slate-500">O</kbd> CSV ·{" "}
-        <kbd className="text-slate-500">S</kbd> demo sales ·{" "}
+        Later: <span className="text-slate-500">Help → Load demo</span>
+        {" · "}
+        Shortcuts: <kbd className="text-slate-500">⌘O</kbd> open ·{" "}
         <kbd className="text-slate-500">E</kbd> export ·{" "}
         <kbd className="text-slate-500">/</kbd> Data↔Model
       </p>

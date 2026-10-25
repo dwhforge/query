@@ -157,20 +157,7 @@ function App() {
 
   const runPreview = useCallback(
     async (ws: Workspace, conns: ConnectionDef[]) => {
-      const focus = ws.queries.find((q) => q.id === ws.focus_query_id);
-      const dialect = projectDialect(project);
-      if (
-        focus &&
-        queryExecution(focus) === "target" &&
-        dialect === "postgres"
-      ) {
-        setLoading(false);
-        setPreview(null);
-        setError(
-          `Query "${focus.name}" has execution=target on postgres — native warehouse preview is not wired yet. Set execution=local for DuckDB preview, or wait for target live path (ADR-0014).`,
-        );
-        return;
-      }
+      // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
       setLoading(true);
       try {
         const result = await previewWorkspace(ws, conns);
@@ -183,7 +170,7 @@ function App() {
         setLoading(false);
       }
     },
-    [project],
+    [],
   );
 
   const debouncedPreview = useMemo(

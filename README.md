@@ -4,6 +4,10 @@
 
 Raw data stays on your machine. No cloud account required.
 
+<p align="center">
+  <img src="docs/welcome.png" alt="DWHForge Query — visual workspace" width="900" />
+</p>
+
 ```text
   CSV · Parquet · PostgreSQL
             │

@@ -94,3 +94,23 @@ select option {
 .edge-pulse {
   animation: pulse-edge 2.4s ease-in-out infinite;
 }
+
+/* React Flow — match workbench chrome */
+.dwh-flow {
+  --xy-background-color: transparent;
+  --xy-node-border-radius: 12px;
+  --xy-edge-stroke: #2dd4bf;
+  --xy-connectionline-stroke: #2dd4bf;
+  --xy-minimap-background-color: #071018;
+  --xy-controls-button-background-color: #020617;
+  --xy-controls-button-color: #cbd5e1;
+  --xy-controls-button-border-color: rgba(148, 163, 184, 0.14);
+}
+
+.dwh-flow .react-flow__edge-text {
+  font-size: 10px;
+}
+
+.dwh-flow .react-flow__attribution {
+  display: none;
+}

@@ -23,18 +23,28 @@ export function previewPipeline(
   return invoke<PreviewResult>("preview_pipeline", { steps, connections });
 }
 
+export interface ExportResult {
+  path: string;
+  /** Relative paths; directories end with `/`. */
+  files: string[];
+}
+
 export function exportDbt(
   pipelineName: string,
   workspace: Workspace,
   outputDir: string,
   dbtTarget: DbtTarget = "v1",
-): Promise<string> {
-  return invoke<string>("export_dbt", {
+): Promise<ExportResult> {
+  return invoke<ExportResult>("export_dbt", {
     pipelineName,
     workspace,
     outputDir,
     dbtTarget,
   });
+}
+
+export function listExportTree(path: string): Promise<string[]> {
+  return invoke<string[]>("list_export_tree", { path });
 }
 
 export function loadSampleWorkspace(): Promise<Workspace> {
@@ -47,11 +57,30 @@ export interface PostgresObject {
   kind: string;
 }
 
+export interface PostgresColumn {
+  name: string;
+  data_type: string;
+  is_nullable: boolean;
+  ordinal_position: number;
+}
+
 export function listPostgresObjects(
   connectionString: string,
 ): Promise<PostgresObject[]> {
   return invoke<PostgresObject[]>("list_postgres_objects", {
     connectionString,
+  });
+}
+
+export function describePostgresObject(
+  connectionString: string,
+  schema: string,
+  tableName: string,
+): Promise<PostgresColumn[]> {
+  return invoke<PostgresColumn[]>("describe_postgres_object", {
+    connectionString,
+    schema,
+    tableName,
   });
 }
 

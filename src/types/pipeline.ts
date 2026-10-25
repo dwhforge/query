@@ -103,6 +103,11 @@ export interface SourceDef {
   table_name?: string;
 }
 
+/** Saved React Flow positions (query id → coords). */
+export interface CanvasLayout {
+  positions: Record<string, { x: number; y: number }>;
+}
+
 /**
  * IDE / dbt project container (ADR-0009 + ADR-0012).
  */
@@ -115,6 +120,7 @@ export interface Project {
   workspace: Workspace;
   dbt_target: "v1" | "v2";
   last_dbt_export_path?: string;
+  canvas?: CanvasLayout;
 }
 
 export interface PreviewResult {

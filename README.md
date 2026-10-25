@@ -8,7 +8,7 @@ Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **
 ./scripts/fetch-duckdb-extensions.sh
 ```
 
-Layout at runtime: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)). Local Parquet = core; **S3** needs `httpfs`.
+DuckDB **v2.0** via `duckdb-rs` **prebuilt** shared lib (not the `bundled` Cargo feature — that recompiles C++ for ages). After first `cargo build -p dwh-engine`, run `./scripts/sync-duckdb-lib.sh` so `libduckdb.so` sits next to binaries. Layout at runtime: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)). Local Parquet = core; **S3** needs `httpfs`.
 
 **Licensing:** open-source is under consideration and **not decided**. Documentation is in English to stay OSS-ready.
 
@@ -34,7 +34,7 @@ Layout at runtime: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extens
 ## Layout
 
 ```
-crates/dwh-pipeline   # Workspace, steps, GraphCompiler, DbtProducer
+crates/dwh-pipeline   # Workspace, steps, GraphCompiler, DbtProducer, CLI dwh-export
 crates/dwh-engine     # DuckDB session + preview + CLI dwh-preview
 src/                  # React UI (queries, join, preview, export)
 src-tauri/            # thin Tauri IPC
@@ -53,6 +53,9 @@ cargo run -p dwh-engine --bin dwh-preview -- fixtures/sample.csv 'amount > 1000'
 
 # Join smoke
 cargo run -p dwh-engine --bin dwh-preview -- --join fixtures/sample.csv fixtures/dim_region.csv region
+
+# Export dbt from a saved .dwhproj.json (same IR as UI Export)
+cargo run -p dwh-pipeline --bin dwh-export -- path/to/project.dwhproj.json /tmp/dwh-out
 
 # Desktop app — Linux system deps (once), one line:
 sudo apt update && sudo apt install -y pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev

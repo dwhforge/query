@@ -18,6 +18,11 @@ src-tauri/extensions/*.duckdb_extension
 third_party/duckdb-extensions/**/*.duckdb_extension
 third_party/duckdb-extensions/**/*.gz
 
+# Prebuilt DuckDB shared lib (scripts/sync-duckdb-lib.sh)
+src-tauri/libduckdb.so
+src-tauri/libduckdb.dylib
+src-tauri/duckdb.dll
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

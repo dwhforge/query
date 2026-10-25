@@ -8,12 +8,15 @@ import type {
 interface ExplorerTreeProps {
   project: Project;
   activeQueryId: string | null;
+  selectedSourceId: string | null;
   expanded: Record<string, boolean>;
   onToggle: (key: string) => void;
   onSelectQuery: (id: string) => void;
   onSelectSource: (source: SourceDef) => void;
   onSelectConnection: (conn: ConnectionDef) => void;
   onExport: () => void;
+  onRevealExport?: () => void;
+  exportFiles?: string[];
   onAddConnection: () => void;
   onAddSourceCsv: () => void;
   onAddSourceParquet: () => void;
@@ -83,12 +86,15 @@ function IconBtn({
 export function ExplorerTree({
   project,
   activeQueryId,
+  selectedSourceId,
   expanded,
   onToggle,
   onSelectQuery,
   onSelectSource,
   onSelectConnection,
   onExport,
+  onRevealExport,
+  exportFiles = [],
   onAddConnection,
   onAddSourceCsv,
   onAddSourceParquet,
@@ -180,20 +186,27 @@ export function ExplorerTree({
                   Objects bound to connections — use +
                 </li>
               )}
-              {project.sources.map((s) => (
-                <li key={s.id}>
-                  <button
-                    type="button"
-                    onClick={() => onSelectSource(s)}
-                    className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80"
-                  >
-                    <span className="w-8 shrink-0 text-[9px] uppercase text-teal-600">
-                      {s.kind === "postgres" ? "pg" : s.kind}
-                    </span>
-                    <span className="truncate">{s.name}</span>
-                  </button>
-                </li>
-              ))}
+              {project.sources.map((s) => {
+                const selected = s.id === selectedSourceId;
+                return (
+                  <li key={s.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectSource(s)}
+                      className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs ${
+                        selected
+                          ? "bg-teal-500/15 text-teal-100"
+                          : "text-slate-300 hover:bg-slate-800/80"
+                      }`}
+                    >
+                      <span className="w-8 shrink-0 text-[9px] uppercase text-teal-600">
+                        {s.kind === "postgres" ? "pg" : s.kind}
+                      </span>
+                      <span className="truncate">{s.name}</span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -249,11 +262,19 @@ export function ExplorerTree({
           <SectionHeader
             title="Export"
             open={exportOpen}
+            count={exportFiles.length || undefined}
             onToggle={() => onToggle("export")}
             actions={
-              <IconBtn title="Export dbt" onClick={onExport}>
-                +
-              </IconBtn>
+              <>
+                {project.last_dbt_export_path && onRevealExport && (
+                  <IconBtn title="Reveal in folder" onClick={onRevealExport}>
+                    ↗
+                  </IconBtn>
+                )}
+                <IconBtn title="Export dbt" onClick={onExport}>
+                  +
+                </IconBtn>
+              </>
             }
           />
           {exportOpen && (
@@ -267,6 +288,38 @@ export function ExplorerTree({
                   dbt ({project.dbt_target})
                 </button>
               </li>
+              {project.last_dbt_export_path && (
+                <li
+                  className="truncate px-1.5 py-0.5 font-mono text-[10px] text-slate-600"
+                  title={project.last_dbt_export_path}
+                >
+                  {project.last_dbt_export_path}
+                </li>
+              )}
+              {exportFiles.length === 0 && !project.last_dbt_export_path && (
+                <li className="px-1.5 py-1 text-[11px] text-slate-600">
+                  No export yet
+                </li>
+              )}
+              {exportFiles.map((rel) => {
+                const depth = rel.replace(/\/$/, "").split("/").length - 1;
+                const name = rel.endsWith("/")
+                  ? rel.slice(0, -1).split("/").pop() + "/"
+                  : (rel.split("/").pop() ?? rel);
+                const isDir = rel.endsWith("/");
+                return (
+                  <li
+                    key={rel}
+                    className={`truncate font-mono text-[11px] ${
+                      isDir ? "text-slate-500" : "text-slate-400"
+                    }`}
+                    style={{ paddingLeft: 6 + depth * 10 }}
+                    title={rel}
+                  >
+                    {name}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

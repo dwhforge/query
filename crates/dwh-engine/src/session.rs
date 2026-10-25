@@ -1,9 +1,9 @@
 use crate::extensions::{
     extensions_dir_display, load_aws_extension, load_httpfs_extension, load_postgres_extension,
-    path_needs_httpfs,
+    path_needs_httpfs, try_load_spatial_extension,
 };
 use crate::secrets::apply_s3_connections;
-use duckdb::Connection;
+use duckdb::{Config, Connection};
 use dwh_pipeline::{ConnectionDef, ConnectionKind, TransformationStep, Workspace};
 use std::sync::Mutex;
 
@@ -17,7 +17,13 @@ pub struct DbSession {
 
 impl DbSession {
     pub fn new() -> Result<Self, String> {
-        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        // duckdb-rs 1.20000 bundles DuckDB v2.0.0 (source_id d54cbbe3df). Official CDN
+        // extensions are tagged library_version `v2.0.0`; LOAD without this flag rejects
+        // them as a source_id mismatch. Artifacts are still DuckDB-signed core extensions.
+        let config = Config::default()
+            .with("allow_extensions_metadata_mismatch", "true")
+            .map_err(|e| e.to_string())?;
+        let conn = Connection::open_in_memory_with_flags(config).map_err(|e| e.to_string())?;
         let session = Self {
             conn: Mutex::new(conn),
             postgres_ready: Mutex::new(false),
@@ -36,7 +42,7 @@ impl DbSession {
         };
 
         eprintln!(
-            "[dwh-rs-query] bundled DuckDB; extensions dir: {}",
+            "[dwh-rs-query] DuckDB; extensions dir: {}",
             extensions_dir_display()
         );
 
@@ -67,10 +73,11 @@ impl DbSession {
             }
         }
 
-        if let Err(e) = conn.execute_batch("LOAD spatial;") {
-            eprintln!(
-                "[dwh-rs-query] extension `spatial` not loaded (best-effort, offline): {e}"
-            );
+        // spatial: optional sidecar only — never bare LOAD (that hits ~/.duckdb / CDN).
+        match try_load_spatial_extension(&conn) {
+            Ok(true) => {}
+            Ok(false) => {} // not shipped in extensions/ — expected
+            Err(e) => eprintln!("[dwh-rs-query] spatial extension (optional): {e}"),
         }
     }
 

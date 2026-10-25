@@ -18,6 +18,7 @@ interface Project {
   workspace: Workspace;
   dbt_target: "v1" | "v2";
   last_dbt_export_path?: string;
+  canvas?: { positions: Record<string, { x: number; y: number }> }; // React Flow layout
 }
 
 interface ConnectionDef {
@@ -114,8 +115,10 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 |---------|----|-----|
 | `preview_workspace` | `Workspace`, `connections[]` | `PreviewResult` |
 | `preview_pipeline` | `steps[]`, `connections[]` | `PreviewResult` (compat) |
-| `export_dbt` | `pipeline_name`, `Workspace`, `output_dir` | `{ path }` |
+| `export_dbt` | `pipeline_name`, `Workspace`, `output_dir`, `dbt_target?` | `{ path, files[] }` (relative tree; dirs end `/`) |
+| `list_export_tree` | `path` | `string[]` — refresh Explorer after open project |
 | `list_postgres_objects` | `connection_string` | `{ schema, name, kind }[]` |
+| `describe_postgres_object` | `connection_string`, `schema`, `table_name` | `{ name, data_type, is_nullable, ordinal_position }[]` |
 | `test_postgres_connection` | `connection_string` | `()` |
 | `save_project` | `path`, `Project` | `()` — writes `project.json` / `.dwhproj.json` |
 | `load_project` | `path` | `Project` |
@@ -123,7 +126,9 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 | `validate_reorder` | … | later |
 | `export_python` / `ai_compile` | … | later / stub |
 
-Postgres UI: object picker — connect → browse catalog → select schema-qualified relation ([ADR-0010](adr/0010-postgres-object-picker.md)).
+CLI twin (same IR): `dwh-export <project.json> <output_dir> [--name NAME] [--target v1|v2]` → prints path + file tree.
+
+Postgres UI: object picker — connect → browse catalog → select schema-qualified relation ([ADR-0010](adr/0010-postgres-object-picker.md)). Describe: select Postgres source → column/types in inspector.
 
 ## 5. DbtProducer (v1 DoD)
 

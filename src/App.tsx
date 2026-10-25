@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConnectionEditor } from "./components/ConnectionEditor";
 import { EmptyHero } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
-import { GraphCanvas } from "./components/GraphCanvas";
+import {
+  GraphCanvas,
+  type CanvasPositions,
+  type GraphEdgeInfo,
+} from "./components/GraphCanvas";
 import { History } from "./components/History";
 import {
   PostgresPicker,
@@ -11,15 +16,21 @@ import {
 } from "./components/PostgresPicker";
 import { PreviewTable } from "./components/PreviewTable";
 import { S3SourceDialog } from "./components/S3SourceDialog";
+import { SourceSchemaPanel } from "./components/SourceSchemaPanel";
+import { StepPalette } from "./components/StepPalette";
 import { debounce } from "./lib/debounce";
 import {
+  describePostgresObject,
   exportDbt,
+  listExportTree,
   loadProject,
   loadSampleWorkspace,
   previewWorkspace,
   saveProject,
+  type PostgresColumn,
 } from "./lib/tauri";
 import {
+  connectionById,
   emptyProject,
   newQueryId,
   syncSourcesFromQueries,
@@ -49,6 +60,15 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [showSql, setShowSql] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const [exportFiles, setExportFiles] = useState<string[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [sourceColumns, setSourceColumns] = useState<PostgresColumn[] | null>(
+    null,
+  );
+  const [sourceSchemaLoading, setSourceSchemaLoading] = useState(false);
+  const [sourceSchemaError, setSourceSchemaError] = useState<string | null>(
+    null,
+  );
   const [showPgPicker, setShowPgPicker] = useState(false);
   const [showS3Dialog, setShowS3Dialog] = useState(false);
   const [connEditorOpen, setConnEditorOpen] = useState(false);
@@ -179,7 +199,40 @@ function App() {
     syncInspectorFromQuery(queries.find((q) => q.id === activeQueryId));
   }, [activeQueryId, queries, syncInspectorFromQuery]);
 
+  async function loadPostgresSchema(source: SourceDef) {
+    if (source.kind !== "postgres") {
+      setSourceColumns(null);
+      setSourceSchemaError(null);
+      return;
+    }
+    const conn = connectionById(project, source.connection_id);
+    const dsn =
+      conn?.postgres?.connection_string ?? source.connection_string ?? "";
+    if (!dsn.trim()) {
+      setSourceColumns(null);
+      setSourceSchemaError("No connection string for this Postgres source");
+      return;
+    }
+    setSourceSchemaLoading(true);
+    setSourceSchemaError(null);
+    try {
+      const cols = await describePostgresObject(
+        dsn,
+        source.schema || "public",
+        source.table_name || "",
+      );
+      setSourceColumns(cols);
+    } catch (e) {
+      setSourceColumns(null);
+      setSourceSchemaError(typeof e === "string" ? e : String(e));
+    } finally {
+      setSourceSchemaLoading(false);
+    }
+  }
+
   function onSelectSource(source: SourceDef) {
+    setSelectedSourceId(source.id);
+    void loadPostgresSchema(source);
     const bound = queries.find((q) => {
       const s = q.steps[0];
       if (!s) return false;
@@ -197,6 +250,9 @@ function App() {
     });
     if (bound) selectQuery(bound.id);
   }
+
+  const selectedSource =
+    project.sources.find((s) => s.id === selectedSourceId) ?? null;
 
   function upsertConnection(conn: ConnectionDef) {
     setProject((p) => {
@@ -357,30 +413,116 @@ function App() {
     );
   }
 
-  function applyJoin() {
-    if (!joinRightId || !joinKey.trim()) return;
-    if (joinRightId === activeQueryId) {
+  function applyJoinTo(
+    hostQueryId: string,
+    rightQueryId: string,
+    key: string,
+    type: JoinType = joinType,
+  ) {
+    if (!rightQueryId || !key.trim()) return;
+    if (rightQueryId === hostQueryId) {
       setError("Cannot join a query to itself");
       return;
     }
-    const key = joinKey.trim();
-    updateActiveSteps((steps) => {
-      const without = steps.filter((s) => s.type !== "Join");
-      return [
-        ...without,
-        {
-          type: "Join",
-          payload: {
-            right_query_id: joinRightId,
-            join_type: joinType,
-            left_on: [key],
-            right_on: [key],
-          },
-        },
-      ];
-    });
+    const k = key.trim();
+    setQueries((prev) =>
+      prev.map((q) => {
+        if (q.id !== hostQueryId) return q;
+        const without = q.steps.filter((s) => s.type !== "Join");
+        return {
+          ...q,
+          steps: [
+            ...without,
+            {
+              type: "Join",
+              payload: {
+                right_query_id: rightQueryId,
+                join_type: type,
+                left_on: [k],
+                right_on: [k],
+              },
+            },
+          ],
+        };
+      }),
+    );
+    setJoinRightId(rightQueryId);
+    setJoinKey(k);
+    setJoinType(type);
+    setActiveQueryId(hostQueryId);
     setError(null);
   }
+
+  function applyJoin() {
+    if (!activeQueryId) return;
+    applyJoinTo(activeQueryId, joinRightId, joinKey, joinType);
+  }
+
+  function connectJoinOnCanvas(rightQueryId: string, hostQueryId: string) {
+    applyJoinTo(hostQueryId, rightQueryId, joinKey || "id", joinType);
+  }
+
+  function selectEdgeOnCanvas(edge: GraphEdgeInfo) {
+    selectQuery(edge.hostQueryId);
+    if (edge.kind === "join") {
+      setJoinRightId(edge.otherQueryId);
+      const host = queries.find((q) => q.id === edge.hostQueryId);
+      const j = host?.steps.find((s) => s.type === "Join");
+      if (j && j.type === "Join") {
+        setJoinKey(j.payload.left_on[0] ?? joinKey);
+        setJoinType(j.payload.join_type);
+      }
+    } else {
+      setAppendOtherId(edge.otherQueryId);
+    }
+  }
+
+  function removeEdgeOnCanvas(edge: GraphEdgeInfo) {
+    setQueries((prev) =>
+      prev.map((q) => {
+        if (q.id !== edge.hostQueryId) return q;
+        if (edge.kind === "join") {
+          return {
+            ...q,
+            steps: q.steps.filter((s) => s.type !== "Join"),
+          };
+        }
+        return {
+          ...q,
+          steps: q.steps
+            .map((s) => {
+              if (s.type !== "Append") return s;
+              const others = s.payload.other_query_ids.filter(
+                (id) => id !== edge.otherQueryId,
+              );
+              if (others.length === 0) return null;
+              return {
+                type: "Append" as const,
+                payload: { other_query_ids: others },
+              };
+            })
+            .filter((s): s is TransformationStep => s !== null),
+        };
+      }),
+    );
+    if (edge.kind === "join") {
+      setJoinRightId("");
+    } else if (appendOtherId === edge.otherQueryId) {
+      setAppendOtherId("");
+    }
+    setError(null);
+  }
+
+  const persistCanvasPositions = useMemo(
+    () =>
+      debounce((positions: CanvasPositions) => {
+        setProject((p) => ({
+          ...p,
+          canvas: { positions },
+        }));
+      }, 300),
+    [],
+  );
 
   function applyAppend() {
     if (!appendOtherId) return;
@@ -405,6 +547,10 @@ function App() {
     updateActiveSteps((steps) => steps.filter((_, i) => i !== index));
   }
 
+  function appendStep(step: TransformationStep) {
+    updateActiveSteps((steps) => [...steps, step]);
+  }
+
   async function handleSaveProject() {
     const path =
       (await save({
@@ -424,6 +570,18 @@ function App() {
     }
   }
 
+  async function refreshExportTree(exportPath: string | undefined) {
+    if (!exportPath) {
+      setExportFiles([]);
+      return;
+    }
+    try {
+      setExportFiles(await listExportTree(exportPath));
+    } catch {
+      setExportFiles([]);
+    }
+  }
+
   async function handleOpenProject() {
     const path = await open({
       multiple: false,
@@ -438,6 +596,7 @@ function App() {
       };
       setProject(withConnections);
       setActiveQueryId(withConnections.workspace.focus_query_id || null);
+      await refreshExportTree(withConnections.last_dbt_export_path);
       setError(null);
       setExportMsg(`Opened ${path}`);
     } catch (e) {
@@ -461,17 +620,31 @@ function App() {
     const dir = await open({ directory: true, multiple: false });
     if (typeof dir !== "string") return;
     try {
-      const path = await exportDbt(
+      const result = await exportDbt(
         project.name.replace(/\s+/g, "_").toLowerCase() || "dwh_rs_query",
         workspace,
         dir,
         project.dbt_target,
       );
-      setProject((p) => ({ ...p, last_dbt_export_path: path }));
-      setExportMsg(`dbt ${project.dbt_target} → ${path}`);
+      setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
+      setExportFiles(result.files);
+      setTreeExpanded((e) => ({ ...e, export: true }));
+      setExportMsg(
+        `dbt ${project.dbt_target} → ${result.path} (${result.files.filter((f) => !f.endsWith("/")).length} files)`,
+      );
       setError(null);
     } catch (e) {
       setExportMsg(null);
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRevealExport() {
+    const path = project.last_dbt_export_path;
+    if (!path) return;
+    try {
+      await revealItemInDir(path);
+    } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     }
   }
@@ -671,6 +844,7 @@ function App() {
             <ExplorerTree
               project={project}
               activeQueryId={activeQueryId}
+              selectedSourceId={selectedSourceId}
               expanded={treeExpanded}
               onToggle={(key) =>
                 setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
@@ -683,6 +857,8 @@ function App() {
                 setConnEditorOpen(true);
               }}
               onExport={() => void handleExportDbt()}
+              onRevealExport={() => void handleRevealExport()}
+              exportFiles={exportFiles}
               onAddConnection={() => openNewConnection("postgres")}
               onAddSourceCsv={() => void addCsvQuery()}
               onAddSourceParquet={() => void addParquetQuery()}
@@ -710,8 +886,13 @@ function App() {
                 queries={queries}
                 activeQueryId={activeQueryId}
                 focusQueryId={focusQueryId}
+                positions={project.canvas?.positions}
+                onPositionsChange={persistCanvasPositions}
                 onSelect={selectQuery}
                 onSetFocus={setFocusQueryId}
+                onConnectJoin={connectJoinOnCanvas}
+                onSelectEdge={selectEdgeOnCanvas}
+                onRemoveEdge={removeEdgeOnCanvas}
               />
             </div>
             <div className="min-h-[28vh] border-t border-[var(--line)] bg-[#060d14]">
@@ -799,6 +980,14 @@ function App() {
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+              {selectedSource?.kind === "postgres" && (
+                <SourceSchemaPanel
+                  source={selectedSource}
+                  columns={sourceColumns}
+                  loading={sourceSchemaLoading}
+                  error={sourceSchemaError}
+                />
+              )}
               <History
                 steps={activeQuery?.steps ?? []}
                 queryNames={Object.fromEntries(queries.map((q) => [q.id, q.name]))}
@@ -986,6 +1175,40 @@ function App() {
                     {activeAppend ? "Update Append" : "Apply Append"}
                   </button>
                 </div>
+                <StepPalette
+                  disabled={!activeQuery}
+                  columnChoices={columnChoices}
+                  onAddRename={(from, to) =>
+                    appendStep({
+                      type: "RenameColumn",
+                      payload: { from, to },
+                    })
+                  }
+                  onAddDerive={(name, expression) =>
+                    appendStep({
+                      type: "DeriveColumn",
+                      payload: { name, expression },
+                    })
+                  }
+                  onAddGroupBy={(dimensions, aggregates) =>
+                    appendStep({
+                      type: "GroupBy",
+                      payload: { dimensions, aggregates },
+                    })
+                  }
+                  onAddSort={(column, descending) =>
+                    appendStep({
+                      type: "SortBy",
+                      payload: { column, descending },
+                    })
+                  }
+                  onAddCustomSql={(raw_sql) =>
+                    appendStep({
+                      type: "CustomSql",
+                      payload: { raw_sql },
+                    })
+                  }
+                />
               </div>
             </div>
           </aside>

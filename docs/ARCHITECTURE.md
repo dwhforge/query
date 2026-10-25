@@ -53,7 +53,7 @@ Local-trust; quote paths/idents; never log connection strings; never send previe
 ## 6. Extensions
 
 - **`postgres`:** required capability. Eager `INSTALL/LOAD` at session start when possible. If load fails, CSV/Parquet may still run; any workspace using `LoadPostgres` must fail with a clear error ([ADR-0008](adr/0008-postgres-required.md)).  
-- **`spatial`:** best-effort only; must not block CSV/Postgres paths.
+- **`spatial`:** optional sidecar file only (`extensions/spatial.duckdb_extension`); never bare `LOAD` / `~/.duckdb`; must not block CSV/Postgres paths.
 
 ## 7. Language & licensing note
 

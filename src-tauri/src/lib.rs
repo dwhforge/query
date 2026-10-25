@@ -1,12 +1,13 @@
 use dwh_engine::{
+    describe_postgres_object as run_describe_postgres_object,
     list_postgres_objects as run_list_postgres_objects, set_extensions_dir,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
-    test_postgres_connection as run_test_postgres_connection, DbSession, PostgresObject,
-    PreviewResult,
+    test_postgres_connection as run_test_postgres_connection, DbSession, PostgresColumn,
+    PostgresObject, PreviewResult,
 };
 use dwh_pipeline::{
-    ConnectionDef, DbtProducer, DbtTarget, OutputProducer, Project, QueryDef,
-    TransformationStep, Workspace,
+    list_export_tree as walk_export_tree, ConnectionDef, DbtProducer, DbtTarget, ExportResult,
+    OutputProducer, Project, QueryDef, TransformationStep, Workspace,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -38,9 +39,16 @@ fn export_dbt(
     workspace: Workspace,
     output_dir: String,
     dbt_target: Option<DbtTarget>,
-) -> Result<String, String> {
+) -> Result<ExportResult, String> {
     let target = dbt_target.unwrap_or(DbtTarget::V1);
-    DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target)
+    let path = DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target)?;
+    let files = walk_export_tree(&path)?;
+    Ok(ExportResult { path, files })
+}
+
+#[tauri::command]
+fn list_export_tree(path: String) -> Result<Vec<String>, String> {
+    walk_export_tree(&path)
 }
 
 #[tauri::command]
@@ -49,6 +57,16 @@ fn list_postgres_objects(
     db: State<'_, DbSession>,
 ) -> Result<Vec<PostgresObject>, String> {
     run_list_postgres_objects(&db, &connection_string)
+}
+
+#[tauri::command]
+fn describe_postgres_object(
+    connection_string: String,
+    schema: String,
+    table_name: String,
+    db: State<'_, DbSession>,
+) -> Result<Vec<PostgresColumn>, String> {
+    run_describe_postgres_object(&db, &connection_string, &schema, &table_name)
 }
 
 #[tauri::command]
@@ -196,8 +214,10 @@ pub fn run() {
             preview_pipeline,
             preview_workspace,
             export_dbt,
+            list_export_tree,
             load_sample_workspace,
             list_postgres_objects,
+            describe_postgres_object,
             test_postgres_connection,
             save_project,
             load_project

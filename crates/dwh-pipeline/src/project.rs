@@ -30,6 +30,19 @@ pub struct SourceDef {
     pub table_name: Option<String>,
 }
 
+/// Saved React Flow node positions (query id → canvas coords).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct CanvasLayout {
+    #[serde(default)]
+    pub positions: std::collections::BTreeMap<String, CanvasPosition>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CanvasPosition {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Project {
     pub id: String,
@@ -45,6 +58,9 @@ pub struct Project {
     pub dbt_target: DbtTarget,
     #[serde(default)]
     pub last_dbt_export_path: Option<String>,
+    /// Visual pipeline editor layout (ADR-0007).
+    #[serde(default)]
+    pub canvas: Option<CanvasLayout>,
 }
 
 impl Project {
@@ -91,11 +107,29 @@ mod tests {
             },
             dbt_target: DbtTarget::V1,
             last_dbt_export_path: None,
+            canvas: Some(CanvasLayout {
+                positions: [(
+                    "q1".into(),
+                    CanvasPosition { x: 12.0, y: 34.0 },
+                )]
+                .into_iter()
+                .collect(),
+            }),
         };
         let json = p.to_json_pretty().unwrap();
         let back = Project::from_json(&json).unwrap();
         assert_eq!(back.name, "demo");
         assert_eq!(back.connections.len(), 1);
         assert_eq!(back.workspace.focus_query_id, "q1");
+        assert_eq!(
+            back.canvas
+                .as_ref()
+                .unwrap()
+                .positions
+                .get("q1")
+                .unwrap()
+                .x,
+            12.0
+        );
     }
 }

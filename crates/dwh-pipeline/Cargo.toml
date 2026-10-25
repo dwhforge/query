@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "TransformationStep AST and CTE SQL compiler for DWH-RS-QUERY"
 
+[[bin]]
+name = "dwh-export"
+path = "src/bin/dwh_export.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

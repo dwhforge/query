@@ -1,11 +1,12 @@
 # App-sidecar DuckDB extensions
 
-Shipped next to the app. Bundled DuckDB loads via `LOAD` only — **no INSTALL**.
+These files ship **next to the application** (Tauri bundle resources → `extensions/`).
 
-Populate:
+Bundled DuckDB (in-process) loads them with `LOAD '/…/extensions/<file>'` — **no INSTALL**, no network.
 
-```bash
-../../scripts/fetch-duckdb-extensions.sh
-```
+Required:
+- `postgres_scanner.duckdb_extension` — Postgres
+- `httpfs.duckdb_extension` — s3:// and https://
+- `aws.duckdb_extension` — optional S3 credentials helper
 
-Files: `postgres_scanner`, `httpfs`, `aws` (`.duckdb_extension`).
+Refresh: `../../scripts/fetch-duckdb-extensions.sh`

@@ -6,9 +6,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Bundled duckdb-rs reports e.g. v2.0.0-dev*; CDN artifacts use the stable tag v2.0.0.
+# Must match the *pinned* bundled duckdb-rs ABI (see crates/dwh-engine/Cargo.toml).
+# Prefer: cargo run -p dwh-engine --bin dwh-duckdb-info
+# Default matches crates/dwh-engine duckdb ~1.20000.0 → DuckDB v2.0.0.
+# CDN path uses library_version (v2.0.0), not source_id (d54cbbe3df).
 VERSION="${1:-v2.0.0}"
 [[ "$VERSION" == v* ]] || VERSION="v${VERSION}"
+# If caller passed a bare source_id hash, map known release.
+if [[ "$VERSION" == "vd54cbbe3df" || "$VERSION" == "d54cbbe3df" ]]; then
+  VERSION="v2.0.0"
+fi
+echo "Fetching extensions for DuckDB ${VERSION}"
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -70,3 +78,8 @@ echo "Ship layout (no install at runtime):"
 echo "  $SHIP_TAURI/"
 echo "  $SHIP_ROOT/   (also used when binary is run from repo with ./extensions)"
 ls -lah "$SHIP_TAURI"
+
+# If cargo already downloaded the prebuilt core lib, place it next to binaries.
+if [[ -x "$ROOT/scripts/sync-duckdb-lib.sh" ]]; then
+  "$ROOT/scripts/sync-duckdb-lib.sh" || true
+fi

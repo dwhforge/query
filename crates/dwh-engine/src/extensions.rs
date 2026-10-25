@@ -40,6 +40,12 @@ const AWS: ExtSpec = ExtSpec {
     files: &["aws.duckdb_extension"],
 };
 
+/// Optional — not shipped by default (ADR-0011). Loaded only if present in sidecar.
+const SPATIAL: ExtSpec = ExtSpec {
+    load_name: "spatial",
+    files: &["spatial.duckdb_extension"],
+};
+
 /// Optional directory set by the host (Tauri resource dir / tests) before session start.
 static EXTENSIONS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -211,6 +217,18 @@ pub fn load_httpfs_extension(conn: &Connection) -> Result<(), String> {
 
 pub fn load_aws_extension(conn: &Connection) -> Result<(), String> {
     load_spec(conn, &AWS)
+}
+
+/// Best-effort spatial: LOAD from sidecar only. Ok(false) = file not shipped (not an error).
+pub fn try_load_spatial_extension(conn: &Connection) -> Result<bool, String> {
+    let Some(dir) = resolve_extensions_dir() else {
+        return Ok(false);
+    };
+    let Some(path) = find_in_dir(&dir, SPATIAL.files) else {
+        return Ok(false);
+    };
+    load_from_path(conn, &path)?;
+    Ok(true)
 }
 
 pub fn path_needs_httpfs(path: &str) -> bool {

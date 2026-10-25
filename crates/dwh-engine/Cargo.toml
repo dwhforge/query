@@ -14,6 +14,11 @@ path = "src/bin/dwh_duckdb_info.rs"
 
 [dependencies]
 dwh-pipeline = { path = "../dwh-pipeline" }
-duckdb = { version = "1.3.2", features = ["bundled"] }
+# DuckDB v2.0.0 — crate ~1.20000.x. Default features download a *prebuilt*
+# shared lib (no C++ compile). Do NOT enable `bundled`/`parquet` Cargo features:
+# those force compiling DuckDB from source (30–60+ min). SQL `read_parquet`
+# still works — it ships inside the official shared library. Sidecar extensions
+# (postgres_scanner, httpfs, aws) stay LOAD-from-file (ADR-0011).
+duckdb = { version = "~1.20000.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

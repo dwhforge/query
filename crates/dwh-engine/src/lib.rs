@@ -9,7 +9,8 @@ pub use extensions::{
     path_needs_httpfs, set_extensions_dir,
 };
 pub use postgres_catalog::{
-    list_postgres_objects, test_postgres_connection, PostgresObject,
+    describe_postgres_object, list_postgres_objects, test_postgres_connection,
+    PostgresColumn, PostgresObject,
 };
 pub use preview::{preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult};
 pub use session::DbSession;

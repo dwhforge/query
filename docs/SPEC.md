@@ -13,10 +13,25 @@ interface Project {
   id: string;
   name: string;
   root_path?: string;
-  sources: SourceDef[];      // dbt sources / PQ connections
-  workspace: Workspace;      // runtime graph
+  connections: ConnectionDef[]; // ADR-0012 — credentials / endpoints
+  sources: SourceDef[];         // objects; may reference connection_id
+  workspace: Workspace;
   dbt_target: "v1" | "v2";
   last_dbt_export_path?: string;
+}
+
+interface ConnectionDef {
+  id: string;
+  name: string;
+  kind: "postgres" | "s3";
+  postgres?: { connection_string: string };
+  s3?: {
+    provider: "config" | "credential_chain";
+    region?, endpoint?, access_key_id?, secret_access_key?, session_token?;
+    url_style?: "path" | "vhost";
+    use_ssl: boolean;
+    verify_ssl: boolean;      // false for self-signed / lab MinIO
+  };
 }
 
 interface SourceDef {
@@ -24,8 +39,9 @@ interface SourceDef {
   name: string;
   kind: "csv" | "parquet" | "postgres";
   path?: string;
-  connection_string?: string;
-  schema?: string;           // postgres (default public)
+  connection_id?: string;
+  connection_string?: string; // legacy only
+  schema?: string;
   table_name?: string;
 }
 
@@ -96,8 +112,8 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 
 | Command | In | Out |
 |---------|----|-----|
-| `preview_workspace` | `Workspace` | `PreviewResult` |
-| `preview_pipeline` | `steps[]` | `PreviewResult` (compat) |
+| `preview_workspace` | `Workspace`, `connections[]` | `PreviewResult` |
+| `preview_pipeline` | `steps[]`, `connections[]` | `PreviewResult` (compat) |
 | `export_dbt` | `pipeline_name`, `Workspace`, `output_dir` | `{ path }` |
 | `list_postgres_objects` | `connection_string` | `{ schema, name, kind }[]` |
 | `test_postgres_connection` | `connection_string` | `()` |
@@ -155,7 +171,7 @@ Generates:
 
 ## 7. MVP Done Definition (v1)
 
-1. Linux: DuckDB session; **`postgres` extension required when `LoadPostgres` is used** (hard actionable error if unavailable). Spatial may stay best-effort.  
+1. Linux: DuckDB session; **`postgres` extension required when `LoadPostgres` is used** (offline-first load — [ADR-0011](adr/0011-offline-duckdb-extensions.md)). **Parquet** via core `read_parquet` (UI + AST). Spatial may stay best-effort.  
 2. Workspace: ≥2 queries (CSV and/or Postgres), Join, preview ≤50.  
 3. UI can add a Postgres query via **object picker** (connection → list schemas/tables/views → select).  
 4. Export dbt → `dbt run` (multi-source + join; Postgres → `source()` + `sources.yml`) with no SQL hand-edits.  

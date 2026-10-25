@@ -91,7 +91,7 @@ fn compile_step(
             "SELECT * FROM read_csv_auto('{}')",
             escape_sql_string(path)
         )),
-        TransformationStep::LoadParquet { path } => Ok(format!(
+        TransformationStep::LoadParquet { path, .. } => Ok(format!(
             "SELECT * FROM read_parquet('{}')",
             escape_sql_string(path)
         )),
@@ -99,6 +99,7 @@ fn compile_step(
             connection_string,
             schema,
             table_name,
+            ..
         } => Ok(format!(
             "SELECT * FROM postgres_scan('{}', '{}', '{}')",
             escape_sql_string(connection_string),
@@ -321,6 +322,7 @@ mod tests {
     #[test]
     fn load_postgres_shape() {
         let steps = vec![TransformationStep::LoadPostgres {
+            connection_id: None,
             connection_string: "postgresql://u:p@localhost/db".into(),
             schema: "sales".into(),
             table_name: "orders".into(),

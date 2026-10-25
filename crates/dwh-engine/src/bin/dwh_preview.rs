@@ -53,7 +53,7 @@ fn main() {
             ],
             focus_query_id: "left".into(),
         };
-        preview_workspace(&db, &ws)
+        preview_workspace(&db, &ws, &[])
     } else {
         let path = args.remove(0);
         let filter = args.first().cloned();
@@ -61,7 +61,7 @@ fn main() {
         if let Some(condition) = filter {
             steps.push(TransformationStep::Filter { condition });
         }
-        preview_pipeline(&db, &steps)
+        preview_pipeline(&db, &steps, &[])
     };
 
     match result {

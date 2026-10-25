@@ -62,7 +62,7 @@ Competitive wedge and how we lean DE/DBA/dev in product language: [COMPETITIVE.m
 
 | Surface | Role |
 |---------|------|
-| **Explorer (left tree)** | Project → Sources / Queries / Export ([ADR-0009](adr/0009-project-explorer.md)) |
+| **Explorer (left tree)** | Project → Connections / Sources / Queries / Export ([ADR-0009](adr/0009-project-explorer.md), [ADR-0012](adr/0012-connections.md)) |
 | **Pipeline canvas** | visual graph of queries + join edges (killer feature) |
 | **Inspector** | Applied steps of active query + Filter/Join |
 | **Preview** | virtualized table for focus query |

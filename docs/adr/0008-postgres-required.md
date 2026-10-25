@@ -12,8 +12,8 @@ Sources today include CSV, Parquet, and Postgres. Treating Postgres as “best-e
 
 1. **PostgreSQL is a required first-class source** from v1 — same tier as CSV, not optional.  
 2. AST step `LoadPostgres { connection_string, schema, table_name }` stays in the canonical contract (`schema` defaults to `public`). See [ADR-0010](0010-postgres-object-picker.md) for catalog browse / object pick.  
-3. Runtime preview: DuckDB `postgres` scanner (extension) must be **installed/loaded successfully** for the Postgres path; failure is a **hard, actionable error** when the user runs a workspace that includes `LoadPostgres` (not a silent skip).  
-4. Startup may still attempt eager `INSTALL/LOAD postgres`; if that fails, CSV/Parquet work can continue, but any preview/export that touches `LoadPostgres` must fail with “Postgres extension unavailable: …”.  
+3. Runtime preview: DuckDB `postgres` scanner must be **loaded successfully** for the Postgres path; failure is a **hard, actionable error** when the user runs a workspace that includes `LoadPostgres` (not a silent skip).  
+4. Extension load is **offline-first** ([ADR-0011](0011-offline-duckdb-extensions.md)): vendored/`LOAD` from disk; no network `INSTALL` unless `DWH_ALLOW_EXTENSION_DOWNLOAD=1`. CSV/Parquet continue if postgres is missing.  
 5. dbt export: `LoadPostgres` → `source('postgres_raw', …)` + `sources.yml` (+ `profiles.yml.example` notes for Postgres target where relevant).  
 6. UI: “Add Postgres query” is a v1 surface — **connection + catalog object picker**, not free-typed table-only and not CustomSql.  
 7. DoD includes a Postgres fixture path (local Postgres or documented docker) in addition to CSV join.

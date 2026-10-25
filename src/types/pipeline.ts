@@ -11,13 +11,46 @@ export interface TableSchema {
 
 export type JoinType = "inner" | "left" | "right" | "full";
 
+/** ADR-0012 — how to reach a system (creds / endpoint). Not a Source. */
+export type ConnectionKind = "postgres" | "s3";
+
+export interface PostgresParams {
+  connection_string: string;
+}
+
+export interface S3Params {
+  /** `config` | `credential_chain` */
+  provider: string;
+  region?: string;
+  endpoint?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  session_token?: string;
+  /** `path` | `vhost` */
+  url_style?: string;
+  use_ssl: boolean;
+  verify_ssl: boolean;
+}
+
+export interface ConnectionDef {
+  id: string;
+  name: string;
+  kind: ConnectionKind;
+  postgres?: PostgresParams;
+  s3?: S3Params;
+}
+
 export type TransformationStep =
   | { type: "LoadCsv"; payload: { path: string } }
-  | { type: "LoadParquet"; payload: { path: string } }
+  | {
+      type: "LoadParquet";
+      payload: { path: string; connection_id?: string };
+    }
   | {
       type: "LoadPostgres";
       payload: {
-        connection_string: string;
+        connection_id?: string;
+        connection_string?: string;
         schema: string;
         table_name: string;
       };
@@ -47,7 +80,6 @@ export interface QueryDef {
   id: string;
   name: string;
   steps: TransformationStep[];
-  /** Optional bind to a Project Source (dbt source / PQ connection). */
   source_id?: string;
 }
 
@@ -56,7 +88,7 @@ export interface Workspace {
   focus_query_id: string;
 }
 
-/** dbt sources + PQ “Get Data” — registered inputs in the Project. */
+/** Object catalog entry — may reference a Connection. */
 export type SourceKind = "csv" | "parquet" | "postgres";
 
 export interface SourceDef {
@@ -64,20 +96,21 @@ export interface SourceDef {
   name: string;
   kind: SourceKind;
   path?: string;
+  connection_id?: string;
+  /** Legacy mirror; prefer connection_id. */
   connection_string?: string;
-  /** Postgres schema (e.g. public). */
   schema?: string;
   table_name?: string;
 }
 
 /**
- * IDE / dbt project container (ADR-0009).
- * Owns Sources + Workspace; Explorer tree navigates this.
+ * IDE / dbt project container (ADR-0009 + ADR-0012).
  */
 export interface Project {
   id: string;
   name: string;
   root_path?: string;
+  connections: ConnectionDef[];
   sources: SourceDef[];
   workspace: Workspace;
   dbt_target: "v1" | "v2";
@@ -102,21 +135,44 @@ export function newSourceId(): string {
   return newId("src");
 }
 
+export function newConnectionId(): string {
+  return newId("conn");
+}
+
 export function newProjectId(): string {
   return newId("proj");
+}
+
+export function emptyS3Params(): S3Params {
+  return {
+    provider: "config",
+    region: "us-east-1",
+    url_style: "path",
+    use_ssl: true,
+    verify_ssl: true,
+  };
 }
 
 export function emptyProject(name = "Untitled"): Project {
   return {
     id: newProjectId(),
     name,
+    connections: [],
     sources: [],
     workspace: { queries: [], focus_query_id: "" },
     dbt_target: "v1",
   };
 }
 
-/** Mirror Load* steps into Sources catalog (idempotent by path/table). */
+export function connectionById(
+  project: Project,
+  id: string | undefined,
+): ConnectionDef | undefined {
+  if (!id) return undefined;
+  return project.connections.find((c) => c.id === id);
+}
+
+/** Mirror Load* steps into Sources catalog (idempotent). */
 export function syncSourcesFromQueries(
   sources: SourceDef[],
   queries: QueryDef[],
@@ -124,8 +180,8 @@ export function syncSourcesFromQueries(
   const next = [...sources];
   const keyOf = (s: SourceDef) =>
     s.kind === "postgres"
-      ? `pg:${s.connection_string}|${s.schema ?? "public"}.${s.table_name}`
-      : `${s.kind}:${s.path}`;
+      ? `pg:${s.connection_id ?? s.connection_string}|${s.schema ?? "public"}.${s.table_name}`
+      : `${s.kind}:${s.connection_id ?? ""}:${s.path}`;
 
   const seen = new Set(next.map(keyOf));
 
@@ -133,7 +189,7 @@ export function syncSourcesFromQueries(
     const step = q.steps[0];
     if (!step) continue;
     if (step.type === "LoadCsv") {
-      const key = `csv:${step.payload.path}`;
+      const key = `csv::${step.payload.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
       next.push({
@@ -143,7 +199,7 @@ export function syncSourcesFromQueries(
         path: step.payload.path,
       });
     } else if (step.type === "LoadParquet") {
-      const key = `parquet:${step.payload.path}`;
+      const key = `parquet:${step.payload.connection_id ?? ""}:${step.payload.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
       next.push({
@@ -151,16 +207,18 @@ export function syncSourcesFromQueries(
         name: step.payload.path.split(/[/\\]/).pop() ?? q.name,
         kind: "parquet",
         path: step.payload.path,
+        connection_id: step.payload.connection_id,
       });
     } else if (step.type === "LoadPostgres") {
       const schema = step.payload.schema || "public";
-      const key = `pg:${step.payload.connection_string}|${schema}.${step.payload.table_name}`;
+      const key = `pg:${step.payload.connection_id ?? step.payload.connection_string}|${schema}.${step.payload.table_name}`;
       if (seen.has(key)) continue;
       seen.add(key);
       next.push({
         id: newSourceId(),
         name: `${schema}.${step.payload.table_name}`,
         kind: "postgres",
+        connection_id: step.payload.connection_id,
         connection_string: step.payload.connection_string,
         schema,
         table_name: step.payload.table_name,

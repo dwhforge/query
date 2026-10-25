@@ -8,6 +8,10 @@ description = "DuckDB session and preview execution for DWH-RS-QUERY"
 name = "dwh-preview"
 path = "src/bin/dwh_preview.rs"
 
+[[bin]]
+name = "dwh-duckdb-info"
+path = "src/bin/dwh_duckdb_info.rs"
+
 [dependencies]
 dwh-pipeline = { path = "../dwh-pipeline" }
 duckdb = { version = "1.3.2", features = ["bundled"] }

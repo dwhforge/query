@@ -1,7 +1,14 @@
 # DWH-RS-QUERY
 
 Local desktop ETL/transform workbench: **Tauri + React/TS + Rust + DuckDB**.  
-Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **CSV, Parquet, PostgreSQL (required)**. Raw data stays on-device.
+Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **CSV, Parquet, PostgreSQL (required)**. Raw data stays on-device.  
+**Bundled DuckDB + sidecar `extensions/`:** no CDN install. After clone (once, needs network):
+
+```bash
+./scripts/fetch-duckdb-extensions.sh
+```
+
+Layout at runtime: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)). Local Parquet = core; **S3** needs `httpfs`.
 
 **Licensing:** open-source is under consideration and **not decided**. Documentation is in English to stay OSS-ready.
 

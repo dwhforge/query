@@ -1,5 +1,7 @@
 use crate::session::DbSession;
-use dwh_pipeline::{GraphCompiler, PipelineCompiler, TransformationStep, Workspace};
+use dwh_pipeline::{
+    ConnectionDef, GraphCompiler, PipelineCompiler, TransformationStep, Workspace,
+};
 use duckdb::arrow::array::{
     Array, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
     Int32Array, Int64Array, Int8Array, LargeStringArray, StringArray, TimestampMicrosecondArray,
@@ -150,22 +152,23 @@ fn run_sql(db: &DbSession, sql: String) -> Result<PreviewResult, String> {
     })
 }
 
-pub fn preview_workspace(db: &DbSession, workspace: &Workspace) -> Result<PreviewResult, String> {
-    if workspace.uses_postgres() {
-        db.ensure_postgres()?;
-    }
-    let sql = GraphCompiler::new(workspace).to_sql(true)?;
+pub fn preview_workspace(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+) -> Result<PreviewResult, String> {
+    let resolved = db.prepare_workspace(workspace, connections)?;
+    let sql = GraphCompiler::new(&resolved).to_sql(true)?;
     run_sql(db, sql)
 }
 
 pub fn preview_pipeline(
     db: &DbSession,
     steps: &[TransformationStep],
+    connections: &[ConnectionDef],
 ) -> Result<PreviewResult, String> {
     let ws = Workspace::from_linear_steps(steps.to_vec());
-    if ws.uses_postgres() {
-        db.ensure_postgres()?;
-    }
-    let sql = PipelineCompiler::new(steps).to_sql(true)?;
+    let resolved = db.prepare_workspace(&ws, connections)?;
+    let sql = GraphCompiler::new(&resolved).to_sql(true)?;
     run_sql(db, sql)
 }

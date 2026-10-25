@@ -140,7 +140,7 @@ fn compile_query_as_dbt_model(
                 "-- source: csv\nselect * from read_csv_auto('{}')\n",
                 escape_sql_string(path)
             ),
-            TransformationStep::LoadParquet { path } => format!(
+            TransformationStep::LoadParquet { path, .. } => format!(
                 "-- source: parquet\nselect * from read_parquet('{}')\n",
                 escape_sql_string(path)
             ),
@@ -169,7 +169,7 @@ fn compile_query_as_dbt_model(
                 "select * from read_csv_auto('{}')",
                 escape_sql_string(path)
             ),
-            TransformationStep::LoadParquet { path } => format!(
+            TransformationStep::LoadParquet { path, .. } => format!(
                 "select * from read_parquet('{}')",
                 escape_sql_string(path)
             ),

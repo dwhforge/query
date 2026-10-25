@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { ConnectionEditor } from "./components/ConnectionEditor";
 import { EmptyHero } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
 import { GraphCanvas } from "./components/GraphCanvas";
@@ -9,6 +10,7 @@ import {
   type PostgresSelection,
 } from "./components/PostgresPicker";
 import { PreviewTable } from "./components/PreviewTable";
+import { S3SourceDialog } from "./components/S3SourceDialog";
 import { debounce } from "./lib/debounce";
 import {
   exportDbt,
@@ -19,6 +21,8 @@ import {
   emptyProject,
   newQueryId,
   syncSourcesFromQueries,
+  type ConnectionDef,
+  type ConnectionKind,
   type JoinType,
   type PreviewResult,
   type Project,
@@ -42,7 +46,14 @@ function App() {
   const [showSql, setShowSql] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [showPgPicker, setShowPgPicker] = useState(false);
+  const [showS3Dialog, setShowS3Dialog] = useState(false);
+  const [connEditorOpen, setConnEditorOpen] = useState(false);
+  const [connEditorKind, setConnEditorKind] =
+    useState<ConnectionKind>("postgres");
+  const [editingConnection, setEditingConnection] =
+    useState<ConnectionDef | null>(null);
   const [treeExpanded, setTreeExpanded] = useState<Record<string, boolean>>({
+    connections: true,
     sources: true,
     queries: true,
     export: true,
@@ -83,31 +94,36 @@ function App() {
     }));
   }, []);
 
-  const runPreview = useCallback(async (ws: Workspace) => {
-    setLoading(true);
-    try {
-      const result = await previewWorkspace(ws);
-      setPreview(result);
-      setError(null);
-    } catch (e) {
-      setPreview(null);
-      setError(typeof e === "string" ? e : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const connections = project.connections;
+
+  const runPreview = useCallback(
+    async (ws: Workspace, conns: ConnectionDef[]) => {
+      setLoading(true);
+      try {
+        const result = await previewWorkspace(ws, conns);
+        setPreview(result);
+        setError(null);
+      } catch (e) {
+        setPreview(null);
+        setError(typeof e === "string" ? e : String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   const debouncedPreview = useMemo(
     () =>
-      debounce((ws: Workspace) => {
-        void runPreview(ws);
+      debounce((ws: Workspace, conns: ConnectionDef[]) => {
+        void runPreview(ws, conns);
       }, 150),
     [runPreview],
   );
 
   useEffect(() => {
-    if (workspace) debouncedPreview(workspace);
-  }, [workspace, debouncedPreview]);
+    if (workspace) debouncedPreview(workspace, connections);
+  }, [workspace, connections, debouncedPreview]);
 
   const syncInspectorFromQuery = useCallback(
     (q: QueryDef | undefined) => {
@@ -164,27 +180,52 @@ function App() {
       if (source.kind === "postgres" && s.type === "LoadPostgres")
         return (
           s.payload.table_name === source.table_name &&
-          (s.payload.schema || "public") === (source.schema || "public")
+          (s.payload.schema || "public") === (source.schema || "public") &&
+          (s.payload.connection_id ?? "") === (source.connection_id ?? "")
         );
       return false;
     });
     if (bound) selectQuery(bound.id);
   }
 
-  async function addCsvQuery() {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "CSV", extensions: ["csv"] }],
+  function upsertConnection(conn: ConnectionDef) {
+    setProject((p) => {
+      const idx = p.connections.findIndex((c) => c.id === conn.id);
+      const connections =
+        idx >= 0
+          ? p.connections.map((c) => (c.id === conn.id ? conn : c))
+          : [...p.connections, conn];
+      return { ...p, connections };
     });
-    if (typeof selected !== "string") return;
+    setConnEditorOpen(false);
+    setEditingConnection(null);
+  }
+
+  function openNewConnection(kind: ConnectionKind) {
+    setEditingConnection(null);
+    setConnEditorKind(kind);
+    setConnEditorOpen(true);
+  }
+
+  function addFileQuery(
+    path: string,
+    kind: "csv" | "parquet",
+    connectionId?: string,
+  ) {
     const id = newQueryId();
+    const base = path.split(/[/\\]/).pop() ?? id;
     const name =
-      selected.split(/[/\\]/).pop()?.replace(/\.csv$/i, "") ?? id;
-    const q: QueryDef = {
-      id,
-      name,
-      steps: [{ type: "LoadCsv", payload: { path: selected } }],
-    };
+      kind === "csv"
+        ? base.replace(/\.csv$/i, "")
+        : base.replace(/\.parquet$/i, "");
+    const step: TransformationStep =
+      kind === "csv"
+        ? { type: "LoadCsv", payload: { path } }
+        : {
+            type: "LoadParquet",
+            payload: { path, connection_id: connectionId },
+          };
+    const q: QueryDef = { id, name, steps: [step] };
     setProject((p) => {
       const nextQueries = [...p.workspace.queries, q];
       return {
@@ -200,6 +241,24 @@ function App() {
     setFilterCondition("");
   }
 
+  async function addCsvQuery() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (typeof selected !== "string") return;
+    addFileQuery(selected, "csv");
+  }
+
+  async function addParquetQuery() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Parquet", extensions: ["parquet"] }],
+    });
+    if (typeof selected !== "string") return;
+    addFileQuery(selected, "parquet");
+  }
+
   function addPostgresFromPicker(sel: PostgresSelection) {
     const id = newQueryId();
     const q: QueryDef = {
@@ -209,7 +268,7 @@ function App() {
         {
           type: "LoadPostgres",
           payload: {
-            connection_string: sel.connection_string,
+            connection_id: sel.connection_id,
             schema: sel.schema,
             table_name: sel.table_name,
           },
@@ -425,10 +484,31 @@ function App() {
           </button>
           <button
             type="button"
+            onClick={() => openNewConnection("postgres")}
+            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
+          >
+            + Connection
+          </button>
+          <button
+            type="button"
             onClick={() => setShowPgPicker(true)}
             className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
           >
             + Postgres
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowS3Dialog(true)}
+            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
+          >
+            + S3
+          </button>
+          <button
+            type="button"
+            onClick={() => void addParquetQuery()}
+            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-teal-700"
+          >
+            + Parquet
           </button>
           <button
             type="button"
@@ -440,16 +520,39 @@ function App() {
         </div>
       </header>
 
+      <ConnectionEditor
+        open={connEditorOpen}
+        initial={editingConnection}
+        defaultKind={connEditorKind}
+        onClose={() => {
+          setConnEditorOpen(false);
+          setEditingConnection(null);
+        }}
+        onSave={upsertConnection}
+      />
       <PostgresPicker
         open={showPgPicker}
+        connections={project.connections}
         onClose={() => setShowPgPicker(false)}
+        onRequestNewConnection={() => openNewConnection("postgres")}
         onSelect={addPostgresFromPicker}
+      />
+      <S3SourceDialog
+        open={showS3Dialog}
+        connections={project.connections}
+        onClose={() => setShowS3Dialog(false)}
+        onRequestNewConnection={() => openNewConnection("s3")}
+        onSelect={(sel) => {
+          addFileQuery(sel.path, "parquet", sel.connection_id);
+          setShowS3Dialog(false);
+        }}
       />
 
       {empty ? (
         <EmptyHero
           onLoadSample={() => void handleLoadSample()}
           onAddCsv={() => void addCsvQuery()}
+          onAddParquet={() => void addParquetQuery()}
           onAddPostgres={() => setShowPgPicker(true)}
         />
       ) : (
@@ -461,12 +564,20 @@ function App() {
               activeQueryId={activeQueryId}
               expanded={treeExpanded}
               onToggle={(key) =>
-                setTreeExpanded((e) => ({ ...e, [key]: e[key] === false }))
+                setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
               }
               onSelectQuery={selectQuery}
               onSelectSource={onSelectSource}
+              onSelectConnection={(c) => {
+                setEditingConnection(c);
+                setConnEditorKind(c.kind);
+                setConnEditorOpen(true);
+              }}
               onExport={() => void handleExportDbt()}
+              onAddConnection={() => openNewConnection("postgres")}
               onAddSourceCsv={() => void addCsvQuery()}
+              onAddSourceParquet={() => void addParquetQuery()}
+              onAddSourceS3={() => setShowS3Dialog(true)}
               onAddSourcePostgres={() => setShowPgPicker(true)}
             />
           </aside>

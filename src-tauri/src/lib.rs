@@ -1,29 +1,34 @@
 use dwh_engine::{
-    list_postgres_objects as run_list_postgres_objects,
+    list_postgres_objects as run_list_postgres_objects, set_extensions_dir,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
     test_postgres_connection as run_test_postgres_connection, DbSession, PostgresObject,
     PreviewResult,
 };
 use dwh_pipeline::{
-    DbtProducer, DbtTarget, OutputProducer, QueryDef, TransformationStep, Workspace,
+    ConnectionDef, DbtProducer, DbtTarget, OutputProducer, QueryDef, TransformationStep,
+    Workspace,
 };
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 fn preview_pipeline(
     steps: Vec<TransformationStep>,
+    connections: Option<Vec<ConnectionDef>>,
     db: State<'_, DbSession>,
 ) -> Result<PreviewResult, String> {
-    run_preview_steps(&db, &steps)
+    let conns = connections.unwrap_or_default();
+    run_preview_steps(&db, &steps, &conns)
 }
 
 #[tauri::command]
 fn preview_workspace(
     workspace: Workspace,
+    connections: Option<Vec<ConnectionDef>>,
     db: State<'_, DbSession>,
 ) -> Result<PreviewResult, String> {
-    run_preview_workspace(&db, &workspace)
+    let conns = connections.unwrap_or_default();
+    run_preview_workspace(&db, &workspace, &conns)
 }
 
 #[tauri::command]
@@ -112,14 +117,60 @@ fn find_fixtures_dir() -> Result<PathBuf, String> {
     Err("Could not find fixtures/sample.csv — run from the repo root".into())
 }
 
+/// Prefer packaged resources, then folder next to the binary, then dev `src-tauri/extensions`.
+fn configure_extensions_dir(app: &tauri::App) {
+    if let Ok(rd) = app.path().resource_dir() {
+        let ext = rd.join("extensions");
+        if ext.is_dir() {
+            eprintln!(
+                "[dwh-rs-query] DuckDB extensions (bundle resources): {}",
+                ext.display()
+            );
+            set_extensions_dir(ext);
+            return;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let ext = parent.join("extensions");
+            if ext.is_dir() {
+                eprintln!(
+                    "[dwh-rs-query] DuckDB extensions (beside binary): {}",
+                    ext.display()
+                );
+                set_extensions_dir(ext);
+                return;
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions");
+    if dev.is_dir() {
+        eprintln!(
+            "[dwh-rs-query] DuckDB extensions (dev src-tauri/extensions): {}",
+            dev.display()
+        );
+        set_extensions_dir(dev);
+    } else {
+        eprintln!(
+            "[dwh-rs-query] WARNING: no extensions/ folder — run scripts/fetch-duckdb-extensions.sh"
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let session = DbSession::new().expect("failed to open DuckDB session");
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(session)
+        .setup(|app| {
+            configure_extensions_dir(app);
+            let session = DbSession::new().map_err(|e| {
+                eprintln!("[dwh-rs-query] DuckDB session failed: {e}");
+                Box::<dyn std::error::Error>::from(e)
+            })?;
+            app.manage(session);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             preview_pipeline,
             preview_workspace,

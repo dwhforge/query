@@ -13,7 +13,8 @@ The UI needs a left **Explorer (tree)**. That implies a durable container above 
 | Our term | Reuses | Role |
 |----------|--------|------|
 | **Project** | dbt project / IDE project | Saved unit of work on disk: name, path, settings |
-| **Source** | dbt `sources` + PQ “Get Data” connection | Registered input: CSV/Parquet path or Postgres connection + schema.table |
+| **Connection** | IDE / dbt profile / PQ data-source settings | Credentials + endpoint params (PG, S3) — [ADR-0012](0012-connections.md) |
+| **Source** | dbt `sources` + PQ “Get Data” object | Registered input object; may reference `connection_id` |
 | **Query** | Power Query query / our `QueryDef` | Transform chain (Applied Steps); may start from a Source or Join |
 | **Workspace** | in-memory graph (keep) | Runtime view inside an open Project: `queries` + `focus_query_id` |
 
@@ -24,12 +25,13 @@ Do **not** introduce parallel names like “PipelinePack”, “DatasetHub”, �
 ```text
 Project
   id, name, root_path?
+  connections: Connection[]     # ADR-0012
   sources: Source[]
   workspace: Workspace          # queries + focus
   dbt_target: V1 | V2           # default export target
 ```
 
-`Source` is the catalog entry for inputs. A Query that `LoadCsv`/`LoadPostgres` **binds** to a Source (by id) when possible; early slice may still embed path/conn in the Load step and mirror into Sources for the tree.
+`Connection` holds credentials. `Source` is the object catalog (path / schema.table) and references a Connection when remote. Load steps prefer `connection_id`, not inline secrets.
 
 ### Explorer tree (UI)
 
@@ -38,16 +40,19 @@ Project
 ```text
 Explorer
   Project «name»
-  Sources                    [+] [PG]
+  Connections                [+]
+  ▾ pg   warehouse
+  ▾ s3   minio-lab
+  Sources                    [+] [PQ] [S3] [PG]
   ▾ csv  sample.csv
-  ▾ csv  dim_region.csv
   Queries                    [+]
   ▾ fact_sales  ★
   Export                     [+]
   ▾ dbt (v1)
 ```
 
-- `+` on Sources → add CSV (primary); PG → Postgres form.  
+- `+` on Connections → Connection editor (PG / S3 params).  
+- `+` on Sources → CSV / local Parquet / S3 object / Postgres object (via Connection).  
 - `+` on Queries → new query (same as add CSV source→query for now; later: empty query / from selected source).  
 - `+` / click on Export → export dbt.  
 - Click Source → select bound query if any.  

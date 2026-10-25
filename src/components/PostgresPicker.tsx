@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  listPostgresObjects,
-  type PostgresObject,
-} from "../lib/tauri";
-
-const STORAGE_KEY = "dwh-rs-query.pg.connection";
+import { listPostgresObjects, type PostgresObject } from "../lib/tauri";
+import type { ConnectionDef } from "../types/pipeline";
 
 export interface PostgresSelection {
-  connection_string: string;
+  connection_id: string;
   schema: string;
   table_name: string;
   kind: string;
@@ -15,7 +11,9 @@ export interface PostgresSelection {
 
 interface Props {
   open: boolean;
+  connections: ConnectionDef[];
   onClose: () => void;
+  onRequestNewConnection: () => void;
   onSelect: (sel: PostgresSelection) => void;
 }
 
@@ -34,19 +32,30 @@ function kindBadge(kind: string): string {
   }
 }
 
-export function PostgresPicker({ open, onClose, onSelect }: Props) {
-  const [conn, setConn] = useState(
-    () =>
-      localStorage.getItem(STORAGE_KEY) ??
-      "postgresql://user:pass@localhost:5432/db",
+export function PostgresPicker({
+  open,
+  connections,
+  onClose,
+  onRequestNewConnection,
+  onSelect,
+}: Props) {
+  const pgConns = useMemo(
+    () => connections.filter((c) => c.kind === "postgres"),
+    [connections],
   );
+  const [connectionId, setConnectionId] = useState("");
   const [objects, setObjects] = useState<PostgresObject[]>([]);
-  const [schemaFilter, setSchemaFilter] = useState<string>("");
+  const [schemaFilter, setSchemaFilter] = useState("");
   const [search, setSearch] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!connectionId && pgConns[0]) setConnectionId(pgConns[0].id);
+  }, [open, pgConns, connectionId]);
 
   useEffect(() => {
     if (!open) return;
@@ -70,7 +79,6 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
       return (
         o.name.toLowerCase().includes(q) ||
         o.schema.toLowerCase().includes(q) ||
-        o.kind.toLowerCase().includes(q) ||
         `${o.schema}.${o.name}`.toLowerCase().includes(q)
       );
     });
@@ -81,10 +89,12 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
     return objects.find((o) => `${o.schema}.${o.name}` === selectedKey) ?? null;
   }, [objects, selectedKey]);
 
+  const activeConn = pgConns.find((c) => c.id === connectionId);
+
   async function browse() {
-    const connection = conn.trim();
-    if (!connection) {
-      setError("Connection string is required");
+    const dsn = activeConn?.postgres?.connection_string?.trim();
+    if (!dsn) {
+      setError("Select a Postgres connection (or create one)");
       return;
     }
     setLoading(true);
@@ -92,9 +102,8 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
     setStatus(null);
     setSelectedKey(null);
     try {
-      const list = await listPostgresObjects(connection);
+      const list = await listPostgresObjects(dsn);
       setObjects(list);
-      localStorage.setItem(STORAGE_KEY, connection);
       const schemaSet = new Set(list.map((o) => o.schema));
       if (schemaSet.has("public")) setSchemaFilter("public");
       else if (schemaSet.size === 1) setSchemaFilter([...schemaSet][0] ?? "");
@@ -102,7 +111,7 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
       setStatus(
         list.length === 0
           ? "Connected — no user tables/views found"
-          : `Connected — ${list.length} object${list.length === 1 ? "" : "s"}`,
+          : `Connected — ${list.length} objects`,
       );
     } catch (e) {
       setObjects([]);
@@ -113,9 +122,9 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
   }
 
   function confirm() {
-    if (!selected) return;
+    if (!selected || !connectionId) return;
     onSelect({
-      connection_string: conn.trim(),
+      connection_id: connectionId,
       schema: selected.schema,
       table_name: selected.name,
       kind: selected.kind,
@@ -129,28 +138,24 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
-      aria-labelledby="pg-picker-title"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex max-h-[min(720px,90vh)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[#0a121c] shadow-2xl shadow-black/50">
+      <div className="flex max-h-[min(720px,90vh)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[#0a121c] shadow-2xl">
         <div className="flex items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
           <div>
-            <h2
-              id="pg-picker-title"
-              className="text-sm font-semibold tracking-tight text-teal-300"
-            >
-              Connect Postgres
+            <h2 className="text-sm font-semibold text-teal-300">
+              Postgres source
             </h2>
             <p className="mt-0.5 text-xs text-slate-500">
-              Browse schemas and pick a table or view — not a free-typed name.
+              Connection (credentials) → browse catalog → pick object.
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
           >
             Esc
           </button>
@@ -158,24 +163,45 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
 
         <div className="space-y-3 border-b border-[var(--line)] px-5 py-4">
           <div>
-            <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-              Connection string
-            </label>
-            <input
-              value={conn}
-              onChange={(e) => setConn(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void browse()}
-              spellCheck={false}
-              autoComplete="off"
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-200 outline-none focus:ring-2 focus:ring-teal-700"
-              placeholder="postgresql://user:pass@host:5432/dbname"
-            />
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                Connection
+              </label>
+              <button
+                type="button"
+                onClick={onRequestNewConnection}
+                className="text-[11px] text-teal-400 hover:text-teal-300"
+              >
+                + New connection
+              </button>
+            </div>
+            {pgConns.length === 0 ? (
+              <p className="rounded-lg border border-amber-900/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-200/90">
+                No Postgres connections — create one to browse objects.
+              </p>
+            ) : (
+              <select
+                value={connectionId}
+                onChange={(e) => {
+                  setConnectionId(e.target.value);
+                  setObjects([]);
+                  setStatus(null);
+                }}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
+              >
+                {pgConns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => void browse()}
-              disabled={loading}
+              disabled={loading || !connectionId}
               className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-50"
             >
               {loading ? "Browsing…" : "Browse objects"}
@@ -212,15 +238,12 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
             placeholder="Filter objects…"
             className="min-w-[160px] flex-1 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-teal-700 disabled:opacity-40"
           />
-          <span className="text-[11px] text-slate-500">
-            {filtered.length}/{objects.length}
-          </span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto">
           {objects.length === 0 && !loading ? (
             <div className="flex h-40 items-center justify-center px-6 text-center text-sm text-slate-500">
-              Enter a connection string and browse to list tables and views.
+              Select a connection and browse to list tables and views.
             </div>
           ) : (
             <ul className="divide-y divide-slate-800/80">
@@ -233,21 +256,21 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
                       type="button"
                       onClick={() => setSelectedKey(key)}
                       onDoubleClick={() => {
-                        setSelectedKey(key);
+                        if (!connectionId) return;
                         onSelect({
-                          connection_string: conn.trim(),
+                          connection_id: connectionId,
                           schema: o.schema,
                           table_name: o.name,
                           kind: o.kind,
                         });
                       }}
-                      className={`flex w-full items-center gap-3 px-5 py-2.5 text-left text-sm transition-colors ${
+                      className={`flex w-full items-center gap-3 px-5 py-2.5 text-left text-sm ${
                         active
                           ? "bg-teal-500/15 text-teal-100"
                           : "text-slate-200 hover:bg-slate-900/80"
                       }`}
                     >
-                      <span className="w-14 shrink-0 rounded border border-slate-700/80 px-1.5 py-0.5 text-center font-mono text-[10px] uppercase tracking-wide text-slate-400">
+                      <span className="w-14 shrink-0 rounded border border-slate-700/80 px-1.5 py-0.5 text-center font-mono text-[10px] uppercase text-slate-400">
                         {kindBadge(o.kind)}
                       </span>
                       <span className="min-w-0 flex-1 font-mono text-xs">
@@ -258,11 +281,6 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
                   </li>
                 );
               })}
-              {filtered.length === 0 && objects.length > 0 && (
-                <li className="px-5 py-8 text-center text-sm text-slate-500">
-                  No objects match this filter.
-                </li>
-              )}
             </ul>
           )}
         </div>
@@ -277,15 +295,15 @@ export function PostgresPicker({ open, onClose, onSelect }: Props) {
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300"
             >
               Cancel
             </button>
             <button
               type="button"
               onClick={confirm}
-              disabled={!selected}
-              className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400 disabled:opacity-40"
+              disabled={!selected || !connectionId}
+              className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-40"
             >
               Add as query
             </button>

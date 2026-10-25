@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ConnectionDef,
   PreviewResult,
   TransformationStep,
   Workspace,
@@ -7,14 +8,18 @@ import type {
 
 export type DbtTarget = "v1" | "v2";
 
-export function previewWorkspace(workspace: Workspace): Promise<PreviewResult> {
-  return invoke<PreviewResult>("preview_workspace", { workspace });
+export function previewWorkspace(
+  workspace: Workspace,
+  connections: ConnectionDef[] = [],
+): Promise<PreviewResult> {
+  return invoke<PreviewResult>("preview_workspace", { workspace, connections });
 }
 
 export function previewPipeline(
   steps: TransformationStep[],
+  connections: ConnectionDef[] = [],
 ): Promise<PreviewResult> {
-  return invoke<PreviewResult>("preview_pipeline", { steps });
+  return invoke<PreviewResult>("preview_pipeline", { steps, connections });
 }
 
 export function exportDbt(

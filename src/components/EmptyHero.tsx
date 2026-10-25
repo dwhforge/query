@@ -1,12 +1,14 @@
 interface EmptyHeroProps {
   onLoadSample: () => void;
   onAddCsv: () => void;
+  onAddParquet: () => void;
   onAddPostgres: () => void;
 }
 
 export function EmptyHero({
   onLoadSample,
   onAddCsv,
+  onAddParquet,
   onAddPostgres,
 }: EmptyHeroProps) {
   return (
@@ -35,6 +37,13 @@ export function EmptyHero({
           className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-200 hover:border-teal-600"
         >
           Open CSV
+        </button>
+        <button
+          type="button"
+          onClick={onAddParquet}
+          className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-200 hover:border-teal-600"
+        >
+          Open Parquet
         </button>
         <button
           type="button"

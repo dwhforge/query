@@ -1,4 +1,9 @@
-import type { Project, QueryDef, SourceDef } from "../types/pipeline";
+import type {
+  ConnectionDef,
+  Project,
+  QueryDef,
+  SourceDef,
+} from "../types/pipeline";
 
 interface ExplorerTreeProps {
   project: Project;
@@ -7,10 +12,13 @@ interface ExplorerTreeProps {
   onToggle: (key: string) => void;
   onSelectQuery: (id: string) => void;
   onSelectSource: (source: SourceDef) => void;
+  onSelectConnection: (conn: ConnectionDef) => void;
   onExport: () => void;
+  onAddConnection: () => void;
   onAddSourceCsv: () => void;
+  onAddSourceParquet: () => void;
+  onAddSourceS3: () => void;
   onAddSourcePostgres: () => void;
-  onAddQueryFromActiveSource?: () => void;
 }
 
 function SectionHeader({
@@ -33,7 +41,9 @@ function SectionHeader({
         onClick={onToggle}
         className="flex min-w-0 flex-1 items-center text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 hover:text-slate-300"
       >
-        <span className="mr-1 w-3 text-[10px] text-slate-600">{open ? "▾" : "▸"}</span>
+        <span className="mr-1 w-3 text-[10px] text-slate-600">
+          {open ? "▾" : "▸"}
+        </span>
         <span className="truncate">{title}</span>
         {typeof count === "number" && (
           <span className="ml-1.5 tabular-nums text-slate-600">{count}</span>
@@ -77,10 +87,15 @@ export function ExplorerTree({
   onToggle,
   onSelectQuery,
   onSelectSource,
+  onSelectConnection,
   onExport,
+  onAddConnection,
   onAddSourceCsv,
+  onAddSourceParquet,
+  onAddSourceS3,
   onAddSourcePostgres,
 }: ExplorerTreeProps) {
+  const connectionsOpen = expanded.connections !== false;
   const sourcesOpen = expanded.sources !== false;
   const queriesOpen = expanded.queries !== false;
   const exportOpen = expanded.export !== false;
@@ -100,16 +115,59 @@ export function ExplorerTree({
       <div className="min-h-0 flex-1 overflow-auto px-1 py-2">
         <div className="px-1">
           <SectionHeader
+            title="Connections"
+            open={connectionsOpen}
+            count={project.connections.length}
+            onToggle={() => onToggle("connections")}
+            actions={
+              <IconBtn title="New connection" onClick={onAddConnection}>
+                +
+              </IconBtn>
+            }
+          />
+          {connectionsOpen && (
+            <ul className="mb-2 ml-3 border-l border-[var(--line)] pl-2">
+              {project.connections.length === 0 && (
+                <li className="py-1 text-xs text-slate-600">
+                  PG / S3 credentials — use +
+                </li>
+              )}
+              {project.connections.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    onClick={() => onSelectConnection(c)}
+                    className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80"
+                  >
+                    <span className="w-8 shrink-0 text-[9px] uppercase text-amber-600/90">
+                      {c.kind === "postgres" ? "pg" : "s3"}
+                    </span>
+                    <span className="truncate">{c.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="px-1">
+          <SectionHeader
             title="Sources"
             open={sourcesOpen}
             count={project.sources.length}
             onToggle={() => onToggle("sources")}
             actions={
               <>
-                <IconBtn title="Add CSV source" onClick={onAddSourceCsv}>
+                <IconBtn title="Add CSV" onClick={onAddSourceCsv}>
                   +
                 </IconBtn>
-                <IconBtn title="Add Postgres source" onClick={onAddSourcePostgres}>
+                <IconBtn title="Add local Parquet" onClick={onAddSourceParquet}>
+                  <span className="text-[9px] font-bold">PQ</span>
+                </IconBtn>
+                <IconBtn title="Add S3 Parquet" onClick={onAddSourceS3}>
+                  <span className="text-[9px] font-bold">S3</span>
+                </IconBtn>
+                <IconBtn title="Add Postgres table" onClick={onAddSourcePostgres}>
                   <span className="text-[9px] font-bold">PG</span>
                 </IconBtn>
               </>
@@ -119,7 +177,7 @@ export function ExplorerTree({
             <ul className="mb-2 ml-3 border-l border-[var(--line)] pl-2">
               {project.sources.length === 0 && (
                 <li className="py-1 text-xs text-slate-600">
-                  No sources — use +
+                  Objects bound to connections — use +
                 </li>
               )}
               {project.sources.map((s) => (
@@ -175,7 +233,9 @@ export function ExplorerTree({
                     >
                       <span className="truncate">{q.name}</span>
                       {isFocus && (
-                        <span className="ml-auto text-[9px] text-teal-400">★</span>
+                        <span className="ml-auto text-[9px] text-teal-400">
+                          ★
+                        </span>
                       )}
                     </button>
                   </li>
@@ -205,11 +265,6 @@ export function ExplorerTree({
                   className="w-full rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80 hover:text-teal-200"
                 >
                   dbt ({project.dbt_target})
-                  {project.last_dbt_export_path && (
-                    <span className="mt-0.5 block truncate text-[10px] text-slate-600">
-                      {project.last_dbt_export_path}
-                    </span>
-                  )}
                 </button>
               </li>
             </ul>

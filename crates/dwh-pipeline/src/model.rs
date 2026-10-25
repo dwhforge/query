@@ -1,3 +1,4 @@
+use crate::connection::ConnectionDef;
 use serde::{Deserialize, Serialize};
 
 fn default_pg_schema() -> String {
@@ -28,10 +29,19 @@ impl JoinType {
 #[serde(tag = "type", content = "payload")]
 pub enum TransformationStep {
     LoadCsv { path: String },
-    LoadParquet { path: String },
+    LoadParquet {
+        path: String,
+        /// Project Connection id (`s3`) for remote paths — ADR-0012.
+        #[serde(default)]
+        connection_id: Option<String>,
+    },
     LoadPostgres {
+        /// Preferred: Project Connection id (`postgres`).
+        #[serde(default)]
+        connection_id: Option<String>,
+        /// Legacy / resolved DSN (filled when connection_id absent).
+        #[serde(default)]
         connection_string: String,
-        /// Database schema (e.g. `public`). Defaults for older payloads.
         #[serde(default = "default_pg_schema")]
         schema: String,
         table_name: String,
@@ -84,12 +94,67 @@ impl Workspace {
         self.queries.iter().find(|q| q.id == id)
     }
 
-    /// True if any step is LoadPostgres (requires DuckDB postgres extension).
     pub fn uses_postgres(&self) -> bool {
         self.queries.iter().any(|q| {
             q.steps
                 .iter()
                 .any(|s| matches!(s, TransformationStep::LoadPostgres { .. }))
         })
+    }
+
+    /// Collect connection ids referenced by Load* steps.
+    pub fn referenced_connection_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for q in &self.queries {
+            for s in &q.steps {
+                match s {
+                    TransformationStep::LoadParquet {
+                        connection_id: Some(id),
+                        ..
+                    }
+                    | TransformationStep::LoadPostgres {
+                        connection_id: Some(id),
+                        ..
+                    } => {
+                        if !ids.contains(id) {
+                            ids.push(id.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ids
+    }
+
+    /// Resolve `connection_id` → inline DSN for compile/runtime (does not strip ids).
+    pub fn resolve_postgres_dsns(&self, connections: &[ConnectionDef]) -> Result<Workspace, String> {
+        let mut out = self.clone();
+        for q in &mut out.queries {
+            for step in &mut q.steps {
+                if let TransformationStep::LoadPostgres {
+                    connection_id,
+                    connection_string,
+                    ..
+                } = step
+                {
+                    if let Some(cid) = connection_id {
+                        let c = connections
+                            .iter()
+                            .find(|c| &c.id == cid)
+                            .ok_or_else(|| format!("Unknown connection_id '{cid}'"))?;
+                        let dsn = c.postgres_dsn().ok_or_else(|| {
+                            format!("Connection '{cid}' is not a postgres connection with DSN")
+                        })?;
+                        *connection_string = dsn.to_string();
+                    } else if connection_string.trim().is_empty() {
+                        return Err(
+                            "LoadPostgres requires connection_id or connection_string".into()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }

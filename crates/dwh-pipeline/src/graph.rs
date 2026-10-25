@@ -6,6 +6,9 @@ pub fn direct_deps(steps: &[TransformationStep]) -> Vec<String> {
     let mut deps = Vec::new();
     for step in steps {
         match step {
+            TransformationStep::FromQuery { query_id } => {
+                deps.push(query_id.clone());
+            }
             TransformationStep::Join { right_query_id, .. } => {
                 deps.push(right_query_id.clone());
             }

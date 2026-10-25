@@ -106,6 +106,18 @@ fn compile_step(
             escape_sql_string(schema),
             escape_sql_string(table_name)
         )),
+        TransformationStep::FromQuery { query_id } => {
+            if !prev_step.is_empty() {
+                return Err("FromQuery must be the first step of a query".into());
+            }
+            let src = last_cte.get(query_id).ok_or_else(|| {
+                format!(
+                    "FromQuery: query '{}' not compiled yet (check deps / cycles)",
+                    query_id
+                )
+            })?;
+            Ok(format!("SELECT * FROM {src}"))
+        }
         TransformationStep::Filter { condition } => {
             require_prev(prev_step, "Filter")?;
             Ok(format!(
@@ -273,6 +285,39 @@ mod tests {
         assert!(sql.contains("read_csv_auto('/tmp/data.csv')"));
         assert!(sql.contains("WHERE amount > 100"));
         assert!(sql.contains("LIMIT 50"));
+    }
+
+    #[test]
+    fn from_query_then_filter() {
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "sales".into(),
+                    name: "sales".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "sales.csv".into(),
+                    }],
+                },
+                QueryDef {
+                    id: "top".into(),
+                    name: "top".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "sales".into(),
+                        },
+                        TransformationStep::Filter {
+                            condition: "qty > 1".into(),
+                        },
+                    ],
+                },
+            ],
+            focus_query_id: "top".into(),
+        };
+        let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
+        assert!(sql.contains("q_sales_s0"));
+        assert!(sql.contains("FROM q_sales_s0"));
+        assert!(sql.contains("WHERE qty > 1"));
+        assert!(sql.contains("q_top_s"));
     }
 
     #[test]

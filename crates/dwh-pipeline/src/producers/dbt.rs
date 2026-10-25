@@ -72,24 +72,17 @@ impl OutputProducer for DbtProducer {
             let query = workspace
                 .query(qid)
                 .ok_or_else(|| format!("missing query {qid}"))?;
-            let stem = sanitize_id(&query.name);
-            let is_source_only = matches!(
-                query.steps.first(),
-                Some(TransformationStep::LoadCsv { .. }
-                    | TransformationStep::LoadParquet { .. }
-                    | TransformationStep::LoadPostgres { .. })
-            ) && query.steps.len() == 1;
-
-            let is_focus = qid == &workspace.focus_query_id;
-            let (folder, prefix) = if is_focus {
-                (&marts, "mart")
-            } else if is_source_only {
-                (&staging, "stg")
-            } else {
-                (&intermediate, "int")
+            let (folder, model_name) = {
+                let name = dbt_model_name(workspace, query);
+                let folder = if name.starts_with("mart_") {
+                    &marts
+                } else if name.starts_with("stg_") {
+                    &staging
+                } else {
+                    &intermediate
+                };
+                (folder, name)
             };
-
-            let model_name = format!("{prefix}_{stem}");
             let sql = compile_query_as_dbt_model(query, &model_name_by_query)?;
             write_file(&folder.join(format!("{model_name}.sql")), &sql)?;
             model_name_by_query.insert(qid.clone(), model_name);
@@ -124,6 +117,71 @@ impl OutputProducer for DbtProducer {
     }
 }
 
+fn is_source_only_query(query: &crate::model::QueryDef) -> bool {
+    matches!(
+        query.steps.first(),
+        Some(
+            TransformationStep::LoadCsv { .. }
+                | TransformationStep::LoadParquet { .. }
+                | TransformationStep::LoadPostgres { .. }
+        )
+    ) && query.steps.len() == 1
+}
+
+/// dbt model file stem for a query (`stg_` / `int_` / `mart_`).
+pub fn dbt_model_name(workspace: &Workspace, query: &crate::model::QueryDef) -> String {
+    let stem = sanitize_id(&query.name);
+    let prefix = if query.id == workspace.focus_query_id {
+        "mart"
+    } else if is_source_only_query(query) {
+        "stg"
+    } else {
+        "int"
+    };
+    format!("{prefix}_{stem}")
+}
+
+/// Build query-id → model-name map in dependency order (for `ref()`).
+pub fn dbt_model_names(workspace: &Workspace) -> Result<std::collections::HashMap<String, String>, String> {
+    let order = topo_queries(workspace)?;
+    let mut map = std::collections::HashMap::new();
+    for qid in order {
+        let query = workspace
+            .query(&qid)
+            .ok_or_else(|| format!("missing query {qid}"))?;
+        map.insert(qid, dbt_model_name(workspace, query));
+    }
+    Ok(map)
+}
+
+/// Compiled dbt model SQL for one query (same body as export). Live Model tab.
+pub fn preview_dbt_model_sql(
+    workspace: &Workspace,
+    query_id: &str,
+) -> Result<PreviewDbtModel, String> {
+    let query = workspace
+        .query(query_id)
+        .ok_or_else(|| format!("query '{query_id}' not found"))?;
+    let names = dbt_model_names(workspace)?;
+    let sql = compile_query_as_dbt_model(query, &names)?;
+    let model_name = names
+        .get(query_id)
+        .cloned()
+        .unwrap_or_else(|| dbt_model_name(workspace, query));
+    Ok(PreviewDbtModel {
+        query_id: query_id.to_string(),
+        model_name,
+        sql,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PreviewDbtModel {
+    pub query_id: String,
+    pub model_name: String,
+    pub sql: String,
+}
+
 fn compile_query_as_dbt_model(
     query: &crate::model::QueryDef,
     models: &std::collections::HashMap<String, String>,
@@ -133,7 +191,7 @@ fn compile_query_as_dbt_model(
         return Err(format!("query '{}' empty", query.id));
     }
 
-    // If single Load* — staging select.
+    // Single Load* / FromQuery — one-shot select.
     if query.steps.len() == 1 {
         return Ok(match &query.steps[0] {
             TransformationStep::LoadCsv { path } => format!(
@@ -152,7 +210,13 @@ fn compile_query_as_dbt_model(
                 let src = pg_dbt_source_name(schema, table_name);
                 format!("select * from {{{{ source('postgres_raw', '{src}') }}}}\n")
             }
-            _ => return Err("single-step query must be Load*".into()),
+            TransformationStep::FromQuery { query_id } => {
+                let m = models.get(query_id).ok_or_else(|| {
+                    format!("dbt FromQuery: missing model for '{query_id}'")
+                })?;
+                format!("select * from {{{{ ref('{m}') }}}}\n")
+            }
+            _ => return Err("single-step query must be Load* or FromQuery".into()),
         });
     }
 
@@ -180,6 +244,15 @@ fn compile_query_as_dbt_model(
             } => {
                 let src = pg_dbt_source_name(schema, table_name);
                 format!("select * from {{{{ source('postgres_raw', '{src}') }}}}")
+            }
+            TransformationStep::FromQuery { query_id } => {
+                if !prev.is_empty() {
+                    return Err("dbt FromQuery must be the first step".into());
+                }
+                let m = models.get(query_id).ok_or_else(|| {
+                    format!("dbt FromQuery: missing model for '{query_id}'")
+                })?;
+                format!("select * from {{{{ ref('{m}') }}}}")
             }
             TransformationStep::Filter { condition } => {
                 format!("select * from {prev} where {condition}")

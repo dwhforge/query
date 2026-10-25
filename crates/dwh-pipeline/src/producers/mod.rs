@@ -1,6 +1,6 @@
 pub mod dbt;
 
-pub use dbt::DbtProducer;
+pub use dbt::{preview_dbt_model_sql, DbtProducer, PreviewDbtModel};
 
 use crate::model::Workspace;
 use serde::{Deserialize, Serialize};

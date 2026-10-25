@@ -11,5 +11,7 @@ pub use compiler::{GraphCompiler, PipelineCompiler};
 pub use connection::{ConnectionDef, ConnectionKind, PostgresParams, S3Params};
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{JoinType, QueryDef, TransformationStep, Workspace};
-pub use producers::{DbtProducer, DbtTarget, OutputProducer};
+pub use producers::{
+    preview_dbt_model_sql, DbtProducer, DbtTarget, OutputProducer, PreviewDbtModel,
+};
 pub use project::{CanvasLayout, CanvasPosition, Project, SourceDef, SourceKind};

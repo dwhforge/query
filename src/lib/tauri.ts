@@ -16,6 +16,23 @@ export function previewWorkspace(
   return invoke<PreviewResult>("preview_workspace", { workspace, connections });
 }
 
+export type PreviewDbtModel = {
+  query_id: string;
+  model_name: string;
+  sql: string;
+};
+
+/** Compiled dbt model body for one query (Model tab). */
+export function previewDbtModel(
+  workspace: Workspace,
+  queryId: string,
+): Promise<PreviewDbtModel> {
+  return invoke<PreviewDbtModel>("preview_dbt_model", {
+    workspace,
+    queryId,
+  });
+}
+
 export function previewPipeline(
   steps: TransformationStep[],
   connections: ConnectionDef[] = [],

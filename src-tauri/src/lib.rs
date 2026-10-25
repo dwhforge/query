@@ -6,8 +6,9 @@ use dwh_engine::{
     PostgresObject, PreviewResult,
 };
 use dwh_pipeline::{
-    list_export_tree as walk_export_tree, ConnectionDef, DbtProducer, DbtTarget, ExportResult,
-    OutputProducer, Project, QueryDef, TransformationStep, Workspace,
+    list_export_tree as walk_export_tree, preview_dbt_model_sql, ConnectionDef, DbtProducer,
+    DbtTarget, ExportResult, OutputProducer, PreviewDbtModel, Project, QueryDef,
+    TransformationStep, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -56,6 +57,15 @@ fn preview_workspace(
 ) -> Result<PreviewResult, String> {
     let conns = connections.unwrap_or_default();
     run_preview_workspace(&db, &workspace, &conns)
+}
+
+/// dbt model SQL for one query (Model tab — updates with selection, no DuckDB).
+#[tauri::command]
+fn preview_dbt_model(
+    workspace: Workspace,
+    query_id: String,
+) -> Result<PreviewDbtModel, String> {
+    preview_dbt_model_sql(&workspace, &query_id)
 }
 
 #[tauri::command]
@@ -162,13 +172,19 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                 name: "dim_region".into(),
                 steps: vec![TransformationStep::LoadCsv { path: dim }],
             },
-            // Enriched sales ⋈ region (existing demo mart when focused).
+            // Shared sales staging — other models FromQuery this (dbt ref).
+            QueryDef {
+                id: "sales".into(),
+                name: "sales".into(),
+                steps: vec![TransformationStep::LoadCsv { path: fact }],
+            },
+            // Enriched sales ⋈ region (demo mart when focused).
             QueryDef {
                 id: "fact_sales".into(),
                 name: "fact_sales".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: fact.clone(),
+                    TransformationStep::FromQuery {
+                        query_id: "sales".into(),
                     },
                     TransformationStep::Join {
                         right_query_id: "dim_region".into(),
@@ -181,13 +197,13 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                     },
                 ],
             },
-            // Top-N on raw sales only — no region join → int_/mart_ without ref(dim).
+            // Top-N on sales only — FromQuery, no region join.
             QueryDef {
                 id: "top_sales".into(),
                 name: "top_sales".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: fact.clone(),
+                    TransformationStep::FromQuery {
+                        query_id: "sales".into(),
                     },
                     TransformationStep::SortBy {
                         column: "qty".into(),
@@ -196,17 +212,21 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                     TransformationStep::Limit { n: 10 },
                 ],
             },
-            // Same top-N, but after joining dim_region → ref(stg_dim_region).
+            // Top regions by volume — GroupBy (not row-level top-N).
             QueryDef {
                 id: "top_by_region".into(),
                 name: "top_by_region".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv { path: fact },
-                    TransformationStep::Join {
-                        right_query_id: "dim_region".into(),
-                        join_type: dwh_pipeline::JoinType::Inner,
-                        left_on: vec!["region".into()],
-                        right_on: vec!["region".into()],
+                    TransformationStep::FromQuery {
+                        query_id: "fact_sales".into(),
+                    },
+                    TransformationStep::GroupBy {
+                        dimensions: vec!["region".into()],
+                        aggregates: vec![
+                            "sum(qty) as qty".into(),
+                            "sum(amount) as amount".into(),
+                            "count(*) as n_rows".into(),
+                        ],
                     },
                     TransformationStep::SortBy {
                         column: "qty".into(),
@@ -291,6 +311,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             preview_pipeline,
             preview_workspace,
+            preview_dbt_model,
             export_dbt,
             list_export_tree,
             load_sample_workspace,

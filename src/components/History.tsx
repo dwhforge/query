@@ -20,6 +20,8 @@ function stepLabel(
       return `LoadParquet · ${step.payload.path.split(/[/\\]/).pop() ?? step.payload.path}`;
     case "LoadPostgres":
       return `LoadPostgres · ${step.payload.schema || "public"}.${step.payload.table_name}`;
+    case "FromQuery":
+      return `FromQuery · ${qname(step.payload.query_id)}`;
     case "Filter":
       return `Filter · ${step.payload.condition || "(empty)"}`;
     case "SelectColumns":
@@ -71,7 +73,8 @@ export function History({ steps, queryNames = {}, onRemoveAt }: HistoryProps) {
                 </div>
                 {step.type !== "LoadCsv" &&
                   step.type !== "LoadParquet" &&
-                  step.type !== "LoadPostgres" && (
+                  step.type !== "LoadPostgres" &&
+                  step.type !== "FromQuery" && (
                     <button
                       type="button"
                       onClick={() => onRemoveAt(index)}

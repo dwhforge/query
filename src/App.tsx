@@ -26,8 +26,10 @@ import {
   getLastProjectPath,
   loadProject,
   loadSampleWorkspace,
+  previewDbtModel,
   previewWorkspace,
   saveProject,
+  type PreviewDbtModel,
   type PostgresColumn,
 } from "./lib/tauri";
 import {
@@ -51,15 +53,20 @@ function App() {
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [filterCondition, setFilterCondition] = useState("");
   const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
+  const [groupDims, setGroupDims] = useState("");
+  const [groupAggs, setGroupAggs] = useState("count(*) as n");
   const [joinRightId, setJoinRightId] = useState("");
   const [joinKey, setJoinKey] = useState("region");
   const [joinType, setJoinType] = useState<JoinType>("inner");
   const [appendOtherId, setAppendOtherId] = useState("");
   const [sqlCopied, setSqlCopied] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
+  const [modelPreview, setModelPreview] = useState<PreviewDbtModel | null>(null);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showSql, setShowSql] = useState(false);
+  /** Bottom dock: sample rows vs generated model SQL (H0 projection; H1 editable later). */
+  const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportFiles, setExportFiles] = useState<string[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
@@ -88,10 +95,19 @@ function App() {
   const focusQueryId = project.workspace.focus_query_id || null;
   const activeQuery = queries.find((q) => q.id === activeQueryId) ?? null;
 
+  /** ★ export mart — independent of canvas selection. */
   const workspace: Workspace | null = useMemo(() => {
     if (queries.length === 0 || !focusQueryId) return null;
     return project.workspace;
   }, [project.workspace, queries.length, focusQueryId]);
+
+  /** Data tab: preview the selected query (fallback to focus). */
+  const dataWorkspace: Workspace | null = useMemo(() => {
+    if (queries.length === 0) return null;
+    const id = activeQueryId || focusQueryId;
+    if (!id || !queries.some((q) => q.id === id)) return null;
+    return { ...project.workspace, focus_query_id: id };
+  }, [project.workspace, queries, activeQueryId, focusQueryId]);
 
   const setQueries = useCallback(
     (updater: (prev: QueryDef[]) => QueryDef[]) => {
@@ -147,14 +163,49 @@ function App() {
   );
 
   useEffect(() => {
-    if (workspace) debouncedPreview(workspace, connections);
-  }, [workspace, connections, debouncedPreview]);
+    if (dataWorkspace) debouncedPreview(dataWorkspace, connections);
+  }, [dataWorkspace, connections, debouncedPreview]);
+
+  // Model tab: dbt SQL for the selected query (instant, no DuckDB).
+  useEffect(() => {
+    const id = activeQueryId || focusQueryId;
+    if (!id || queries.length === 0) {
+      setModelPreview(null);
+      setModelError(null);
+      return;
+    }
+    let cancelled = false;
+    void previewDbtModel(project.workspace, id)
+      .then((m) => {
+        if (!cancelled) {
+          setModelPreview(m);
+          setModelError(null);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setModelPreview(null);
+          const msg = typeof e === "string" ? e : String(e);
+          // Old Tauri binary without the new command — needs full restart, not HMR.
+          setModelError(
+            /not found/i.test(msg)
+              ? "Backend outdated: stop & restart Tauri Dev (HMR won’t load preview_dbt_model)."
+              : msg,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.workspace, activeQueryId, focusQueryId, queries.length]);
 
   const syncInspectorFromQuery = useCallback(
     (q: QueryDef | undefined) => {
       if (!q) {
         setFilterCondition("");
         setSelectedColumns([]);
+        setGroupDims("");
+        setGroupAggs("count(*) as n");
         setJoinRightId("");
         setJoinKey("");
         setJoinType("inner");
@@ -166,6 +217,14 @@ function App() {
       setSelectedColumns(
         sc && sc.type === "SelectColumns" ? [...sc.payload.columns] : [],
       );
+      const g = q.steps.find((s) => s.type === "GroupBy");
+      if (g && g.type === "GroupBy") {
+        setGroupDims(g.payload.dimensions.join(", "));
+        setGroupAggs(g.payload.aggregates.join(", "));
+      } else {
+        setGroupDims("");
+        setGroupAggs("count(*) as n");
+      }
       const j = q.steps.find((s) => s.type === "Join");
       if (j && j.type === "Join") {
         setJoinRightId(j.payload.right_query_id);
@@ -465,6 +524,32 @@ function App() {
     });
   }
 
+  function applyGroupBy(
+    dimsCsv: string = groupDims,
+    aggsCsv: string = groupAggs,
+  ) {
+    const dimensions = dimsCsv
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const aggregates = aggsCsv
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setGroupDims(dimensions.join(", "));
+    setGroupAggs(
+      aggregates.length > 0 ? aggregates.join(", ") : "count(*) as n",
+    );
+    updateActiveSteps((steps) => {
+      const without = steps.filter((s) => s.type !== "GroupBy");
+      if (dimensions.length === 0 || aggregates.length === 0) return without;
+      return [
+        ...without,
+        { type: "GroupBy", payload: { dimensions, aggregates } },
+      ];
+    });
+  }
+
   function applySelectColumns() {
     const cols = selectedColumns.map((c) => c.trim()).filter(Boolean);
     updateActiveSteps((steps) => {
@@ -557,6 +642,18 @@ function App() {
             steps: q.steps.filter((s) => s.type !== "Join"),
           };
         }
+        if (edge.kind === "from") {
+          return {
+            ...q,
+            steps: q.steps.filter(
+              (s) =>
+                !(
+                  s.type === "FromQuery" &&
+                  s.payload.query_id === edge.otherQueryId
+                ),
+            ),
+          };
+        }
         return {
           ...q,
           steps: q.steps
@@ -583,30 +680,66 @@ function App() {
     setError(null);
   }
 
+  /** Branch: new query = FromQuery(selected) — dbt `ref`, no duplicate Load. */
+  function deriveQueryFrom(fromQueryId: string) {
+    const src = queries.find((q) => q.id === fromQueryId);
+    if (!src) return;
+    const id = newQueryId();
+    const used = new Set(queries.map((q) => q.name));
+    let name = `${src.name}_derived`;
+    if (used.has(name)) {
+      let i = 2;
+      while (used.has(`${src.name}_${i}`)) i += 1;
+      name = `${src.name}_${i}`;
+    }
+    const q: QueryDef = {
+      id,
+      name,
+      steps: [{ type: "FromQuery", payload: { query_id: fromQueryId } }],
+    };
+    setProject((p) => {
+      const nextQueries = [...p.workspace.queries, q];
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(p.sources, nextQueries),
+        workspace: {
+          queries: nextQueries,
+          focus_query_id: p.workspace.focus_query_id || id,
+        },
+      };
+    });
+    setActiveQueryId(id);
+    setFilterCondition("");
+    setError(null);
+  }
+
   /** Drop a query node: remove from workspace, scrub Join/Append refs, fix focus. */
   function removeQueryOnCanvas(queryId: string) {
     const remaining = queries.filter((q) => q.id !== queryId);
     const scrubbed = remaining.map((q) => ({
       ...q,
-      steps: q.steps
-        .map((s) => {
-          if (s.type === "Join" && s.payload.right_query_id === queryId) {
-            return null;
-          }
-          if (s.type === "Append") {
-            const others = s.payload.other_query_ids.filter(
-              (id) => id !== queryId,
-            );
-            if (others.length === 0) return null;
-            return {
-              type: "Append" as const,
-              payload: { other_query_ids: others },
-            };
-          }
-          return s;
-        })
-        .filter((s): s is TransformationStep => s !== null),
-    }));
+        steps: q.steps
+          .map((s) => {
+            if (s.type === "Join" && s.payload.right_query_id === queryId) {
+              return null;
+            }
+            if (s.type === "FromQuery" && s.payload.query_id === queryId) {
+              return null;
+            }
+            if (s.type === "Append") {
+              const others = s.payload.other_query_ids.filter(
+                (id) => id !== queryId,
+              );
+              if (others.length === 0) return null;
+              return {
+                type: "Append" as const,
+                payload: { other_query_ids: others },
+              };
+            }
+            return s;
+          })
+          .filter((s): s is TransformationStep => s !== null),
+      }));
     const focus =
       focusQueryId === queryId
         ? (scrubbed[0]?.id ?? "")
@@ -751,9 +884,11 @@ function App() {
   }, []);
 
   async function copySql() {
-    if (!preview?.sql) return;
+    const text =
+      bottomTab === "model" ? modelPreview?.sql : preview?.sql;
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(preview.sql);
+      await navigator.clipboard.writeText(text);
       setSqlCopied(true);
       window.setTimeout(() => setSqlCopied(false), 1500);
     } catch {
@@ -811,7 +946,7 @@ function App() {
         void handleExportDbt();
       } else if (k === "/" || k === "?") {
         e.preventDefault();
-        setShowSql((v) => !v);
+        setBottomTab((t) => (t === "data" ? "model" : "data"));
       } else if (k === "p") {
         e.preventDefault();
         setShowPgPicker((v) => !v);
@@ -835,6 +970,7 @@ function App() {
   const activeJoin = activeQuery?.steps.find((s) => s.type === "Join");
   const activeAppend = activeQuery?.steps.find((s) => s.type === "Append");
   const activeSelect = activeQuery?.steps.find((s) => s.type === "SelectColumns");
+  const activeGroup = activeQuery?.steps.find((s) => s.type === "GroupBy");
   const joinRightName =
     otherQueries.find((q) => q.id === joinRightId)?.name ??
     queries.find((q) => q.id === joinRightId)?.name ??
@@ -888,17 +1024,19 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setShowSql((v) => !v)}
+            onClick={() => setBottomTab("model")}
             className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-            disabled={!preview?.sql}
+            disabled={!modelPreview?.sql}
           >
-            {showSql ? "Hide SQL" : "SQL"}
+            Model
           </button>
           <button
             type="button"
             onClick={() => void copySql()}
             className="rounded-lg border border-slate-700/80 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
-            disabled={!preview?.sql}
+            disabled={
+              bottomTab === "model" ? !modelPreview?.sql : !preview?.sql
+            }
           >
             {sqlCopied ? "Copied" : "Copy SQL"}
           </button>
@@ -1042,21 +1180,59 @@ function App() {
                 onSelectEdge={selectEdgeOnCanvas}
                 onRemoveEdge={removeEdgeOnCanvas}
                 onRemoveQuery={removeQueryOnCanvas}
+                onDeriveQuery={deriveQueryFrom}
               />
             </div>
-            <div className="min-h-[28vh] border-t border-[var(--line)] bg-[#060d14]">
-              <div className="flex items-center justify-between px-4 py-2">
-                <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  Preview
-                  {focusQueryId
-                    ? ` · ${queries.find((q) => q.id === focusQueryId)?.name ?? ""}`
-                    : ""}
-                </h2>
-                <span className="text-xs text-slate-500">
-                  {loading
-                    ? "running…"
-                    : preview
-                      ? `${preview.rows.length} rows · ${preview.columns.length} cols`
+            <div className="flex min-h-[28vh] flex-col border-t border-[var(--line)] bg-[#060d14]">
+              <div className="flex items-center justify-between gap-3 px-4 pt-2">
+                <div className="flex items-end gap-3">
+                  <div
+                    role="tablist"
+                    aria-label="Result dock"
+                    className="flex gap-1"
+                  >
+                    {(
+                      [
+                        { id: "data" as const, label: "Data" },
+                        { id: "model" as const, label: "Model" },
+                      ] as const
+                    ).map((tab) => {
+                      const on = bottomTab === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={on}
+                          onClick={() => setBottomTab(tab.id)}
+                          className={`border-b-2 px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] transition ${
+                            on
+                              ? "border-teal-400 text-teal-200"
+                              : "border-transparent text-slate-500 hover:text-slate-300"
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <span className="hidden pb-1.5 text-[10px] text-slate-600 sm:inline">
+                    {activeQuery?.name ??
+                      (focusQueryId
+                        ? queries.find((q) => q.id === focusQueryId)?.name
+                        : null) ??
+                      "select a query"}
+                  </span>
+                </div>
+                <span className="pb-1.5 text-xs text-slate-500">
+                  {bottomTab === "data"
+                    ? loading
+                      ? "running…"
+                      : preview
+                        ? `${preview.rows.length} rows · ${preview.columns.length} cols`
+                        : "—"
+                    : modelPreview
+                      ? `${modelPreview.model_name}.sql · dbt`
                       : "—"}
                 </span>
               </div>
@@ -1074,35 +1250,45 @@ function App() {
                   )}
                 </div>
               )}
-              {showSql && preview?.sql && (
-                <div className="mx-4 mb-2">
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                      Compiled SQL
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => void copySql()}
-                      className="text-[11px] text-teal-400 hover:text-teal-300"
-                    >
-                      {sqlCopied ? "Copied" : "Copy"}
-                    </button>
-                  </div>
-                  <pre className="max-h-28 overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3 text-[11px] text-slate-400">
-                    {preview.sql}
-                  </pre>
-                </div>
-              )}
-              <div className="h-[22vh] px-3 pb-3">
-                <div className="h-full overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
-                  {preview ? (
-                    <PreviewTable
-                      columns={preview.columns}
-                      rows={preview.rows}
-                    />
+              <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
+                <div className="h-[22vh] overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
+                  {bottomTab === "data" ? (
+                    preview ? (
+                      <PreviewTable
+                        columns={preview.columns}
+                        rows={preview.rows}
+                      />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-slate-600">
+                        Waiting for preview…
+                      </div>
+                    )
                   ) : (
-                    <div className="flex h-full items-center justify-center text-slate-600">
-                      Waiting for preview…
+                    <div className="flex h-full flex-col">
+                      <div className="flex items-center justify-between border-b border-slate-800 px-3 py-1.5">
+                        <span className="truncate font-mono text-[11px] text-teal-300/90">
+                          {modelPreview
+                            ? `models/…/${modelPreview.model_name}.sql`
+                            : "Generated model"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void copySql()}
+                          disabled={!modelPreview?.sql}
+                          className="text-[11px] text-teal-400 hover:text-teal-300 disabled:opacity-40"
+                        >
+                          {sqlCopied ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                      {modelPreview?.sql ? (
+                        <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+                          {modelPreview.sql}
+                        </pre>
+                      ) : (
+                        <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-slate-500">
+                          {modelError ?? "Select a query to see its dbt model"}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1229,6 +1415,46 @@ function App() {
                 </div>
                 <div>
                   <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    GroupBy
+                  </label>
+                  {activeGroup && activeGroup.type === "GroupBy" && (
+                    <p className="mb-2 rounded-md border border-teal-900/40 bg-teal-950/30 px-2 py-1.5 font-mono text-[11px] text-teal-200/90">
+                      Applied: {activeGroup.payload.dimensions.join(", ")} ·{" "}
+                      {activeGroup.payload.aggregates.join(", ")}
+                    </p>
+                  )}
+                  <input
+                    type="text"
+                    value={groupDims}
+                    onChange={(e) => setGroupDims(e.target.value)}
+                    disabled={!activeQuery}
+                    placeholder="dimensions: region, date"
+                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+                  />
+                  <input
+                    type="text"
+                    value={groupAggs}
+                    onChange={(e) => setGroupAggs(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && applyGroupBy()}
+                    disabled={!activeQuery}
+                    placeholder="aggregates: sum(qty) as qty"
+                    className="mb-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700 disabled:opacity-40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => applyGroupBy()}
+                    disabled={!activeQuery}
+                    className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                  >
+                    {groupDims.trim() && groupAggs.trim()
+                      ? activeGroup
+                        ? "Update GroupBy"
+                        : "Apply GroupBy"
+                      : "Clear GroupBy"}
+                  </button>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                     Join
                   </label>
                   {activeJoin && activeJoin.type === "Join" && (
@@ -1340,10 +1566,7 @@ function App() {
                     })
                   }
                   onAddGroupBy={(dimensions, aggregates) =>
-                    appendStep({
-                      type: "GroupBy",
-                      payload: { dimensions, aggregates },
-                    })
+                    applyGroupBy(dimensions.join(", "), aggregates.join(", "))
                   }
                   onAddSort={(column, descending) =>
                     appendStep({

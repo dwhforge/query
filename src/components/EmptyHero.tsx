@@ -57,7 +57,7 @@ export function EmptyHero({
         Shortcuts: <kbd className="text-slate-500">O</kbd> CSV ·{" "}
         <kbd className="text-slate-500">S</kbd> sample ·{" "}
         <kbd className="text-slate-500">E</kbd> export ·{" "}
-        <kbd className="text-slate-500">/</kbd> SQL
+        <kbd className="text-slate-500">/</kbd> Data↔Model
       </p>
     </div>
   );

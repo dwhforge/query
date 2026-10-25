@@ -32,7 +32,7 @@ import type { QueryDef, TransformationStep } from "../types/pipeline";
 
 export type CanvasPositions = Record<string, { x: number; y: number }>;
 
-export type GraphEdgeKind = "join" | "append";
+export type GraphEdgeKind = "join" | "append" | "from";
 
 export type GraphEdgeInfo = {
   kind: GraphEdgeKind;
@@ -59,10 +59,12 @@ type EdgeData = GraphEdgeInfo & Record<string, unknown>;
 
 type CanvasActions = {
   toggleExpand: (queryId: string) => void;
+  deriveQuery: (queryId: string) => void;
 };
 
 const CanvasActionsCtx = createContext<CanvasActions>({
   toggleExpand: () => {},
+  deriveQuery: () => {},
 });
 
 interface GraphCanvasProps {
@@ -77,6 +79,8 @@ interface GraphCanvasProps {
   onSelectEdge?: (edge: GraphEdgeInfo) => void;
   onRemoveEdge?: (edge: GraphEdgeInfo) => void;
   onRemoveQuery?: (queryId: string) => void;
+  /** New query whose first step is FromQuery(this node). */
+  onDeriveQuery?: (fromQueryId: string) => void;
 }
 
 function sourceKind(q: QueryDef): string {
@@ -85,6 +89,7 @@ function sourceKind(q: QueryDef): string {
   if (s.type === "LoadCsv") return "CSV";
   if (s.type === "LoadParquet") return "Parquet";
   if (s.type === "LoadPostgres") return "Postgres";
+  if (s.type === "FromQuery") return "REF";
   return s.type;
 }
 
@@ -96,6 +101,8 @@ function shortStepLabel(step: TransformationStep, index: number): string {
       return `s${index} LoadParquet`;
     case "LoadPostgres":
       return `s${index} LoadPostgres`;
+    case "FromQuery":
+      return `s${index} FromQuery`;
     case "Filter":
       return `s${index} Filter`;
     case "SelectColumns":
@@ -290,6 +297,34 @@ function buildGraph(
           });
         }
       }
+      if (step.type === "FromQuery") {
+        const src = step.payload.query_id;
+        const id = `from:${src}->${q.id}`;
+        const selected = selectedEdgeId === id;
+        edges.push({
+          id,
+          source: src,
+          target: q.id,
+          label: "from",
+          data: {
+            kind: "from",
+            hostQueryId: q.id,
+            otherQueryId: src,
+          } satisfies EdgeData,
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: selected ? "#a78bfa" : "#8b5cf6",
+          },
+          style: {
+            stroke: selected ? "#a78bfa" : "#7c3aed",
+            strokeWidth: selected ? 2.5 : 1.75,
+            strokeDasharray: "2 4",
+          },
+          labelStyle: { fill: "#c4b5fd", fontSize: 10 },
+          labelBgStyle: { fill: "#0a1520", fillOpacity: 0.85 },
+          animated: selected || q.id === focusQueryId || src === focusQueryId,
+        });
+      }
     }
   }
 
@@ -300,7 +335,7 @@ const QueryNode = memo(function QueryNode({
   id,
   data,
 }: NodeProps<QueryNodeType>) {
-  const { toggleExpand } = useContext(CanvasActionsCtx);
+  const { toggleExpand, deriveQuery } = useContext(CanvasActionsCtx);
   return (
     <div
       className={`min-w-[180px] max-w-[240px] rounded-xl border px-3 py-2.5 shadow-lg backdrop-blur transition ${
@@ -324,6 +359,17 @@ const QueryNode = memo(function QueryNode({
               FOCUS
             </span>
           )}
+          <button
+            type="button"
+            title="New query from this (FromQuery / ref)"
+            className="nodrag nopan rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-violet-300"
+            onClick={(e) => {
+              e.stopPropagation();
+              deriveQuery(id);
+            }}
+          >
+            ↳
+          </button>
           <button
             type="button"
             title={data.expanded ? "Collapse steps" : "Expand steps"}
@@ -391,6 +437,7 @@ function GraphCanvasInner({
   onSelectEdge,
   onRemoveEdge,
   onRemoveQuery,
+  onDeriveQuery,
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow();
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
@@ -433,7 +480,17 @@ function GraphCanvasInner({
     });
   }, []);
 
-  const actions = useMemo(() => ({ toggleExpand }), [toggleExpand]);
+  const deriveQuery = useCallback(
+    (queryId: string) => {
+      onDeriveQuery?.(queryId);
+    },
+    [onDeriveQuery],
+  );
+
+  const actions = useMemo(
+    () => ({ toggleExpand, deriveQuery }),
+    [toggleExpand, deriveQuery],
+  );
 
   // Sync graph from project model. Merge into RF nodes so measured size stays.
   useEffect(() => {
@@ -618,8 +675,12 @@ function GraphCanvasInner({
       {selectedEdge && onRemoveEdge && (
         <div className="absolute right-3 top-3 z-10 flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/95 px-2.5 py-1.5 shadow-lg">
           <span className="font-mono text-[11px] text-teal-200">
-            {selectedEdge.kind === "join" ? "Join" : "Append"} ·{" "}
-            {selectedEdge.otherQueryId.slice(0, 8)}→
+            {selectedEdge.kind === "join"
+              ? "Join"
+              : selectedEdge.kind === "append"
+                ? "Append"
+                : "From"}{" "}
+            · {selectedEdge.otherQueryId.slice(0, 8)}→
             {selectedEdge.hostQueryId.slice(0, 8)}
           </span>
           <button
@@ -657,7 +718,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
         <GraphCanvasInner {...props} />
       </ReactFlowProvider>
       <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-slate-600">
-        Drag · zoom · dblclick=focus · ▸ steps · Del=delete node/edge
+        Drag · zoom · dblclick=focus · ↳=FromQuery · ▸ steps · Del=delete
         {props.onConnectJoin ? " · handle→Join" : ""}
       </p>
     </div>

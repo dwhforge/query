@@ -46,6 +46,8 @@ pub enum TransformationStep {
         schema: String,
         table_name: String,
     },
+    /// Start from another query’s output (`ref` in dbt). Must be the first step.
+    FromQuery { query_id: String },
     Filter { condition: String },
     SelectColumns { columns: Vec<String> },
     RenameColumn { from: String, to: String },

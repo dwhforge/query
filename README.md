@@ -19,6 +19,7 @@ DuckDB **v2.0** via `duckdb-rs` **prebuilt** shared lib (not the `bundled` Cargo
 | [docs/DESIGN.md](docs/DESIGN.md) | Product design, horizons (dbt → PQ → two-way), UX north star |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules, Workspace IR, invariants |
 | [docs/SPEC.md](docs/SPEC.md) | Contracts, commands, dbt DoD |
+| [docs/DEMOS.md](docs/DEMOS.md) | Demo workspaces · dbt practice coverage (A/B/C) |
 | [docs/COMPETITIVE.md](docs/COMPETITIVE.md) | Landscape, wedge, DE/DBA/developer positioning |
 | [docs/adr/](docs/adr/) | ADRs (positioning, multi-query, join, two-way, UX) |
 | [docs/TZ-EARLY.md](docs/TZ-EARLY.md) | Archived early design brief |

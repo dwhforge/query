@@ -7,7 +7,7 @@ use dwh_engine::{
 };
 use dwh_pipeline::{
     list_export_tree as walk_export_tree, preview_dbt_model_sql, ConnectionDef, DbtProducer,
-    DbtTarget, ExportResult, OutputProducer, PreviewDbtModel, Project, QueryDef,
+    DbtTarget, ExportResult, GraphCompiler, OutputProducer, PreviewDbtModel, Project, QueryDef,
     TransformationStep, Workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -148,23 +148,19 @@ fn get_last_project_path(app: AppHandle) -> Result<Option<String>, String> {
         .filter(|p| PathBuf::from(p).is_file()))
 }
 
-/// Resolve repo fixtures and return a ready sample workspace (fact ⋈ dim).
-#[tauri::command]
-fn load_sample_workspace() -> Result<Workspace, String> {
-    let fixtures = find_fixtures_dir()?;
-    let fact = fixtures
-        .join("sample.csv")
+fn fixture_csv(fixtures: &std::path::Path, name: &str) -> Result<String, String> {
+    fixtures
+        .join(name)
         .canonicalize()
-        .map_err(|e| e.to_string())?
-        .to_string_lossy()
-        .into_owned();
-    let dim = fixtures
-        .join("dim_region.csv")
-        .canonicalize()
-        .map_err(|e| e.to_string())?
-        .to_string_lossy()
-        .into_owned();
+        .map_err(|e| format!("fixture {name}: {e}"))
+        .map(|p| p.to_string_lossy().into_owned())
+}
 
+/// Medallion + fan-out (A1–A8, A12). Query names have no layer prefix —
+/// `stg_`/`int_`/`mart_` are added only at dbt export. See docs/DEMOS.md.
+fn demo_sales(fixtures: &std::path::Path) -> Result<Workspace, String> {
+    let fact = fixture_csv(fixtures, "sample.csv")?;
+    let dim = fixture_csv(fixtures, "dim_region.csv")?;
     Ok(Workspace {
         queries: vec![
             QueryDef {
@@ -172,13 +168,36 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                 name: "dim_region".into(),
                 steps: vec![TransformationStep::LoadCsv { path: dim }],
             },
-            // Shared sales staging — other models FromQuery this (dbt ref).
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
                 steps: vec![TransformationStep::LoadCsv { path: fact }],
             },
-            // Enriched sales ⋈ region (demo mart when focused).
+            QueryDef {
+                id: "sales_clean".into(),
+                name: "sales_clean".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sales".into(),
+                    },
+                    TransformationStep::RenameColumn {
+                        from: "amount".into(),
+                        to: "revenue".into(),
+                    },
+                    TransformationStep::SelectColumns {
+                        columns: vec![
+                            "date".into(),
+                            "region".into(),
+                            "revenue".into(),
+                            "qty".into(),
+                        ],
+                    },
+                    TransformationStep::DeriveColumn {
+                        name: "amount_per_unit".into(),
+                        expression: "revenue / nullif(qty, 0)".into(),
+                    },
+                ],
+            },
             QueryDef {
                 id: "fact_sales".into(),
                 name: "fact_sales".into(),
@@ -197,7 +216,6 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                     },
                 ],
             },
-            // Top-N on sales only — FromQuery, no region join.
             QueryDef {
                 id: "top_sales".into(),
                 name: "top_sales".into(),
@@ -212,7 +230,6 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                     TransformationStep::Limit { n: 10 },
                 ],
             },
-            // Top regions by volume — GroupBy (not row-level top-N).
             QueryDef {
                 id: "top_by_region".into(),
                 name: "top_by_region".into(),
@@ -236,8 +253,144 @@ fn load_sample_workspace() -> Result<Workspace, String> {
                 ],
             },
         ],
-        focus_query_id: "fact_sales".into(),
+        // Focus → mart_* at export; other non-Load queries → int_*.
+        focus_query_id: "top_by_region".into(),
     })
+}
+
+/// Multi-feed Append (A1, A5, A9, A12).
+fn demo_union(fixtures: &std::path::Path) -> Result<Workspace, String> {
+    let eu = fixture_csv(fixtures, "sales_eu.csv")?;
+    let us = fixture_csv(fixtures, "sales_us.csv")?;
+    Ok(Workspace {
+        queries: vec![
+            QueryDef {
+                id: "sales_eu".into(),
+                name: "sales_eu".into(),
+                steps: vec![TransformationStep::LoadCsv { path: eu }],
+            },
+            QueryDef {
+                id: "sales_us".into(),
+                name: "sales_us".into(),
+                steps: vec![TransformationStep::LoadCsv { path: us }],
+            },
+            QueryDef {
+                id: "sales_all".into(),
+                name: "sales_all".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sales_eu".into(),
+                    },
+                    TransformationStep::Append {
+                        other_query_ids: vec!["sales_us".into()],
+                    },
+                ],
+            },
+            QueryDef {
+                id: "by_region".into(),
+                name: "by_region".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sales_all".into(),
+                    },
+                    TransformationStep::GroupBy {
+                        dimensions: vec!["region".into()],
+                        aggregates: vec![
+                            "sum(qty) as qty".into(),
+                            "sum(amount) as amount".into(),
+                            "count(*) as n_rows".into(),
+                        ],
+                    },
+                    TransformationStep::SortBy {
+                        column: "amount".into(),
+                        descending: true,
+                    },
+                ],
+            },
+        ],
+        focus_query_id: "by_region".into(),
+    })
+}
+
+/// SqlModel + CustomSql window + ref (A2, A10, A11, A12; B2 via CustomSql).
+fn demo_sql(fixtures: &std::path::Path) -> Result<Workspace, String> {
+    let fact = fixture_csv(fixtures, "sample.csv")?;
+    Ok(Workspace {
+        queries: vec![
+            QueryDef {
+                id: "calendar".into(),
+                name: "calendar".into(),
+                steps: vec![TransformationStep::SqlModel {
+                    raw_sql: "select * from (values \
+                        (date '2024-01-01', 'EU'), \
+                        (date '2024-01-02', 'US'), \
+                        (date '2024-01-03', 'EU'), \
+                        (date '2024-01-04', 'APAC'), \
+                        (date '2024-01-05', 'EU'), \
+                        (date '2024-01-06', 'US'), \
+                        (date '2024-01-07', 'EU'), \
+                        (date '2024-01-08', 'APAC'), \
+                        (date '2024-01-09', 'EU'), \
+                        (date '2024-01-10', 'US')\
+                    ) as t(day, region)"
+                        .into(),
+                }],
+            },
+            QueryDef {
+                id: "sales".into(),
+                name: "sales".into(),
+                steps: vec![TransformationStep::LoadCsv { path: fact }],
+            },
+            QueryDef {
+                id: "sales_enriched".into(),
+                name: "sales_enriched".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sales".into(),
+                    },
+                    TransformationStep::CustomSql {
+                        raw_sql: "select *, row_number() over (\
+                            partition by region order by amount desc\
+                        ) as region_rank from {{prev_step}}"
+                            .into(),
+                    },
+                ],
+            },
+            QueryDef {
+                id: "sales_top3".into(),
+                name: "sales_top3".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sales_enriched".into(),
+                    },
+                    TransformationStep::Filter {
+                        condition: "region_rank <= 3".into(),
+                    },
+                ],
+            },
+        ],
+        focus_query_id: "sales_enriched".into(),
+    })
+}
+
+/// `sales` | `union` | `sql` — see docs/DEMOS.md.
+#[tauri::command]
+fn load_demo_workspace(name: String) -> Result<Workspace, String> {
+    let fixtures = find_fixtures_dir()?;
+    match name.trim().to_ascii_lowercase().as_str() {
+        "sales" | "sample" | "" => demo_sales(&fixtures),
+        "union" => demo_union(&fixtures),
+        "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
+        other => Err(format!(
+            "Unknown demo '{other}'. Use: sales | union | sql"
+        )),
+    }
+}
+
+/// Compat: same as `load_demo_workspace("sales")`.
+#[tauri::command]
+fn load_sample_workspace() -> Result<Workspace, String> {
+    load_demo_workspace("sales".into())
 }
 
 fn find_fixtures_dir() -> Result<PathBuf, String> {
@@ -247,11 +400,15 @@ fn find_fixtures_dir() -> Result<PathBuf, String> {
         cwd.join("../fixtures"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures"),
     ] {
-        if candidate.join("sample.csv").is_file() && candidate.join("dim_region.csv").is_file() {
+        if candidate.join("sample.csv").is_file()
+            && candidate.join("dim_region.csv").is_file()
+            && candidate.join("sales_eu.csv").is_file()
+            && candidate.join("sales_us.csv").is_file()
+        {
             return Ok(candidate);
         }
     }
-    Err("Could not find fixtures/sample.csv — run from the repo root".into())
+    Err("Could not find fixtures/ (sample, dim_region, sales_eu, sales_us) — run from repo root".into())
 }
 
 /// Prefer packaged resources, then folder next to the binary, then dev `src-tauri/extensions`.
@@ -314,6 +471,7 @@ pub fn run() {
             preview_dbt_model,
             export_dbt,
             list_export_tree,
+            load_demo_workspace,
             load_sample_workspace,
             list_postgres_objects,
             describe_postgres_object,
@@ -324,4 +482,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod demo_tests {
+    use super::*;
+
+    #[test]
+    fn all_demos_compile() {
+        for name in ["sales", "union", "sql"] {
+            let ws = load_demo_workspace(name.into()).expect(name);
+            GraphCompiler::new(&ws)
+                .to_sql(false)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
 }

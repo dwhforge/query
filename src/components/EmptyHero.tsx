@@ -1,13 +1,21 @@
+export type DemoId = "sales" | "union" | "sql";
+
 interface EmptyHeroProps {
-  onLoadSample: () => void;
+  onLoadDemo: (id: DemoId) => void;
   onAddCsv: () => void;
   onAddParquet: () => void;
   onAddPostgres: () => void;
   onAddSqlModel: () => void;
 }
 
+const DEMOS: { id: DemoId; label: string; hint: string }[] = [
+  { id: "sales", label: "Sales", hint: "medallion · join · top-N" },
+  { id: "union", label: "Union", hint: "Append multi-feed" },
+  { id: "sql", label: "SQL hybrid", hint: "SqlModel · window" },
+];
+
 export function EmptyHero({
-  onLoadSample,
+  onLoadDemo,
   onAddCsv,
   onAddParquet,
   onAddPostgres,
@@ -25,14 +33,27 @@ export function EmptyHero({
         Drop sources on the canvas, join in a few clicks, preview instantly, export
         real dbt. Built to feel faster than Power Query.
       </p>
-      <div className="anim-rise-delay-2 mt-8 flex flex-wrap items-center justify-center gap-3">
-        <button
-          type="button"
-          onClick={onLoadSample}
-          className="rounded-lg bg-teal-500 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-[0_0_32px_rgba(45,212,191,0.35)] transition hover:bg-teal-400"
-        >
-          Load sample join
-        </button>
+      <div className="anim-rise-delay-2 mt-8 w-full max-w-lg">
+        <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+          Load demo
+        </p>
+        <div className="flex flex-wrap items-stretch justify-center gap-2">
+          {DEMOS.map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              onClick={() => onLoadDemo(d.id)}
+              className="min-w-[8.5rem] rounded-lg bg-teal-500 px-4 py-2.5 text-left shadow-[0_0_32px_rgba(45,212,191,0.25)] transition hover:bg-teal-400"
+            >
+              <div className="text-sm font-semibold text-slate-950">{d.label}</div>
+              <div className="text-[10px] font-medium text-slate-800/80">
+                {d.hint}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="anim-rise-delay-2 mt-6 flex flex-wrap items-center justify-center gap-3">
         <button
           type="button"
           onClick={onAddCsv}
@@ -64,7 +85,7 @@ export function EmptyHero({
       </div>
       <p className="mt-6 text-[11px] text-slate-600">
         Shortcuts: <kbd className="text-slate-500">O</kbd> CSV ·{" "}
-        <kbd className="text-slate-500">S</kbd> sample ·{" "}
+        <kbd className="text-slate-500">S</kbd> demo sales ·{" "}
         <kbd className="text-slate-500">E</kbd> export ·{" "}
         <kbd className="text-slate-500">/</kbd> Data↔Model
       </p>

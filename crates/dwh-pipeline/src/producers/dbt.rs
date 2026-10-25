@@ -129,8 +129,13 @@ fn is_source_only_query(query: &crate::model::QueryDef) -> bool {
 }
 
 /// dbt model file stem for a query (`stg_` / `int_` / `mart_`).
+/// Layer prefixes are export-only — query names in the UI normally omit them.
+/// If a user already put `stg_`/`int_`/`mart_` in the query name, keep as-is.
 pub fn dbt_model_name(workspace: &Workspace, query: &crate::model::QueryDef) -> String {
     let stem = sanitize_id(&query.name);
+    if stem.starts_with("stg_") || stem.starts_with("int_") || stem.starts_with("mart_") {
+        return stem;
+    }
     let prefix = if query.id == workspace.focus_query_id {
         "mart"
     } else if is_source_only_query(query) {
@@ -488,5 +493,21 @@ mod tests {
 
         let v2 = DbtProducer.produce("demo_v2", &ws, dir.to_str().unwrap(), DbtTarget::V2);
         assert!(v2.is_err());
+    }
+
+    #[test]
+    fn explicit_layer_prefix_not_doubled() {
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "q".into(),
+                name: "stg_sales".into(),
+                steps: vec![TransformationStep::LoadCsv {
+                    path: "x.csv".into(),
+                }],
+            }],
+            focus_query_id: "q".into(),
+        };
+        let q = ws.query("q").unwrap();
+        assert_eq!(dbt_model_name(&ws, q), "stg_sales");
     }
 }

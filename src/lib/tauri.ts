@@ -64,8 +64,17 @@ export function listExportTree(path: string): Promise<string[]> {
   return invoke<string[]>("list_export_tree", { path });
 }
 
+export type DemoWorkspaceName = "sales" | "union" | "sql";
+
+export function loadDemoWorkspace(
+  name: DemoWorkspaceName | string,
+): Promise<Workspace> {
+  return invoke<Workspace>("load_demo_workspace", { name });
+}
+
+/** @deprecated prefer loadDemoWorkspace("sales") */
 export function loadSampleWorkspace(): Promise<Workspace> {
-  return invoke<Workspace>("load_sample_workspace");
+  return loadDemoWorkspace("sales");
 }
 
 export interface PostgresObject {

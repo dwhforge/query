@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConnectionEditor } from "./components/ConnectionEditor";
-import { EmptyHero } from "./components/EmptyHero";
+import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
 import {
   GraphCanvas,
@@ -24,7 +24,7 @@ import {
   listExportTree,
   getLastProjectPath,
   loadProject,
-  loadSampleWorkspace,
+  loadDemoWorkspace,
   previewDbtModel,
   previewWorkspace,
   saveProject,
@@ -709,16 +709,29 @@ function App() {
     setError(null);
   }
 
-  async function handleLoadSample() {
+  async function handleLoadDemo(id: DemoId) {
     try {
-      const ws = await loadSampleWorkspace();
+      const ws = await loadDemoWorkspace(id);
+      const projectName =
+        id === "sales"
+          ? "demo_sales"
+          : id === "union"
+            ? "demo_union"
+            : "demo_sql";
       setProject((p) => ({
         ...p,
-        name: p.name === "Untitled" ? "sample_join" : p.name,
+        name: projectName,
         sources: syncSourcesFromQueries([], ws.queries),
         workspace: ws,
+        canvas: { positions: {} },
       }));
       setActiveQueryId(ws.focus_query_id);
+      setSelectedStepIndex(
+        ws.queries.find((q) => q.id === ws.focus_query_id)?.steps.length
+          ? (ws.queries.find((q) => q.id === ws.focus_query_id)!.steps.length -
+              1)
+          : null,
+      );
       setError(null);
       setExportMsg(null);
     } catch (e) {
@@ -1163,7 +1176,7 @@ function App() {
         void addCsvQuery();
       } else if (k === "s") {
         e.preventDefault();
-        void handleLoadSample();
+        void handleLoadDemo("sales");
       } else if (k === "e") {
         e.preventDefault();
         void handleExportDbt();
@@ -1442,7 +1455,7 @@ function App() {
 
       {empty ? (
         <EmptyHero
-          onLoadSample={() => void handleLoadSample()}
+          onLoadDemo={(id) => void handleLoadDemo(id)}
           onAddCsv={() => void addCsvQuery()}
           onAddParquet={() => void addParquetQuery()}
           onAddPostgres={() => openPgPicker("query")}
@@ -1488,17 +1501,29 @@ function App() {
 
           {/* Canvas */}
           <section className="flex min-h-0 flex-col border-r border-[var(--line)]">
-            <div className="flex items-center justify-between px-4 py-2">
+            <div className="flex items-center justify-between gap-2 px-4 py-2">
               <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Pipeline canvas
               </h2>
-              <button
-                type="button"
-                onClick={() => void handleLoadSample()}
-                className="text-[11px] text-teal-500/90 hover:text-teal-300"
-              >
-                Reload sample
-              </button>
+              <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
+                <span className="text-slate-600">Demo</span>
+                {(
+                  [
+                    ["sales", "Sales"],
+                    ["union", "Union"],
+                    ["sql", "SQL"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => void handleLoadDemo(id)}
+                    className="text-teal-500/90 hover:text-teal-300"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="min-h-0 flex-1 px-3 pb-2">
               <GraphCanvas

@@ -1,6 +1,6 @@
 use crate::session::DbSession;
 use dwh_pipeline::sql_escape::escape_sql_string;
-use duckdb::params;
+use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 /// A selectable relation in a Postgres database (table, view, …).
@@ -21,17 +21,58 @@ pub struct PostgresColumn {
     pub ordinal_position: i64,
 }
 
-/// List user-visible relations via DuckDB `postgres_query` + `pg_catalog`.
-pub fn list_postgres_objects(
+/// DuckDB 2.0+: `postgres_query(alias, sql)` needs a prior
+/// `ATTACH '…' AS alias (TYPE postgres)`. First arg is **not** the DSN.
+fn attach_alias(conn_str: &str) -> String {
+    // FNV-1a — stable within process; alias is an opaque DuckDB identifier.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in conn_str.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("dwh_pg_{h:016x}")
+}
+
+fn ensure_pg_attached(conn: &Connection, conn_str: &str) -> Result<String, String> {
+    let alias = attach_alias(conn_str);
+    let sql = format!(
+        "ATTACH IF NOT EXISTS '{}' AS {alias} (TYPE postgres, READ_ONLY);",
+        escape_sql_string(conn_str),
+    );
+    conn.execute_batch(&sql)
+        .map_err(|e| redact_conn_err(conn_str, e))?;
+    Ok(alias)
+}
+
+fn with_postgres_query<F, T>(
     db: &DbSession,
     connection_string: &str,
-) -> Result<Vec<PostgresObject>, String> {
+    remote_sql: &str,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce(&Connection, String) -> Result<T, String>,
+{
     let conn_str = connection_string.trim();
     if conn_str.is_empty() {
         return Err("Connection string is empty".into());
     }
     db.ensure_postgres()?;
+    db.with_conn(|conn| {
+        let alias = ensure_pg_attached(conn, conn_str)?;
+        let duck_sql = format!(
+            "SELECT * FROM postgres_query('{alias}', '{}')",
+            escape_sql_string(remote_sql)
+        );
+        f(conn, duck_sql)
+    })
+}
 
+/// List user-visible relations via DuckDB `ATTACH` + `postgres_query` + `pg_catalog`.
+pub fn list_postgres_objects(
+    db: &DbSession,
+    connection_string: &str,
+) -> Result<Vec<PostgresObject>, String> {
     // No single quotes in the remote SQL — avoids escaping pitfalls.
     let remote_sql = "\
 SELECT n.nspname AS schema_name, c.relname AS name, \
@@ -51,13 +92,8 @@ WHERE c.relkind IN ('r','p','v','m','f') \
   AND n.nspname NOT LIKE 'pg_temp_%' \
 ORDER BY 1, 2";
 
-    let sql = format!(
-        "SELECT schema_name, name, kind FROM postgres_query('{}', '{}')",
-        escape_sql_string(conn_str),
-        escape_sql_string(remote_sql)
-    );
-
-    db.with_conn(|conn| {
+    let conn_str = connection_string.trim();
+    with_postgres_query(db, conn_str, remote_sql, |conn, sql| {
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| redact_conn_err(conn_str, e))?;
@@ -72,10 +108,6 @@ ORDER BY 1, 2";
                 kind: row.get::<_, String>(2).map_err(|e| e.to_string())?,
             });
         }
-        if out.is_empty() {
-            // Still a successful connect — empty catalog is valid.
-            return Ok(out);
-        }
         Ok(out)
     })
 }
@@ -87,16 +119,11 @@ pub fn describe_postgres_object(
     schema: &str,
     table: &str,
 ) -> Result<Vec<PostgresColumn>, String> {
-    let conn_str = connection_string.trim();
-    if conn_str.is_empty() {
-        return Err("Connection string is empty".into());
-    }
     let schema = schema.trim();
     let table = table.trim();
     if schema.is_empty() || table.is_empty() {
         return Err("schema and table_name are required".into());
     }
-    db.ensure_postgres()?;
 
     let remote_sql = format!(
         "SELECT column_name, data_type, is_nullable, ordinal_position \
@@ -107,14 +134,8 @@ pub fn describe_postgres_object(
         table = escape_sql_string(table),
     );
 
-    let sql = format!(
-        "SELECT column_name, data_type, is_nullable, ordinal_position \
-         FROM postgres_query('{}', '{}')",
-        escape_sql_string(conn_str),
-        escape_sql_string(&remote_sql)
-    );
-
-    db.with_conn(|conn| {
+    let conn_str = connection_string.trim();
+    with_postgres_query(db, conn_str, &remote_sql, |conn, sql| {
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| redact_conn_err(conn_str, e))?;
@@ -133,9 +154,7 @@ pub fn describe_postgres_object(
         }
         if out.is_empty() {
             return Err(format!(
-                "Postgres: no columns for {schema}.{table} (missing relation or no privilege)",
-                schema = schema,
-                table = table
+                "Postgres: no columns for {schema}.{table} (missing relation or no privilege)"
             ));
         }
         Ok(out)
@@ -148,15 +167,7 @@ pub fn test_postgres_connection(
     connection_string: &str,
 ) -> Result<(), String> {
     let conn_str = connection_string.trim();
-    if conn_str.is_empty() {
-        return Err("Connection string is empty".into());
-    }
-    db.ensure_postgres()?;
-    let sql = format!(
-        "SELECT * FROM postgres_query('{}', 'SELECT 1 AS ok')",
-        escape_sql_string(conn_str)
-    );
-    db.with_conn(|conn| {
+    with_postgres_query(db, conn_str, "SELECT 1 AS ok", |conn, sql| {
         conn.execute_batch(&sql)
             .map_err(|e| redact_conn_err(conn_str, e))?;
         Ok(())

@@ -1,80 +1,119 @@
 # DWHForge Query
 
-Local desktop ETL/transform workbench: **Tauri + React/TS + Rust + DuckDB**.  
-Workspace AST → CTE SQL → preview ≤50 rows → **dbt export**. Sources: **CSV, Parquet, PostgreSQL (required)**. Raw data stays on-device.  
-**Bundled DuckDB + sidecar `extensions/`:** no CDN install. After clone (once, needs network):
+**Visual transforms → real dbt.** A local desktop workbench for data engineers: multi-source pipelines, instant DuckDB preview, export a project you can `dbt run` without hand-edits.
+
+Raw data stays on your machine. No cloud account required.
+
+```text
+  CSV · Parquet · PostgreSQL
+            │
+            ▼
+   Visual workspace (PQ-like queries + Join)
+            │
+            ▼
+   DuckDB preview  ≤50 rows
+            │
+            ▼
+   dbt project  (staging / intermediate / marts)
+```
+
+## Why
+
+Most “visual ETL” tools stop at a proprietary graph. DWHForge Query treats the graph as an IR and ships **dbt** as the artifact: `sources.yml`, layered models, `profiles.yml`, ready for your warehouse.
+
+Power Query *mental model* (multi-query, Applied Steps, Merge) — not Power BI reports, not M.
+
+## Features
+
+- **Multi-query workspace** — sources as queries, Join / Append / Filter / GroupBy / free SQL
+- **Structural preview** — DuckDB in-process; catch bad joins before you leave the editor
+- **dbt export** — runnable project for DuckDB or Postgres target dialect
+- **PostgreSQL sources** — first-class (ATTACH + catalog picker); CSV / Parquet / S3 paths
+- **Secrets off-project** — `~/.dwhforge-query/secrets.json`, not inside `.dwhproj.json`
+- **Offline DuckDB** — bundled engine + sidecar `extensions/` (no CDN install at runtime)
+
+## Quick start
 
 ```bash
+# Once: DuckDB extensions (needs network)
 ./scripts/fetch-duckdb-extensions.sh
-```
 
-DuckDB **v2.0** via `duckdb-rs` **prebuilt** shared lib (not the `bundled` Cargo feature — that recompiles C++ for ages). After first `cargo build -p dwh-engine`, run `./scripts/sync-duckdb-lib.sh` so `libduckdb.so` sits next to binaries. Layout at runtime: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)). Local Parquet = core; **S3** needs `httpfs`.
-
-Connection secrets: `~/.dwhforge-query/secrets.json` (not inside `.dwhproj.json`).
-
-**Licensing:** open-source is under consideration and **not decided**. Documentation is in English to stay OSS-ready.
-
-## Docs
-
-| Document | Contents |
-|----------|----------|
-| [docs/DESIGN.md](docs/DESIGN.md) | Product design, horizons (dbt → PQ → two-way), UX north star |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules, Workspace IR, invariants |
-| [docs/SPEC.md](docs/SPEC.md) | Contracts, commands, dbt DoD |
-| [docs/DEMOS.md](docs/DEMOS.md) | Demo workspaces · dbt practice coverage (A/B/C) |
-| [docs/COMPETITIVE.md](docs/COMPETITIVE.md) | Landscape, wedge, DE/DBA/developer positioning |
-| [docs/adr/](docs/adr/) | ADRs (positioning, multi-query, join, two-way, UX) |
-| [docs/TZ-EARLY.md](docs/TZ-EARLY.md) | Archived early design brief |
-
-## Naming
-
-| Layer | Name |
-|-------|------|
-| Product / UI / docs | **DWHForge Query** |
-| Local config / secrets | `~/.dwhforge-query/` |
-| Tauri identifier | `com.dwhforge.query` |
-| Repo / npm / Cargo (legacy path) | `dwh-rs-query` |
-
-## Layout
-
-```
-crates/dwh-pipeline   # Workspace, steps, GraphCompiler, DbtProducer, CLI dwh-export
-crates/dwh-engine     # DuckDB session + preview + CLI dwh-preview
-src/                  # React UI (queries, join, preview, export)
-src-tauri/            # thin Tauri IPC
-fixtures/
-docs/
-```
-
-### Commands
-
-```bash
-# Compiler / dbt-producer unit tests
-cargo test -p dwh-pipeline
-
-# Headless preview
-cargo run -p dwh-engine --bin dwh-preview -- fixtures/sample.csv 'amount > 1000'
-
-# Join smoke
-cargo run -p dwh-engine --bin dwh-preview -- --join fixtures/sample.csv fixtures/dim_region.csv region
-
-# Export dbt from a saved .dwhproj.json (same IR as UI Export)
-cargo run -p dwh-pipeline --bin dwh-export -- path/to/project.dwhproj.json /tmp/dwh-out
-
-# Desktop app — Linux system deps (once), one line:
-sudo apt update && sudo apt install -y pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev
+# Linux desktop deps (once)
+sudo apt update && sudo apt install -y \
+  pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev librsvg2-dev \
+  patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev
 
 npm install
 npm run tauri dev
 ```
 
+After the first `cargo build -p dwh-engine`, sync the shared lib next to binaries:
+
+```bash
+./scripts/sync-duckdb-lib.sh
+```
+
+DuckDB **v2** via `duckdb-rs` **prebuilt** lib (not Cargo `bundled` — that rebuilds C++ for a long time). Runtime layout: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)).
+
+### Headless / CI
+
+```bash
+cargo test -p dwh-pipeline
+
+cargo run -p dwh-engine --bin dwh-preview -- fixtures/sample.csv 'amount > 1000'
+
+cargo run -p dwh-engine --bin dwh-preview -- --join \
+  fixtures/sample.csv fixtures/dim_region.csv region
+
+# Same IR as UI Export
+cargo run -p dwh-pipeline --bin dwh-export -- \
+  path/to/project.dwhproj.json /tmp/dwh-out
+```
+
+Then: `cd /tmp/dwh-out/<project_name> && dbt run --profiles-dir ./`
+
 ### VS Code / Cursor
 
-See [`.vscode/launch.json`](.vscode/launch.json):
+[`.vscode/launch.json`](.vscode/launch.json) — **DWHForge Query: Tauri Dev** (LLDB + Vite), headless `dwh-preview`, tasks for pipeline tests. Extensions: [`.vscode/extensions.json`](.vscode/extensions.json).
 
-- **DWHForge Query: Tauri Dev** — LLDB + `ui:dev` (Vite :1420)
-- **dwh-preview (sample.csv)** — headless DuckDB smoke
-- **npm: tauri dev** — full desktop without LLDB
-- Tasks: `cargo: test dwh-pipeline`, `smoke: dwh-preview sample`
+## Stack
 
-Recommended extensions: `.vscode/extensions.json` (rust-analyzer, CodeLLDB, Tauri).
+| Layer | Choice |
+|-------|--------|
+| Shell | Tauri 2 |
+| UI | React + TypeScript + Vite |
+| IR / export | Rust (`dwh-pipeline`) |
+| Preview | DuckDB (`dwh-engine`) |
+| Artifact | dbt Core project |
+
+```text
+crates/dwh-pipeline   Workspace, steps, compiler, DbtProducer, dwh-export
+crates/dwh-engine     DuckDB session, preview, dwh-preview
+src/                  React UI
+src-tauri/            Tauri IPC
+fixtures/  docs/
+```
+
+## Naming
+
+| | |
+|--|--|
+| Product | **DWHForge Query** |
+| Secrets / config | `~/.dwhforge-query/` |
+| App id | `com.dwhforge.query` |
+| Repo (legacy path) | `dwh-rs-query` |
+
+## Docs
+
+| | |
+|--|--|
+| [DESIGN](docs/DESIGN.md) | Product horizons, UX north star |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Modules, Workspace IR |
+| [SPEC](docs/SPEC.md) | Contracts, commands, dbt DoD |
+| [DEMOS](docs/DEMOS.md) | Demo workspaces · practice coverage |
+| [COMPETITIVE](docs/COMPETITIVE.md) | Landscape & wedge |
+| [adr/](docs/adr/) | Decisions |
+
+## License
+
+Open-source licensing is under consideration and **not decided**. Docs stay in English to stay OSS-ready.

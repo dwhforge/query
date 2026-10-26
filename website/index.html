@@ -116,22 +116,28 @@
           const assets = rel.assets || [];
           const appimage = pick(assets, /\.AppImage$/i);
           const deb = pick(assets, /\.deb$/i);
+          const rpm = pick(assets, /\.rpm$/i);
           status.textContent = `Latest: ${rel.tag_name}`;
           const bits = [];
           if (appimage) {
             bits.push(
-              `<a class="btn" href="${appimage.browser_download_url}">Download AppImage</a>`,
+              `<a class="btn" href="${appimage.browser_download_url}">AppImage</a>`,
             );
           }
           if (deb) {
             bits.push(
-              `<a class="btn secondary" href="${deb.browser_download_url}">Download .deb</a>`,
+              `<a class="btn secondary" href="${deb.browser_download_url}">.deb (Debian/Ubuntu)</a>`,
+            );
+          }
+          if (rpm) {
+            bits.push(
+              `<a class="btn secondary" href="${rpm.browser_download_url}">.rpm (RHEL/Fedora)</a>`,
             );
           }
           bits.push(
             `<a class="btn secondary" href="${rel.html_url}">All assets on GitHub</a>`,
           );
-          if (!appimage && !deb) {
+          if (!appimage && !deb && !rpm) {
             status.textContent =
               `${rel.tag_name} — binaries still uploading, or open GitHub.`;
           }

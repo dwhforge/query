@@ -127,8 +127,14 @@ fixtures/  docs/
 
 ## Download
 
-- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/) (latest AppImage / `.deb`)
+- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/) (latest AppImage / `.deb` / `.rpm`)
 - GitHub Releases: [dwhforge/query/releases](https://github.com/dwhforge/query/releases)
+
+| Package | Use on |
+|---------|--------|
+| `.deb` | Debian / Ubuntu |
+| `.rpm` | RHEL / Rocky / Alma / Fedora |
+| `.AppImage` | portable (any modern x86_64 Linux) |
 
 Linux builds ship **offline**: bundled DuckDB shared lib + `extensions/` (no CDN at runtime).
 

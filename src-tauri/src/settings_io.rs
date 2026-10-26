@@ -12,6 +12,20 @@ pub struct AppSettings {
     pub default_target_dialect: WarehouseDialect,
     #[serde(default)]
     pub default_dbt_target: DbtTarget,
+    /// Explorer sidebar width (px).
+    #[serde(default = "default_explorer_width")]
+    pub explorer_width_px: u32,
+    /// Inspector sidebar width (px).
+    #[serde(default = "default_inspector_width")]
+    pub inspector_width_px: u32,
+}
+
+fn default_explorer_width() -> u32 {
+    240
+}
+
+fn default_inspector_width() -> u32 {
+    300
 }
 
 impl Default for AppSettings {
@@ -19,6 +33,8 @@ impl Default for AppSettings {
         Self {
             default_target_dialect: WarehouseDialect::Duckdb,
             default_dbt_target: DbtTarget::V1,
+            explorer_width_px: default_explorer_width(),
+            inspector_width_px: default_inspector_width(),
         }
     }
 }

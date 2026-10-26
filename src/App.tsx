@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+function clampPanelWidth(px: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(px)));
+}
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConnectionEditor } from "./components/ConnectionEditor";
@@ -6,6 +10,7 @@ import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
+import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import {
   emptyJoinKeyPair,
   joinPairsComplete,
@@ -71,7 +76,15 @@ function App() {
   const [appSettings, setAppSettingsState] = useState<AppSettings>({
     default_target_dialect: "duckdb",
     default_dbt_target: "v1",
+    explorer_width_px: 240,
+    inspector_width_px: 300,
   });
+  const [explorerWidth, setExplorerWidth] = useState(240);
+  const [inspectorWidth, setInspectorWidth] = useState(300);
+  const explorerWidthRef = useRef(explorerWidth);
+  const inspectorWidthRef = useRef(inspectorWidth);
+  explorerWidthRef.current = explorerWidth;
+  inspectorWidthRef.current = inspectorWidth;
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
     null,
@@ -825,6 +838,14 @@ function App() {
     }
   }
 
+  function persistPanelWidths(nextExplorer: number, nextInspector: number) {
+    void persistAppSettings({
+      ...appSettings,
+      explorer_width_px: Math.round(nextExplorer),
+      inspector_width_px: Math.round(nextInspector),
+    });
+  }
+
   async function handleSetTargetDialect(d: WarehouseDialect) {
     setProject((p) => ({ ...p, target_dialect: d }));
     await persistAppSettings({
@@ -1327,10 +1348,20 @@ function App() {
       let settings: AppSettings = {
         default_target_dialect: "duckdb",
         default_dbt_target: "v1",
+        explorer_width_px: 240,
+        inspector_width_px: 300,
       };
       try {
         settings = await getAppSettings();
-        if (!cancelled) setAppSettingsState(settings);
+        if (!cancelled) {
+          setAppSettingsState(settings);
+          setExplorerWidth(
+            clampPanelWidth(settings.explorer_width_px ?? 240, 160, 480),
+          );
+          setInspectorWidth(
+            clampPanelWidth(settings.inspector_width_px ?? 300, 220, 560),
+          );
+        }
       } catch {
         // Missing settings — keep in-memory defaults.
       }
@@ -1689,9 +1720,12 @@ function App() {
           onAddSqlModel={() => addSqlModelQuery()}
         />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-[200px_minmax(0,1fr)_280px] lg:grid-cols-[240px_minmax(0,1fr)_300px]">
+        <div className="flex min-h-0 flex-1">
           {/* Explorer */}
-          <aside className="min-h-0 border-r border-[var(--line)] bg-[#050b12]">
+          <aside
+            className="min-h-0 shrink-0 overflow-hidden bg-[#050b12]"
+            style={{ width: explorerWidth }}
+          >
             <ExplorerTree
               project={project}
               activeQueryId={activeQueryId}
@@ -1725,9 +1759,25 @@ function App() {
               onRenameSource={renameSource}
             />
           </aside>
+          <PanelResizeHandle
+            aria-label="Resize explorer"
+            onDelta={(dx) =>
+              setExplorerWidth((w) => {
+                const next = clampPanelWidth(w + dx, 160, 480);
+                explorerWidthRef.current = next;
+                return next;
+              })
+            }
+            onDragEnd={() =>
+              persistPanelWidths(
+                explorerWidthRef.current,
+                inspectorWidthRef.current,
+              )
+            }
+          />
 
           {/* Canvas */}
-          <section className="flex min-h-0 flex-col border-r border-[var(--line)]">
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-2 px-4 py-2">
               <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Pipeline canvas
@@ -1862,8 +1912,28 @@ function App() {
             </div>
           </section>
 
+          <PanelResizeHandle
+            aria-label="Resize inspector"
+            onDelta={(dx) =>
+              setInspectorWidth((w) => {
+                const next = clampPanelWidth(w - dx, 220, 560);
+                inspectorWidthRef.current = next;
+                return next;
+              })
+            }
+            onDragEnd={() =>
+              persistPanelWidths(
+                explorerWidthRef.current,
+                inspectorWidthRef.current,
+              )
+            }
+          />
+
           {/* Inspector: top = step order, bottom = edit selected step */}
-          <aside className="flex min-h-0 min-w-0 flex-col border-l border-[var(--line)] bg-[#050b12]">
+          <aside
+            className="flex min-h-0 shrink-0 flex-col overflow-hidden bg-[#050b12]"
+            style={{ width: inspectorWidth }}
+          >
             <div className="shrink-0 border-b border-[var(--line)] px-4 py-3">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="truncate text-sm font-semibold text-slate-100">

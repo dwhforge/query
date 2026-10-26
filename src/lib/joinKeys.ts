@@ -84,7 +84,7 @@ export function formatJoinKeyLabel(leftOn: string[], rightOn: string[]): string 
     const l = leftOn[i] ?? "";
     const r = rightOn[i] ?? l;
     if (!l && !r) continue;
-    parts.push(l === r ? l : `${l}=${r}`);
+    parts.push(l === r ? l : `${l} = ${r}`);
   }
   return parts.join(", ") || "?";
 }

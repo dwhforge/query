@@ -18,7 +18,11 @@ python3 -m venv "$VENV"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 python -m pip install --upgrade pip
-python -m pip install 'dbt-core>=1.7,<2' 'dbt-duckdb>=1.7,<2'
+# duckdb + postgres adapters — match Project.target_dialect in profiles.yml
+python -m pip install \
+  'dbt-core>=1.7,<2' \
+  'dbt-duckdb>=1.7,<2' \
+  'dbt-postgres>=1.7,<2'
 
 DBT="$VENV/bin/dbt"
 if [[ ! -x "$DBT" ]]; then

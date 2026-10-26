@@ -1,18 +1,22 @@
 import {
   Background,
   BackgroundVariant,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
   Handle,
   MarkerType,
   MiniMap,
   Position,
   ReactFlow,
   ReactFlowProvider,
+  getBezierPath,
   useEdgesState,
   useNodesState,
   useReactFlow,
   type Connection,
   type Edge,
+  type EdgeProps,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
@@ -28,6 +32,7 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { formatJoinKeyLabel } from "../lib/joinKeys";
 import type { QueryDef, TransformationStep } from "../types/pipeline";
 
 export type CanvasPositions = Record<string, { x: number; y: number }>;
@@ -55,7 +60,66 @@ export type QueryNodeData = {
 
 type QueryNodeType = Node<QueryNodeData, "query">;
 
-type EdgeData = GraphEdgeInfo & Record<string, unknown>;
+type EdgeData = GraphEdgeInfo & {
+  labelText?: string;
+  labelKind?: GraphEdgeKind;
+} & Record<string, unknown>;
+
+/** HTML edge labels stay sharp under zoom; default SVG labels look blurry. */
+const LabeledEdge = memo(function LabeledEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style,
+  markerEnd,
+  data,
+  label,
+}: EdgeProps<Edge<EdgeData>>) {
+  const [edgePath, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+  });
+  const text =
+    (typeof data?.labelText === "string" && data.labelText) ||
+    (typeof label === "string" ? label : "") ||
+    "";
+  const kind = data?.labelKind ?? data?.kind ?? "join";
+  const tone =
+    kind === "join"
+      ? "border-teal-500/40 bg-slate-950 text-teal-200"
+      : kind === "append"
+        ? "border-slate-600 bg-slate-950 text-slate-300"
+        : "border-violet-500/40 bg-slate-950 text-violet-200";
+
+  return (
+    <>
+      <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
+      {text ? (
+        <EdgeLabelRenderer>
+          <div
+            className={`nodrag nopan pointer-events-none absolute z-[1] max-w-[220px] rounded-md border px-2 py-0.5 text-center font-mono text-[11px] font-semibold leading-tight tracking-tight shadow-md ${tone}`}
+            style={{
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            }}
+            title={text}
+          >
+            {text}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  );
+});
+
+const edgeTypes = { labeled: LabeledEdge };
 
 type CanvasActions = {
   toggleExpand: (queryId: string) => void;
@@ -113,8 +177,15 @@ function shortStepLabel(step: TransformationStep, index: number): string {
       return `s${index} Filter`;
     case "SelectColumns":
       return `s${index} Select`;
-    case "Join":
-      return `s${index} Join ${step.payload.join_type}`;
+    case "Join": {
+      const keys = formatJoinKeyLabel(
+        step.payload.left_on,
+        step.payload.right_on,
+      );
+      return keys && keys !== "?"
+        ? `s${index} Join ${keys}`
+        : `s${index} Join ${step.payload.join_type}`;
+    }
     case "Append":
       return `s${index} Append`;
     case "RenameColumn":
@@ -252,25 +323,21 @@ function buildGraph(
         const right = step.payload.right_query_id;
         const id = `join:${right}->${q.id}`;
         const selected = selectedEdgeId === id;
+        const keys = formatJoinKeyLabel(
+          step.payload.left_on,
+          step.payload.right_on,
+        );
+        const labelText = `${step.payload.join_type} · ${keys}`;
         edges.push({
           id,
+          type: "labeled",
           source: right,
           target: q.id,
-          label: (() => {
-            const { left_on, right_on } = step.payload;
-            const n = Math.max(left_on.length, right_on.length);
-            const parts: string[] = [];
-            for (let i = 0; i < n; i++) {
-              const l = left_on[i] ?? "";
-              const r = right_on[i] ?? l;
-              if (!l && !r) continue;
-              parts.push(l === r ? l : `${l}=${r}`);
-            }
-            const keys = parts.join(", ") || "?";
-            return `${step.payload.join_type} · ${keys}`;
-          })(),
+          label: labelText,
           data: {
             kind: "join",
+            labelKind: "join",
+            labelText,
             hostQueryId: q.id,
             otherQueryId: right,
           } satisfies EdgeData,
@@ -282,8 +349,6 @@ function buildGraph(
             stroke: selected ? "#5eead4" : "#2dd4bf",
             strokeWidth: selected ? 3 : 2,
           },
-          labelStyle: { fill: "#5eead4", fontSize: 10 },
-          labelBgStyle: { fill: "#0a1520", fillOpacity: 0.85 },
           animated: selected || q.id === focusQueryId || right === focusQueryId,
         });
       }
@@ -293,11 +358,14 @@ function buildGraph(
           const selected = selectedEdgeId === id;
           edges.push({
             id,
+            type: "labeled",
             source: other,
             target: q.id,
             label: "append",
             data: {
               kind: "append",
+              labelKind: "append",
+              labelText: "append",
               hostQueryId: q.id,
               otherQueryId: other,
             } satisfies EdgeData,
@@ -310,8 +378,6 @@ function buildGraph(
               strokeWidth: selected ? 2.5 : 1.5,
               strokeDasharray: "4 3",
             },
-            labelStyle: { fill: "#94a3b8", fontSize: 10 },
-            labelBgStyle: { fill: "#0a1520", fillOpacity: 0.85 },
           });
         }
       }
@@ -321,11 +387,14 @@ function buildGraph(
         const selected = selectedEdgeId === id;
         edges.push({
           id,
+          type: "labeled",
           source: src,
           target: q.id,
           label: "from",
           data: {
             kind: "from",
+            labelKind: "from",
+            labelText: "from",
             hostQueryId: q.id,
             otherQueryId: src,
           } satisfies EdgeData,
@@ -338,8 +407,6 @@ function buildGraph(
             strokeWidth: selected ? 2.5 : 1.75,
             strokeDasharray: "2 4",
           },
-          labelStyle: { fill: "#c4b5fd", fontSize: 10 },
-          labelBgStyle: { fill: "#0a1520", fillOpacity: 0.85 },
           animated: selected || q.id === focusQueryId || src === focusQueryId,
         });
       }
@@ -655,6 +722,7 @@ function GraphCanvasInner({
         onConnect={onConnect}
         onNodeDragStop={persistPositions}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.35}
         maxZoom={1.6}

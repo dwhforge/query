@@ -142,6 +142,10 @@ export function getLastProjectPath(): Promise<string | null> {
 export interface AppSettings {
   default_target_dialect: WarehouseDialect;
   default_dbt_target: DbtTarget;
+  /** Explorer sidebar width (px). */
+  explorer_width_px?: number;
+  /** Inspector sidebar width (px). */
+  inspector_width_px?: number;
 }
 
 export function getAppSettings(): Promise<AppSettings> {

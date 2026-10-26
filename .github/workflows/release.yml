@@ -1,4 +1,4 @@
-# Linux release: deb + rpm (+ AppImage best-effort). DuckDB lib + extensions bundled.
+# Linux release: portable tar.gz (no sudo) + deb + rpm. DuckDB lib + extensions bundled.
 name: release
 
 on:
@@ -12,9 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # linuxdeploy is an AppImage; runners often lack usable FUSE.
   APPIMAGE_EXTRACT_AND_RUN: "1"
-  # linuxdeploy's bundled strip dies on modern glibc .relr.dyn sections.
   NO_STRIP: "true"
 
 jobs:
@@ -29,8 +27,7 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
             patchelf libssl-dev libgtk-3-dev libdbus-1-dev pkg-config \
-            curl wget file rpm \
-            libfuse2
+            curl wget file rpm
 
       - uses: actions/setup-node@v4
         with:
@@ -64,43 +61,50 @@ jobs:
           fi
           test -f src-tauri/libduckdb.so
           test -f "$EXT/postgres_scanner.duckdb_extension"
-          ls -la src-tauri/libduckdb.so "$EXT"
 
-      # deb + rpm first — reliable on GHA; cover Debian/Ubuntu and RHEL/Fedora/Rocky.
-      - name: Tauri build (deb + rpm)
+      - name: Tauri build (deb + rpm + binary)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPIMAGE_EXTRACT_AND_RUN: "1"
           NO_STRIP: "true"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "DWHForge Query ${{ github.ref_name }}"
           releaseBody: |
-            Offline Linux builds (DuckDB engine + `extensions/` bundled). MIT.
+            Offline Linux builds (DuckDB + `extensions/` bundled). MIT.
 
-            | Package | Distros |
-            |---------|---------|
-            | `.deb` | Debian / Ubuntu |
-            | `.rpm` | RHEL / Rocky / Alma / Fedora |
-            | `.AppImage` | portable (if present) |
+            | Artifact | Notes |
+            |----------|--------|
+            | **`.tar.gz`** | **No sudo** — unpack and `./DWHForge-Query` |
+            | `.deb` | Debian / Ubuntu (`sudo apt/dpkg -i`) |
+            | `.rpm` | RHEL / Rocky / Fedora (`sudo dnf/rpm -i`) |
 
-            No CDN install at runtime. Optional dbt for Export validate is separate.
+            Portable tarball still needs system WebKitGTK (once per machine).
+            No DuckDB CDN at runtime.
           releaseDraft: false
           prerelease: false
+          # Skip AppImage (linuxdeploy fragile on GHA). tar.gz is the portable path.
           args: --bundles deb,rpm
 
-      # AppImage is best-effort (linuxdeploy is fragile on hosted runners).
-      - name: Tauri build (AppImage)
-        continue-on-error: true
-        uses: tauri-apps/tauri-action@v0
+      - name: Pack portable tar.gz
+        run: |
+          chmod +x ./scripts/pack-portable-linux.sh
+          ./scripts/pack-portable-linux.sh "${GITHUB_REF_NAME}"
+
+      - name: Upload portable tar.gz to release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-          NO_STRIP: "true"
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "DWHForge Query ${{ github.ref_name }}"
-          releaseDraft: false
-          prerelease: false
-          args: --bundles appimage
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          FILE=$(ls dist-portable/dwhforge-query-*-linux-x86_64.tar.gz | head -1)
+          # gh may be available on runners; fall back to API upload via curl if needed
+          if command -v gh >/dev/null; then
+            gh release upload "$TAG" "$FILE" --clobber --repo "${{ github.repository }}"
+          else
+            curl -sL -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/gzip" \
+              --data-binary @"$FILE" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$(curl -sL -H "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" | jq -r .id)/assets?name=$(basename "$FILE")"
+          fi

@@ -114,14 +114,14 @@
         })
         .then((rel) => {
           const assets = rel.assets || [];
-          const appimage = pick(assets, /\.AppImage$/i);
+          const tarball = pick(assets, /linux-x86_64\.tar\.gz$/i);
           const deb = pick(assets, /\.deb$/i);
           const rpm = pick(assets, /\.rpm$/i);
           status.textContent = `Latest: ${rel.tag_name}`;
           const bits = [];
-          if (appimage) {
+          if (tarball) {
             bits.push(
-              `<a class="btn" href="${appimage.browser_download_url}">AppImage</a>`,
+              `<a class="btn" href="${tarball.browser_download_url}">Download .tar.gz (no sudo)</a>`,
             );
           }
           if (deb) {
@@ -137,7 +137,7 @@
           bits.push(
             `<a class="btn secondary" href="${rel.html_url}">All assets on GitHub</a>`,
           );
-          if (!appimage && !deb && !rpm) {
+          if (!tarball && !deb && !rpm) {
             status.textContent =
               `${rel.tag_name} — binaries still uploading, or open GitHub.`;
           }

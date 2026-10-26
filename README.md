@@ -132,9 +132,9 @@ fixtures/  docs/
 
 | Package | Use on |
 |---------|--------|
+| `.tar.gz` | **No sudo** — unpack, `./DWHForge-Query` |
 | `.deb` | Debian / Ubuntu |
-| `.rpm` | RHEL / Rocky / Alma / Fedora |
-| `.AppImage` | portable (any modern x86_64 Linux) |
+| `.rpm` | RHEL / Rocky / Alma / Fedora (`sudo` required to install) |
 
 Linux builds ship **offline**: bundled DuckDB shared lib + `extensions/` (no CDN at runtime).
 

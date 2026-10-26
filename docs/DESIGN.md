@@ -12,7 +12,7 @@
 
 Positioning: [ADR-0001](adr/0001-product-positioning.md).
 
-**Licensing:** Open-source release is **under consideration and not decided**. Specs and code should stay OSS-friendly (English docs, no proprietary assumptions).
+**Licensing:** **MIT** ([LICENSE](../LICENSE)). Docs stay English / OSS-friendly.
 
 ## 2. Horizons
 

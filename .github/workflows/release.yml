@@ -1,0 +1,82 @@
+# Linux release: AppImage + .deb with DuckDB lib + extensions (no runtime CDN).
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps (WebKit / Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            patchelf libssl-dev libgtk-3-dev libdbus-1-dev pkg-config \
+            curl wget file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Fetch DuckDB extensions (offline bundle)
+        run: ./scripts/fetch-duckdb-extensions.sh
+
+      - name: Build engine (pulls prebuilt libduckdb)
+        run: cargo build -p dwh-engine --release
+
+      - name: Sync libduckdb.so into src-tauri resources
+        run: ./scripts/sync-duckdb-lib.sh
+
+      - name: Flatten postgres extension symlink (bundle-safe)
+        run: |
+          EXT=src-tauri/extensions
+          if [[ -L "$EXT/postgres.duckdb_extension" ]]; then
+            rm -f "$EXT/postgres.duckdb_extension"
+            cp -f "$EXT/postgres_scanner.duckdb_extension" "$EXT/postgres.duckdb_extension"
+          fi
+          test -f src-tauri/libduckdb.so
+          test -f "$EXT/postgres_scanner.duckdb_extension"
+          ls -la src-tauri/libduckdb.so "$EXT"
+
+      - name: Tauri build (AppImage + deb)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DWHForge Query ${{ github.ref_name }}"
+          releaseBody: |
+            Offline Linux build (DuckDB engine + `extensions/` bundled).
+
+            **Download:** AppImage (portable) or `.deb`.
+
+            No CDN install at runtime. Optional: local dbt for Export validate —
+            `./scripts/fetch-dbt-venv.sh` or system `dbt` (not required to open the app).
+
+            License: MIT
+          releaseDraft: false
+          prerelease: false
+          args: --bundles appimage,deb

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DWHForge Query — Download</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #071018;
+        --fg: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #2dd4bf;
+        --line: #1e293b;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: radial-gradient(1200px 600px at 20% -10%, #0f766e33, transparent),
+          var(--bg);
+        color: var(--fg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+      }
+      main {
+        max-width: 36rem;
+        width: 100%;
+      }
+      h1 {
+        font-size: 1.75rem;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.5rem;
+      }
+      p {
+        color: var(--muted);
+        line-height: 1.5;
+        margin: 0 0 1.25rem;
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.25rem 1.35rem;
+        background: #0a1520cc;
+      }
+      a.btn {
+        display: inline-block;
+        margin: 0.35rem 0.5rem 0.35rem 0;
+        padding: 0.65rem 1.1rem;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #042f2e;
+        font-weight: 700;
+        text-decoration: none;
+      }
+      a.btn.secondary {
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid #2dd4bf66;
+      }
+      a.btn[disabled],
+      a.btn.is-disabled {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+      .meta {
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin-top: 1rem;
+      }
+      code {
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>DWHForge Query</h1>
+      <p>
+        Visual transforms → real dbt. Local desktop workbench — DuckDB preview,
+        Postgres sources, offline engine. MIT licensed.
+      </p>
+      <div class="card">
+        <p id="status">Loading latest release…</p>
+        <div id="actions"></div>
+        <p class="meta">
+          Linux x86_64 · AppImage (portable) or <code>.deb</code> · no runtime CDN.
+          Source:
+          <a href="https://github.com/dwhforge/query" style="color: var(--accent)"
+            >github.com/dwhforge/query</a
+          >
+        </p>
+      </div>
+    </main>
+    <script>
+      const API =
+        "https://api.github.com/repos/dwhforge/query/releases/latest";
+      const status = document.getElementById("status");
+      const actions = document.getElementById("actions");
+
+      function pick(assets, re) {
+        return assets.find((a) => re.test(a.name));
+      }
+
+      fetch(API)
+        .then((r) => {
+          if (!r.ok) throw new Error("No release yet");
+          return r.json();
+        })
+        .then((rel) => {
+          const assets = rel.assets || [];
+          const appimage = pick(assets, /\.AppImage$/i);
+          const deb = pick(assets, /\.deb$/i);
+          status.textContent = `Latest: ${rel.tag_name}`;
+          const bits = [];
+          if (appimage) {
+            bits.push(
+              `<a class="btn" href="${appimage.browser_download_url}">Download AppImage</a>`,
+            );
+          }
+          if (deb) {
+            bits.push(
+              `<a class="btn secondary" href="${deb.browser_download_url}">Download .deb</a>`,
+            );
+          }
+          bits.push(
+            `<a class="btn secondary" href="${rel.html_url}">All assets on GitHub</a>`,
+          );
+          if (!appimage && !deb) {
+            status.textContent =
+              `${rel.tag_name} — binaries still uploading, or open GitHub.`;
+          }
+          actions.innerHTML = bits.join("");
+        })
+        .catch(() => {
+          status.textContent = "No published release yet.";
+          actions.innerHTML = `<a class="btn" href="https://github.com/dwhforge/query/releases">Open releases</a>`;
+        });
+    </script>
+  </body>
+</html>

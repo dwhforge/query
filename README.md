@@ -125,6 +125,13 @@ fixtures/  docs/
 | [COMPETITIVE](docs/COMPETITIVE.md) | Landscape & wedge |
 | [adr/](docs/adr/) | Decisions |
 
+## Download
+
+- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/) (latest AppImage / `.deb`)
+- GitHub Releases: [dwhforge/query/releases](https://github.com/dwhforge/query/releases)
+
+Linux builds ship **offline**: bundled DuckDB shared lib + `extensions/` (no CDN at runtime).
+
 ## License
 
-Open-source licensing is under consideration and **not decided**. Docs stay in English to stay OSS-ready.
+[MIT](LICENSE)

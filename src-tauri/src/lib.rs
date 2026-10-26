@@ -9,7 +9,7 @@ mod secrets_io;
 
 use dwh_pipeline::{
     list_export_tree as walk_export_tree, preview_dbt_model_sql, ConnectionDef, DbtProducer,
-    DbtTarget, ExportResult, OutputProducer, PreviewDbtModel, Project, QueryDef,
+    DbtTarget, ExportResult, GraphCompiler, OutputProducer, PreviewDbtModel, Project, QueryDef,
     TransformationStep, WarehouseDialect, Workspace,
 };
 use serde::{Deserialize, Serialize};

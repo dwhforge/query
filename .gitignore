@@ -23,6 +23,9 @@ src-tauri/libduckdb.so
 src-tauri/libduckdb.dylib
 src-tauri/duckdb.dll
 
+# Local dbt Core 1.x venv (scripts/fetch-dbt-venv.sh) — offline parse on Export
+src-tauri/dbt-venv/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

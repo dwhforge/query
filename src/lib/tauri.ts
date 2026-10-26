@@ -47,6 +47,10 @@ export interface ExportResult {
   path: string;
   /** Relative paths; directories end with `/`. */
   files: string[];
+  /** Offline `dbt parse` succeeded (no warehouse). */
+  dbt_parse_ok: boolean;
+  /** Captured parse log (may be truncated). */
+  dbt_parse_log: string;
 }
 
 export function exportDbt(
@@ -132,4 +136,18 @@ export function loadProject(path: string): Promise<Project> {
 /** Last Save/Open `.dwhproj.json` path (app session) — for restore on launch. */
 export function getLastProjectPath(): Promise<string | null> {
   return invoke<string | null>("get_last_project_path");
+}
+
+/** App defaults in `~/.dwhforge-query/settings.json` (not secrets, not project IR). */
+export interface AppSettings {
+  default_target_dialect: WarehouseDialect;
+  default_dbt_target: DbtTarget;
+}
+
+export function getAppSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>("get_app_settings");
+}
+
+export function setAppSettings(settings: AppSettings): Promise<void> {
+  return invoke<void>("set_app_settings", { settings });
 }

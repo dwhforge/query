@@ -23,12 +23,15 @@ import {
   describePostgresObject,
   exportDbt,
   listExportTree,
+  getAppSettings,
   getLastProjectPath,
   loadProject,
   loadDemoWorkspace,
   previewDbtModel,
   previewWorkspace,
   saveProject,
+  setAppSettings,
+  type AppSettings,
   type PreviewDbtModel,
   type PostgresColumn,
 } from "./lib/tauri";
@@ -55,6 +58,10 @@ import {
 
 function App() {
   const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
+  const [appSettings, setAppSettingsState] = useState<AppSettings>({
+    default_target_dialect: "duckdb",
+    default_dbt_target: "v1",
+  });
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
     null,
@@ -752,6 +759,23 @@ function App() {
     setError(null);
   }
 
+  async function persistAppSettings(next: AppSettings) {
+    setAppSettingsState(next);
+    try {
+      await setAppSettings(next);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleSetTargetDialect(d: WarehouseDialect) {
+    setProject((p) => ({ ...p, target_dialect: d }));
+    await persistAppSettings({
+      ...appSettings,
+      default_target_dialect: d,
+    });
+  }
+
   async function handleLoadDemo(id: DemoId) {
     try {
       const ws = await loadDemoWorkspace(id);
@@ -767,6 +791,8 @@ function App() {
         sources: syncSourcesFromQueries([], ws.queries),
         workspace: ws,
         canvas: { positions: {} },
+        dbt_target: appSettings.default_dbt_target,
+        target_dialect: appSettings.default_target_dialect,
       }));
       setActiveQueryId(ws.focus_query_id);
       setSelectedStepIndex(
@@ -1177,19 +1203,35 @@ function App() {
     }
   }
 
-  // Restore last project (connections included) on app launch.
+  // Load app settings, then restore last project (or seed Untitled from settings).
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      let settings: AppSettings = {
+        default_target_dialect: "duckdb",
+        default_dbt_target: "v1",
+      };
+      try {
+        settings = await getAppSettings();
+        if (!cancelled) setAppSettingsState(settings);
+      } catch {
+        // Missing settings — keep in-memory defaults.
+      }
       try {
         const path = await getLastProjectPath();
-        if (!path || cancelled) return;
-        const loaded = await loadProject(path);
         if (cancelled) return;
-        applyLoadedProject(loaded, path);
-        setExportMsg(`Restored ${path}`);
+        if (path) {
+          const loaded = await loadProject(path);
+          if (cancelled) return;
+          applyLoadedProject(loaded, path);
+          setExportMsg(`Restored ${path}`);
+          return;
+        }
       } catch {
-        // Missing/corrupt session — stay on empty Untitled.
+        // Missing/corrupt session — fall through to Untitled.
+      }
+      if (!cancelled) {
+        setProject(emptyProject("Untitled", settings));
       }
     })();
     return () => {
@@ -1227,10 +1269,19 @@ function App() {
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
       setTreeExpanded((e) => ({ ...e, export: true }));
-      setExportMsg(
-        `dbt ${project.dbt_target} · ${dialect} → ${result.path} (${result.files.filter((f) => !f.endsWith("/")).length} files)`,
-      );
-      setError(null);
+      const nFiles = result.files.filter((f) => !f.endsWith("/")).length;
+      const base = `dbt ${project.dbt_target} · ${dialect} → ${result.path} (${nFiles} files)`;
+      if (result.dbt_parse_ok) {
+        setExportMsg(`${base} · dbt parse OK`);
+        setError(null);
+      } else {
+        setExportMsg(`${base} · dbt parse failed (files written)`);
+        setError(
+          result.dbt_parse_log?.trim()
+            ? result.dbt_parse_log
+            : "dbt parse failed (install ./scripts/fetch-dbt-venv.sh or put dbt on PATH)",
+        );
+      }
     } catch (e) {
       setExportMsg(null);
       setError(typeof e === "string" ? e : String(e));
@@ -1466,7 +1517,7 @@ function App() {
         onCopySql={() => void copySql()}
         onNewConnection={() => openNewConnection("postgres")}
         onSetTargetDialect={(d: WarehouseDialect) =>
-          setProject((p) => ({ ...p, target_dialect: d }))
+          void handleSetTargetDialect(d)
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
       />

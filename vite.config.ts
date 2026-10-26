@@ -21,7 +21,16 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // Ignore Rust/Cargo and other heavy trees — watching them hits
+      // ENOSPC (inotify limit) and kills Vite → Tauri "Connection refused".
+      ignored: [
+        "**/src-tauri/**",
+        "**/target/**",
+        "**/dbt-venv/**",
+        "**/extensions/**",
+        "**/third_party/**",
+        "**/.git/**",
+      ],
     },
   },
 }));

@@ -8,7 +8,7 @@
 - Brand / app id: **DWHForge Query** · `com.dwhforge.query` ([ADR-0016](adr/0016-product-rename-dwhforge-query.md))  
 - Repo path may still be `dwh-rs-query`  
 - Raw data never leaves the machine (AI receives only schema / steps / prompt)  
-- Secrets: `~/.dwhforge-query/secrets.json`
+- Local dir: `~/.dwhforge-query/` — `secrets.json` + `settings.json` (app defaults)
 
 Positioning: [ADR-0001](adr/0001-product-positioning.md).
 

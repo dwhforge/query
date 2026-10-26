@@ -4,12 +4,29 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
-/// Result of `export_dbt` (path + relative file tree).
+/// Result of `export_dbt` (path + relative file tree + optional offline parse).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExportResult {
     pub path: String,
     /// Relative paths under `path`, directories end with `/`, sorted.
     pub files: Vec<String>,
+    /// `dbt parse` succeeded (false if skipped failure / missing dbt / parse error).
+    #[serde(default)]
+    pub dbt_parse_ok: bool,
+    /// Captured parse log (truncated); empty when validate was not requested.
+    #[serde(default)]
+    pub dbt_parse_log: String,
+}
+
+impl ExportResult {
+    pub fn with_files(path: String, files: Vec<String>) -> Self {
+        Self {
+            path,
+            files,
+            dbt_parse_ok: false,
+            dbt_parse_log: String::new(),
+        }
+    }
 }
 
 /// Walk `root` and return sorted relative paths (dirs end with `/`).

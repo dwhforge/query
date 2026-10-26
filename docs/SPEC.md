@@ -3,6 +3,8 @@
 Canon: product name **DWHForge Query** ([ADR-0016](adr/0016-product-rename-dwhforge-query.md)). Positioning — [ADR-0001](adr/0001-product-positioning.md).  
 Docs language: English (OSS under consideration, not decided).
 
+**Local app dir** `~/.dwhforge-query/`: `secrets.json` (credentials) · `settings.json` (defaults / last-used Export dialect). Project IR stays in `.dwhproj.json` (`target_dialect` per project).
+
 ## 1. Project + Workspace contract
 
 Reuse industry names ([ADR-0009](adr/0009-project-explorer.md)):
@@ -115,18 +117,20 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 |---------|----|-----|
 | `preview_workspace` | `Workspace`, `connections[]` | `PreviewResult` |
 | `preview_pipeline` | `steps[]`, `connections[]` | `PreviewResult` (compat) |
-| `export_dbt` | `pipeline_name`, `Workspace`, `output_dir`, `dbt_target?` | `{ path, files[] }` (relative tree; dirs end `/`) |
+| `export_dbt` | `pipeline_name`, `Workspace`, `output_dir`, `dbt_target?` | `{ path, files[], dbt_parse_ok, dbt_parse_log }` — always writes tree, then offline `dbt parse` ([§5.2](#52-export-validation-offline-parse)) |
 | `list_export_tree` | `path` | `string[]` — refresh Explorer after open project |
 | `list_postgres_objects` | `connection_string` | `{ schema, name, kind }[]` |
 | `describe_postgres_object` | `connection_string`, `schema`, `table_name` | `{ name, data_type, is_nullable, ordinal_position }[]` |
 | `test_postgres_connection` | `connection_string` | `()` |
 | `save_project` | `path`, `Project` | `()` — writes `project.json` / `.dwhproj.json` |
 | `load_project` | `path` | `Project` |
+| `get_app_settings` | — | `{ default_target_dialect, default_dbt_target }` from `~/.dwhforge-query/settings.json` |
+| `set_app_settings` | same shape | `()` — writes settings (not secrets; not project IR) |
 | `describe_query` | `Workspace`, `query_id`, `upto_index` | `TableSchema` |
 | `validate_reorder` | … | later |
 | `export_python` / `ai_compile` | … | later / stub |
 
-CLI twin (same IR): `dwh-export <project.json> <output_dir> [--name NAME] [--target v1|v2]` → prints path + file tree.
+CLI twin (same IR): `dwh-export <project.json> <output_dir> [--name NAME] [--target v1|v2] [--validate]` → prints path + file tree. `--validate` is **off** by default (headless/CI without dbt); UI Export always validates.
 
 Postgres UI: object picker — connect → browse catalog → select schema-qualified relation ([ADR-0010](adr/0010-postgres-object-picker.md)). Describe: select Postgres source → column/types in inspector.
 
@@ -166,6 +170,19 @@ Generates:
 - **Simplification (allowed early):** one dbt model per query = SQL for that query’s step chain with `ref()`/`source()`.  
 - Focus query’s last model → `mart_<name>.sql`.  
 - DoD **per target**: `dbt run` with no hand-edits on fixture 2 CSVs + Join. V1 DoD can land before V2.
+
+### 5.2 Export validation (offline parse)
+
+Author-first: Export generates the project for git / another machine. After write, the app runs:
+
+```text
+dbt parse --no-partial-parse --project-dir <root> --profiles-dir <root>
+```
+
+- **In scope:** project structure, YAML, Jinja, `ref`/`source` graph — **no warehouse connection**.
+- **Out of scope on Export:** `dbt debug`, `dbt compile`, `dbt run` (those need a data platform; `run` remains DoD on the target machine / CI).
+- Missing `dbt`: soft-fail (`dbt_parse_ok: false` + install hint); **files still written**.
+- Resolve binary: `src-tauri/dbt-venv/bin/dbt` ([`scripts/fetch-dbt-venv.sh`](../scripts/fetch-dbt-venv.sh)) → else `PATH`.
 
 ## 6. Frontend (v1)
 

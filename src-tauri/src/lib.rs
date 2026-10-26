@@ -6,15 +6,17 @@ use dwh_engine::{
     PostgresObject, PreviewResult,
 };
 mod secrets_io;
+mod settings_io;
 
 use dwh_pipeline::{
-    list_export_tree as walk_export_tree, preview_dbt_model_sql, ConnectionDef, DbtProducer,
-    DbtTarget, ExportResult, GraphCompiler, OutputProducer, PreviewDbtModel, Project, QueryDef,
-    TransformationStep, WarehouseDialect, Workspace,
+    dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql, resolve_dbt_bin,
+    ConnectionDef, DbtProducer, DbtTarget, ExportResult, OutputProducer, PreviewDbtModel,
+    Project, QueryDef, TransformationStep, WarehouseDialect, Workspace,
 };
+use settings_io::AppSettings;
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 
 /// App-level session (survives relaunch) — last opened/saved project path.
@@ -72,8 +74,24 @@ fn preview_dbt_model(
     preview_dbt_model_sql(&workspace, &query_id, dialect)
 }
 
+fn tauri_dbt_bin_candidates(app: Option<&AppHandle>) -> Vec<PathBuf> {
+    let mut extra = Vec::new();
+    if let Some(app) = app {
+        if let Ok(rd) = app.path().resource_dir() {
+            extra.push(rd.join("dbt-venv/bin/dbt"));
+        }
+        if let Ok(ad) = app.path().app_data_dir() {
+            extra.push(ad.join("dbt-venv/bin/dbt"));
+        }
+    }
+    // Dev checkout: next to src-tauri crate.
+    extra.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dbt-venv/bin/dbt"));
+    extra
+}
+
 #[tauri::command]
 fn export_dbt(
+    app: AppHandle,
     pipeline_name: String,
     workspace: Workspace,
     output_dir: String,
@@ -84,7 +102,16 @@ fn export_dbt(
     let dialect = target_dialect.unwrap_or_default();
     let path = DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target, dialect)?;
     let files = walk_export_tree(&path)?;
-    Ok(ExportResult { path, files })
+    let mut result = ExportResult::with_files(path.clone(), files);
+
+    // Author-first: always offline-validate with `dbt parse` (no warehouse).
+    // Files stay on disk even when parse fails or dbt is missing.
+    let candidates = tauri_dbt_bin_candidates(Some(&app));
+    let bin = resolve_dbt_bin(&candidates);
+    let outcome = dbt_parse(&path, bin.as_deref());
+    result.dbt_parse_ok = outcome.ok;
+    result.dbt_parse_log = outcome.log;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -145,6 +172,17 @@ fn get_last_project_path(app: AppHandle) -> Result<Option<String>, String> {
     Ok(session
         .last_project_path
         .filter(|p| PathBuf::from(p).is_file()))
+}
+
+/// App defaults / last-used (`~/.dwhforge-query/settings.json`).
+#[tauri::command]
+fn get_app_settings() -> Result<AppSettings, String> {
+    settings_io::load_settings()
+}
+
+#[tauri::command]
+fn set_app_settings(settings: AppSettings) -> Result<(), String> {
+    settings_io::save_settings(&settings)
 }
 
 fn fixture_csv(fixtures: &std::path::Path, name: &str) -> Result<String, String> {
@@ -491,7 +529,9 @@ pub fn run() {
             test_postgres_connection,
             save_project,
             load_project,
-            get_last_project_path
+            get_last_project_path,
+            get_app_settings,
+            set_app_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -500,6 +540,7 @@ pub fn run() {
 #[cfg(test)]
 mod demo_tests {
     use super::*;
+    use dwh_pipeline::GraphCompiler;
 
     #[test]
     fn all_demos_compile() {

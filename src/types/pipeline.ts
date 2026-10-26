@@ -203,15 +203,24 @@ export function emptyS3Params(): S3Params {
   };
 }
 
-export function emptyProject(name = "Untitled"): Project {
+/** Optional seed from `~/.dwhforge-query/settings.json` (app defaults). */
+export type ProjectDefaults = {
+  default_target_dialect?: WarehouseDialect;
+  default_dbt_target?: "v1" | "v2";
+};
+
+export function emptyProject(
+  name = "Untitled",
+  defaults?: ProjectDefaults,
+): Project {
   return {
     id: newProjectId(name),
     name,
     connections: [],
     sources: [],
     workspace: { queries: [], focus_query_id: "" },
-    dbt_target: "v1",
-    target_dialect: "duckdb",
+    dbt_target: defaults?.default_dbt_target ?? "v1",
+    target_dialect: defaults?.default_target_dialect ?? "duckdb",
   };
 }
 

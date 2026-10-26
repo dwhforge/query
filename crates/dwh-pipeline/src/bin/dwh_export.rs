@@ -1,7 +1,8 @@
 //! CLI twin of UI `export_dbt` — same Project/Workspace IR → dbt tree.
 
 use dwh_pipeline::{
-    list_export_tree, DbtProducer, DbtTarget, OutputProducer, Project,
+    dbt_parse, list_export_tree, resolve_dbt_bin, DbtProducer, DbtTarget, ExportResult,
+    OutputProducer, Project,
 };
 use std::env;
 use std::fs;
@@ -10,9 +11,11 @@ use std::process;
 fn usage() -> ! {
     eprintln!(
         "Usage:\n  \
-         dwh-export <project.json|.dwhproj.json> <output_dir> [--name NAME] [--target v1|v2]\n\n\
+         dwh-export <project.json|.dwhproj.json> <output_dir> [--name NAME] [--target v1|v2] [--validate]\n\n\
          Reads Project (workspace + dbt_target), writes a dbt project under output_dir/<name>/\n\
-         and prints the relative file tree."
+         and prints the relative file tree.\n\n\
+         --validate  run offline `dbt parse` after export (default: off; UI always validates).\n\
+                     Requires dbt Core 1.x (./scripts/fetch-dbt-venv.sh or PATH)."
     );
     process::exit(1);
 }
@@ -28,6 +31,7 @@ fn main() {
 
     let mut name_override: Option<String> = None;
     let mut target_override: Option<DbtTarget> = None;
+    let mut validate = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -47,6 +51,9 @@ fn main() {
                         process::exit(1);
                     }
                 });
+            }
+            "--validate" => {
+                validate = true;
             }
             "-h" | "--help" => usage(),
             other => {
@@ -99,8 +106,25 @@ fn main() {
         process::exit(1);
     });
 
+    let mut result = ExportResult::with_files(path.clone(), files);
+
+    if validate {
+        let bin = resolve_dbt_bin(&[]);
+        let outcome = dbt_parse(&path, bin.as_deref());
+        result.dbt_parse_ok = outcome.ok;
+        result.dbt_parse_log = outcome.log;
+    }
+
     println!("dbt {} → {}", target.as_str(), path);
-    for f in &files {
+    for f in &result.files {
         println!("  {f}");
+    }
+    if validate {
+        if result.dbt_parse_ok {
+            println!("dbt parse: OK");
+        } else {
+            eprintln!("dbt parse: FAILED\n{}", result.dbt_parse_log);
+            process::exit(2);
+        }
     }
 }

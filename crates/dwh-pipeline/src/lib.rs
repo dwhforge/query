@@ -1,5 +1,6 @@
 pub mod compiler;
 pub mod connection;
+pub mod dbt_cli;
 pub mod dialect;
 pub mod emit;
 pub mod export_tree;
@@ -19,6 +20,7 @@ pub use dialect::{
 };
 pub use emit::{emit_transform_step, emit_transform_step_ex, substitute_query_placeholders};
 pub use postgres_attach::{duckdb_postgres_relation, postgres_attach_alias};
+pub use dbt_cli::{dbt_parse, default_dbt_venv_candidates, resolve_dbt_bin, DbtParseOutcome};
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{JoinType, QueryDef, TransformationStep, Workspace};
 pub use producers::{

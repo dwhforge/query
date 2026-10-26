@@ -33,7 +33,7 @@ Power Query *mental model* (multi-query, Applied Steps, Merge) — not Power BI 
 - **Structural preview** — DuckDB in-process; catch bad joins before you leave the editor
 - **dbt export** — runnable project for DuckDB or Postgres target dialect
 - **PostgreSQL sources** — first-class (ATTACH + catalog picker); CSV / Parquet / S3 paths
-- **Secrets off-project** — `~/.dwhforge-query/secrets.json`, not inside `.dwhproj.json`
+- **Secrets + settings off-project** — `~/.dwhforge-query/secrets.json` and `settings.json` (defaults / last Export dialect); not inside `.dwhproj.json`
 - **Offline DuckDB** — bundled engine + sidecar `extensions/` (no CDN install at runtime)
 
 ## Quick start
@@ -41,6 +41,9 @@ Power Query *mental model* (multi-query, Applied Steps, Merge) — not Power BI 
 ```bash
 # Once: DuckDB extensions (needs network)
 ./scripts/fetch-duckdb-extensions.sh
+
+# Once: local dbt Core 1.x venv for offline `dbt parse` on Export
+./scripts/fetch-dbt-venv.sh
 
 # Linux desktop deps (once)
 sudo apt update && sudo apt install -y \
@@ -69,12 +72,16 @@ cargo run -p dwh-engine --bin dwh-preview -- fixtures/sample.csv 'amount > 1000'
 cargo run -p dwh-engine --bin dwh-preview -- --join \
   fixtures/sample.csv fixtures/dim_region.csv region
 
-# Same IR as UI Export
+# Same IR as UI Export (optional offline parse — needs dbt on PATH or fetch-dbt-venv.sh)
 cargo run -p dwh-pipeline --bin dwh-export -- \
-  path/to/project.dwhproj.json /tmp/dwh-out
+  path/to/project.dwhproj.json /tmp/dwh-out --validate
 ```
 
-Then: `cd /tmp/dwh-out/<project_name> && dbt run --profiles-dir ./`
+UI **Export** always writes the tree then runs offline `dbt parse` (no warehouse). `dbt run` stays on the target machine / CI:
+
+```bash
+cd /tmp/dwh-out/<project_name> && dbt run --profiles-dir ./
+```
 
 ### VS Code / Cursor
 
@@ -103,7 +110,7 @@ fixtures/  docs/
 | | |
 |--|--|
 | Product | **DWHForge Query** |
-| Secrets / config | `~/.dwhforge-query/` |
+| Secrets / settings | `~/.dwhforge-query/` (`secrets.json`, `settings.json`) |
 | App id | `com.dwhforge.query` |
 | Repo (legacy path) | `dwh-rs-query` |
 

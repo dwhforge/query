@@ -13,11 +13,18 @@ Working name **DWH-RS-QUERY** / `dwh-rs-query` was internal. Public brand should
 | Layer | Name |
 |-------|------|
 | Product / UI / window title | **DWHForge Query** |
-| Local data dir | `~/.dwhforge-query/` (secrets, future app state) |
+| Local data dir | `~/.dwhforge-query/` (secrets + settings) |
 | Tauri identifier | `com.dwhforge.query` |
 | Repo / Cargo crate paths | may stay `dwh-rs-query` until a mechanical rename; docs call out the brand |
 
-Secrets for connections live in `~/.dwhforge-query/secrets.json` (not in `.dwhproj.json`). See ADR-0012 / ADR-0013 updates.
+Under `~/.dwhforge-query/`:
+
+| File | Role |
+|------|------|
+| `secrets.json` | Connection secrets (mode `0600`) — not in `.dwhproj.json` ([ADR-0012](0012-connections.md)) |
+| `settings.json` | App defaults / last-used (`default_target_dialect`, `default_dbt_target`) — seeds new/demo projects; open projects keep their own IR |
+
+Per-project `target_dialect` / `dbt_target` stay in `.dwhproj.json` ([ADR-0014](0014-query-execution-affinity.md)).
 
 ## Consequences
 

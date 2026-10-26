@@ -1,3 +1,4 @@
+import { formatJoinKeyLabel } from "../lib/joinKeys";
 import type { TransformationStep } from "../types/pipeline";
 
 interface HistoryProps {
@@ -86,12 +87,10 @@ export function stepSummaryLine(
     case "Join":
       return {
         kind: `Join ${step.payload.join_type}`,
-        detail: (() => {
-          const l = step.payload.left_on.join(",");
-          const r = step.payload.right_on.join(",");
-          const keys = l === r ? l : `${l}=${r}`;
-          return `${qname(step.payload.right_query_id)} on ${keys}`;
-        })(),
+        detail: `${qname(step.payload.right_query_id)} on ${formatJoinKeyLabel(
+          step.payload.left_on,
+          step.payload.right_on,
+        )}`,
       };
     case "Append":
       return {

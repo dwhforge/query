@@ -42,7 +42,7 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 
 | ID | Practice | Gap |
 |----|----------|-----|
-| B1 | Multi-key Join | IR arrays exist; inspector is single key |
+| B1 | Multi-key Join | UI: dual column pickers + multi-key pairs (schema from preview) |
 | B2 | Top-N per group / window | CustomSql only (see `sql` demo) |
 | B3 | Anti-join | CustomSql |
 | B4 | Seeds | CSV Load proxy, not `seeds/` |

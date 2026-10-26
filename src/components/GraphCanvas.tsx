@@ -75,7 +75,10 @@ interface GraphCanvasProps {
   onPositionsChange?: (positions: CanvasPositions) => void;
   onSelect: (id: string) => void;
   onSetFocus: (id: string) => void;
-  onConnectJoin?: (rightQueryId: string, leftQueryId: string) => void;
+  onConnectJoin?: (
+    rightQueryId: string,
+    leftQueryId: string,
+  ) => void | Promise<void>;
   onSelectEdge?: (edge: GraphEdgeInfo) => void;
   onRemoveEdge?: (edge: GraphEdgeInfo) => void;
   onRemoveQuery?: (queryId: string) => void;
@@ -254,9 +257,16 @@ function buildGraph(
           source: right,
           target: q.id,
           label: (() => {
-            const l = step.payload.left_on.join(",");
-            const r = step.payload.right_on.join(",");
-            const keys = l === r ? l : `${l}=${r}`;
+            const { left_on, right_on } = step.payload;
+            const n = Math.max(left_on.length, right_on.length);
+            const parts: string[] = [];
+            for (let i = 0; i < n; i++) {
+              const l = left_on[i] ?? "";
+              const r = right_on[i] ?? l;
+              if (!l && !r) continue;
+              parts.push(l === r ? l : `${l}=${r}`);
+            }
+            const keys = parts.join(", ") || "?";
             return `${step.payload.join_type} · ${keys}`;
           })(),
           data: {

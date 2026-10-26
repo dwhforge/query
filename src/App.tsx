@@ -5,6 +5,15 @@ import { ConnectionEditor } from "./components/ConnectionEditor";
 import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { ExplorerTree } from "./components/ExplorerTree";
+import { JoinKeyEditor } from "./components/JoinKeyEditor";
+import {
+  emptyJoinKeyPair,
+  joinPairsComplete,
+  pairsFromOn,
+  pairsToOn,
+  suggestJoinPairs,
+  type JoinKeyPair,
+} from "./lib/joinKeys";
 import {
   GraphCanvas,
   type CanvasPositions,
@@ -46,6 +55,7 @@ import {
   type ConnectionDef,
   type ConnectionKind,
   type JoinType,
+  type ColumnMetadata,
   type PreviewResult,
   type Project,
   type QueryDef,
@@ -71,10 +81,16 @@ function App() {
   const [groupDims, setGroupDims] = useState("");
   const [groupAggs, setGroupAggs] = useState("count(*) as n");
   const [joinRightId, setJoinRightId] = useState("");
-  /** Host (left) column — may differ from right (e.g. data_source_id = id). */
-  const [joinLeftKey, setJoinLeftKey] = useState("");
-  const [joinRightKey, setJoinRightKey] = useState("");
+  /** Join key pairs (IR `left_on` / `right_on`). */
+  const [joinKeyPairs, setJoinKeyPairs] = useState<JoinKeyPair[]>([
+    emptyJoinKeyPair(),
+  ]);
   const [joinType, setJoinType] = useState<JoinType>("inner");
+  const [joinLeftColumns, setJoinLeftColumns] = useState<ColumnMetadata[]>([]);
+  const [joinRightColumns, setJoinRightColumns] = useState<ColumnMetadata[]>(
+    [],
+  );
+  const [joinColsLoading, setJoinColsLoading] = useState(false);
   /** FromQuery parent id (child / derived query root). */
   const [fromQueryId, setFromQueryId] = useState("");
   const [appendOtherId, setAppendOtherId] = useState("");
@@ -196,6 +212,49 @@ function App() {
     if (dataWorkspace) debouncedPreview(dataWorkspace, connections);
   }, [dataWorkspace, connections, debouncedPreview]);
 
+  // Schema-aware Join: column lists from truncated preview (left before Join, full right).
+  useEffect(() => {
+    const step =
+      selectedStepIndex != null && activeQuery
+        ? activeQuery.steps[selectedStepIndex]
+        : undefined;
+    if (step?.type !== "Join") {
+      return;
+    }
+    const hostId = activeQueryId;
+    const rightId = joinRightId || step.payload.right_query_id;
+    if (!hostId || !rightId) {
+      setJoinLeftColumns([]);
+      setJoinRightColumns([]);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      setJoinColsLoading(true);
+      void fetchJoinSideColumns(hostId, rightId, selectedStepIndex)
+        .then((cols) => {
+          if (cancelled) return;
+          setJoinLeftColumns(cols.left);
+          setJoinRightColumns(cols.right);
+        })
+        .finally(() => {
+          if (!cancelled) setJoinColsLoading(false);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchJoinSideColumns closes over workspace
+  }, [
+    activeQueryId,
+    selectedStepIndex,
+    joinRightId,
+    activeQuery,
+    project.workspace,
+    connections,
+  ]);
+
   // Model tab: dbt SQL for the selected query (instant, no DuckDB).
   useEffect(() => {
     const id = activeQueryId || focusQueryId;
@@ -243,8 +302,7 @@ function App() {
         setGroupDims("");
         setGroupAggs("count(*) as n");
         setJoinRightId("");
-        setJoinLeftKey("");
-        setJoinRightKey("");
+        setJoinKeyPairs([emptyJoinKeyPair()]);
         setJoinType("inner");
         setFromQueryId("");
         return;
@@ -266,13 +324,13 @@ function App() {
       const j = q.steps.find((s) => s.type === "Join");
       if (j && j.type === "Join") {
         setJoinRightId(j.payload.right_query_id);
-        setJoinLeftKey(j.payload.left_on[0] ?? "");
-        setJoinRightKey(j.payload.right_on[0] ?? j.payload.left_on[0] ?? "");
+        setJoinKeyPairs(
+          pairsFromOn(j.payload.left_on, j.payload.right_on),
+        );
         setJoinType(j.payload.join_type);
       } else {
         setJoinRightId("");
-        setJoinLeftKey("");
-        setJoinRightKey("");
+        setJoinKeyPairs([emptyJoinKeyPair()]);
         setJoinType("inner");
       }
       const fq = q.steps.find((s) => s.type === "FromQuery");
@@ -304,9 +362,8 @@ function App() {
         break;
       case "Join":
         setJoinRightId(step.payload.right_query_id);
-        setJoinLeftKey(step.payload.left_on[0] ?? "");
-        setJoinRightKey(
-          step.payload.right_on[0] ?? step.payload.left_on[0] ?? "",
+        setJoinKeyPairs(
+          pairsFromOn(step.payload.left_on, step.payload.right_on),
         );
         setJoinType(step.payload.join_type);
         break;
@@ -828,13 +885,12 @@ function App() {
   function applyJoinTo(
     hostQueryId: string,
     rightQueryId: string,
-    leftKey: string,
-    rightKey: string,
+    pairs: JoinKeyPair[],
     type: JoinType = joinType,
   ) {
-    const lk = leftKey.trim();
-    const rk = rightKey.trim() || lk;
-    if (!rightQueryId || !lk) return;
+    const { left_on, right_on } = pairsToOn(pairs);
+    // Allow empty keys so canvas can open the Join for picking (never invent "id").
+    if (!rightQueryId) return;
     if (rightQueryId === hostQueryId) {
       setError("Cannot join a query to itself");
       return;
@@ -850,8 +906,8 @@ function App() {
           payload: {
             right_query_id: rightQueryId,
             join_type: type,
-            left_on: [lk],
-            right_on: [rk],
+            left_on,
+            right_on,
           },
         };
         const steps = [...without, step];
@@ -861,11 +917,13 @@ function App() {
       }),
     );
     setJoinRightId(rightQueryId);
-    setJoinLeftKey(lk);
-    setJoinRightKey(rk);
+    setJoinKeyPairs(
+      left_on.length > 0
+        ? pairsFromOn(left_on, right_on)
+        : [emptyJoinKeyPair()],
+    );
     setJoinType(type);
     setActiveQueryId(hostQueryId);
-    // Select Join step after queries commit (avoid race with sync useEffect).
     const idx = joinIndex;
     const step = joinStep;
     queueMicrotask(() => {
@@ -877,11 +935,71 @@ function App() {
     setError(null);
   }
 
-  function connectJoinOnCanvas(rightQueryId: string, hostQueryId: string) {
-    // Prefer inspector keys; if empty, create Join with placeholder keys for edit.
-    const lk = joinLeftKey.trim() || joinRightKey.trim() || "id";
-    const rk = joinRightKey.trim() || lk;
-    applyJoinTo(hostQueryId, rightQueryId, lk, rk, joinType);
+  async function fetchJoinSideColumns(
+    hostQueryId: string,
+    rightQueryId: string,
+    joinStepIndex: number | null,
+  ): Promise<{ left: ColumnMetadata[]; right: ColumnMetadata[] }> {
+    const host = queries.find((q) => q.id === hostQueryId);
+    const upto =
+      joinStepIndex != null && joinStepIndex >= 0
+        ? joinStepIndex
+        : (host?.steps.findIndex((s) => s.type === "Join") ??
+          host?.steps.length ??
+          0);
+    const leftUpto = Math.max(0, upto);
+
+    const leftWs: Workspace = {
+      ...project.workspace,
+      focus_query_id: hostQueryId,
+      queries: project.workspace.queries.map((q) =>
+        q.id === hostQueryId
+          ? { ...q, steps: q.steps.slice(0, leftUpto) }
+          : q,
+      ),
+    };
+    const rightWs: Workspace = {
+      ...project.workspace,
+      focus_query_id: rightQueryId,
+    };
+
+    const [leftRes, rightRes] = await Promise.all([
+      hostQueryId
+        ? previewWorkspace(leftWs, connections).catch(() => null)
+        : Promise.resolve(null),
+      rightQueryId
+        ? previewWorkspace(rightWs, connections).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    return {
+      left: leftRes?.columns ?? [],
+      right: rightRes?.columns ?? [],
+    };
+  }
+
+  async function connectJoinOnCanvas(
+    rightQueryId: string,
+    hostQueryId: string,
+  ) {
+    // Prefer complete pairs already in the inspector; else schema-suggest; never fake "id".
+    let pairs = joinKeyPairs;
+    if (!joinPairsComplete(pairs)) {
+      try {
+        const host = queries.find((q) => q.id === hostQueryId);
+        const upto = host?.steps.length ?? 0;
+        const cols = await fetchJoinSideColumns(
+          hostQueryId,
+          rightQueryId,
+          upto,
+        );
+        setJoinLeftColumns(cols.left);
+        setJoinRightColumns(cols.right);
+        pairs = suggestJoinPairs(cols.left, cols.right);
+      } catch {
+        pairs = [emptyJoinKeyPair()];
+      }
+    }
+    applyJoinTo(hostQueryId, rightQueryId, pairs, joinType);
   }
 
   function selectEdgeOnCanvas(edge: GraphEdgeInfo) {
@@ -892,9 +1010,8 @@ function App() {
       const idx = host?.steps.findIndex((s) => s.type === "Join") ?? -1;
       const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
-        setJoinLeftKey(j.payload.left_on[0] ?? "");
-        setJoinRightKey(
-          j.payload.right_on[0] ?? j.payload.left_on[0] ?? "",
+        setJoinKeyPairs(
+          pairsFromOn(j.payload.left_on, j.payload.right_on),
         );
         setJoinType(j.payload.join_type);
         setSelectedStepIndex(idx);
@@ -1380,17 +1497,22 @@ function App() {
           return;
         }
         {
-          const lk = joinLeftKey.trim() || "id";
-          const rk = joinRightKey.trim() || lk;
+          const { left_on, right_on } = joinPairsComplete(joinKeyPairs)
+            ? pairsToOn(joinKeyPairs)
+            : { left_on: [] as string[], right_on: [] as string[] };
           appendStep({
             type: "Join",
             payload: {
               right_query_id: peer,
               join_type: "inner",
-              left_on: [lk],
-              right_on: [rk],
+              left_on,
+              right_on,
             },
           });
+          setJoinRightId(peer);
+          if (left_on.length === 0) {
+            setJoinKeyPairs([emptyJoinKeyPair()]);
+          }
         }
         break;
       case "Append":
@@ -2072,45 +2194,31 @@ function App() {
                           <option value="right">right</option>
                           <option value="full">full</option>
                         </select>
-                        <label className="block text-[10px] uppercase tracking-wide text-slate-500">
-                          Left key (this query) = right key (other)
-                        </label>
-                        <div className="flex gap-1">
-                          <input
-                            value={joinLeftKey}
-                            onChange={(e) => setJoinLeftKey(e.target.value)}
-                            placeholder="data_source_id"
-                            list="inspector-cols"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                          />
-                          <span className="self-center text-slate-600">=</span>
-                          <input
-                            value={joinRightKey}
-                            onChange={(e) => setJoinRightKey(e.target.value)}
-                            placeholder="id"
-                            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                          />
-                        </div>
-                        <p className="text-[10px] text-slate-600">
-                          FK example: data_source_id = id (not id = id).
-                        </p>
+                        <JoinKeyEditor
+                          pairs={joinKeyPairs}
+                          onChange={setJoinKeyPairs}
+                          leftColumns={joinLeftColumns}
+                          rightColumns={joinRightColumns}
+                          leftLoading={joinColsLoading}
+                          rightLoading={joinColsLoading}
+                        />
                         <button
                           type="button"
                           disabled={
-                            !joinRightId || !joinLeftKey.trim()
+                            !joinRightId || !joinPairsComplete(joinKeyPairs)
                           }
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
-                            const lk = joinLeftKey.trim();
-                            const rk = joinRightKey.trim() || lk;
+                            const { left_on, right_on } =
+                              pairsToOn(joinKeyPairs);
                             replaceStepAt(selectedStepIndex, {
                               type: "Join",
                               payload: {
                                 right_query_id: joinRightId,
                                 join_type: joinType,
-                                left_on: [lk],
-                                right_on: [rk],
+                                left_on,
+                                right_on,
                               },
                             });
                           }}

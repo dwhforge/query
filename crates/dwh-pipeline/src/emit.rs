@@ -376,15 +376,19 @@ fn jinja_ascii_fold(inner: &str) -> String {
     expr
 }
 
-/// Build map ascii_fold→actual from relation; error if two columns collide under ASCII fold.
+/// Build map ascii_fold→actual from relation; any repeated fold key → error (exact dup vs case clash).
 fn jinja_build_col_map(rel_expr: &str, map_name: &str) -> String {
     let key = jinja_ascii_fold("_c.name");
     format!(
         "  {{% set {map_name} = {{}} %}}\n\
   {{% for _c in adapter.get_columns_in_relation({rel_expr}) %}}\n\
     {{% set _fk = {key} %}}\n\
-    {{% if _fk in {map_name} and {map_name}[_fk] != _c.name %}}\n\
-      {{{{ exceptions.raise_compiler_error(\"Append: ambiguous columns '\" ~ {map_name}[_fk] ~ \"' and '\" ~ _c.name ~ \"' (ASCII case-insensitive collision; rename one)\") }}}}\n\
+    {{% if _fk in {map_name} %}}\n\
+      {{% if {map_name}[_fk] != _c.name %}}\n\
+        {{{{ exceptions.raise_compiler_error(\"Append: ambiguous columns '\" ~ {map_name}[_fk] ~ \"' and '\" ~ _c.name ~ \"' (ASCII case-insensitive collision; rename one)\") }}}}\n\
+      {{% else %}}\n\
+        {{{{ exceptions.raise_compiler_error(\"Append: duplicate column name '\" ~ _c.name ~ \"'\") }}}}\n\
+      {{% endif %}}\n\
     {{% endif %}}\n\
     {{% if {map_name}.update({{ _fk: _c.name }}) %}}{{% endif %}}\n\
   {{% endfor %}}\n"
@@ -725,6 +729,21 @@ mod tests {
         assert!(sql.contains("| replace('A', 'a')"));
         assert!(sql.contains("raise_compiler_error"));
         assert!(sql.contains("ambiguous columns"));
+        // Exact dup ["id","id"] must error on every source map (left + right), not only left collect.
+        assert!(sql.contains("duplicate column name"));
+        assert_eq!(
+            sql.matches("duplicate column name").count(),
+            3, // left collect + _lmap + _rmap0
+            "exact-duplicate check must cover left collect and each source map"
+        );
+    }
+
+    #[test]
+    fn duplicate_exact_name_rejected_in_rust() {
+        let cols = vec!["id".into(), "id".into()];
+        let err = validate_unambiguous_ascii_names(&cols, "test").unwrap_err();
+        assert!(err.contains("duplicate column name 'id'"));
+        assert!(!err.contains("ambiguous"));
     }
 
     #[test]

@@ -71,10 +71,6 @@ pub fn validate_target_execution(
                             query.name
                         ));
                     }
-                    TransformationStep::Append { .. } => {
-                        // UNION ALL BY NAME is DuckDB-only; postgres emitter handles portable form,
-                        // but Append of arbitrary queries on PG target still OK at SQL level.
-                    }
                     _ => {}
                 }
             }
@@ -102,12 +98,14 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Rename column (`SELECT … FROM prev`). DuckDB: `EXCLUDE`. Postgres: needs schema-aware column list (v1 error).
+/// Rename column (`SELECT … FROM prev`). DuckDB: `EXCLUDE`.
+/// Postgres: pass `left_dbt_relation` (`ref('…')` / `source('…','…')`) so emit can list columns via jinja.
 pub fn sql_rename_column(
     dialect: WarehouseDialect,
     prev: &str,
     from: &str,
     to: &str,
+    left_dbt_relation: Option<&str>,
 ) -> Result<String, String> {
     match dialect {
         WarehouseDialect::Duckdb => Ok(format!(
@@ -117,19 +115,34 @@ pub fn sql_rename_column(
             quote_ident(to),
             prev
         )),
-        WarehouseDialect::Postgres => Err(format!(
-            "RenameColumn '{from}'→'{to}' on postgres requires schema-aware emit; use SelectColumns or target_dialect=duckdb (prev={prev})"
-        )),
+        WarehouseDialect::Postgres => {
+            let rel = left_dbt_relation.ok_or_else(|| {
+                format!(
+                    "RenameColumn '{from}'→'{to}' on postgres needs a known left relation \
+                     (LoadPostgres/FromQuery before schema-changing steps); \
+                     or use SelectColumns / target_dialect=duckdb (prev={prev})"
+                )
+            })?;
+            let from_l = from.to_ascii_lowercase().replace('\'', "''");
+            let to_sql = quote_ident(to);
+            Ok(format!(
+                "{{% set _ren_rel = {rel} %}}\n  SELECT\n    {{% for _c in adapter.get_columns_in_relation(_ren_rel) %}}{{% if (_c.name | lower) == '{from_l}' %}}{{{{ adapter.quote(_c.name) }}}} AS {to_sql}{{% else %}}{{{{ adapter.quote(_c.name) }}}}{{% endif %}}{{% if not loop.last %}}, {{% endif %}}{{% endfor %}}\n  FROM {prev}"
+            ))
+        }
     }
 }
 
-/// Append / union. DuckDB: UNION ALL BY NAME. Postgres: UNION ALL (column order must match).
-pub fn sql_union_all(dialect: WarehouseDialect, left: &str, right: &str) -> String {
+/// Append / union by column **name** (ADR-0003). DuckDB: `UNION ALL BY NAME`.
+/// For postgres use [`crate::emit`] Append (jinja name-alignment) — positional `UNION ALL` diverges from preview.
+pub fn sql_union_all(dialect: WarehouseDialect, left: &str, right: &str) -> Result<String, String> {
     match dialect {
-        WarehouseDialect::Duckdb => format!("SELECT * FROM {left} UNION ALL BY NAME SELECT * FROM {right}"),
-        WarehouseDialect::Postgres => {
-            format!("SELECT * FROM {left} UNION ALL SELECT * FROM {right}")
-        }
+        WarehouseDialect::Duckdb => Ok(format!(
+            "SELECT * FROM {left} UNION ALL BY NAME SELECT * FROM {right}"
+        )),
+        WarehouseDialect::Postgres => Err(
+            "sql_union_all: postgres needs name-aligned emit (see emit Append), not positional UNION ALL"
+                .into(),
+        ),
     }
 }
 

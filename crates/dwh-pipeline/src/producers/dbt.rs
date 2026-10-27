@@ -342,7 +342,17 @@ fn compile_query_as_dbt_model(
                     dialect,
                     left_dbt.as_deref(),
                 )?;
-                if matches!(other, TransformationStep::Join { .. }) {
+                // Column set no longer matches Load/FromQuery relation — drop for later Rename/Append.
+                if matches!(
+                    other,
+                    TransformationStep::Join { .. }
+                        | TransformationStep::Append { .. }
+                        | TransformationStep::SelectColumns { .. }
+                        | TransformationStep::RenameColumn { .. }
+                        | TransformationStep::DeriveColumn { .. }
+                        | TransformationStep::GroupBy { .. }
+                        | TransformationStep::CustomSql { .. }
+                ) {
                     left_dbt = None;
                 }
                 sql
@@ -536,5 +546,117 @@ mod tests {
         assert!(profiles.contains("password: postgres"));
         assert!(profiles.contains("dbname: dwh"));
         assert!(profiles.contains("schema: sys"));
+    }
+
+    #[test]
+    fn postgres_append_and_rename_match_by_name_semantics() {
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "eu".into(),
+                    name: "sales_eu".into(),
+                    steps: vec![TransformationStep::LoadPostgres {
+                        connection_id: Some("pg".into()),
+                        connection_string: String::new(),
+                        schema: "sales".into(),
+                        table_name: "eu".into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "us".into(),
+                    name: "sales_us".into(),
+                    steps: vec![TransformationStep::LoadPostgres {
+                        connection_id: Some("pg".into()),
+                        connection_string: String::new(),
+                        schema: "sales".into(),
+                        table_name: "us".into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "all".into(),
+                    name: "sales_all".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "eu".into(),
+                        },
+                        TransformationStep::RenameColumn {
+                            from: "amt".into(),
+                            to: "amount".into(),
+                        },
+                        TransformationStep::Append {
+                            other_query_ids: vec!["us".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "all".into(),
+        };
+
+        // Rename then Append: Rename clears left_dbt, so Append needs its own left — expect error
+        // unless Append comes while left relation is still known. Prefer Append-before-rename path.
+        let rename_then_append =
+            preview_dbt_model_sql(&ws, "all", WarehouseDialect::Postgres);
+        assert!(
+            rename_then_append.is_err(),
+            "Append after Rename must not silently fall back to positional UNION ALL"
+        );
+
+        let ws_append_first = Workspace {
+            queries: vec![
+                ws.queries[0].clone(),
+                ws.queries[1].clone(),
+                QueryDef {
+                    id: "all".into(),
+                    name: "sales_all".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "eu".into(),
+                        },
+                        TransformationStep::Append {
+                            other_query_ids: vec!["us".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "all".into(),
+        };
+        let sql = preview_dbt_model_sql(&ws_append_first, "all", WarehouseDialect::Postgres)
+            .unwrap()
+            .sql;
+        assert!(!sql.contains("UNION ALL SELECT *"));
+        assert!(sql.contains("UNION ALL"));
+        assert!(sql.contains("_ns.names"));
+        assert!(sql.contains("ref('stg_sales_us')"));
+
+        let ws_rename = Workspace {
+            queries: vec![
+                ws.queries[0].clone(),
+                QueryDef {
+                    id: "ren".into(),
+                    name: "sales_renamed".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "eu".into(),
+                        },
+                        TransformationStep::RenameColumn {
+                            from: "amt".into(),
+                            to: "amount".into(),
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "ren".into(),
+        };
+        let ren = preview_dbt_model_sql(&ws_rename, "ren", WarehouseDialect::Postgres)
+            .unwrap()
+            .sql;
+        assert!(!ren.contains("EXCLUDE"));
+        assert!(ren.contains("AS \"amount\""));
+        assert!(ren.contains("get_columns_in_relation"));
     }
 }

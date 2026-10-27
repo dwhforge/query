@@ -54,7 +54,7 @@ pub fn emit_transform_step_ex(
         }
         TransformationStep::RenameColumn { from, to } => {
             require_prev(prev, "RenameColumn")?;
-            sql_rename_column(dialect, prev, from, to)
+            sql_rename_column(dialect, prev, from, to, left_dbt_relation)
         }
         TransformationStep::DeriveColumn { name, expression } => {
             require_prev(prev, "DeriveColumn")?;
@@ -144,21 +144,39 @@ pub fn emit_transform_step_ex(
             if other_query_ids.is_empty() {
                 return Err("Append: other_query_ids empty".into());
             }
-            let mut left = format!("SELECT * FROM {prev}");
-            for oid in other_query_ids {
-                let other = relations
-                    .get(oid)
-                    .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
-                left = match dialect {
-                    WarehouseDialect::Duckdb => {
-                        format!("{left} UNION ALL BY NAME SELECT * FROM {other}")
+            match dialect {
+                WarehouseDialect::Duckdb => {
+                    let mut left = format!("SELECT * FROM {prev}");
+                    for oid in other_query_ids {
+                        let other = relations
+                            .get(oid)
+                            .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
+                        left = format!("{left} UNION ALL BY NAME SELECT * FROM {other}");
                     }
-                    WarehouseDialect::Postgres => {
-                        format!("{left} UNION ALL SELECT * FROM {other}")
+                    Ok(left)
+                }
+                WarehouseDialect::Postgres => {
+                    // Same meaning as DuckDB BY NAME: match columns by name, fill missing with NULL.
+                    let left_rel = left_dbt_relation.ok_or_else(|| {
+                        "Append (postgres): need a known left relation (LoadPostgres/FromQuery \
+                         before schema-changing steps) for name-aligned UNION"
+                            .to_string()
+                    })?;
+                    let mut right_models = Vec::with_capacity(other_query_ids.len());
+                    for oid in other_query_ids {
+                        let other = relations
+                            .get(oid)
+                            .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
+                        let model = parse_dbt_ref_model(other).ok_or_else(|| {
+                            format!(
+                                "Append (postgres): right side must be {{{{ ref('…') }}}} (got '{other}')"
+                            )
+                        })?;
+                        right_models.push(model);
                     }
-                };
+                    Ok(dbt_append_union_by_name(prev, left_rel, &right_models))
+                }
             }
-            Ok(left)
         }
         TransformationStep::CustomSql { raw_sql } => {
             require_prev(prev, "CustomSql")?;
@@ -242,6 +260,48 @@ fn emit_join_unequal_keys(
             "Join (postgres): unequal keys need a dbt ref() right side (got '{right}')"
         )),
     }
+}
+
+/// Postgres / dbt stand-in for DuckDB `UNION ALL BY NAME`: column union by name, NULL fillers.
+/// `left_dbt` is a bare call (`ref('m')` / `source('s','t')`); rights are model names for `ref()`.
+fn dbt_append_union_by_name(prev: &str, left_dbt: &str, right_models: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str("{% set _ns = namespace(names=[], lower=[]) %}\n");
+    out.push_str(&format!("  {{% set _lrel = {left_dbt} %}}\n"));
+    for (i, m) in right_models.iter().enumerate() {
+        out.push_str(&format!("  {{% set _r{i} = ref('{m}') %}}\n"));
+    }
+    out.push_str(
+        "  {% for _c in adapter.get_columns_in_relation(_lrel) %}\n\
+    {% if (_c.name | lower) not in _ns.lower %}\n\
+      {% do _ns.names.append(_c.name) %}\n\
+      {% do _ns.lower.append(_c.name | lower) %}\n\
+    {% endif %}\n\
+  {% endfor %}\n",
+    );
+    for i in 0..right_models.len() {
+        out.push_str(&format!(
+            "  {{% for _c in adapter.get_columns_in_relation(_r{i}) %}}\n\
+    {{% if (_c.name | lower) not in _ns.lower %}}\n\
+      {{% do _ns.names.append(_c.name) %}}\n\
+      {{% do _ns.lower.append(_c.name | lower) %}}\n\
+    {{% endif %}}\n\
+  {{% endfor %}}\n"
+        ));
+    }
+
+    let col_list =
+        "{% for _n in _ns.names %}{{ adapter.quote(_n) }}{% if not loop.last %}, {% endif %}{% endfor %}";
+    out.push_str(&format!("  SELECT {col_list} FROM {prev}"));
+
+    for i in 0..right_models.len() {
+        out.push_str("\n  UNION ALL\n");
+        out.push_str(&format!(
+            "  {{% set _rnames{i} = adapter.get_columns_in_relation(_r{i}) | map(attribute='name') | map('lower') | list %}}\n\
+  SELECT {{% for _n in _ns.names %}}{{% if (_n | lower) in _rnames{i} %}}{{{{ adapter.quote(_n) }}}}{{% else %}}NULL AS {{{{ adapter.quote(_n) }}}}{{% endif %}}{{% if not loop.last %}}, {{% endif %}}{{% endfor %}} FROM {{{{ _r{i} }}}}"
+        ));
+    }
+    out
 }
 
 /// dbt join projection: left wins on name clashes; right-only columns keep their names.
@@ -376,5 +436,85 @@ mod tests {
         let sql = emit_transform_step(&join, "s0", &rel, WarehouseDialect::Duckdb).unwrap();
         assert!(sql.contains("stg_sys_data_source_items__' ~ _c.name"));
         assert!(!sql.contains("EXCLUDE"));
+    }
+
+    #[test]
+    fn append_duckdb_uses_union_all_by_name() {
+        let mut rel = HashMap::new();
+        rel.insert("us".into(), "cte_us".into());
+        let step = TransformationStep::Append {
+            other_query_ids: vec!["us".into()],
+        };
+        let sql = emit_transform_step(&step, "s0", &rel, WarehouseDialect::Duckdb).unwrap();
+        assert!(sql.contains("UNION ALL BY NAME"));
+        assert!(sql.contains("cte_us"));
+    }
+
+    #[test]
+    fn append_postgres_name_aligns_via_jinja_not_positional() {
+        let mut rel = HashMap::new();
+        rel.insert("us".into(), "{{ ref('stg_sales_us') }}".into());
+        let step = TransformationStep::Append {
+            other_query_ids: vec!["us".into()],
+        };
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &rel,
+            WarehouseDialect::Postgres,
+            Some("ref('stg_sales_eu')"),
+        )
+        .unwrap();
+        assert!(!sql.contains("UNION ALL SELECT *"), "must not use positional UNION ALL");
+        assert!(sql.contains("UNION ALL"));
+        assert!(sql.contains("ref('stg_sales_us')"));
+        assert!(sql.contains("ref('stg_sales_eu')"));
+        assert!(sql.contains("_ns.names"));
+        assert!(sql.contains("NULL AS"));
+    }
+
+    #[test]
+    fn append_postgres_requires_left_relation() {
+        let mut rel = HashMap::new();
+        rel.insert("us".into(), "{{ ref('stg_sales_us') }}".into());
+        let step = TransformationStep::Append {
+            other_query_ids: vec!["us".into()],
+        };
+        let err = emit_transform_step(&step, "s0", &rel, WarehouseDialect::Postgres).unwrap_err();
+        assert!(err.contains("left relation"));
+    }
+
+    #[test]
+    fn rename_postgres_uses_jinja_column_list() {
+        let sql = emit_transform_step_ex(
+            &TransformationStep::RenameColumn {
+                from: "amt".into(),
+                to: "amount".into(),
+            },
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Postgres,
+            Some("ref('stg_sales')"),
+        )
+        .unwrap();
+        assert!(!sql.contains("EXCLUDE"));
+        assert!(sql.contains("ref('stg_sales')"));
+        assert!(sql.contains("AS \"amount\""));
+        assert!(sql.contains("'amt'"));
+    }
+
+    #[test]
+    fn rename_postgres_errors_without_left_relation() {
+        let err = emit_transform_step(
+            &TransformationStep::RenameColumn {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Postgres,
+        )
+        .unwrap_err();
+        assert!(err.contains("left relation") || err.contains("SelectColumns"));
     }
 }

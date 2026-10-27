@@ -127,16 +127,18 @@ fixtures/  docs/
 
 ## Download
 
-- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/) (latest AppImage / `.deb` / `.rpm`)
+- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/) (latest Linux / Windows)
 - GitHub Releases: [dwhforge/query/releases](https://github.com/dwhforge/query/releases)
 
 | Package | Use on |
 |---------|--------|
-| `.tar.gz` | **No sudo** — unpack, `./DWHForge-Query` |
+| `.tar.gz` | **Linux, no sudo** — unpack, `./DWHForge-Query` |
+| `.zip` | **Windows, no installer** — unpack, `DWHForge-Query.exe` |
 | `.deb` | Debian / Ubuntu |
 | `.rpm` | RHEL / Rocky / Alma / Fedora (`sudo` required to install) |
+| NSIS `.exe` | Windows installer |
 
-Linux builds ship **offline**: bundled DuckDB shared lib + `extensions/` (no CDN at runtime).
+Builds ship **offline**: bundled DuckDB shared lib + `extensions/` (no CDN at runtime). CI: tag `v*` → `.github/workflows/release.yml` (Linux + Windows).
 
 ## License
 

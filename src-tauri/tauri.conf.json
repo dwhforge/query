@@ -32,8 +32,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "extensions/*",
-      "libduckdb.so"
+      "extensions/*"
     ]
   }
 }

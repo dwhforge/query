@@ -54,9 +54,19 @@ for name in "${EXT_FILES[@]}"; do
   echo "  -> $SHIP_TAURI/${name}.duckdb_extension"
 done
 
-# Alias used by some loaders
-ln -sfn postgres_scanner.duckdb_extension "$SHIP_TAURI/postgres.duckdb_extension"
-ln -sfn postgres_scanner.duckdb_extension "$SHIP_ROOT/postgres.duckdb_extension"
+# Alias used by some loaders (copy on Windows — no symlink privilege needed)
+alias_postgres() {
+  local dir="$1"
+  local src="$dir/postgres_scanner.duckdb_extension"
+  local dst="$dir/postgres.duckdb_extension"
+  if [[ "$OS_NAME" == "windows" ]]; then
+    cp -f "$src" "$dst"
+  else
+    ln -sfn postgres_scanner.duckdb_extension "$dst"
+  fi
+}
+alias_postgres "$SHIP_TAURI"
+alias_postgres "$SHIP_ROOT"
 
 cat > "$SHIP_TAURI/README.md" <<'EOF'
 # App-sidecar DuckDB extensions

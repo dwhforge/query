@@ -89,7 +89,7 @@
         <p id="status">Loading latest release…</p>
         <div id="actions"></div>
         <p class="meta">
-          Linux x86_64 · AppImage (portable) or <code>.deb</code> · no runtime CDN.
+          Linux + Windows x86_64 · portable archive or installer · no runtime CDN.
           Source:
           <a href="https://github.com/dwhforge/query" style="color: var(--accent)"
             >github.com/dwhforge/query</a
@@ -115,29 +115,42 @@
         .then((rel) => {
           const assets = rel.assets || [];
           const tarball = pick(assets, /linux-x86_64\.tar\.gz$/i);
+          const winZip = pick(assets, /windows-x86_64\.zip$/i);
           const deb = pick(assets, /\.deb$/i);
           const rpm = pick(assets, /\.rpm$/i);
+          const nsis = pick(assets, /setup\.exe$|\.nsis\.zip$/i) ||
+            pick(assets, /DWHForge-Query.*\.exe$/i);
           status.textContent = `Latest: ${rel.tag_name}`;
           const bits = [];
           if (tarball) {
             bits.push(
-              `<a class="btn" href="${tarball.browser_download_url}">Download .tar.gz (no sudo)</a>`,
+              `<a class="btn" href="${tarball.browser_download_url}">Linux .tar.gz</a>`,
+            );
+          }
+          if (winZip) {
+            bits.push(
+              `<a class="btn" href="${winZip.browser_download_url}">Windows .zip</a>`,
             );
           }
           if (deb) {
             bits.push(
-              `<a class="btn secondary" href="${deb.browser_download_url}">.deb (Debian/Ubuntu)</a>`,
+              `<a class="btn secondary" href="${deb.browser_download_url}">.deb</a>`,
             );
           }
           if (rpm) {
             bits.push(
-              `<a class="btn secondary" href="${rpm.browser_download_url}">.rpm (RHEL/Fedora)</a>`,
+              `<a class="btn secondary" href="${rpm.browser_download_url}">.rpm</a>`,
+            );
+          }
+          if (nsis && (!winZip || nsis.browser_download_url !== winZip.browser_download_url)) {
+            bits.push(
+              `<a class="btn secondary" href="${nsis.browser_download_url}">Windows installer</a>`,
             );
           }
           bits.push(
             `<a class="btn secondary" href="${rel.html_url}">All assets on GitHub</a>`,
           );
-          if (!tarball && !deb && !rpm) {
+          if (!tarball && !winZip && !deb && !rpm && !nsis) {
             status.textContent =
               `${rel.tag_name} — binaries still uploading, or open GitHub.`;
           }

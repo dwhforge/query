@@ -1,4 +1,5 @@
-# Linux release: portable tar.gz (no sudo) + deb + rpm. DuckDB lib + extensions bundled.
+# Linux + Windows release. DuckDB lib + extensions bundled (no CDN at runtime).
+# Artifacts: portable tar.gz / zip (no sudo/admin) + deb + rpm + NSIS.
 name: release
 
 on:
@@ -16,7 +17,36 @@ env:
   NO_STRIP: "true"
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.create.outputs.id }}
+    steps:
+      - name: Create GitHub Release
+        id: create
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DWHForge Query ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: |
+            Offline builds (DuckDB + `extensions/` bundled). MIT.
+
+            | Artifact | Notes |
+            |----------|--------|
+            | **`.tar.gz`** | **Linux** — unpack and `./DWHForge-Query` (no sudo) |
+            | **`.zip`** | **Windows** — unpack and `DWHForge-Query.exe` |
+            | `.deb` | Debian / Ubuntu (`sudo apt/dpkg -i`) |
+            | `.rpm` | RHEL / Rocky / Fedora (`sudo dnf/rpm -i`) |
+            | `.exe` (NSIS) | Windows installer |
+
+            Linux portable still needs system WebKitGTK once per machine.
+            Windows needs WebView2 (usually preinstalled).
+            No DuckDB CDN at runtime.
+
   linux:
+    needs: prepare
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -68,19 +98,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NO_STRIP: "true"
         with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ github.ref_name }}
-          releaseName: "DWHForge Query ${{ github.ref_name }}"
-          releaseBody: |
-            Offline Linux builds (DuckDB + `extensions/` bundled). MIT.
-
-            | Artifact | Notes |
-            |----------|--------|
-            | **`.tar.gz`** | **No sudo** — unpack and `./DWHForge-Query` |
-            | `.deb` | Debian / Ubuntu (`sudo apt/dpkg -i`) |
-            | `.rpm` | RHEL / Rocky / Fedora (`sudo dnf/rpm -i`) |
-
-            Portable tarball still needs system WebKitGTK (once per machine).
-            No DuckDB CDN at runtime.
           releaseDraft: false
           prerelease: false
           # Skip AppImage (linuxdeploy fragile on GHA). tar.gz is the portable path.
@@ -97,14 +116,75 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           FILE=$(ls dist-portable/dwhforge-query-*-linux-x86_64.tar.gz | head -1)
-          # gh may be available on runners; fall back to API upload via curl if needed
-          if command -v gh >/dev/null; then
-            gh release upload "$TAG" "$FILE" --clobber --repo "${{ github.repository }}"
-          else
-            curl -sL -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Content-Type: application/gzip" \
-              --data-binary @"$FILE" \
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/$(curl -sL -H "Authorization: Bearer $GH_TOKEN" \
-                "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" | jq -r .id)/assets?name=$(basename "$FILE")"
+          gh release upload "$TAG" "$FILE" --clobber --repo "${{ github.repository }}"
+
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: npm ci
+        shell: bash
+        run: npm ci
+
+      - name: Fetch DuckDB extensions (offline bundle)
+        shell: bash
+        run: ./scripts/fetch-duckdb-extensions.sh
+
+      - name: Build engine (pulls prebuilt duckdb.dll)
+        shell: bash
+        run: cargo build -p dwh-engine --release
+
+      - name: Sync duckdb.dll into src-tauri resources
+        shell: bash
+        run: ./scripts/sync-duckdb-lib.sh
+
+      - name: Verify Windows resources
+        shell: bash
+        run: |
+          EXT=src-tauri/extensions
+          # Ensure postgres alias is a real file (NSIS-safe)
+          if [[ ! -f "$EXT/postgres.duckdb_extension" ]]; then
+            cp -f "$EXT/postgres_scanner.duckdb_extension" "$EXT/postgres.duckdb_extension"
           fi
+          test -f src-tauri/duckdb.dll
+          test -f "$EXT/postgres_scanner.duckdb_extension"
+          test -f "$EXT/httpfs.duckdb_extension"
+
+      - name: Tauri build (NSIS installer)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          args: --bundles nsis
+
+      - name: Pack portable zip
+        shell: bash
+        run: |
+          chmod +x ./scripts/pack-portable-windows.sh
+          ./scripts/pack-portable-windows.sh "${GITHUB_REF_NAME}"
+
+      - name: Upload portable zip to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          FILE=$(ls dist-portable/dwhforge-query-*-windows-x86_64.zip | head -1)
+          gh release upload "$TAG" "$FILE" --clobber --repo "${{ github.repository }}"

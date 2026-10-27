@@ -19,8 +19,9 @@ pub use dialect::{
     QueryExecution, WarehouseDialect,
 };
 pub use emit::{
-    emit_transform_step, emit_transform_step_ex, resolve_source_column, select_list_aligned,
-    sql_union_all_aligned, substitute_query_placeholders, union_column_names,
+    ascii_fold_name, emit_transform_step, emit_transform_step_ex, resolve_source_column,
+    select_list_aligned, sql_union_all_aligned, substitute_query_placeholders,
+    union_column_names, validate_unambiguous_ascii_names,
 };
 pub use postgres_attach::{duckdb_postgres_relation, postgres_attach_alias};
 pub use dbt_cli::{dbt_parse, default_dbt_venv_candidates, resolve_dbt_bin, DbtParseOutcome};

@@ -262,127 +262,194 @@ fn emit_join_unequal_keys(
     }
 }
 
-/// Case-insensitive column union; first-seen spelling is the canonical result name.
-pub fn union_column_names(sources: &[&[String]]) -> Vec<String> {
+/// Fold for DuckDB `UNION ALL BY NAME` matching: **ASCII** A–Z only (not Unicode case).
+/// `"Имя"` and `"имя"` stay distinct; `"Amount"` / `"amount"` collide.
+pub fn ascii_fold_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+/// Reject schemas where two columns collide under [`ascii_fold_name`] (PG allows `"Amount"`+`"amount"`).
+pub fn validate_unambiguous_ascii_names(cols: &[String], context: &str) -> Result<(), String> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    for c in cols {
+        let key = ascii_fold_name(c);
+        if let Some(prev) = seen.get(&key) {
+            if *prev != c.as_str() {
+                return Err(format!(
+                    "{context}: ambiguous columns '{prev}' and '{c}' \
+                     (ASCII case-insensitive collision; rename one before Append)"
+                ));
+            }
+            return Err(format!("{context}: duplicate column name '{c}'"));
+        }
+        seen.insert(key, c.as_str());
+    }
+    Ok(())
+}
+
+/// Case-insensitive (ASCII) column union; first-seen spelling is the canonical result name.
+/// Each source must pass [`validate_unambiguous_ascii_names`].
+pub fn union_column_names(sources: &[&[String]]) -> Result<Vec<String>, String> {
+    for (i, cols) in sources.iter().enumerate() {
+        validate_unambiguous_ascii_names(cols, &format!("Append source[{i}]"))?;
+    }
     let mut out = Vec::new();
-    let mut seen_lower = std::collections::HashSet::new();
+    let mut seen_fold = std::collections::HashSet::new();
     for cols in sources {
         for c in *cols {
-            let key = c.to_ascii_lowercase();
-            if seen_lower.insert(key) {
+            if seen_fold.insert(ascii_fold_name(c)) {
                 out.push(c.clone());
             }
         }
     }
-    out
+    Ok(out)
 }
 
-/// Actual column name in `source_cols` matching `canonical` case-insensitively.
-pub fn resolve_source_column<'a>(canonical: &str, source_cols: &'a [String]) -> Option<&'a str> {
-    let want = canonical.to_ascii_lowercase();
-    source_cols
+/// Actual column name in `source_cols` matching `canonical` under [`ascii_fold_name`].
+pub fn resolve_source_column<'a>(
+    canonical: &str,
+    source_cols: &'a [String],
+) -> Result<Option<&'a str>, String> {
+    validate_unambiguous_ascii_names(source_cols, "Append resolve")?;
+    let want = ascii_fold_name(canonical);
+    Ok(source_cols
         .iter()
-        .find(|c| c.eq_ignore_ascii_case(&want))
-        .map(|s| s.as_str())
+        .find(|c| ascii_fold_name(c) == want)
+        .map(|s| s.as_str()))
 }
 
 /// SELECT list aligning `source_cols` to `canonical` result names (BY NAME semantics).
-/// Missing → `NULL AS "canonical"`; present → `"actual" AS "canonical"` (always alias for stable names).
-pub fn select_list_aligned(canonical: &[String], source_cols: &[String]) -> String {
-    canonical
-        .iter()
-        .map(|name| match resolve_source_column(name, source_cols) {
-            Some(actual) => format!(
+/// Missing → `NULL AS "canonical"`; present → `"actual" AS "canonical"`.
+pub fn select_list_aligned(
+    canonical: &[String],
+    source_cols: &[String],
+) -> Result<String, String> {
+    validate_unambiguous_ascii_names(source_cols, "Append select_list")?;
+    let mut parts = Vec::with_capacity(canonical.len());
+    for name in canonical {
+        match resolve_source_column(name, source_cols)? {
+            Some(actual) => parts.push(format!(
                 "{} AS {}",
                 quote_ident(actual),
                 quote_ident(name)
-            ),
-            None => format!("NULL AS {}", quote_ident(name)),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+            )),
+            None => parts.push(format!("NULL AS {}", quote_ident(name))),
+        }
+    }
+    Ok(parts.join(", "))
 }
 
-/// Portable `UNION ALL` with BY NAME semantics given known schemas (order / extras / case).
+/// Portable `UNION ALL` with BY NAME semantics given known schemas (order / extras / ASCII case).
 pub fn sql_union_all_aligned(
     left_from: &str,
     left_cols: &[String],
     rights: &[(String, Vec<String>)], // (from_sql, cols)
-) -> String {
+) -> Result<String, String> {
     let mut sources: Vec<&[String]> = vec![left_cols];
     for (_, cols) in rights {
         sources.push(cols.as_slice());
     }
-    let canonical = union_column_names(&sources);
+    let canonical = union_column_names(&sources)?;
     let mut parts = vec![format!(
         "SELECT {} FROM {}",
-        select_list_aligned(&canonical, left_cols),
+        select_list_aligned(&canonical, left_cols)?,
         left_from
     )];
     for (from_sql, cols) in rights {
         parts.push(format!(
             "SELECT {} FROM {}",
-            select_list_aligned(&canonical, cols),
+            select_list_aligned(&canonical, cols)?,
             from_sql
         ));
     }
-    parts.join("\nUNION ALL\n")
+    Ok(parts.join("\nUNION ALL\n"))
 }
 
-/// Jinja fragment: build `map` lower→actual from `rel` into `_maps.<map_name>`.
+/// Jinja expr: ASCII-only lower of `inner` (A–Z→a–z). Matches Rust [`ascii_fold_name`], not `| lower`.
+fn jinja_ascii_fold(inner: &str) -> String {
+    let mut expr = format!("({inner})");
+    for upper in b'A'..=b'Z' {
+        let u = upper as char;
+        let l = (upper + 32) as char;
+        expr = format!("({expr} | replace('{u}', '{l}'))");
+    }
+    expr
+}
+
+/// Build map ascii_fold→actual from relation; error if two columns collide under ASCII fold.
 fn jinja_build_col_map(rel_expr: &str, map_name: &str) -> String {
+    let key = jinja_ascii_fold("_c.name");
     format!(
         "  {{% set {map_name} = {{}} %}}\n\
   {{% for _c in adapter.get_columns_in_relation({rel_expr}) %}}\n\
-    {{% if {map_name}.update({{ (_c.name | lower): _c.name }}) %}}{{% endif %}}\n\
+    {{% set _fk = {key} %}}\n\
+    {{% if _fk in {map_name} and {map_name}[_fk] != _c.name %}}\n\
+      {{{{ exceptions.raise_compiler_error(\"Append: ambiguous columns '\" ~ {map_name}[_fk] ~ \"' and '\" ~ _c.name ~ \"' (ASCII case-insensitive collision; rename one)\") }}}}\n\
+    {{% endif %}}\n\
+    {{% if {map_name}.update({{ _fk: _c.name }}) %}}{{% endif %}}\n\
   {{% endfor %}}\n"
     )
 }
 
-/// Jinja SELECT list: for each canonical `_n` in `_ns.names`, use `_maps.<map>` actual or NULL.
-fn jinja_select_aligned(map_name: &str, from_sql: &str) -> String {
+/// Collect column into `_ns.names` / `_ns.fold` using ASCII fold; reject ambiguity within relation.
+fn jinja_collect_canonical(rel_expr: &str) -> String {
+    let key = jinja_ascii_fold("_c.name");
     format!(
-        "SELECT {{% for _n in _ns.names %}}{{% set _k = _n | lower %}}{{% if _k in {map_name} %}}{{{{ adapter.quote({map_name}[_k]) }}}} AS {{{{ adapter.quote(_n) }}}}{{% else %}}NULL AS {{{{ adapter.quote(_n) }}}}{{% endif %}}{{% if not loop.last %}}, {{% endif %}}{{% endfor %}} FROM {from_sql}"
+        "  {{% for _c in adapter.get_columns_in_relation({rel_expr}) %}}\n\
+    {{% set _fk = {key} %}}\n\
+    {{% if _fk in _ns.fold %}}\n\
+      {{% set _prev = _ns.names[_ns.fold.index(_fk)] %}}\n\
+      {{% if _prev != _c.name %}}\n\
+        {{{{ exceptions.raise_compiler_error(\"Append: ambiguous columns '\" ~ _prev ~ \"' and '\" ~ _c.name ~ \"' (ASCII case-insensitive collision; rename one)\") }}}}\n\
+      {{% else %}}\n\
+        {{{{ exceptions.raise_compiler_error(\"Append: duplicate column name '\" ~ _c.name ~ \"'\") }}}}\n\
+      {{% endif %}}\n\
+    {{% else %}}\n\
+      {{% do _ns.names.append(_c.name) %}}\n\
+      {{% do _ns.fold.append(_fk) %}}\n\
+    {{% endif %}}\n\
+  {{% endfor %}}\n"
     )
 }
 
-/// Postgres / dbt stand-in for DuckDB `UNION ALL BY NAME`.
-/// Left and every right: NULL for missing cols; quote **actual** source names (case-safe).
+/// Jinja SELECT: for each canonical `_n`, use map actual or NULL (ASCII fold key).
+fn jinja_select_aligned(map_name: &str, from_sql: &str) -> String {
+    let key = jinja_ascii_fold("_n");
+    format!(
+        "SELECT {{% for _n in _ns.names %}}{{% set _k = {key} %}}{{% if _k in {map_name} %}}{{{{ adapter.quote({map_name}[_k]) }}}} AS {{{{ adapter.quote(_n) }}}}{{% else %}}NULL AS {{{{ adapter.quote(_n) }}}}{{% endif %}}{{% if not loop.last %}}, {{% endif %}}{{% endfor %}} FROM {from_sql}"
+    )
+}
+
+/// Postgres / dbt stand-in for DuckDB `UNION ALL BY NAME` (ASCII fold policy).
 fn dbt_append_union_by_name(prev: &str, left_dbt: &str, right_models: &[String]) -> String {
     let mut out = String::new();
-    out.push_str("{% set _ns = namespace(names=[], lower=[]) %}\n");
+    out.push_str("{% set _ns = namespace(names=[], fold=[]) %}\n");
     out.push_str(&format!("  {{% set _lrel = {left_dbt} %}}\n"));
     for (i, m) in right_models.iter().enumerate() {
         out.push_str(&format!("  {{% set _r{i} = ref('{m}') %}}\n"));
     }
 
-    // Canonical names: left order first, then right-only (case-insensitive).
-    out.push_str(
-        "  {% for _c in adapter.get_columns_in_relation(_lrel) %}\n\
-    {% if (_c.name | lower) not in _ns.lower %}\n\
-      {% do _ns.names.append(_c.name) %}\n\
-      {% do _ns.lower.append(_c.name | lower) %}\n\
-    {% endif %}\n\
-  {% endfor %}\n",
-    );
+    // Per-relation ambiguity is checked while building maps; cross-source merge is ASCII fold.
+    out.push_str(&jinja_collect_canonical("_lrel"));
     for i in 0..right_models.len() {
+        // Across sources: only append if fold key unseen (Amount on left + amount on right → one col).
+        let key = jinja_ascii_fold("_c.name");
         out.push_str(&format!(
             "  {{% for _c in adapter.get_columns_in_relation(_r{i}) %}}\n\
-    {{% if (_c.name | lower) not in _ns.lower %}}\n\
+    {{% set _fk = {key} %}}\n\
+    {{% if _fk not in _ns.fold %}}\n\
       {{% do _ns.names.append(_c.name) %}}\n\
-      {{% do _ns.lower.append(_c.name | lower) %}}\n\
+      {{% do _ns.fold.append(_fk) %}}\n\
     {{% endif %}}\n\
   {{% endfor %}}\n"
         ));
     }
 
-    // lower → actual spelling per source (left + each right).
     out.push_str(&jinja_build_col_map("_lrel", "_lmap"));
     for i in 0..right_models.len() {
         out.push_str(&jinja_build_col_map(&format!("_r{i}"), &format!("_rmap{i}")));
     }
 
-    // Every branch projects the full canonical set; missing → NULL AS canonical.
     out.push_str("  ");
     out.push_str(&jinja_select_aligned("_lmap", prev));
     for i in 0..right_models.len() {
@@ -545,15 +612,39 @@ mod tests {
     fn union_names_order_and_case_first_wins() {
         let left = vec!["id".into(), "Amount".into()];
         let right = vec!["amount".into(), "id".into(), "currency".into()];
-        let names = union_column_names(&[&left, &right]);
+        let names = union_column_names(&[&left, &right]).unwrap();
         assert_eq!(names, vec!["id", "Amount", "currency"]);
+    }
+
+    #[test]
+    fn union_names_non_ascii_case_stays_distinct() {
+        // DuckDB BY NAME: "Имя" and "имя" are different columns (not ASCII A–Z).
+        let left = vec!["Имя".into()];
+        let right = vec!["имя".into()];
+        let names = union_column_names(&[&left, &right]).unwrap();
+        assert_eq!(names, vec!["Имя", "имя"]);
+        // ASCII fold leaves Cyrillic unchanged → distinct keys (unlike Jinja `| lower`).
+        assert_eq!(ascii_fold_name("Имя"), "Имя");
+        assert_eq!(ascii_fold_name("имя"), "имя");
+        assert_ne!(ascii_fold_name("Имя"), ascii_fold_name("имя"));
+    }
+
+    #[test]
+    fn ambiguous_ascii_names_rejected() {
+        let cols = vec!["Amount".into(), "amount".into()];
+        let err = validate_unambiguous_ascii_names(&cols, "test").unwrap_err();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("Amount"));
+        assert!(err.contains("amount"));
+        assert!(union_column_names(&[&cols]).is_err());
+        assert!(select_list_aligned(&["Amount".into()], &cols).is_err());
     }
 
     #[test]
     fn select_list_right_only_null_on_left() {
         let canonical = vec!["id".into(), "amount".into(), "currency".into()];
         let left = vec!["id".into(), "amount".into()];
-        let sql = select_list_aligned(&canonical, &left);
+        let sql = select_list_aligned(&canonical, &left).unwrap();
         assert_eq!(
             sql,
             "\"id\" AS \"id\", \"amount\" AS \"amount\", NULL AS \"currency\""
@@ -564,7 +655,7 @@ mod tests {
     fn select_list_left_only_null_on_right() {
         let canonical = vec!["id".into(), "amount".into(), "region".into()];
         let right = vec!["id".into(), "amount".into()];
-        let sql = select_list_aligned(&canonical, &right);
+        let sql = select_list_aligned(&canonical, &right).unwrap();
         assert!(sql.ends_with("NULL AS \"region\""));
         assert!(!sql.contains("\"region\" AS \"region\""));
     }
@@ -573,7 +664,7 @@ mod tests {
     fn select_list_case_uses_actual_source_name() {
         let canonical = vec!["Amount".into()]; // left spelling wins
         let right = vec!["amount".into()];
-        let sql = select_list_aligned(&canonical, &right);
+        let sql = select_list_aligned(&canonical, &right).unwrap();
         // Must quote the *right* physical name, alias to canonical.
         assert_eq!(sql, "\"amount\" AS \"Amount\"");
         assert_ne!(sql, "\"Amount\" AS \"Amount\"");
@@ -584,7 +675,7 @@ mod tests {
         let canonical = vec!["id".into(), "amount".into(), "region".into()];
         let right = vec!["region".into(), "id".into(), "amount".into()];
         assert_eq!(
-            select_list_aligned(&canonical, &right),
+            select_list_aligned(&canonical, &right).unwrap(),
             "\"id\" AS \"id\", \"amount\" AS \"amount\", \"region\" AS \"region\""
         );
     }
@@ -597,7 +688,8 @@ mod tests {
             "s0",
             &left,
             &[("{{ ref('stg_us') }}".into(), right)],
-        );
+        )
+        .unwrap();
         let (left_sel, right_sel) = sql.split_once("\nUNION ALL\n").unwrap();
         assert!(left_sel.contains("NULL AS \"currency\""));
         assert!(left_sel.contains("\"Amount\" AS \"Amount\""));
@@ -607,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn append_postgres_jinja_nulls_both_sides_and_maps_actual_names() {
+    fn append_postgres_jinja_uses_ascii_fold_not_unicode_lower() {
         let mut rel = HashMap::new();
         rel.insert("us".into(), "{{ ref('stg_sales_us') }}".into());
         let step = TransformationStep::Append {
@@ -621,18 +713,18 @@ mod tests {
             Some("ref('stg_sales_eu')"),
         )
         .unwrap();
-        assert!(!sql.contains("UNION ALL SELECT *"), "must not use positional UNION ALL");
-        assert!(sql.contains("_lmap"), "left lower→actual map");
-        assert!(sql.contains("_rmap0"), "right lower→actual map");
-        // Both branches must be able to emit NULL (right-only on left, left-only on right).
-        assert_eq!(
-            sql.matches("NULL AS {{ adapter.quote(_n) }}").count(),
-            2,
-            "NULL filler in left and right SELECT templates"
+        assert!(!sql.contains("UNION ALL SELECT *"));
+        assert!(sql.contains("_lmap"));
+        assert!(sql.contains("_rmap0"));
+        assert_eq!(sql.matches("NULL AS {{ adapter.quote(_n) }}").count(), 2);
+        // Must not use Unicode `| lower` for fold keys (would merge Имя/имя).
+        assert!(
+            !sql.contains("| lower") && !sql.contains("|lower"),
+            "Append jinja must use ASCII replace-fold, not | lower: {sql}"
         );
-        assert!(sql.contains("_lmap[_k]"), "left uses actual name from map");
-        assert!(sql.contains("_rmap0[_k]"), "right uses actual name from map");
-        assert!(sql.contains("AS {{ adapter.quote(_n) }}"));
+        assert!(sql.contains("| replace('A', 'a')"));
+        assert!(sql.contains("raise_compiler_error"));
+        assert!(sql.contains("ambiguous columns"));
     }
 
     #[test]

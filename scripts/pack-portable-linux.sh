@@ -29,14 +29,21 @@ if [[ ! -f "$EXT/postgres_scanner.duckdb_extension" ]]; then
   exit 1
 fi
 
+FIXTURES="$ROOT/fixtures"
+if [[ ! -f "$FIXTURES/sample.csv" ]]; then
+  echo "Missing $FIXTURES — demo CSVs required for portable pack" >&2
+  exit 1
+fi
+
 NAME="dwhforge-query-${VER}-linux-x86_64"
 STAGING="$ROOT/dist-portable/$NAME"
 rm -rf "$STAGING"
-mkdir -p "$STAGING/extensions"
+mkdir -p "$STAGING/extensions" "$STAGING/fixtures"
 
 cp -f "$BIN" "$STAGING/dwh-rs-query"
 cp -f "$LIB" "$STAGING/libduckdb.so"
 cp -f "$EXT"/*.duckdb_extension "$STAGING/extensions/"
+cp -f "$FIXTURES"/*.csv "$STAGING/fixtures/"
 chmod +x "$STAGING/dwh-rs-query"
 
 # Launcher: LD_LIBRARY_PATH so libduckdb.so resolves next to the binary.
@@ -55,6 +62,7 @@ DWHForge Query ${VER} — portable Linux x86_64 (MIT)
 Run (no sudo, no install):
   ./DWHForge-Query
 
+Keep fixtures/ next to the launcher (demos / samples).
 Needs system WebKitGTK / GTK (typical on desktop Linux):
   Debian/Ubuntu:  sudo apt install libwebkit2gtk-4.1-0
   RHEL/Fedora:    sudo dnf install webkit2gtk4.1

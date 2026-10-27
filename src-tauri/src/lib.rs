@@ -14,10 +14,24 @@ use dwh_pipeline::{
     Project, QueryDef, TransformationStep, WarehouseDialect, Workspace,
 };
 use settings_io::AppSettings;
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Manager, State};
+
+static FIXTURES_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn set_fixtures_dir(dir: PathBuf) {
+    let _ = FIXTURES_DIR.set(dir);
+}
+
+fn fixtures_dir_complete(dir: &Path) -> bool {
+    dir.join("sample.csv").is_file()
+        && dir.join("dim_region.csv").is_file()
+        && dir.join("sales_eu.csv").is_file()
+        && dir.join("sales_us.csv").is_file()
+}
 
 /// App-level session (survives relaunch) — last opened/saved project path.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -445,21 +459,79 @@ fn load_sample_workspace() -> Result<Workspace, String> {
 }
 
 fn find_fixtures_dir() -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    for candidate in [
-        cwd.join("fixtures"),
-        cwd.join("../fixtures"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures"),
-    ] {
-        if candidate.join("sample.csv").is_file()
-            && candidate.join("dim_region.csv").is_file()
-            && candidate.join("sales_eu.csv").is_file()
-            && candidate.join("sales_us.csv").is_file()
-        {
+    if let Some(dir) = FIXTURES_DIR.get() {
+        if fixtures_dir_complete(dir) {
+            return Ok(dir.clone());
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            // Portable zip / next to binary
+            candidates.push(parent.join("fixtures"));
+            // Some installers nest resources under resources/
+            candidates.push(parent.join("resources").join("fixtures"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("fixtures"));
+        candidates.push(cwd.join("../fixtures"));
+    }
+    // Dev checkout
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures"));
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures"));
+
+    for candidate in candidates {
+        if fixtures_dir_complete(&candidate) {
             return Ok(candidate);
         }
     }
-    Err("Could not find fixtures/ (sample, dim_region, sales_eu, sales_us) — run from repo root".into())
+    Err(
+        "Could not find fixtures/ (sample, dim_region, sales_eu, sales_us) — \
+         expected next to the app binary or in the install resources"
+            .into(),
+    )
+}
+
+/// Prefer packaged resources, then folder next to the binary, then repo `fixtures/`.
+fn configure_fixtures_dir(app: &tauri::App) {
+    if let Ok(rd) = app.path().resource_dir() {
+        let fixtures = rd.join("fixtures");
+        if fixtures_dir_complete(&fixtures) {
+            eprintln!(
+                "[dwh-rs-query] fixtures (bundle resources): {}",
+                fixtures.display()
+            );
+            set_fixtures_dir(fixtures);
+            return;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let fixtures = parent.join("fixtures");
+            if fixtures_dir_complete(&fixtures) {
+                eprintln!(
+                    "[dwh-rs-query] fixtures (beside binary): {}",
+                    fixtures.display()
+                );
+                set_fixtures_dir(fixtures);
+                return;
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures");
+    if fixtures_dir_complete(&dev) {
+        eprintln!(
+            "[dwh-rs-query] fixtures (dev repo): {}",
+            dev.display()
+        );
+        set_fixtures_dir(dev);
+    } else {
+        eprintln!(
+            "[dwh-rs-query] WARNING: no fixtures/ — demos will fail until CSV samples are shipped beside the app"
+        );
+    }
 }
 
 /// Prefer packaged resources, then folder next to the binary, then dev `src-tauri/extensions`.
@@ -509,6 +581,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             configure_extensions_dir(app);
+            configure_fixtures_dir(app);
             let session = DbSession::new().map_err(|e| {
                 eprintln!("[dwh-rs-query] DuckDB session failed: {e}");
                 Box::<dyn std::error::Error>::from(e)

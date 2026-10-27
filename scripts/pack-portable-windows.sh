@@ -30,14 +30,21 @@ if [[ ! -f "$EXT/postgres_scanner.duckdb_extension" ]]; then
   exit 1
 fi
 
+FIXTURES="$ROOT/fixtures"
+if [[ ! -f "$FIXTURES/sample.csv" ]]; then
+  echo "Missing $FIXTURES — demo CSVs required for portable pack" >&2
+  exit 1
+fi
+
 NAME="dwhforge-query-${VER}-windows-x86_64"
 STAGING="$ROOT/dist-portable/$NAME"
 rm -rf "$STAGING"
-mkdir -p "$STAGING/extensions"
+mkdir -p "$STAGING/extensions" "$STAGING/fixtures"
 
 cp -f "$BIN" "$STAGING/DWHForge-Query.exe"
 cp -f "$LIB" "$STAGING/duckdb.dll"
 cp -f "$EXT"/*.duckdb_extension "$STAGING/extensions/"
+cp -f "$FIXTURES"/*.csv "$STAGING/fixtures/"
 
 cat > "$STAGING/README.txt" << EOF
 DWHForge Query ${VER} — portable Windows x86_64 (MIT)
@@ -45,6 +52,7 @@ DWHForge Query ${VER} — portable Windows x86_64 (MIT)
 Run (no installer):
   DWHForge-Query.exe
 
+Keep fixtures/ next to the exe (demos / samples).
 Needs Microsoft Edge WebView2 Runtime (usually already on Windows 10/11).
 DuckDB engine + extensions/ are included — no CDN at runtime.
 EOF

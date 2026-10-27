@@ -23,6 +23,9 @@ src-tauri/libduckdb.so
 src-tauri/libduckdb.dylib
 src-tauri/duckdb.dll
 
+# Demo CSVs copied into bundle resources (scripts/sync-fixtures.sh); source of truth is /fixtures
+src-tauri/fixtures/
+
 # Local dbt Core 1.x venv (scripts/fetch-dbt-venv.sh) — offline parse on Export
 src-tauri/dbt-venv/
 

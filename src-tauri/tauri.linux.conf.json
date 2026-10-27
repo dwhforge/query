@@ -3,6 +3,7 @@
   "bundle": {
     "resources": [
       "extensions/*",
+      "fixtures/*",
       "libduckdb.so"
     ]
   }

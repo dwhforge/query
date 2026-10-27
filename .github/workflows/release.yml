@@ -82,6 +82,11 @@ jobs:
       - name: Sync libduckdb.so into src-tauri resources
         run: ./scripts/sync-duckdb-lib.sh
 
+      - name: Sync demo fixtures into src-tauri resources
+        run: |
+          chmod +x ./scripts/sync-fixtures.sh
+          ./scripts/sync-fixtures.sh
+
       - name: Flatten postgres extension symlink (bundle-safe)
         run: |
           EXT=src-tauri/extensions
@@ -90,6 +95,7 @@ jobs:
             cp -f "$EXT/postgres_scanner.duckdb_extension" "$EXT/postgres.duckdb_extension"
           fi
           test -f src-tauri/libduckdb.so
+          test -f src-tauri/fixtures/sample.csv
           test -f "$EXT/postgres_scanner.duckdb_extension"
 
       - name: Tauri build (deb + rpm + binary)
@@ -151,6 +157,12 @@ jobs:
         shell: bash
         run: ./scripts/sync-duckdb-lib.sh
 
+      - name: Sync demo fixtures into src-tauri resources
+        shell: bash
+        run: |
+          chmod +x ./scripts/sync-fixtures.sh
+          ./scripts/sync-fixtures.sh
+
       - name: Verify Windows resources
         shell: bash
         run: |
@@ -160,6 +172,7 @@ jobs:
             cp -f "$EXT/postgres_scanner.duckdb_extension" "$EXT/postgres.duckdb_extension"
           fi
           test -f src-tauri/duckdb.dll
+          test -f src-tauri/fixtures/sample.csv
           test -f "$EXT/postgres_scanner.duckdb_extension"
           test -f "$EXT/httpfs.duckdb_extension"
 

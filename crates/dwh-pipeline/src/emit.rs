@@ -262,8 +262,92 @@ fn emit_join_unequal_keys(
     }
 }
 
-/// Postgres / dbt stand-in for DuckDB `UNION ALL BY NAME`: column union by name, NULL fillers.
-/// `left_dbt` is a bare call (`ref('m')` / `source('s','t')`); rights are model names for `ref()`.
+/// Case-insensitive column union; first-seen spelling is the canonical result name.
+pub fn union_column_names(sources: &[&[String]]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen_lower = std::collections::HashSet::new();
+    for cols in sources {
+        for c in *cols {
+            let key = c.to_ascii_lowercase();
+            if seen_lower.insert(key) {
+                out.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Actual column name in `source_cols` matching `canonical` case-insensitively.
+pub fn resolve_source_column<'a>(canonical: &str, source_cols: &'a [String]) -> Option<&'a str> {
+    let want = canonical.to_ascii_lowercase();
+    source_cols
+        .iter()
+        .find(|c| c.eq_ignore_ascii_case(&want))
+        .map(|s| s.as_str())
+}
+
+/// SELECT list aligning `source_cols` to `canonical` result names (BY NAME semantics).
+/// Missing → `NULL AS "canonical"`; present → `"actual" AS "canonical"` (always alias for stable names).
+pub fn select_list_aligned(canonical: &[String], source_cols: &[String]) -> String {
+    canonical
+        .iter()
+        .map(|name| match resolve_source_column(name, source_cols) {
+            Some(actual) => format!(
+                "{} AS {}",
+                quote_ident(actual),
+                quote_ident(name)
+            ),
+            None => format!("NULL AS {}", quote_ident(name)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Portable `UNION ALL` with BY NAME semantics given known schemas (order / extras / case).
+pub fn sql_union_all_aligned(
+    left_from: &str,
+    left_cols: &[String],
+    rights: &[(String, Vec<String>)], // (from_sql, cols)
+) -> String {
+    let mut sources: Vec<&[String]> = vec![left_cols];
+    for (_, cols) in rights {
+        sources.push(cols.as_slice());
+    }
+    let canonical = union_column_names(&sources);
+    let mut parts = vec![format!(
+        "SELECT {} FROM {}",
+        select_list_aligned(&canonical, left_cols),
+        left_from
+    )];
+    for (from_sql, cols) in rights {
+        parts.push(format!(
+            "SELECT {} FROM {}",
+            select_list_aligned(&canonical, cols),
+            from_sql
+        ));
+    }
+    parts.join("\nUNION ALL\n")
+}
+
+/// Jinja fragment: build `map` lower→actual from `rel` into `_maps.<map_name>`.
+fn jinja_build_col_map(rel_expr: &str, map_name: &str) -> String {
+    format!(
+        "  {{% set {map_name} = {{}} %}}\n\
+  {{% for _c in adapter.get_columns_in_relation({rel_expr}) %}}\n\
+    {{% if {map_name}.update({{ (_c.name | lower): _c.name }}) %}}{{% endif %}}\n\
+  {{% endfor %}}\n"
+    )
+}
+
+/// Jinja SELECT list: for each canonical `_n` in `_ns.names`, use `_maps.<map>` actual or NULL.
+fn jinja_select_aligned(map_name: &str, from_sql: &str) -> String {
+    format!(
+        "SELECT {{% for _n in _ns.names %}}{{% set _k = _n | lower %}}{{% if _k in {map_name} %}}{{{{ adapter.quote({map_name}[_k]) }}}} AS {{{{ adapter.quote(_n) }}}}{{% else %}}NULL AS {{{{ adapter.quote(_n) }}}}{{% endif %}}{{% if not loop.last %}}, {{% endif %}}{{% endfor %}} FROM {from_sql}"
+    )
+}
+
+/// Postgres / dbt stand-in for DuckDB `UNION ALL BY NAME`.
+/// Left and every right: NULL for missing cols; quote **actual** source names (case-safe).
 fn dbt_append_union_by_name(prev: &str, left_dbt: &str, right_models: &[String]) -> String {
     let mut out = String::new();
     out.push_str("{% set _ns = namespace(names=[], lower=[]) %}\n");
@@ -271,6 +355,8 @@ fn dbt_append_union_by_name(prev: &str, left_dbt: &str, right_models: &[String])
     for (i, m) in right_models.iter().enumerate() {
         out.push_str(&format!("  {{% set _r{i} = ref('{m}') %}}\n"));
     }
+
+    // Canonical names: left order first, then right-only (case-insensitive).
     out.push_str(
         "  {% for _c in adapter.get_columns_in_relation(_lrel) %}\n\
     {% if (_c.name | lower) not in _ns.lower %}\n\
@@ -290,15 +376,20 @@ fn dbt_append_union_by_name(prev: &str, left_dbt: &str, right_models: &[String])
         ));
     }
 
-    let col_list =
-        "{% for _n in _ns.names %}{{ adapter.quote(_n) }}{% if not loop.last %}, {% endif %}{% endfor %}";
-    out.push_str(&format!("  SELECT {col_list} FROM {prev}"));
-
+    // lower → actual spelling per source (left + each right).
+    out.push_str(&jinja_build_col_map("_lrel", "_lmap"));
     for i in 0..right_models.len() {
-        out.push_str("\n  UNION ALL\n");
-        out.push_str(&format!(
-            "  {{% set _rnames{i} = adapter.get_columns_in_relation(_r{i}) | map(attribute='name') | map('lower') | list %}}\n\
-  SELECT {{% for _n in _ns.names %}}{{% if (_n | lower) in _rnames{i} %}}{{{{ adapter.quote(_n) }}}}{{% else %}}NULL AS {{{{ adapter.quote(_n) }}}}{{% endif %}}{{% if not loop.last %}}, {{% endif %}}{{% endfor %}} FROM {{{{ _r{i} }}}}"
+        out.push_str(&jinja_build_col_map(&format!("_r{i}"), &format!("_rmap{i}")));
+    }
+
+    // Every branch projects the full canonical set; missing → NULL AS canonical.
+    out.push_str("  ");
+    out.push_str(&jinja_select_aligned("_lmap", prev));
+    for i in 0..right_models.len() {
+        out.push_str("\n  UNION ALL\n  ");
+        out.push_str(&jinja_select_aligned(
+            &format!("_rmap{i}"),
+            &format!("{{{{ _r{i} }}}}"),
         ));
     }
     out
@@ -451,7 +542,72 @@ mod tests {
     }
 
     #[test]
-    fn append_postgres_name_aligns_via_jinja_not_positional() {
+    fn union_names_order_and_case_first_wins() {
+        let left = vec!["id".into(), "Amount".into()];
+        let right = vec!["amount".into(), "id".into(), "currency".into()];
+        let names = union_column_names(&[&left, &right]);
+        assert_eq!(names, vec!["id", "Amount", "currency"]);
+    }
+
+    #[test]
+    fn select_list_right_only_null_on_left() {
+        let canonical = vec!["id".into(), "amount".into(), "currency".into()];
+        let left = vec!["id".into(), "amount".into()];
+        let sql = select_list_aligned(&canonical, &left);
+        assert_eq!(
+            sql,
+            "\"id\" AS \"id\", \"amount\" AS \"amount\", NULL AS \"currency\""
+        );
+    }
+
+    #[test]
+    fn select_list_left_only_null_on_right() {
+        let canonical = vec!["id".into(), "amount".into(), "region".into()];
+        let right = vec!["id".into(), "amount".into()];
+        let sql = select_list_aligned(&canonical, &right);
+        assert!(sql.ends_with("NULL AS \"region\""));
+        assert!(!sql.contains("\"region\" AS \"region\""));
+    }
+
+    #[test]
+    fn select_list_case_uses_actual_source_name() {
+        let canonical = vec!["Amount".into()]; // left spelling wins
+        let right = vec!["amount".into()];
+        let sql = select_list_aligned(&canonical, &right);
+        // Must quote the *right* physical name, alias to canonical.
+        assert_eq!(sql, "\"amount\" AS \"Amount\"");
+        assert_ne!(sql, "\"Amount\" AS \"Amount\"");
+    }
+
+    #[test]
+    fn select_list_reorder_same_names() {
+        let canonical = vec!["id".into(), "amount".into(), "region".into()];
+        let right = vec!["region".into(), "id".into(), "amount".into()];
+        assert_eq!(
+            select_list_aligned(&canonical, &right),
+            "\"id\" AS \"id\", \"amount\" AS \"amount\", \"region\" AS \"region\""
+        );
+    }
+
+    #[test]
+    fn sql_union_all_aligned_full_scenario() {
+        let left = vec!["id".into(), "Amount".into()];
+        let right = vec!["amount".into(), "id".into(), "currency".into()];
+        let sql = sql_union_all_aligned(
+            "s0",
+            &left,
+            &[("{{ ref('stg_us') }}".into(), right)],
+        );
+        let (left_sel, right_sel) = sql.split_once("\nUNION ALL\n").unwrap();
+        assert!(left_sel.contains("NULL AS \"currency\""));
+        assert!(left_sel.contains("\"Amount\" AS \"Amount\""));
+        assert!(right_sel.contains("\"amount\" AS \"Amount\""));
+        assert!(right_sel.contains("\"currency\" AS \"currency\""));
+        assert!(!right_sel.contains("\"Amount\" AS \"Amount\""));
+    }
+
+    #[test]
+    fn append_postgres_jinja_nulls_both_sides_and_maps_actual_names() {
         let mut rel = HashMap::new();
         rel.insert("us".into(), "{{ ref('stg_sales_us') }}".into());
         let step = TransformationStep::Append {
@@ -466,11 +622,17 @@ mod tests {
         )
         .unwrap();
         assert!(!sql.contains("UNION ALL SELECT *"), "must not use positional UNION ALL");
-        assert!(sql.contains("UNION ALL"));
-        assert!(sql.contains("ref('stg_sales_us')"));
-        assert!(sql.contains("ref('stg_sales_eu')"));
-        assert!(sql.contains("_ns.names"));
-        assert!(sql.contains("NULL AS"));
+        assert!(sql.contains("_lmap"), "left lower→actual map");
+        assert!(sql.contains("_rmap0"), "right lower→actual map");
+        // Both branches must be able to emit NULL (right-only on left, left-only on right).
+        assert_eq!(
+            sql.matches("NULL AS {{ adapter.quote(_n) }}").count(),
+            2,
+            "NULL filler in left and right SELECT templates"
+        );
+        assert!(sql.contains("_lmap[_k]"), "left uses actual name from map");
+        assert!(sql.contains("_rmap0[_k]"), "right uses actual name from map");
+        assert!(sql.contains("AS {{ adapter.quote(_n) }}"));
     }
 
     #[test]

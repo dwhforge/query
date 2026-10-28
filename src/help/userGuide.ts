@@ -69,10 +69,23 @@ export const HELP_SECTIONS: HelpSection[] = [
     ],
     bullets: [
       "Incremental models, snapshots / SCD2",
-      "Full dbt tests & docs UI (narrow Join expectations are planned, not shipped)",
+      "Full dbt tests & docs UI (narrow Join expectations → dbt tests are planned, not shipped)",
       "Macros / packages browser",
       "Two-way edit of arbitrary hand-written dbt back into the canvas",
-      "Join investigation panels (row counts / unmatched → grid) — planned next",
+    ],
+  },
+  {
+    id: "join-diag",
+    title: "Join diagnostics",
+    paragraphs: [
+      "Select a Join step to see investigation counts beside its settings. Counts use the full inputs after preceding transforms (not the preview’s 50-row limit). Click a row to open a bounded sample in Data; a clean sample is not proof for the full input.",
+    ],
+    bullets: [
+      "Left / right input row counts and Join output count",
+      "Unmatched left / right (input rows with zero matches)",
+      "Fan-out left rows (more than one right match) and duplicate right-key groups",
+      "Does not block editing while computing (ADR-0007)",
+      "Persisted Join expectations → dbt tests: not shipped yet",
     ],
   },
   {

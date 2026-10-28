@@ -1,9 +1,9 @@
 use dwh_engine::{
     collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
-    list_postgres_objects as run_list_postgres_objects, set_extensions_dir,
+    join_diagnostics as run_join_diagnostics, list_postgres_objects as run_list_postgres_objects,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
-    test_postgres_connection as run_test_postgres_connection, DbSession, PostgresColumn,
-    PostgresObject, PreviewResult,
+    set_extensions_dir, test_postgres_connection as run_test_postgres_connection, DbSession,
+    JoinDiagnostics, PostgresColumn, PostgresObject, PreviewResult,
 };
 mod secrets_io;
 mod settings_io;
@@ -76,6 +76,19 @@ fn preview_workspace(
 ) -> Result<PreviewResult, String> {
     let conns = connections.unwrap_or_default();
     run_preview_workspace(&db, &workspace, &conns)
+}
+
+/// Join investigation diagnostics (DESIGN §9). Full-input counts + bounded samples.
+#[tauri::command]
+fn join_diagnostics(
+    workspace: Workspace,
+    host_query_id: String,
+    join_step_index: usize,
+    connections: Option<Vec<ConnectionDef>>,
+    db: State<'_, DbSession>,
+) -> Result<JoinDiagnostics, String> {
+    let conns = connections.unwrap_or_default();
+    run_join_diagnostics(&db, &workspace, &conns, &host_query_id, join_step_index)
 }
 
 /// dbt model SQL for one query (Model tab). Seeds from DuckDB/PG when available.
@@ -612,6 +625,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             preview_pipeline,
             preview_workspace,
+            join_diagnostics,
             preview_dbt_model,
             export_dbt,
             list_export_tree,

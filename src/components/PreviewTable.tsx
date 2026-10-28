@@ -11,25 +11,47 @@ import type { ColumnMetadata } from "../types/pipeline";
 interface PreviewTableProps {
   columns: ColumnMetadata[];
   rows: unknown[][];
+  /** Column names to emphasize (e.g. Join keys). */
+  highlightKeys?: string[];
 }
 
-export function PreviewTable({ columns, rows }: PreviewTableProps) {
+function foldKey(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+export function PreviewTable({
+  columns,
+  rows,
+  highlightKeys = [],
+}: PreviewTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const hi = new Set(highlightKeys.map(foldKey));
 
   const columnDefs: ColumnDef<unknown[]>[] = columns.map((col, index) => ({
     id: `${col.name}-${index}`,
-    header: () => (
-      <span className="flex flex-col gap-0.5">
-        <span className="font-medium text-slate-100">{col.name}</span>
-        <span className="text-[10px] uppercase tracking-wide text-slate-500">
-          {col.type}
+    header: () => {
+      const on = hi.has(foldKey(col.name));
+      return (
+        <span className="flex flex-col gap-0.5">
+          <span
+            className={`font-medium ${on ? "text-teal-200" : "text-slate-100"}`}
+          >
+            {col.name}
+            {on ? " · key" : ""}
+          </span>
+          <span className="text-[10px] uppercase tracking-wide text-slate-500">
+            {col.type}
+          </span>
         </span>
-      </span>
-    ),
+      );
+    },
     cell: ({ row }) => {
       const value = row.original[index];
+      const on = hi.has(foldKey(col.name));
       return (
-        <span className="block truncate text-slate-200">
+        <span
+          className={`block truncate ${on ? "text-teal-100" : "text-slate-200"}`}
+        >
           {value === null || value === undefined ? "∅" : String(value)}
         </span>
       );

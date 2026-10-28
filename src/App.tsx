@@ -10,6 +10,10 @@ import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
+import {
+  JoinDiagnosticsPanel,
+  type JoinDiagKind,
+} from "./components/JoinDiagnosticsPanel";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import {
@@ -37,6 +41,7 @@ import { debounce } from "./lib/debounce";
 import {
   describePostgresObject,
   exportDbt,
+  joinDiagnostics,
   listExportTree,
   getAppSettings,
   getLastProjectPath,
@@ -47,6 +52,8 @@ import {
   saveProject,
   setAppSettings,
   type AppSettings,
+  type JoinDiagSample,
+  type JoinDiagnostics,
   type PreviewDbtModel,
   type PostgresColumn,
 } from "./lib/tauri";
@@ -105,6 +112,18 @@ function App() {
     [],
   );
   const [joinColsLoading, setJoinColsLoading] = useState(false);
+  const [joinDiag, setJoinDiag] = useState<JoinDiagnostics | null>(null);
+  const [joinDiagLoading, setJoinDiagLoading] = useState(false);
+  const [joinDiagError, setJoinDiagError] = useState<string | null>(null);
+  /** Overrides Data tab when user opens a Join diagnostic sample. */
+  const [diagView, setDiagView] = useState<{
+    label: string;
+    columns: ColumnMetadata[];
+    rows: unknown[][];
+    totalCount: number;
+    sampleLimit: number;
+    highlightKeys: string[];
+  } | null>(null);
   /** FromQuery parent id (child / derived query root). */
   const [fromQueryId, setFromQueryId] = useState("");
   const [appendOtherId, setAppendOtherId] = useState("");
@@ -265,6 +284,52 @@ function App() {
     activeQueryId,
     selectedStepIndex,
     joinRightId,
+    activeQuery,
+    project.workspace,
+    connections,
+  ]);
+
+  // Join diagnostics (DESIGN §9) — async, never blocks Apply / canvas.
+  useEffect(() => {
+    const step =
+      selectedStepIndex != null && activeQuery
+        ? activeQuery.steps[selectedStepIndex]
+        : undefined;
+    if (!activeQueryId || selectedStepIndex === null || step?.type !== "Join") {
+      setJoinDiag(null);
+      setJoinDiagError(null);
+      setJoinDiagLoading(false);
+      setDiagView(null);
+      return;
+    }
+    let cancelled = false;
+    setJoinDiagLoading(true);
+    setJoinDiagError(null);
+    void joinDiagnostics(
+      project.workspace,
+      activeQueryId,
+      selectedStepIndex,
+      connections,
+    )
+      .then((d) => {
+        if (!cancelled) {
+          setJoinDiag(d);
+          setJoinDiagLoading(false);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setJoinDiag(null);
+          setJoinDiagLoading(false);
+          setJoinDiagError(typeof e === "string" ? e : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeQueryId,
+    selectedStepIndex,
     activeQuery,
     project.workspace,
     connections,
@@ -962,6 +1027,85 @@ function App() {
       }
     });
     setError(null);
+  }
+
+  async function openJoinDiagnostic(
+    kind: JoinDiagKind,
+    sample: JoinDiagSample | null,
+    label: string,
+  ) {
+    if (!joinDiag || !activeQueryId) return;
+    const keys = [...joinDiag.left_on, ...joinDiag.right_on];
+    const sampleLimit = joinDiag.sample_limit;
+
+    if (sample) {
+      setDiagView({
+        label,
+        columns: sample.columns,
+        rows: sample.rows,
+        totalCount: sample.total_count,
+        sampleLimit,
+        highlightKeys: keys,
+      });
+      setBottomTab("data");
+      return;
+    }
+
+    // left / right / output — preview truncated workspace (LIMIT 50 via preview).
+    try {
+      let ws: Workspace;
+      if (kind === "left") {
+        ws = {
+          ...project.workspace,
+          focus_query_id: activeQueryId,
+          queries: project.workspace.queries.map((q) =>
+            q.id === activeQueryId
+              ? {
+                  ...q,
+                  steps: q.steps.slice(0, joinDiag.join_step_index),
+                }
+              : q,
+          ),
+        };
+      } else if (kind === "right") {
+        ws = {
+          ...project.workspace,
+          focus_query_id: joinDiag.right_query_id,
+        };
+      } else {
+        // output = host through Join inclusive
+        ws = {
+          ...project.workspace,
+          focus_query_id: activeQueryId,
+          queries: project.workspace.queries.map((q) =>
+            q.id === activeQueryId
+              ? {
+                  ...q,
+                  steps: q.steps.slice(0, joinDiag.join_step_index + 1),
+                }
+              : q,
+          ),
+        };
+      }
+      const result = await previewWorkspace(ws, connections);
+      const total =
+        kind === "left"
+          ? joinDiag.left_count
+          : kind === "right"
+            ? joinDiag.right_count
+            : joinDiag.output_count;
+      setDiagView({
+        label,
+        columns: result.columns,
+        rows: result.rows,
+        totalCount: total,
+        sampleLimit,
+        highlightKeys: keys,
+      });
+      setBottomTab("data");
+    } catch (e) {
+      setJoinDiagError(typeof e === "string" ? e : String(e));
+    }
   }
 
   async function fetchJoinSideColumns(
@@ -1854,17 +1998,19 @@ function App() {
                 </div>
                 <span className="pb-1.5 text-xs text-slate-500">
                   {bottomTab === "data"
-                    ? loading
-                      ? "running…"
-                      : preview
-                        ? `${preview.rows.length} rows · ${preview.columns.length} cols`
-                        : "—"
+                    ? diagView
+                      ? `diag · ${diagView.rows.length}/${diagView.totalCount} · ${diagView.columns.length} cols`
+                      : loading
+                        ? "running…"
+                        : preview
+                          ? `${preview.rows.length} rows · ${preview.columns.length} cols`
+                          : "—"
                     : modelPreview
                       ? `${modelPreview.model_name}.sql · dbt`
                       : "—"}
                 </span>
               </div>
-              {(error || exportMsg) && (
+              {(error || exportMsg || diagView) && (
                 <div className="space-y-1 px-4 pb-2">
                   {error && (
                     <div className="rounded-lg border border-rose-900/50 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">
@@ -1876,12 +2022,40 @@ function App() {
                       {exportMsg}
                     </div>
                   )}
+                  {diagView && bottomTab === "data" && (
+                    <div className="flex items-start justify-between gap-2 rounded-lg border border-teal-900/40 bg-teal-950/20 px-3 py-2 text-[11px] text-teal-100/90">
+                      <span>
+                        <span className="font-semibold">{diagView.label}</span>
+                        {" · "}
+                        sample {diagView.rows.length}
+                        {diagView.totalCount > diagView.rows.length
+                          ? ` of ${diagView.totalCount}`
+                          : ""}
+                        {` (limit ${diagView.sampleLimit})`}
+                        {" · "}
+                        clean sample ≠ full-input proof
+                      </span>
+                      <button
+                        type="button"
+                        className="shrink-0 text-teal-300/80 hover:text-teal-100"
+                        onClick={() => setDiagView(null)}
+                      >
+                        Back to preview
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
                 <div className="h-[22vh] overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
                   {bottomTab === "data" ? (
-                    preview ? (
+                    diagView ? (
+                      <PreviewTable
+                        columns={diagView.columns}
+                        rows={diagView.rows}
+                        highlightKeys={diagView.highlightKeys}
+                      />
+                    ) : preview ? (
                       <PreviewTable
                         columns={preview.columns}
                         rows={preview.rows}
@@ -2307,6 +2481,14 @@ function App() {
                         >
                           Apply
                         </button>
+                        <JoinDiagnosticsPanel
+                          loading={joinDiagLoading}
+                          error={joinDiagError}
+                          diag={joinDiag}
+                          onOpen={(kind, sample, label) =>
+                            void openJoinDiagnostic(kind, sample, label)
+                          }
+                        />
                       </>
                     )}
                     {selectedStep.type === "Append" && (

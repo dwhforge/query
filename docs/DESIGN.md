@@ -175,7 +175,7 @@ Do not expand the transform catalog until A–C are green.
 
 ### D — Join diagnostics + expectations
 
-- [ ] §9 diagnostics in UI (counts, unmatched, fan-out, samples); must not block editing  
+- [x] §9 diagnostics in UI (counts, unmatched, fan-out, samples); must not block editing — `join_diagnostics` + Join inspector panel  
 - [ ] Persist ≥1 Join expectation; export dbt test(s); survive re-export  
 
 ### E — Demand (process, parallel)

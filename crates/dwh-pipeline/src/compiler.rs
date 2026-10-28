@@ -10,12 +10,38 @@ pub struct GraphCompiler<'a> {
     workspace: &'a Workspace,
 }
 
+/// Shared WITH … CTE list for a workspace (Join diagnostics, custom selects).
+#[derive(Debug, Clone)]
+pub struct CompiledCtes {
+    /// CTE definitions joined by `,\n` (no leading `WITH`).
+    pub definitions: String,
+    /// query_id → last step CTE name.
+    pub last_by_query: HashMap<String, String>,
+}
+
+impl CompiledCtes {
+    pub fn select_sql(&self, cte: &str, limit: Option<u64>) -> String {
+        let mut sql = format!("WITH \n{}\nSELECT * FROM {cte}", self.definitions);
+        if let Some(n) = limit {
+            sql.push_str(&format!(" LIMIT {n}"));
+        }
+        sql.push(';');
+        sql
+    }
+
+    /// Wrap an arbitrary SELECT that may reference CTEs from this compile.
+    pub fn wrap_select(&self, select_body: &str) -> String {
+        format!("WITH \n{}\n{select_body}", self.definitions)
+    }
+}
+
 impl<'a> GraphCompiler<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
         Self { workspace }
     }
 
-    pub fn to_sql(&self, is_preview: bool) -> Result<String, String> {
+    /// Compile all query steps into a CTE list (topo order).
+    pub fn compile_ctes(&self) -> Result<CompiledCtes, String> {
         if self.workspace.queries.is_empty() {
             return Err("Workspace is empty".into());
         }
@@ -30,7 +56,7 @@ impl<'a> GraphCompiler<'a> {
                 .query(qid)
                 .ok_or_else(|| format!("missing query {qid}"))?;
             if query.steps.is_empty() {
-                return Err(format!("query '{}' has no steps", qid));
+                return Err(format!("query '{qid}' has no steps"));
             }
 
             for (idx, step) in query.steps.iter().enumerate() {
@@ -48,7 +74,16 @@ impl<'a> GraphCompiler<'a> {
             }
         }
 
-        let focus_last = last_cte
+        Ok(CompiledCtes {
+            definitions: parts.join(",\n"),
+            last_by_query: last_cte,
+        })
+    }
+
+    pub fn to_sql(&self, is_preview: bool) -> Result<String, String> {
+        let compiled = self.compile_ctes()?;
+        let focus_last = compiled
+            .last_by_query
             .get(&self.workspace.focus_query_id)
             .ok_or_else(|| {
                 format!(
@@ -56,15 +91,7 @@ impl<'a> GraphCompiler<'a> {
                     self.workspace.focus_query_id
                 )
             })?;
-
-        let mut sql = String::from("WITH \n");
-        sql.push_str(&parts.join(",\n"));
-        if is_preview {
-            sql.push_str(&format!("\nSELECT * FROM {focus_last} LIMIT 50;"));
-        } else {
-            sql.push_str(&format!("\nSELECT * FROM {focus_last};"));
-        }
-        Ok(sql)
+        Ok(compiled.select_sql(focus_last, if is_preview { Some(50) } else { None }))
     }
 }
 

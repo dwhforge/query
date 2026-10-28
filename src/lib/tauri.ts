@@ -45,6 +45,50 @@ export function previewPipeline(
   return invoke<PreviewResult>("preview_pipeline", { steps, connections });
 }
 
+/** Bounded Join diagnostic sample (DESIGN §9). */
+export type JoinDiagSample = {
+  columns: { name: string; type: string }[];
+  rows: unknown[][];
+  sample_rows: number;
+  total_count: number;
+};
+
+/** Full-input counts + samples for one Join step. */
+export type JoinDiagnostics = {
+  host_query_id: string;
+  join_step_index: number;
+  right_query_id: string;
+  left_on: string[];
+  right_on: string[];
+  sample_limit: number;
+  left_count: number;
+  right_count: number;
+  output_count: number;
+  unmatched_left_count: number;
+  unmatched_right_count: number;
+  fanout_left_count: number;
+  right_dup_key_group_count: number;
+  unmatched_left: JoinDiagSample;
+  unmatched_right: JoinDiagSample;
+  fanout_pairs: JoinDiagSample;
+  right_dup_keys: JoinDiagSample;
+  sql_counts: string;
+};
+
+export function joinDiagnostics(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  connections: ConnectionDef[] = [],
+): Promise<JoinDiagnostics> {
+  return invoke<JoinDiagnostics>("join_diagnostics", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+  });
+}
+
 export interface ExportResult {
   path: string;
   /** Relative paths; directories end with `/`. */

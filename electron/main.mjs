@@ -28,15 +28,38 @@ let hostPort = null;
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
 
-const isDev = !app.isPackaged;
+/** Dev UI only when Vite URL is set — portable packs are NOT packaged asar. */
+function useViteDevServer() {
+  return Boolean(process.env.VITE_DEV_SERVER_URL);
+}
 
 function portableRoot() {
-  // Unpacked portable layout: electron + dwh-host sit next to package.json.
-  if (!app.isPackaged) return null;
-  const cand = path.dirname(app.getAppPath());
-  if (fs.existsSync(path.join(cand, "dwh-host")) ||
-      fs.existsSync(path.join(cand, "dwh-host.exe"))) {
-    return cand;
+  // Unpacked portable: dwh-host next to package.json (ROOT = parent of electron/).
+  if (
+    fs.existsSync(path.join(ROOT, "dwh-host")) ||
+    fs.existsSync(path.join(ROOT, "dwh-host.exe"))
+  ) {
+    return ROOT;
+  }
+  if (app.isPackaged) {
+    const cand = path.dirname(app.getAppPath());
+    if (
+      fs.existsSync(path.join(cand, "dwh-host")) ||
+      fs.existsSync(path.join(cand, "dwh-host.exe"))
+    ) {
+      return cand;
+    }
+  }
+  return null;
+}
+
+function resolveIndexHtml() {
+  const candidates = [
+    path.join(ROOT, "dist", "index.html"),
+    path.join(app.getAppPath(), "dist", "index.html"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
   }
   return null;
 }
@@ -205,13 +228,31 @@ function createWindow() {
     },
   });
 
-  if (isDev) {
-    const url = process.env.VITE_DEV_SERVER_URL || "http://localhost:1420";
-    void mainWindow.loadURL(url);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+  mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    console.error(`[dwh] did-fail-load ${code} ${desc} url=${url}`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    console.error("[dwh] render-process-gone", details);
+  });
+
+  const devUrl = process.env.VITE_DEV_SERVER_URL;
+  const indexHtml = resolveIndexHtml();
+
+  if (useViteDevServer() && devUrl) {
+    void mainWindow.loadURL(devUrl);
+  } else if (indexHtml) {
+    void mainWindow.loadFile(indexHtml);
   } else {
-    const appRoot = app.getAppPath();
-    void mainWindow.loadFile(path.join(appRoot, "dist", "index.html"));
+    const msg =
+      "UI not found (dist/index.html). For portable: re-pack release. " +
+      "For dev: npm run electron:dev (sets VITE_DEV_SERVER_URL).";
+    console.error(`[dwh] ${msg}`);
+    dialog.showErrorBox("DWHForge Query", msg);
+  }
+
+  // Autofill.enable -32601 is harmless DevTools noise.
+  if (process.env.DWH_DEVTOOLS === "1") {
+    mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
   mainWindow.on("closed", () => {

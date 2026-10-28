@@ -2,6 +2,8 @@ mod export_e2e;
 mod extensions;
 mod join_diagnostics;
 mod join_lens;
+mod join_near_miss;
+mod key_map_write;
 mod load_seeds;
 mod postgres_catalog;
 mod preview;
@@ -21,6 +23,13 @@ pub use join_lens::{
     BlameUnmatchedKeyResult, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinKeySide,
     JoinKeyTuple, JoinRowExplanation, JOIN_LENS_KEY_SAMPLE_LIMIT, JOIN_LENS_MAX_KEYS,
     JOIN_LENS_MAX_MATCHES,
+};
+pub use join_near_miss::{
+    join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,
+};
+pub use key_map_write::{
+    read_key_map, read_key_map_from_postgres, write_key_map, write_key_map_to_postgres,
+    KeyMapWriteResult,
 };
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{

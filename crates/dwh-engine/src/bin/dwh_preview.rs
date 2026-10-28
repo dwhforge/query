@@ -54,6 +54,7 @@ fn main() {
 },
             ],
             focus_query_id: "left".into(),
+            key_maps: vec![],
         };
         preview_workspace(&db, &ws, &[])
     } else {

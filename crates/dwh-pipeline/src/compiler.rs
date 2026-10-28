@@ -211,6 +211,7 @@ mod tests {
 },
             ],
             focus_query_id: "top".into(),
+            key_maps: vec![],
         };
         let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
         assert!(sql.contains("q_sales_s0"));
@@ -249,6 +250,7 @@ mod tests {
 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
         assert!(sql.contains("INNER JOIN"));
@@ -287,6 +289,7 @@ mod tests {
                 },
             ],
             focus_query_id: "sales".into(),
+            key_maps: vec![],
         };
         let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
         assert!(sql.contains("q_sales_s0"));
@@ -347,6 +350,7 @@ mod tests {
              execution: Default::default(),
 }],
             focus_query_id: "m".into(),
+            key_maps: vec![],
         };
         let sql = GraphCompiler::new(&ws).to_sql(false).unwrap();
         assert!(sql.contains("select 1 as n"));

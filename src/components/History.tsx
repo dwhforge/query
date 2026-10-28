@@ -99,6 +99,16 @@ export function stepSummaryLine(
       };
     case "CustomSql":
       return { kind: "Custom SQL", detail: "snippet" };
+    case "NormalizeKey":
+      return {
+        kind: "NormalizeKey",
+        detail: `${step.payload.columns.join(", ")} · ${step.payload.ops.join("→")}`,
+      };
+    case "ApplyKeyMap":
+      return {
+        kind: "ApplyKeyMap",
+        detail: `${step.payload.column} ← ${step.payload.map_id}`,
+      };
     default:
       return { kind: "Step", detail: "" };
   }

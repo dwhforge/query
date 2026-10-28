@@ -350,6 +350,8 @@ fn step_kind_label(step: &TransformationStep) -> &'static str {
         TransformationStep::Join { .. } => "Join",
         TransformationStep::Append { .. } => "Append",
         TransformationStep::CustomSql { .. } => "CustomSql",
+        TransformationStep::NormalizeKey { .. } => "NormalizeKey",
+        TransformationStep::ApplyKeyMap { .. } => "ApplyKeyMap",
     }
 }
 
@@ -1365,6 +1367,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         let keys = vec![
@@ -1426,6 +1429,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         let out =
@@ -1488,6 +1492,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         let out = explain_join_rows(&db, &ws, &[], "fact", 1, &[], Some(&[0, 2])).unwrap();
@@ -1566,6 +1571,7 @@ mod tests {
                 },
             ],
             focus_query_id: "coverage".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         // First Join (index 1) while second Join still follows in the query.
@@ -1620,6 +1626,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         let out = explain_join_key(
@@ -1671,6 +1678,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         // `partner` exists only on dim_channel — no left partner.
@@ -1725,6 +1733,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
         let blame = blame_unmatched_key(

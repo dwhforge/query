@@ -19,6 +19,14 @@ declare global {
         filters?: { name: string; extensions: string[] }[];
       }) => Promise<string | null>;
       revealItemInDir: (path: string) => Promise<void>;
+      windowAction?: (
+        action:
+          | "zoom-in"
+          | "zoom-out"
+          | "zoom-reset"
+          | "toggle-fullscreen"
+          | "close",
+      ) => Promise<{ zoomFactor: number; fullScreen: boolean } | null>;
     };
   }
 }

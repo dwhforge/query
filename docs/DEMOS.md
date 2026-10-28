@@ -38,6 +38,7 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | A12 | Multi-hop int→mart | FromQuery chain | sales, union, sql |
 | A13 | Postgres source | LoadPostgres | UI only (needs DSN) |
 | A14 | Chained RIGHT OUTER (multi-join) | Two Join steps, different rights | right |
+| A15 | Join-key From→To map + dbt seed | KeyMap + ApplyKeyMap → `seeds/map_*.csv` | keymap (+ EmptyHero playground) |
 
 ### B — Partial
 
@@ -46,7 +47,7 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | B1 | Multi-key Join | UI: dual column pickers + multi-key pairs (schema from preview) |
 | B2 | Top-N per group / window | CustomSql only (see `sql` demo) |
 | B3 | Anti-join | CustomSql |
-| B4 | Seeds | CSV Load proxy, not `seeds/` |
+| B4 | Seeds (general) | KeyMap seeds shipped (A15); other seed use-cases still LoadCsv proxy |
 
 ### C — Not covered (do not claim)
 
@@ -113,3 +114,17 @@ How to read it:
 3. Canvas shows **two** join edges; a third drag appends another Join (does not wipe prior ones).
 
 Categories: A1, A3, A14.
+
+### 5. `keymap` — From→To join-key aliases (ADR-0020)
+
+Dirty fact channels (`www`, `shop`, `prt`, `Web `) vs clean `dim_channel`. EmptyHero shows the same map as an interactive playground before loading the canvas.
+
+| Query (UI) | dbt model (export) | Steps |
+|------------|-------------------|--------|
+| `dim_channel` | `stg_dim_channel` | LoadCsv |
+| `alias_sales` | `stg_alias_sales` | LoadCsv → **ApplyKeyMap**(channel) |
+| `enriched` ★focus | `mart_enriched` | From(alias_sales) → LEFT Join(dim_channel) |
+
+`Workspace.key_maps` holds `map_channel_alias`. Export writes `seeds/map_channel_alias.csv` and models `ref` it. After first export, edit the seed — reopen syncs into the KeyMap editor.
+
+Categories: A1, A3, A15.

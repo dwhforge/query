@@ -20,6 +20,11 @@ export interface AppMenuProps {
   onSetTargetDialect: (d: WarehouseDialect) => void;
   onLoadDemo: (id: DemoId) => void;
   onOpenHelp: () => void;
+  onZoomIn?: () => void;
+  onZoomOut?: () => void;
+  onZoomReset?: () => void;
+  onToggleFullscreen?: () => void;
+  onCloseWindow?: () => void;
 }
 
 type MenuId = "file" | "view" | "project" | "help";
@@ -131,6 +136,11 @@ export function AppMenu({
   onSetTargetDialect,
   onLoadDemo,
   onOpenHelp,
+  onZoomIn,
+  onZoomOut,
+  onZoomReset,
+  onToggleFullscreen,
+  onCloseWindow,
 }: AppMenuProps) {
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null);
   const navRef = useRef<HTMLElement>(null);
@@ -191,6 +201,16 @@ export function AppMenu({
             disabled={!canExport}
             onClick={() => run(onExport)}
           />
+          {onCloseWindow && (
+            <>
+              <Sep />
+              <Item
+                label="Close window"
+                hint="⌘W"
+                onClick={() => run(onCloseWindow)}
+              />
+            </>
+          )}
         </MenuBarItem>
 
         <MenuBarItem
@@ -208,6 +228,39 @@ export function AppMenu({
             disabled={!canCopySql}
             onClick={() => run(onCopySql)}
           />
+          {(onZoomIn || onZoomOut || onToggleFullscreen) && (
+            <>
+              <Sep />
+              {onZoomIn && (
+                <Item
+                  label="Zoom in"
+                  hint="⌘+"
+                  onClick={() => run(onZoomIn)}
+                />
+              )}
+              {onZoomOut && (
+                <Item
+                  label="Zoom out"
+                  hint="⌘-"
+                  onClick={() => run(onZoomOut)}
+                />
+              )}
+              {onZoomReset && (
+                <Item
+                  label="Actual size"
+                  hint="⌘0"
+                  onClick={() => run(onZoomReset)}
+                />
+              )}
+              {onToggleFullscreen && (
+                <Item
+                  label="Toggle full screen"
+                  hint="F11"
+                  onClick={() => run(onToggleFullscreen)}
+                />
+              )}
+            </>
+          )}
         </MenuBarItem>
 
         <MenuBarItem
@@ -270,6 +323,10 @@ export function AppMenu({
           <Item
             label="Right joins — two RIGHT OUTER · coverage"
             onClick={() => run(() => onLoadDemo("right"))}
+          />
+          <Item
+            label="Key mapping — From→To · seed table"
+            onClick={() => run(() => onLoadDemo("keymap"))}
           />
         </MenuBarItem>
       </nav>

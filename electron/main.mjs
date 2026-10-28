@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   shell,
 } from "electron";
 import { spawn } from "node:child_process";
@@ -309,6 +310,7 @@ function createWindow() {
     width: 1280,
     height: 800,
     title: "DWHForge Query",
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -386,7 +388,37 @@ ipcMain.handle("dwh:reveal", async (_e, targetPath) => {
   shell.showItemInFolder(targetPath);
 });
 
+/** Window chrome from in-app menu (system menu bar is hidden). */
+ipcMain.handle("dwh:window", async (e, action) => {
+  const win =
+    BrowserWindow.fromWebContents(e.sender) ?? mainWindow;
+  if (!win || win.isDestroyed()) return null;
+  const z = () => win.webContents.getZoomFactor();
+  switch (action) {
+    case "zoom-in":
+      win.webContents.setZoomFactor(Math.min(3, Math.round((z() + 0.1) * 10) / 10));
+      break;
+    case "zoom-out":
+      win.webContents.setZoomFactor(Math.max(0.5, Math.round((z() - 0.1) * 10) / 10));
+      break;
+    case "zoom-reset":
+      win.webContents.setZoomFactor(1);
+      break;
+    case "toggle-fullscreen":
+      win.setFullScreen(!win.isFullScreen());
+      break;
+    case "close":
+      win.close();
+      break;
+    default:
+      break;
+  }
+  return { zoomFactor: win.webContents.getZoomFactor(), fullScreen: win.isFullScreen() };
+});
+
 app.whenReady().then(async () => {
+  // Hide native File/Edit/… bar — chrome lives in the in-app AppMenu.
+  Menu.setApplicationMenu(null);
   try {
     await startHost();
   } catch (e) {

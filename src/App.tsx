@@ -6,6 +6,7 @@ function clampPanelWidth(px: number, min: number, max: number): number {
 import {
   openDialog as open,
   revealItemInDir,
+  windowAction,
   saveDialog as save,
 } from "./lib/bridge";
 import { ConnectionEditor } from "./components/ConnectionEditor";
@@ -19,6 +20,17 @@ import {
 } from "./components/JoinDiagnosticsPanel";
 import { JoinLens } from "./components/JoinLens";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
+import { KeyMapEditor } from "./components/KeyMapEditor";
+import {
+  applyKeyMapToWorkspace,
+  applyNormalizeToWorkspace,
+  deleteKeyMapFromWorkspace,
+  emptyKeyMap,
+  resolveKeyMapConnectionString,
+  syncApplyKeyMapEntries,
+  upsertKeyMapList,
+  type ApplySide,
+} from "./lib/keyMap";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import {
   emptyJoinKeyPair,
@@ -55,12 +67,17 @@ import {
   loadDemoWorkspace,
   previewDbtModel,
   previewWorkspace,
+  pushKeyMapToExport,
+  readKeyMap,
   saveProject,
   setAppSettings,
   setGlobalConnections,
+  syncKeyMapsFromExport,
+  writeKeyMap,
   type AppSettings,
   type JoinDiagSample,
   type JoinDiagnostics,
+  type NearMissHypothesis,
   type PreviewDbtModel,
   type PostgresColumn,
 } from "./lib/bridge";
@@ -81,10 +98,25 @@ import {
   type QueryDef,
   type QueryExecution,
   type SourceDef,
+  type KeyMapDef,
+  type NormalizeOp,
   type TransformationStep,
   type WarehouseDialect,
   type Workspace,
 } from "./types/pipeline";
+
+type KeyMapTabSession = {
+  map: KeyMapDef;
+  pickTo?: string[];
+  suggestedFrom?: string[];
+  joinCtx?: {
+    hostQueryId: string;
+    joinStepIndex: number;
+    rightQueryId: string;
+    leftOn: string[];
+    rightOn: string[];
+  };
+};
 
 function App() {
   const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
@@ -153,6 +185,10 @@ function App() {
   } | null>(null);
   /** Join Lens mode on Data (where-provenance docks). Default on when Join selected. */
   const [joinLensOn, setJoinLensOn] = useState(true);
+  /** Open KeyMap editor tabs (VS Code–style, beside Pipeline canvas). */
+  const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
+  /** Center workspace tab: canvas or open KeyMap id. */
+  const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
   /** FromQuery parent id (child / derived query root). */
   const [fromQueryId, setFromQueryId] = useState("");
   const [appendOtherId, setAppendOtherId] = useState("");
@@ -196,8 +232,10 @@ function App() {
     connections: true,
     sources: true,
     queries: true,
+    keyMaps: true,
     export: true,
   });
+  const [selectedKeyMapId, setSelectedKeyMapId] = useState<string | null>(null);
 
   const queries = project.workspace.queries;
   const focusQueryId = project.workspace.focus_query_id || null;
@@ -560,6 +598,8 @@ function App() {
 
   const selectQuery = useCallback(
     (id: string) => {
+      setCenterTab("canvas");
+      setSelectedKeyMapId(null);
       setActiveQueryId(id);
       const q = queries.find((x) => x.id === id);
       syncInspectorFromQuery(q);
@@ -569,6 +609,30 @@ function App() {
     },
     [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
+
+  function closeKeyMapTab(mapId: string) {
+    setKeyMapTabs((tabs) => {
+      const idx = tabs.findIndex((t) => t.map.id === mapId);
+      const next = tabs.filter((t) => t.map.id !== mapId);
+      setCenterTab((cur) => {
+        if (cur !== mapId) return cur;
+        if (next.length === 0) return "canvas";
+        const fallback = next[Math.min(Math.max(idx, 0), next.length - 1)];
+        return fallback?.map.id ?? "canvas";
+      });
+      return next;
+    });
+    setSelectedKeyMapId((id) => (id === mapId ? null : id));
+  }
+
+  function patchKeyMapTab(mapId: string, patch: Partial<KeyMapTabSession> | ((t: KeyMapTabSession) => KeyMapTabSession)) {
+    setKeyMapTabs((tabs) =>
+      tabs.map((t) => {
+        if (t.map.id !== mapId) return t;
+        return typeof patch === "function" ? patch(t) : { ...t, ...patch };
+      }),
+    );
+  }
 
   // Keep forms in sync when steps change; clamp selected step index.
   useEffect(() => {
@@ -1016,7 +1080,9 @@ function App() {
             ? "demo_union"
             : id === "right"
               ? "demo_right_joins"
-              : "demo_sql";
+              : id === "keymap"
+                ? "demo_keymap"
+                : "demo_sql";
       setProject((p) => ({
         ...p,
         name: projectName,
@@ -1642,6 +1708,259 @@ function App() {
     setActiveQueryId(withConnections.workspace.focus_query_id || null);
     void refreshExportTree(withConnections.last_dbt_export_path);
     setError(null);
+    // After first export, seeds/map_*.csv is SoT (ADR-0020).
+    const exportPath = withConnections.last_dbt_export_path;
+    if (exportPath) {
+      void syncKeyMapsFromExport(withConnections.workspace, exportPath)
+        .then((synced) => {
+          setProject((p) =>
+            p.last_dbt_export_path === exportPath
+              ? { ...p, workspace: synced.workspace }
+              : p,
+          );
+        })
+        .catch(() => {
+          /* export tree missing — keep project maps */
+        });
+    }
+  }
+
+  function openKeyMapEditor(
+    map: KeyMapDef,
+    opts?: {
+      pickTo?: string[];
+      suggestedFrom?: string[];
+      joinCtx?: {
+        hostQueryId: string;
+        joinStepIndex: number;
+        rightQueryId: string;
+        leftOn: string[];
+        rightOn: string[];
+      };
+    },
+  ) {
+    const normalized: KeyMapDef = {
+      storage: { kind: "seed" },
+      from_column: "from",
+      to_column: "to",
+      ...map,
+    };
+    setSelectedKeyMapId(normalized.id);
+    setKeyMapTabs((tabs) => {
+      const i = tabs.findIndex((t) => t.map.id === normalized.id);
+      const session: KeyMapTabSession = {
+        map: normalized,
+        pickTo: opts?.pickTo,
+        suggestedFrom: opts?.suggestedFrom,
+        joinCtx: opts?.joinCtx,
+      };
+      if (i < 0) return [...tabs, session];
+      // Refresh opts / map shell but keep in-tab edits if re-opening same id from explorer
+      // with a newer project copy — prefer project map entries when opening from tree.
+      const prev = tabs[i]!;
+      const next = [...tabs];
+      next[i] = {
+        ...session,
+        map: {
+          ...normalized,
+          // Keep unsaved tab entries if same revision id already open
+          entries: prev.map.entries.length ? prev.map.entries : normalized.entries,
+          storage: normalized.storage ?? prev.map.storage,
+        },
+      };
+      return next;
+    });
+    setCenterTab(normalized.id);
+    // Source-backed: load live rows from WH into the editor.
+    if (normalized.storage?.kind === "source") {
+      void (async () => {
+        let conns = project.connections;
+        let dsn = resolveKeyMapConnectionString(project, normalized, conns);
+        if (!dsn) {
+          try {
+            conns = await getGlobalConnections();
+            if (conns.length) {
+              setProject((p) => ({ ...p, connections: conns }));
+            }
+            dsn = resolveKeyMapConnectionString(project, normalized, conns);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (
+          !normalized.storage.connection_id &&
+          conns.some((c) => c.kind === "postgres")
+        ) {
+          const pick =
+            conns.find((c) => c.id === project.target_connection_id) ??
+            conns.find((c) => c.kind === "postgres");
+          if (pick) {
+            patchKeyMapTab(normalized.id, (s) =>
+              s.map.storage?.kind === "source"
+                ? {
+                    ...s,
+                    map: {
+                      ...s.map,
+                      storage: {
+                        ...s.map.storage,
+                        connection_id: pick.id,
+                      },
+                    },
+                  }
+                : s,
+            );
+          }
+        }
+        if (!dsn) return;
+        try {
+          const r = await readKeyMap(normalized, dsn);
+          patchKeyMapTab(normalized.id, (s) => ({
+            ...s,
+            map: { ...s.map, entries: r.entries },
+          }));
+        } catch (e) {
+          setError(
+            typeof e === "string"
+              ? e
+              : `Could not load KeyMap from warehouse: ${String(e)}`,
+          );
+        }
+      })();
+    }
+  }
+
+  async function saveKeyMapToProject(map: KeyMapDef): Promise<void> {
+    setProject((p) => {
+      const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], map);
+      const queries = syncApplyKeyMapEntries(p.workspace.queries, map);
+      return {
+        ...p,
+        workspace: { ...p.workspace, key_maps, queries },
+      };
+    });
+    setSelectedKeyMapId(map.id);
+    const kind = map.storage?.kind ?? "seed";
+    if (kind === "seed") {
+      const exportPath = project.last_dbt_export_path;
+      if (exportPath) {
+        try {
+          await pushKeyMapToExport(exportPath, map);
+          setExportMsg(`KeyMap saved → seeds (export tree)`);
+        } catch {
+          /* export tree missing */
+        }
+      }
+      return;
+    }
+    if (kind === "source") {
+      let conns = project.connections;
+      let dsn = resolveKeyMapConnectionString(project, map, conns);
+      if (!dsn) {
+        try {
+          conns = await getGlobalConnections();
+          if (conns.length) {
+            setProject((p) => ({ ...p, connections: conns }));
+          }
+          dsn = resolveKeyMapConnectionString(project, map, conns);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!dsn) {
+        setError(
+          "No Postgres connection string — open Connections and save a Postgres DSN.",
+        );
+        return;
+      }
+      try {
+        const r = await writeKeyMap(map, dsn);
+        setExportMsg(
+          `KeyMap write-back → ${r.schema}.${r.table} (${r.rows_written} rows)`,
+        );
+        setError(null);
+      } catch (e) {
+        setError(
+          typeof e === "string"
+            ? e
+            : `KeyMap write-back failed: ${String(e)}`,
+        );
+      }
+      return;
+    }
+    // ref: project cache only
+    setExportMsg(
+      "KeyMap saved in project (ref storage — no warehouse write-back)",
+    );
+  }
+
+  function handleAddKeyMap() {
+    const map = emptyKeyMap("Key map");
+    void saveKeyMapToProject(map);
+    openKeyMapEditor(map);
+    setTreeExpanded((e) => ({ ...e, keyMaps: true }));
+  }
+
+  function handleRenameKeyMap(mapId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setProject((p) => {
+      const key_maps = (p.workspace.key_maps ?? []).map((m) =>
+        m.id === mapId ? { ...m, name: trimmed } : m,
+      );
+      return { ...p, workspace: { ...p.workspace, key_maps } };
+    });
+    patchKeyMapTab(mapId, (t) => ({ ...t, map: { ...t.map, name: trimmed } }));
+  }
+
+  function handleDeleteKeyMap(mapId: string) {
+    setProject((p) => {
+      const { workspace } = deleteKeyMapFromWorkspace(p.workspace, mapId);
+      return { ...p, workspace };
+    });
+    if (selectedKeyMapId === mapId) setSelectedKeyMapId(null);
+    closeKeyMapTab(mapId);
+  }
+
+  function handleApplyNearMiss(hyp: NearMissHypothesis) {
+    if (!joinLensTarget) return;
+    const ops = hyp.ops as NormalizeOp[];
+    const side = hyp.apply_on as ApplySide;
+    setProject((p) => ({
+      ...p,
+      workspace: applyNormalizeToWorkspace(
+        p.workspace,
+        joinLensTarget.hostQueryId,
+        joinLensTarget.joinStepIndex,
+        joinLensTarget.rightQueryId,
+        side,
+        joinLensTarget.leftOn,
+        joinLensTarget.rightOn,
+        ops,
+      ),
+    }));
+  }
+
+  function handleMapKeyFromLens(_side: "left" | "right", fromValues: string[]) {
+    if (!joinLensTarget) return;
+    const existing = project.workspace.key_maps?.[0];
+    const map = existing
+      ? {
+          ...existing,
+          entries: [
+            ...existing.entries,
+            ...fromValues
+              .filter((f) => !existing.entries.some((e) => e.from.trim() === f))
+              .map((from) => ({ from, to: "" })),
+          ],
+        }
+      : {
+          ...emptyKeyMap("join aliases"),
+          entries: fromValues.map((from) => ({ from, to: "" })),
+        };
+    openKeyMapEditor(map, {
+      suggestedFrom: fromValues,
+      joinCtx: { ...joinLensTarget },
+    });
   }
 
   async function refreshExportTree(exportPath: string | undefined) {
@@ -1788,6 +2107,11 @@ function App() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && centerTab !== "canvas") {
+        e.preventDefault();
+        closeKeyMapTab(centerTab);
+        return;
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       const k = e.key.toLowerCase();
@@ -1805,15 +2129,37 @@ function App() {
         setShowPgPicker((v) => !v);
       } else if ((e.ctrlKey || e.metaKey) && k === "s") {
         e.preventDefault();
+        if (centerTab !== "canvas") {
+          const tab = keyMapTabs.find((t) => t.map.id === centerTab);
+          if (tab) {
+            void saveKeyMapToProject(tab.map);
+            return;
+          }
+        }
         void handleSaveProject();
       } else if ((e.ctrlKey || e.metaKey) && k === "o") {
         e.preventDefault();
         void handleOpenProject();
+      } else if ((e.ctrlKey || e.metaKey) && (k === "=" || k === "+")) {
+        e.preventDefault();
+        void windowAction("zoom-in");
+      } else if ((e.ctrlKey || e.metaKey) && k === "-") {
+        e.preventDefault();
+        void windowAction("zoom-out");
+      } else if ((e.ctrlKey || e.metaKey) && k === "0") {
+        e.preventDefault();
+        void windowAction("zoom-reset");
+      } else if (e.key === "F11") {
+        e.preventDefault();
+        void windowAction("toggle-fullscreen");
+      } else if ((e.ctrlKey || e.metaKey) && k === "w") {
+        e.preventDefault();
+        void windowAction("close");
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workspace, showPgPicker, project.name, project.dbt_target]);
+  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs]);
 
   // Fix addCsvQuery focus race: simplify by combining into one setProject
   // (handlers above already mostly OK)
@@ -2042,6 +2388,40 @@ function App() {
           payload: { raw_sql: "select * from {{prev_step}}" },
         });
         break;
+      case "NormalizeKey": {
+        if (activeQuery.steps.length === 0) {
+          setError("NormalizeKey needs a prior step");
+          return;
+        }
+        const col = columnChoices[0] ?? "channel";
+        appendStep({
+          type: "NormalizeKey",
+          payload: { columns: [col], ops: ["trim", "lower"] },
+        });
+        break;
+      }
+      case "ApplyKeyMap": {
+        if (activeQuery.steps.length === 0) {
+          setError("ApplyKeyMap needs a prior step");
+          return;
+        }
+        const col = columnChoices[0] ?? "channel";
+        const maps = project.workspace.key_maps ?? [];
+        const map = maps[0] ?? emptyKeyMap("key map");
+        if (!maps[0]) {
+          saveKeyMapToProject(map);
+        }
+        appendStep({
+          type: "ApplyKeyMap",
+          payload: {
+            column: col,
+            map_id: map.id,
+            entries: map.entries,
+          },
+        });
+        openKeyMapEditor(map, { suggestedFrom: [] });
+        break;
+      }
       default:
         break;
     }
@@ -2057,6 +2437,8 @@ function App() {
     { id: "Limit", label: "Limit" },
     { id: "RenameColumn", label: "Rename" },
     { id: "DeriveColumn", label: "Derived/Calculated" },
+    { id: "NormalizeKey", label: "NormalizeKey" },
+    { id: "ApplyKeyMap", label: "ApplyKeyMap" },
     { id: "CustomSql", label: "Custom SQL" },
   ];
 
@@ -2068,6 +2450,10 @@ function App() {
         return "Custom SQL";
       case "DeriveColumn":
         return "Derived/Calculated";
+      case "NormalizeKey":
+        return "NormalizeKey";
+      case "ApplyKeyMap":
+        return "ApplyKeyMap";
       default:
         return step.type;
     }
@@ -2098,6 +2484,11 @@ function App() {
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
         onOpenHelp={() => setHelpOpen(true)}
+        onZoomIn={() => void windowAction("zoom-in")}
+        onZoomOut={() => void windowAction("zoom-out")}
+        onZoomReset={() => void windowAction("zoom-reset")}
+        onToggleFullscreen={() => void windowAction("toggle-fullscreen")}
+        onCloseWindow={() => void windowAction("close")}
       />
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
@@ -2157,6 +2548,7 @@ function App() {
               project={project}
               activeQueryId={activeQueryId}
               selectedSourceId={selectedSourceId}
+              selectedKeyMapId={selectedKeyMapId}
               expanded={treeExpanded}
               onToggle={(key) =>
                 setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
@@ -2184,6 +2576,13 @@ function App() {
               onNewSqlModel={addSqlModelQuery}
               onRenameQuery={renameQuery}
               onRenameSource={renameSource}
+              onSelectKeyMap={(map) => {
+                setSelectedKeyMapId(map.id);
+                openKeyMapEditor(map);
+              }}
+              onAddKeyMap={handleAddKeyMap}
+              onRenameKeyMap={handleRenameKeyMap}
+              onDeleteKeyMap={handleDeleteKeyMap}
             />
           </aside>
           <PanelResizeHandle
@@ -2203,14 +2602,181 @@ function App() {
             }
           />
 
-          {/* Canvas */}
+          {/* Canvas / KeyMap workspace tabs */}
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-2 px-4 py-2">
-              <h2 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            <div
+              role="tablist"
+              aria-label="Workspace"
+              className="flex shrink-0 items-stretch gap-0 overflow-x-auto border-b border-[var(--line)] bg-[#060d14]"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={centerTab === "canvas"}
+                onClick={() => {
+                  setCenterTab("canvas");
+                  setSelectedKeyMapId(null);
+                }}
+                className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] transition ${
+                  centerTab === "canvas"
+                    ? "bg-[#0a1520] text-teal-200"
+                    : "text-slate-500 hover:bg-slate-900/50 hover:text-slate-300"
+                }`}
+              >
                 Pipeline canvas
-              </h2>
+              </button>
+              {keyMapTabs.map((tab) => {
+                const on = centerTab === tab.map.id;
+                return (
+                  <div
+                    key={tab.map.id}
+                    className={`group flex shrink-0 items-stretch border-r border-[var(--line)] ${
+                      on ? "bg-[#0a1520]" : "hover:bg-slate-900/50"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={on}
+                      onClick={() => {
+                        setCenterTab(tab.map.id);
+                        setSelectedKeyMapId(tab.map.id);
+                      }}
+                      className={`max-w-[14rem] truncate px-3 py-2 text-left text-[12px] ${
+                        on
+                          ? "text-teal-100"
+                          : "text-slate-500 group-hover:text-slate-300"
+                      }`}
+                      title={tab.map.name}
+                    >
+                      {tab.map.name || tab.map.id}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Close ${tab.map.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeKeyMapTab(tab.map.id);
+                      }}
+                      className={`px-1.5 text-[14px] leading-none ${
+                        on
+                          ? "text-slate-500 hover:text-slate-200"
+                          : "text-slate-700 opacity-0 group-hover:opacity-100 hover:text-slate-300"
+                      }`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
             </div>
-            <div className="min-h-0 flex-1 px-3 pb-2">
+
+            {keyMapTabs.map((keyMapEditor) => (
+              <div
+                key={keyMapEditor.map.id}
+                className={
+                  centerTab === keyMapEditor.map.id
+                    ? "flex min-h-0 flex-1 flex-col p-3"
+                    : "hidden"
+                }
+                aria-hidden={centerTab !== keyMapEditor.map.id}
+              >
+                <KeyMapEditor
+                  map={keyMapEditor.map}
+                  pickToOptions={keyMapEditor.pickTo}
+                  suggestedFrom={keyMapEditor.suggestedFrom}
+                  postgresConnections={project.connections.filter(
+                    (c) => c.kind === "postgres",
+                  )}
+                  sourceOptions={project.sources
+                    .filter(
+                      (s) =>
+                        s.kind === "postgres" &&
+                        Boolean(s.schema?.trim()) &&
+                        Boolean(s.table_name?.trim()),
+                    )
+                    .map((s) => ({
+                      source: s.schema!,
+                      table: s.table_name!,
+                      label: `${s.schema}.${s.table_name}${s.name ? ` · ${s.name}` : ""}`,
+                    }))}
+                  refOptions={project.workspace.queries.flatMap((q) => {
+                    const stem = q.name
+                      .toLowerCase()
+                      .replace(/[^a-z0-9]+/g, "_")
+                      .replace(/^_|_$/g, "");
+                    return [stem, `stg_${stem}`, `int_${stem}`, `mart_${stem}`];
+                  })}
+                  onChange={(map) =>
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
+                      ...s,
+                      map: { ...map, id: keyMapEditor.map.id },
+                    }))
+                  }
+                  onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
+                  onSave={
+                    keyMapEditor.joinCtx
+                      ? undefined
+                      : () => {
+                          void saveKeyMapToProject(keyMapEditor.map);
+                        }
+                  }
+                  onDelete={
+                    keyMapEditor.joinCtx
+                      ? undefined
+                      : () => {
+                          if (
+                            window.confirm(
+                              `Delete KeyMap “${keyMapEditor.map.name}”? ApplyKeyMap steps that use it will be removed.`,
+                            )
+                          ) {
+                            handleDeleteKeyMap(keyMapEditor.map.id);
+                          }
+                        }
+                  }
+                  saveLabel={
+                    keyMapEditor.map.storage?.kind === "source"
+                      ? "Save to warehouse"
+                      : "Save map"
+                  }
+                  onApply={
+                    keyMapEditor.joinCtx
+                      ? (side) => {
+                          const ctx = keyMapEditor.joinCtx!;
+                          const map = keyMapEditor.map;
+                          void saveKeyMapToProject(map).then(() => {
+                            setProject((p) => ({
+                              ...p,
+                              workspace: applyKeyMapToWorkspace(
+                                {
+                                  ...p.workspace,
+                                  key_maps: upsertKeyMapList(
+                                    p.workspace.key_maps ?? [],
+                                    map,
+                                  ),
+                                },
+                                ctx.hostQueryId,
+                                ctx.joinStepIndex,
+                                ctx.rightQueryId,
+                                side,
+                                ctx.leftOn[0] ?? "key",
+                                ctx.rightOn[0] ?? "key",
+                                map,
+                              ),
+                            }));
+                            closeKeyMapTab(map.id);
+                            setCenterTab("canvas");
+                          });
+                        }
+                      : undefined
+                  }
+                />
+              </div>
+            ))}
+
+            {centerTab === "canvas" && (
+              <>
+            <div className="min-h-0 flex-1 px-3 pb-2 pt-2">
               <GraphCanvas
                 queries={queries}
                 activeQueryId={activeQueryId}
@@ -2370,6 +2936,8 @@ function App() {
                         rows={preview.rows}
                         joinDiag={joinDiag}
                         joinDiagLoading={joinDiagLoading}
+                        onApplyNearMiss={handleApplyNearMiss}
+                        onMapKey={handleMapKeyFromLens}
                       />
                     ) : preview ? (
                       <PreviewTable
@@ -2412,6 +2980,8 @@ function App() {
                 </div>
               </div>
             </div>
+              </>
+            )}
           </section>
 
           <PanelResizeHandle
@@ -3009,6 +3579,189 @@ function App() {
                           }}
                         >
                           Apply
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "NormalizeKey" &&
+                      selectedStepIndex !== null && (
+                      <>
+                        <p className="text-[10px] text-slate-500">
+                          Deterministic key cleanup before Join (overwrite in
+                          place).
+                        </p>
+                        <label className="block text-[10px] text-slate-500">
+                          Columns (comma-separated)
+                          <input
+                            list="inspector-cols"
+                            defaultValue={selectedStep.payload.columns.join(", ")}
+                            key={`nk-cols-${selectedStepIndex}-${selectedStep.payload.columns.join(",")}`}
+                            id="normalize-cols-input"
+                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                          />
+                        </label>
+                        <div className="flex flex-wrap gap-2 text-[11px] text-slate-300">
+                          {(
+                            [
+                              "trim",
+                              "lower",
+                              "upper",
+                              "collapse_space",
+                              "ltrim_zeros",
+                            ] as NormalizeOp[]
+                          ).map((op) => {
+                            const on = selectedStep.payload.ops.includes(op);
+                            return (
+                              <label
+                                key={op}
+                                className="flex items-center gap-1 rounded border border-slate-700 px-1.5 py-0.5"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  onChange={() => {
+                                    const ops = on
+                                      ? selectedStep.payload.ops.filter(
+                                          (o) => o !== op,
+                                        )
+                                      : [...selectedStep.payload.ops, op];
+                                    if (ops.length === 0) return;
+                                    replaceStepAt(selectedStepIndex, {
+                                      type: "NormalizeKey",
+                                      payload: {
+                                        columns: selectedStep.payload.columns,
+                                        ops,
+                                      },
+                                    });
+                                  }}
+                                />
+                                {op}
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            const el = document.getElementById(
+                              "normalize-cols-input",
+                            ) as HTMLInputElement | null;
+                            const columns = (el?.value ?? "")
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter(Boolean);
+                            if (!columns.length) return;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "NormalizeKey",
+                              payload: {
+                                columns,
+                                ops: selectedStep.payload.ops,
+                              },
+                            });
+                          }}
+                        >
+                          Apply columns
+                        </button>
+                      </>
+                    )}
+                    {selectedStep.type === "ApplyKeyMap" &&
+                      selectedStepIndex !== null && (
+                      <>
+                        <p className="text-[10px] text-slate-500">
+                          Remap values via From→To table (dbt seed after export).
+                        </p>
+                        <label className="block text-[10px] text-slate-500">
+                          Column
+                          <input
+                            list="inspector-cols"
+                            defaultValue={selectedStep.payload.column}
+                            key={`akm-col-${selectedStepIndex}-${selectedStep.payload.column}`}
+                            id="apply-keymap-col"
+                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                          />
+                        </label>
+                        <label className="block text-[10px] text-slate-500">
+                          KeyMap
+                          <select
+                            value={selectedStep.payload.map_id}
+                            onChange={(e) => {
+                              const map_id = e.target.value;
+                              const map = (
+                                project.workspace.key_maps ?? []
+                              ).find((m) => m.id === map_id);
+                              replaceStepAt(selectedStepIndex, {
+                                type: "ApplyKeyMap",
+                                payload: {
+                                  column: selectedStep.payload.column,
+                                  map_id,
+                                  entries: map?.entries ?? selectedStep.payload.entries ?? [],
+                                },
+                              });
+                            }}
+                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
+                          >
+                            {(project.workspace.key_maps ?? []).length === 0 && (
+                              <option value={selectedStep.payload.map_id}>
+                                {selectedStep.payload.map_id}
+                              </option>
+                            )}
+                            {(project.workspace.key_maps ?? []).map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.name} ({m.entries.length} rows)
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <p className="font-mono text-[10px] text-slate-500">
+                          {(selectedStep.payload.entries ?? []).length} entries
+                          in step snapshot
+                          {(selectedStep.payload.entries ?? [])
+                            .slice(0, 3)
+                            .map((e) => ` · ${e.from}→${e.to}`)
+                            .join("")}
+                          {(selectedStep.payload.entries?.length ?? 0) > 3
+                            ? "…"
+                            : ""}
+                        </p>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
+                          onClick={() => {
+                            const el = document.getElementById(
+                              "apply-keymap-col",
+                            ) as HTMLInputElement | null;
+                            const column =
+                              el?.value.trim() || selectedStep.payload.column;
+                            replaceStepAt(selectedStepIndex, {
+                              type: "ApplyKeyMap",
+                              payload: {
+                                ...selectedStep.payload,
+                                column,
+                              },
+                            });
+                          }}
+                        >
+                          Apply column
+                        </button>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
+                          onClick={() => {
+                            const maps = project.workspace.key_maps ?? [];
+                            const map =
+                              maps.find(
+                                (m) => m.id === selectedStep.payload.map_id,
+                              ) ?? {
+                                id: selectedStep.payload.map_id,
+                                name: selectedStep.payload.map_id,
+                                entries: selectedStep.payload.entries ?? [],
+                              };
+                            openKeyMapEditor(map, {
+                              suggestedFrom: [],
+                            });
+                          }}
+                        >
+                          Edit From→To map…
                         </button>
                       </>
                     )}

@@ -6,6 +6,7 @@ pub mod emit;
 pub mod export_manifest;
 pub mod export_tree;
 pub mod graph;
+pub mod key_map_sync;
 pub mod model;
 pub mod postgres_attach;
 pub mod producers;
@@ -23,10 +24,14 @@ pub use dialect::{
     QueryExecution, WarehouseDialect,
 };
 pub use emit::{
-    ascii_fold_name, emit_transform_step, emit_transform_step_ex, rename_select_list,
+    ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
+    key_map_seed_name, normalize_column_expr, parse_key_map_seed_csv, rename_select_list,
     resolve_source_column, select_list_aligned, sql_union_all_aligned,
     substitute_query_placeholders, union_column_names, validate_unambiguous_ascii_names,
     EmitSchemaOpts,
+};
+pub use key_map_sync::{
+    push_key_map_to_export, sync_key_maps_from_export, KeyMapSyncResult,
 };
 pub use schema::{apply_step_schema, infer_workspace_schemas, StepSchema, WorkspaceSchemas};
 pub use postgres_attach::{duckdb_postgres_relation, postgres_attach_alias};
@@ -37,7 +42,10 @@ pub use export_manifest::{
     commit_export_plan, find_conflicts, hash_content, load_manifest, ExportManifest, MANIFEST_FILE,
 };
 pub use export_tree::{list_export_tree, ExportResult};
-pub use model::{JoinType, QueryDef, TransformationStep, Workspace};
+pub use model::{
+    JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, QueryDef, TransformationStep,
+    Workspace,
+};
 pub use producers::{
     build_export_plan, dbt_model_name, preview_dbt_model_sql, preview_dbt_model_sql_with_seeds,
     DbtProducer, DbtTarget, OutputProducer, PreviewDbtModel,

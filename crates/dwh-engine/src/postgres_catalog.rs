@@ -35,6 +35,18 @@ pub fn ensure_pg_attached(conn: &Connection, conn_str: &str) -> Result<String, S
     Ok(alias)
 }
 
+/// Writable ATTACH for KeyMap write-back (separate alias so RO attach stays intact).
+pub fn ensure_pg_attached_rw(conn: &Connection, conn_str: &str) -> Result<String, String> {
+    let alias = format!("{}_w", postgres_attach_alias(conn_str));
+    let sql = format!(
+        "ATTACH IF NOT EXISTS '{}' AS {alias} (TYPE postgres);",
+        escape_sql_string(conn_str),
+    );
+    conn.execute_batch(&sql)
+        .map_err(|e| redact_conn_err(conn_str, e))?;
+    Ok(alias)
+}
+
 fn with_postgres_query<F, T>(
     db: &DbSession,
     connection_string: &str,

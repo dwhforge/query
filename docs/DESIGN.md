@@ -140,6 +140,14 @@ Selecting a Join step shows the following diagnostics beside its settings:
 
 Cell-level lineage through arbitrary SQL, calculations and aggregation; a universal provenance browser; and rich profiling of every column are not acceptance criteria for Join investigation MVP. An optional AI narrator over Join Lens facts is deferred ([ADR-0019](adr/0019-join-lens-ai-narrator.md)).
 
+### Key mapping (fix keys before Join)
+
+Unmatched / near-miss keys are fixed with explicit steps, not fuzzy Join ON ([ADR-0020](adr/0020-join-key-mapping.md)):
+
+- **Near-miss** → `NormalizeKey` (trim/case/spaces/zeros) on Left / Right / Both
+- **Aliases** → `KeyMap` From→To table + `ApplyKeyMap`; export as `seeds/map_*.csv` (table after `dbt seed`). After first export the seed is source of truth (sync back into the editor).
+- EmptyHero includes a virtual Key mapping playground; full demo: Help → Load demo → Key mapping.
+
 ## 10. Next — Definition of Done (*Return and edit*)
 
 Decisions: [ADR-0018](adr/0018-return-and-edit.md).  

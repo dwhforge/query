@@ -77,7 +77,51 @@ export type TransformationStep =
       };
     }
   | { type: "Append"; payload: { other_query_ids: string[] } }
-  | { type: "CustomSql"; payload: { raw_sql: string } };
+  | { type: "CustomSql"; payload: { raw_sql: string } }
+  | {
+      type: "NormalizeKey";
+      payload: { columns: string[]; ops: NormalizeOp[] };
+    }
+  | {
+      type: "ApplyKeyMap";
+      payload: { column: string; map_id: string; entries?: KeyMapEntry[] };
+    };
+
+/** Deterministic key cleanup ops (near-miss Apply). */
+export type NormalizeOp =
+  | "trim"
+  | "lower"
+  | "upper"
+  | "collapse_space"
+  | "ltrim_zeros";
+
+export interface KeyMapEntry {
+  from: string;
+  to: string;
+}
+
+/** Where the From→To table lives (ADR-0020). */
+export type KeyMapStorage =
+  | { kind: "seed" }
+  | { kind: "ref"; model: string }
+  | {
+      kind: "source";
+      source: string;
+      table: string;
+      /** Postgres connection for read / write-back. */
+      connection_id?: string;
+    };
+
+/** Named From→To join-key alias table (ADR-0020). */
+export interface KeyMapDef {
+  id: string;
+  name: string;
+  entries: KeyMapEntry[];
+  /** Default seed; or bind to existing dbt ref / source. */
+  storage?: KeyMapStorage;
+  from_column?: string;
+  to_column?: string;
+}
 
 /** Preview engine for this Query node only (ADR-0014). */
 export type QueryExecution = "local" | "target";
@@ -97,6 +141,8 @@ export interface QueryDef {
 export interface Workspace {
   queries: QueryDef[];
   focus_query_id: string;
+  /** Join-key alias maps (ADR-0020). */
+  key_maps?: KeyMapDef[];
 }
 
 /** Object catalog entry — may reference a Connection. */

@@ -7,12 +7,15 @@ import type {
 import {
   blameUnmatchedKey,
   explainJoinKey,
+  joinKeyNearMiss,
   previewWorkspace,
   type BlameUnmatchedKeyResult,
   type ExplainJoinKeyResult,
   type JoinDiagSample,
   type JoinDiagnostics,
+  type JoinKeyNearMiss,
   type JoinKeySide,
+  type NearMissHypothesis,
 } from "../lib/bridge";
 import {
   classifyJoinColumnOrigins,
@@ -301,6 +304,10 @@ export type JoinLensProps = {
   /** Opposite-probe candidates (unmatched samples). */
   joinDiag: JoinDiagnostics | null;
   joinDiagLoading?: boolean;
+  /** Apply near-miss → insert NormalizeKey before Join. */
+  onApplyNearMiss?: (hyp: NearMissHypothesis) => void;
+  /** Open KeyMap editor with From values from selected side key. */
+  onMapKey?: (side: JoinKeySide, fromValues: string[]) => void;
 };
 
 function JoinLensImpl({
@@ -316,6 +323,8 @@ function JoinLensImpl({
   rows,
   joinDiag,
   joinDiagLoading = false,
+  onApplyNearMiss,
+  onMapKey,
 }: JoinLensProps) {
   /** Linked-mode parent lookup (preview of left/right inputs). */
   const [parentLeftCols, setParentLeftCols] = useState<ColumnMetadata[]>([]);
@@ -339,6 +348,8 @@ function JoinLensImpl({
   );
   const [keyExplainLoading, setKeyExplainLoading] = useState(false);
   const [keyExplainError, setKeyExplainError] = useState<string | null>(null);
+  const [nearMiss, setNearMiss] = useState<JoinKeyNearMiss | null>(null);
+  const [nearMissLoading, setNearMissLoading] = useState(false);
 
   useEffect(() => {
     if (!enabled || !hostQueryId || joinStepIndex < 1 || !rightQueryId) return;
@@ -401,7 +412,27 @@ function JoinLensImpl({
     setKeyExplain(null);
     setKeyBlame(null);
     setKeyExplainError(null);
+    setNearMiss(null);
   }, [hostQueryId, joinStepIndex, leftOn.join("\0"), rightOn.join("\0")]);
+
+  useEffect(() => {
+    if (!enabled || !hostQueryId || joinStepIndex < 1) return;
+    let cancelled = false;
+    setNearMissLoading(true);
+    void joinKeyNearMiss(workspace, hostQueryId, joinStepIndex, connections)
+      .then((r) => {
+        if (!cancelled) setNearMiss(r);
+      })
+      .catch(() => {
+        if (!cancelled) setNearMiss(null);
+      })
+      .finally(() => {
+        if (!cancelled) setNearMissLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, workspace, hostQueryId, joinStepIndex, connections]);
 
   const unmatchedLeft = joinDiag?.unmatched_left ?? null;
   const unmatchedRight = joinDiag?.unmatched_right ?? null;
@@ -955,6 +986,42 @@ function JoinLensImpl({
             </span>
           )}
         </div>
+        {(nearMissLoading ||
+          (nearMiss && nearMiss.hypotheses.length > 0)) && (
+          <div className="shrink-0 space-y-1 border-b border-teal-950/60 bg-teal-950/20 px-2 py-1">
+            <div className="text-[9px] font-semibold uppercase tracking-wide text-teal-400/80">
+              Near-miss
+              {nearMiss && nearMiss.hypotheses.length > 0
+                ? ` (+${nearMiss.hypotheses.reduce((s, h) => s + h.delta_matches, 0)} keys)`
+                : nearMissLoading
+                  ? "…"
+                  : ""}
+            </div>
+            {(nearMiss?.hypotheses ?? []).slice(0, 3).map((h, i) => (
+              <div
+                key={i}
+                className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-300"
+              >
+                <span className="font-mono text-teal-200/90">
+                  {h.ops.join("→")}
+                </span>
+                <span className="text-slate-500">on {h.apply_on}</span>
+                <span className="text-slate-500">
+                  Δ+{h.delta_matches}
+                </span>
+                {onApplyNearMiss && (
+                  <button
+                    type="button"
+                    onClick={() => onApplyNearMiss(h)}
+                    className="rounded border border-teal-800/80 px-1 py-0.5 text-[9px] text-teal-200 hover:bg-teal-500/10"
+                  >
+                    Apply NormalizeKey
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {(keyBlame || keyExplainError) && (
           <div
             className={`shrink-0 border-b px-2 py-1 text-[10px] leading-snug ${
@@ -963,7 +1030,37 @@ function JoinLensImpl({
                 : "border-slate-800 bg-slate-950/80 text-slate-300"
             }`}
           >
-            {keyExplainError ?? (keyBlame ? blameLabel(keyBlame) : null)}
+            <div className="flex flex-wrap items-center gap-2">
+              <span>
+                {keyExplainError ?? (keyBlame ? blameLabel(keyBlame) : null)}
+              </span>
+              {onMapKey &&
+                keyBlame?.verdict === "no_partner" &&
+                sideProbe &&
+                !pairMode && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const side: JoinKeySide =
+                        leftSel != null ? "left" : "right";
+                      const row =
+                        leftSel != null
+                          ? leftRows[leftSel!]
+                          : rightRows[rightSel!];
+                      const cols = leftSel != null ? leftCols : rightCols;
+                      const keys = leftSel != null ? leftOn : rightOn;
+                      if (!row) return;
+                      const vals = keyValuesFromRow(row, cols, keys).map(
+                        (v) => cellStr(v),
+                      );
+                      onMapKey(side, vals);
+                    }}
+                    className="rounded border border-amber-800/60 px-1.5 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
+                  >
+                    Add to map…
+                  </button>
+                )}
+            </div>
           </div>
         )}
         <div className="min-h-0 flex-1">

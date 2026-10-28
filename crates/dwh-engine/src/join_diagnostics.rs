@@ -448,6 +448,7 @@ mod tests {
                 },
             ],
             focus_query_id: "fact".into(),
+            key_maps: vec![],
         };
 
         let db = DbSession::new().expect("duckdb");
@@ -493,6 +494,7 @@ mod tests {
                 },
             ],
             focus_query_id: "left".into(),
+            key_maps: vec![],
         };
 
         let db = DbSession::new().expect("duckdb");

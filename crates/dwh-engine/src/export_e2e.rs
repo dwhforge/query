@@ -62,6 +62,7 @@ mod tests {
                 },
             ],
             focus_query_id: "sales_all".into(),
+            key_maps: vec![],
         }
     }
 

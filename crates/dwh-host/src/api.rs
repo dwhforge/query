@@ -7,16 +7,20 @@ use dwh_engine::{
     blame_unmatched_key as run_blame_unmatched_key, collect_load_seeds,
     describe_postgres_object as run_describe_postgres_object,
     explain_join_key as run_explain_join_key, explain_join_rows as run_explain_join_rows,
-    join_diagnostics as run_join_diagnostics, list_postgres_objects as run_list_postgres_objects,
+    join_diagnostics as run_join_diagnostics, join_key_near_miss as run_join_key_near_miss,
+    list_postgres_objects as run_list_postgres_objects,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
-    set_extensions_dir, test_postgres_connection as run_test_postgres_connection,
+    read_key_map as run_read_key_map, set_extensions_dir,
+    test_postgres_connection as run_test_postgres_connection, write_key_map as run_write_key_map,
     BlameUnmatchedKeyResult, DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult,
-    JoinDiagnostics, JoinKeySide, JoinKeyTuple, PostgresColumn, PostgresObject, PreviewResult,
+    JoinDiagnostics, JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, KeyMapWriteResult, PostgresColumn,
+    PostgresObject, PreviewResult,
 };
 use dwh_pipeline::{
     dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql,
-    preview_dbt_model_sql_with_seeds, resolve_dbt_bin, ConnectionDef, DbtProducer, DbtTarget,
-    ExportResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
+    preview_dbt_model_sql_with_seeds, push_key_map_to_export, resolve_dbt_bin,
+    sync_key_maps_from_export, ConnectionDef, DbtProducer, DbtTarget, ExportResult, KeyMapDef,
+    KeyMapSyncResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
     Workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -275,6 +279,7 @@ fn demo_sales(fixtures: &Path) -> Result<Workspace, String> {
             },
         ],
         focus_query_id: "top_by_region".into(),
+        key_maps: vec![],
     })
 }
 
@@ -332,6 +337,7 @@ fn demo_union(fixtures: &Path) -> Result<Workspace, String> {
             },
         ],
         focus_query_id: "by_region".into(),
+        key_maps: vec![],
     })
 }
 
@@ -396,6 +402,7 @@ fn demo_sql(fixtures: &Path) -> Result<Workspace, String> {
             },
         ],
         focus_query_id: "sales_enriched".into(),
+        key_maps: vec![],
     })
 }
 
@@ -450,6 +457,74 @@ fn demo_right_joins(fixtures: &Path) -> Result<Workspace, String> {
             },
         ],
         focus_query_id: "coverage".into(),
+        key_maps: vec![],
+    })
+}
+
+/// Dirty channel codes → dim_channel via KeyMap (ADR-0020). Hero playground twin.
+fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
+    use dwh_pipeline::{KeyMapDef, KeyMapEntry};
+    let sales = fixture_csv(fixtures, "alias_sales.csv")?;
+    let dim = fixture_csv(fixtures, "dim_channel.csv")?;
+    let mut map = KeyMapDef::new("map_channel_alias", "channel aliases");
+    map.entries = vec![
+        KeyMapEntry {
+            from: "www".into(),
+            to: "web".into(),
+        },
+        KeyMapEntry {
+            from: "shop".into(),
+            to: "store".into(),
+        },
+        KeyMapEntry {
+            from: "prt".into(),
+            to: "partner".into(),
+        },
+        KeyMapEntry {
+            from: "Web ".into(),
+            to: "web".into(),
+        },
+    ];
+    Ok(Workspace {
+        queries: vec![
+            QueryDef {
+                id: "dim_channel".into(),
+                name: "dim_channel".into(),
+                steps: vec![TransformationStep::LoadCsv { path: dim }],
+                execution: Default::default(),
+            },
+            QueryDef {
+                id: "alias_sales".into(),
+                name: "alias_sales".into(),
+                steps: vec![
+                    TransformationStep::LoadCsv { path: sales },
+                    TransformationStep::ApplyKeyMap {
+                        column: "channel".into(),
+                        map_id: map.id.clone(),
+                        entries: map.entries.clone(),
+                    },
+                ],
+                execution: Default::default(),
+            },
+            QueryDef {
+                id: "enriched".into(),
+                name: "enriched".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "alias_sales".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_channel".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["channel".into()],
+                        right_on: vec!["channel".into()],
+                    },
+                ],
+                execution: Default::default(),
+            },
+        ],
+        focus_query_id: "enriched".into(),
+        key_maps: vec![map],
     })
 }
 
@@ -460,8 +535,9 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "union" => demo_union(&fixtures),
         "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
         "right" | "right_joins" | "coverage" => demo_right_joins(&fixtures),
+        "keymap" | "key_map" | "mapping" | "aliases" => demo_keymap(&fixtures),
         other => Err(format!(
-            "Unknown demo '{other}'. Use: sales | union | sql | right"
+            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap"
         )),
     }
 }
@@ -481,6 +557,34 @@ struct JoinDiagArgs {
     host_query_id: String,
     join_step_index: usize,
     connections: Option<Vec<ConnectionDef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncKeyMapsArgs {
+    workspace: Workspace,
+    export_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncKeyMapsOut {
+    workspace: Workspace,
+    result: KeyMapSyncResult,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushKeyMapArgs {
+    export_path: String,
+    key_map: KeyMapDef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyMapWhArgs {
+    key_map: KeyMapDef,
+    connection_string: String,
 }
 
 #[derive(Deserialize)]
@@ -766,6 +870,48 @@ impl HostState {
                     &a.key_values,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "join_key_near_miss" => {
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let conns = a.connections.unwrap_or_default();
+                let out: JoinKeyNearMiss = run_join_key_near_miss(
+                    &db,
+                    &a.workspace,
+                    &conns,
+                    &a.host_query_id,
+                    a.join_step_index,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "sync_key_maps_from_export" => {
+                let a: SyncKeyMapsArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let mut ws = a.workspace;
+                let result: KeyMapSyncResult =
+                    sync_key_maps_from_export(&mut ws, Path::new(&a.export_path))?;
+                serde_json::to_value(SyncKeyMapsOut {
+                    workspace: ws,
+                    result,
+                })
+                .map_err(|e| e.to_string())
+            }
+            "push_key_map_to_export" => {
+                let a: PushKeyMapArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let rel = push_key_map_to_export(Path::new(&a.export_path), &a.key_map)?;
+                serde_json::to_value(serde_json::json!({ "path": rel })).map_err(|e| e.to_string())
+            }
+            "write_key_map" => {
+                let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out: KeyMapWriteResult =
+                    run_write_key_map(&db, &a.key_map, &a.connection_string)?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "read_key_map" => {
+                let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let entries = run_read_key_map(&db, &a.key_map, &a.connection_string)?;
+                serde_json::to_value(serde_json::json!({ "entries": entries }))
+                    .map_err(|e| e.to_string())
             }
             "preview_dbt_model" => {
                 let a: PreviewDbtArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;

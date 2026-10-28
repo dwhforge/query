@@ -218,6 +218,81 @@ export function blameUnmatchedKey(
   });
 }
 
+export type NearMissSide = "left" | "right" | "both";
+
+export type NearMissHypothesis = {
+  ops: string[];
+  apply_on: NearMissSide;
+  baseline_matches: number;
+  after_matches: number;
+  delta_matches: number;
+  sample_pairs: string[];
+};
+
+export type JoinKeyNearMiss = {
+  host_query_id: string;
+  join_step_index: number;
+  left_on: string[];
+  right_on: string[];
+  baseline_matches: number;
+  hypotheses: NearMissHypothesis[];
+};
+
+export function joinKeyNearMiss(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  connections: ConnectionDef[] = [],
+): Promise<JoinKeyNearMiss> {
+  return invoke<JoinKeyNearMiss>("join_key_near_miss", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+  });
+}
+
+export type KeyMapSyncResult = {
+  updated_maps: number;
+  created_maps: number;
+  seed_files: string[];
+};
+
+export function syncKeyMapsFromExport(
+  workspace: Workspace,
+  exportPath: string,
+): Promise<{ workspace: Workspace; result: KeyMapSyncResult }> {
+  return invoke("sync_key_maps_from_export", { workspace, exportPath });
+}
+
+export function pushKeyMapToExport(
+  exportPath: string,
+  keyMap: import("../types/pipeline").KeyMapDef,
+): Promise<{ path: string }> {
+  return invoke("push_key_map_to_export", { exportPath, keyMap });
+}
+
+export type KeyMapWriteResult = {
+  schema: string;
+  table: string;
+  rows_written: number;
+  created_table: boolean;
+};
+
+export function writeKeyMap(
+  keyMap: import("../types/pipeline").KeyMapDef,
+  connectionString: string,
+): Promise<KeyMapWriteResult> {
+  return invoke("write_key_map", { keyMap, connectionString });
+}
+
+export function readKeyMap(
+  keyMap: import("../types/pipeline").KeyMapDef,
+  connectionString: string,
+): Promise<{ entries: import("../types/pipeline").KeyMapEntry[] }> {
+  return invoke("read_key_map", { keyMap, connectionString });
+}
+
 export interface ExportResult {
   path: string;
   files: string[];
@@ -247,7 +322,7 @@ export function listExportTree(path: string): Promise<string[]> {
   return invoke<string[]>("list_export_tree", { path });
 }
 
-export type DemoWorkspaceName = "sales" | "union" | "sql";
+export type DemoWorkspaceName = "sales" | "union" | "sql" | "right" | "keymap";
 
 export function loadDemoWorkspace(
   name: DemoWorkspaceName | string,
@@ -354,4 +429,18 @@ export function saveDialog(opts?: {
 
 export function revealItemInDir(path: string): Promise<void> {
   return bridge().revealItemInDir(path);
+}
+
+export type WindowAction =
+  | "zoom-in"
+  | "zoom-out"
+  | "zoom-reset"
+  | "toggle-fullscreen"
+  | "close";
+
+/** Electron window chrome (zoom / fullscreen / close). No-op if bridge lacks API. */
+export function windowAction(action: WindowAction): Promise<void> {
+  const dwh = window.dwh;
+  if (!dwh?.windowAction) return Promise.resolve();
+  return dwh.windowAction(action).then(() => undefined);
 }

@@ -214,6 +214,7 @@ mod tests {
 },
             ],
             focus_query_id: "joined".into(),
+            key_maps: vec![],
         };
         let order = topo_queries(&ws).unwrap();
         assert!(

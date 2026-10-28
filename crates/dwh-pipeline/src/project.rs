@@ -115,6 +115,7 @@ mod tests {
                     execution: Default::default(),
                 }],
                 focus_query_id: "q1".into(),
+                key_maps: vec![],
             },
             dbt_target: DbtTarget::V1,
             target_dialect: WarehouseDialect::Duckdb,

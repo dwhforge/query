@@ -255,6 +255,7 @@ mod tests {
                 },
             ],
             focus_query_id: "by_region".into(),
+            key_maps: vec![],
         };
 
         let db = DbSession::new().expect("duckdb");
@@ -346,6 +347,7 @@ mod tests {
                 },
             ],
             focus_query_id: "coverage".into(),
+            key_maps: vec![],
         };
         let db = DbSession::new().expect("duckdb");
         let out = preview_workspace(&db, &ws, &[]).expect("preview");

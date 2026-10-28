@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld("dwh", {
   open: (opts) => ipcRenderer.invoke("dwh:open", opts),
   save: (opts) => ipcRenderer.invoke("dwh:save", opts),
   revealItemInDir: (p) => ipcRenderer.invoke("dwh:reveal", p),
+  windowAction: (action) => ipcRenderer.invoke("dwh:window", action),
 });

@@ -48,6 +48,7 @@ import {
   joinDiagnostics,
   listExportTree,
   getAppSettings,
+  getGlobalConnections,
   getLastProjectPath,
   loadProject,
   loadDemoWorkspace,
@@ -55,6 +56,7 @@ import {
   previewWorkspace,
   saveProject,
   setAppSettings,
+  setGlobalConnections,
   type AppSettings,
   type JoinDiagSample,
   type JoinDiagnostics,
@@ -103,6 +105,8 @@ function App() {
   );
   const [filterCondition, setFilterCondition] = useState("");
   const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
+  /** Schema before the selected SelectColumns step (full upstream column list). */
+  const [upstreamColumnNames, setUpstreamColumnNames] = useState<string[]>([]);
   const [groupDims, setGroupDims] = useState("");
   const [groupAggs, setGroupAggs] = useState("count(*) as n");
   const [joinRightId, setJoinRightId] = useState("");
@@ -588,17 +592,21 @@ function App() {
   const selectedSource =
     project.sources.find((s) => s.id === selectedSourceId) ?? null;
 
-  function upsertConnection(conn: ConnectionDef) {
-    setProject((p) => {
-      const idx = p.connections.findIndex((c) => c.id === conn.id);
-      const connections =
-        idx >= 0
-          ? p.connections.map((c) => (c.id === conn.id ? conn : c))
-          : [...p.connections, conn];
-      return { ...p, connections };
-    });
+  async function upsertConnection(conn: ConnectionDef) {
+    const next = (() => {
+      const idx = project.connections.findIndex((c) => c.id === conn.id);
+      return idx >= 0
+        ? project.connections.map((c) => (c.id === conn.id ? conn : c))
+        : [...project.connections, conn];
+    })();
+    setProject((p) => ({ ...p, connections: next }));
     setConnEditorOpen(false);
     setEditingConnection(null);
+    try {
+      await setGlobalConnections(next);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
   }
 
   function openNewConnection(kind: ConnectionKind) {
@@ -957,6 +965,7 @@ function App() {
       setProject((p) => ({
         ...p,
         name: projectName,
+        // Keep global connections; demos only replace sources/workspace.
         sources: syncSourcesFromQueries([], ws.queries),
         workspace: ws,
         canvas: { positions: {} },
@@ -1531,7 +1540,7 @@ function App() {
     }
   }
 
-  // Load app settings, then restore last project (or seed Untitled from settings).
+  // Load app settings + global connections, then restore last project.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -1555,6 +1564,12 @@ function App() {
       } catch {
         // Missing settings — keep in-memory defaults.
       }
+      let globalConns: ConnectionDef[] = [];
+      try {
+        globalConns = await getGlobalConnections();
+      } catch {
+        // First run / missing connections.json.
+      }
       try {
         const path = await getLastProjectPath();
         if (cancelled) return;
@@ -1569,7 +1584,10 @@ function App() {
         // Missing/corrupt session — fall through to Untitled.
       }
       if (!cancelled) {
-        setProject(emptyProject("Untitled", settings));
+        setProject({
+          ...emptyProject("Untitled", settings),
+          connections: globalConns,
+        });
       }
     })();
     return () => {
@@ -1692,7 +1710,52 @@ function App() {
       : null;
 
   /** Columns to pick from — prefer live preview of the active/focus query. */
+  // When editing SelectColumns, load columns from the query truncated *before* that step
+  // so the picker still lists fields that the step currently drops.
+  useEffect(() => {
+    if (
+      !activeQueryId ||
+      selectedStepIndex === null ||
+      selectedStep?.type !== "SelectColumns"
+    ) {
+      setUpstreamColumnNames([]);
+      return;
+    }
+    let cancelled = false;
+    const hostId = activeQueryId;
+    const upto = selectedStepIndex;
+    const leftWs: Workspace = {
+      ...project.workspace,
+      focus_query_id: hostId,
+      queries: project.workspace.queries.map((q) =>
+        q.id === hostId ? { ...q, steps: q.steps.slice(0, upto) } : q,
+      ),
+    };
+    void previewWorkspace(leftWs, connections)
+      .then((res) => {
+        if (!cancelled) {
+          setUpstreamColumnNames(res.columns.map((c) => c.name));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setUpstreamColumnNames([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeQueryId,
+    selectedStepIndex,
+    selectedStep?.type,
+    project.workspace,
+    connections,
+  ]);
+
   const columnChoices = useMemo(() => {
+    const fromUpstream =
+      selectedStep?.type === "SelectColumns" && upstreamColumnNames.length > 0
+        ? upstreamColumnNames
+        : [];
     const fromPreview =
       preview && preview.columns.length > 0
         ? preview.columns.map((c) => c.name)
@@ -1701,8 +1764,16 @@ function App() {
       selectedStep?.type === "SelectColumns"
         ? selectedStep.payload.columns
         : [];
-    return [...new Set([...fromPreview, ...fromStep, ...selectedColumns])];
-  }, [preview, selectedStep, selectedColumns]);
+    // Prefer upstream-of-SelectColumns when editing that step; else live preview.
+    const base =
+      fromUpstream.length > 0 ? fromUpstream : fromPreview;
+    return [...new Set([...base, ...fromStep, ...selectedColumns])];
+  }, [
+    preview,
+    selectedStep,
+    selectedColumns,
+    upstreamColumnNames,
+  ]);
 
   function addAvailableStep(kind: string) {
     if (!activeQuery) return;
@@ -1711,12 +1782,22 @@ function App() {
       case "Filter":
         appendStep({ type: "Filter", payload: { condition: "" } });
         break;
-      case "SelectColumns":
+      case "SelectColumns": {
+        // Keep all upstream columns by default (not a truncated subset).
+        const cols =
+          columnChoices.length > 0
+            ? [...columnChoices]
+            : (preview?.columns.map((c) => c.name) ?? []);
+        if (cols.length === 0) {
+          setError("Columns: wait for preview so the schema is known");
+          return;
+        }
         appendStep({
           type: "SelectColumns",
-          payload: { columns: columnChoices.slice(0, 5) },
+          payload: { columns: cols },
         });
         break;
+      }
       case "GroupBy":
         appendStep({
           type: "GroupBy",
@@ -2413,24 +2494,44 @@ function App() {
                     {selectedStep.type === "SelectColumns" && (
                       <>
                         {columnChoices.length > 0 && (
-                          <ul className="max-h-28 space-y-0.5 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
-                            {columnChoices.map((name) => {
-                              const checked = selectedColumns.includes(name);
-                              return (
-                                <li key={name}>
-                                  <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-200 hover:bg-slate-900">
-                                    <input
-                                      type="checkbox"
-                                      checked={checked}
-                                      onChange={() => toggleColumn(name)}
-                                      className="rounded border-slate-600"
-                                    />
-                                    <span className="font-mono">{name}</span>
-                                  </label>
-                                </li>
-                              );
-                            })}
-                          </ul>
+                          <>
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                className="flex-1 rounded border border-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
+                                onClick={() =>
+                                  setSelectedColumns([...columnChoices])
+                                }
+                              >
+                                Select all
+                              </button>
+                              <button
+                                type="button"
+                                className="flex-1 rounded border border-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:border-slate-600 hover:text-slate-200"
+                                onClick={() => setSelectedColumns([])}
+                              >
+                                Clear
+                              </button>
+                            </div>
+                            <ul className="max-h-40 space-y-0.5 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
+                              {columnChoices.map((name) => {
+                                const checked = selectedColumns.includes(name);
+                                return (
+                                  <li key={name}>
+                                    <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-200 hover:bg-slate-900">
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() => toggleColumn(name)}
+                                        className="rounded border-slate-600"
+                                      />
+                                      <span className="font-mono">{name}</span>
+                                    </label>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </>
                         )}
                         <input
                           type="text"

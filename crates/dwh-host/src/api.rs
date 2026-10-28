@@ -1,5 +1,6 @@
 //! Command dispatch — same surface as the former Tauri invoke API (camelCase args).
 
+use crate::connections_io;
 use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
@@ -481,6 +482,12 @@ struct SettingsArgs {
     settings: AppSettings,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GlobalConnectionsArgs {
+    connections: Vec<ConnectionDef>,
+}
+
 pub struct HostState {
     pub db: Mutex<DbSession>,
 }
@@ -635,6 +642,18 @@ impl HostState {
                 drop(db);
                 let a: SettingsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 settings_io::save_settings(&a.settings)?;
+                Ok(Value::Null)
+            }
+            "get_global_connections" => {
+                drop(db);
+                let conns = connections_io::load_global_connections()?;
+                serde_json::to_value(conns).map_err(|e| e.to_string())
+            }
+            "set_global_connections" => {
+                drop(db);
+                let a: GlobalConnectionsArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                connections_io::save_global_connections(&a.connections)?;
                 Ok(Value::Null)
             }
             "load_demo_workspace" => {

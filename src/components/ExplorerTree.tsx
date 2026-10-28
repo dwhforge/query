@@ -350,16 +350,24 @@ export function ExplorerTree({
             count={project.connections.length}
             onToggle={() => onToggle("connections")}
             actions={
-              <IconBtn title="New connection" onClick={onAddConnection}>
-                +
-              </IconBtn>
+              <>
+                <span
+                  className="mr-0.5 text-[9px] font-medium uppercase tracking-wide text-slate-600"
+                  title="Shared across all projects"
+                >
+                  Global
+                </span>
+                <IconBtn title="New connection" onClick={onAddConnection}>
+                  +
+                </IconBtn>
+              </>
             }
           />
           {connectionsOpen && (
             <ul className="mb-2 ml-3 border-l border-[var(--line)] pl-2">
               {project.connections.length === 0 && (
                 <li className="py-1 text-xs text-slate-600">
-                  PG / S3 credentials — use +
+                  PG / S3 credentials (app-wide) — use +
                 </li>
               )}
               {project.connections.map((c) => (

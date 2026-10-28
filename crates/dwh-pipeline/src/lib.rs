@@ -44,6 +44,7 @@ pub use producers::{
 };
 pub use project::{CanvasLayout, CanvasPosition, Project, SourceDef, SourceKind};
 pub use secrets::{
-    extract_connection_secret, merge_project_secrets, project_for_disk, strip_connection_secrets,
-    ConnectionSecret, SecretsFile,
+    connections_for_disk, extract_connection_secret, merge_connection_list_secrets,
+    merge_project_secrets, migrate_legacy_project_secrets, project_for_disk,
+    strip_connection_secrets, upsert_global_secrets, ConnectionSecret, SecretsFile,
 };

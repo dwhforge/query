@@ -250,6 +250,17 @@ export function setAppSettings(settings: AppSettings): Promise<void> {
   return invoke<void>("set_app_settings", { settings });
 }
 
+/** App-global Connections (shells + secrets under ~/.dwhforge-query/). */
+export function getGlobalConnections(): Promise<ConnectionDef[]> {
+  return invoke<ConnectionDef[]>("get_global_connections");
+}
+
+export function setGlobalConnections(
+  connections: ConnectionDef[],
+): Promise<void> {
+  return invoke<void>("set_global_connections", { connections });
+}
+
 /** Electron dialog helpers. */
 export function openDialog(opts?: {
   multiple?: boolean;

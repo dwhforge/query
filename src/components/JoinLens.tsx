@@ -6,7 +6,10 @@ import type {
 } from "../types/pipeline";
 import type { ExplainJoinRowsResult, JoinRowExplanation } from "../lib/bridge";
 import { explainJoinRows } from "../lib/bridge";
-import { classifyJoinColumnOrigins } from "../lib/joinColumnOrigin";
+import {
+  classifyJoinColumnOrigins,
+  pinSideRowsToResult,
+} from "../lib/joinColumnOrigin";
 import { PreviewTable } from "./PreviewTable";
 
 const DEBOUNCE_MS = 90;
@@ -44,8 +47,10 @@ type SideCardProps = {
   title: "Left" | "Right";
   columns: ColumnMetadata[];
   rows: unknown[][];
-  matchCount: number;
   maxMatches: number;
+  /** Key-level match count before pinning to the active result row. */
+  keyMatchCount: number;
+  pinned: boolean;
   keyNames: string[];
   emptyHint: string;
   /** Scroll + highlight target when explanation changes. */
@@ -57,8 +62,9 @@ function SideCard({
   title,
   columns,
   rows,
-  matchCount,
   maxMatches,
+  keyMatchCount,
+  pinned,
   keyNames,
   emptyHint,
   scrollToken,
@@ -84,6 +90,20 @@ function SideCard({
     }
   }, [scrollToken, rows, columns, keyNames, onAnchorEl]);
 
+  let status: string;
+  if (keyMatchCount === 0 && rows.length === 0) {
+    status = "no match";
+  } else if (pinned && keyMatchCount > rows.length) {
+    status =
+      rows.length === 1
+        ? `1 parent · ${keyMatchCount} share key`
+        : `${rows.length} parents · ${keyMatchCount} share key`;
+  } else if (keyMatchCount > maxMatches || keyMatchCount > rows.length) {
+    status = `${rows.length} of ${keyMatchCount} shown`;
+  } else {
+    status = `${keyMatchCount} match${keyMatchCount === 1 ? "" : "es"}`;
+  }
+
   return (
     <div className="flex h-full min-h-0 w-[11.5rem] shrink-0 flex-col overflow-hidden rounded-lg border border-teal-900/40 bg-[#071018] shadow-lg shadow-black/40">
       <div className="shrink-0 border-b border-slate-800 px-2 py-1.5">
@@ -94,13 +114,7 @@ function SideCard({
         >
           {title}
         </div>
-        <div className="text-[10px] text-slate-500">
-          {matchCount === 0
-            ? "no match"
-            : matchCount > maxMatches
-              ? `${rows.length} of ${matchCount} shown`
-              : `${matchCount} match${matchCount === 1 ? "" : "es"}`}
-        </div>
+        <div className="text-[10px] text-slate-500">{status}</div>
       </div>
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto p-1.5">
         {rows.length === 0 ? (
@@ -309,12 +323,6 @@ export function JoinLens({
     return cacheRef.current.get(fingerprint(vals)) ?? null;
   }, [activeIndex, rows, columns, leftOn, enabled, cacheTick, keysPresent]);
 
-  const scrollToken = useMemo(
-    () =>
-      `${activeIndex}|${activeExpl?.fingerprint ?? ""}|${activeExpl?.left_rows.length ?? 0}|${activeExpl?.right_rows.length ?? 0}`,
-    [activeIndex, activeExpl],
-  );
-
   const columnOrigins = useMemo(() => {
     if (leftCols.length === 0 && rightCols.length === 0) {
       return classifyJoinColumnOrigins(
@@ -331,6 +339,68 @@ export function JoinLens({
       rightCols.map((c) => c.name),
     );
   }, [columns, leftOn, leftCols, rightCols]);
+
+  // Key-only lookup returns every left/right row sharing the join key (e.g. same
+  // region, different qty). Pin docks to the active result row via side columns.
+  const leftPinned = useMemo(() => {
+    const idx = Math.min(activeIndex, Math.max(0, rows.length - 1));
+    const resultRow = rows[idx];
+    if (!activeExpl || !resultRow) {
+      return { rows: [] as unknown[][], pinned: false };
+    }
+    return pinSideRowsToResult({
+      side: "left",
+      sideRows: activeExpl.left_rows,
+      sideColumns: leftCols,
+      resultRow,
+      resultColumns: columns,
+      origins: columnOrigins,
+      leftOn,
+      rightOn,
+    });
+  }, [
+    activeExpl,
+    activeIndex,
+    rows,
+    leftCols,
+    columns,
+    columnOrigins,
+    leftOn,
+    rightOn,
+  ]);
+
+  const rightPinned = useMemo(() => {
+    const idx = Math.min(activeIndex, Math.max(0, rows.length - 1));
+    const resultRow = rows[idx];
+    if (!activeExpl || !resultRow) {
+      return { rows: [] as unknown[][], pinned: false };
+    }
+    return pinSideRowsToResult({
+      side: "right",
+      sideRows: activeExpl.right_rows,
+      sideColumns: rightCols,
+      resultRow,
+      resultColumns: columns,
+      origins: columnOrigins,
+      leftOn,
+      rightOn,
+    });
+  }, [
+    activeExpl,
+    activeIndex,
+    rows,
+    rightCols,
+    columns,
+    columnOrigins,
+    leftOn,
+    rightOn,
+  ]);
+
+  const scrollToken = useMemo(
+    () =>
+      `${activeIndex}|${activeExpl?.fingerprint ?? ""}|${leftPinned.rows.length}|${rightPinned.rows.length}|${leftPinned.pinned}|${rightPinned.pinned}`,
+    [activeIndex, activeExpl, leftPinned, rightPinned],
+  );
 
   const updateBeam = useCallback(() => {
     const root = rootRef.current;
@@ -351,7 +421,9 @@ export function JoinLens({
       return;
     }
 
-    // Center: first key cell, clamped into visible grid.
+    // Center hub = join key cell (left_on spelling). Do NOT clamp X to the clip
+    // edge — that made the beam look attached to whatever column was at the
+    // viewport border after horizontal scroll.
     const keyCell = rowEl.querySelector(
       '[data-join-origin="key"]',
     ) as HTMLElement | null;
@@ -359,34 +431,35 @@ export function JoinLens({
     let cy: number;
     if (keyCell) {
       const kr = keyCell.getBoundingClientRect();
-      let ax = kr.left + kr.width / 2;
-      if (ax < cr.left + 4) ax = cr.left + 10;
-      else if (ax > cr.right - 4) ax = cr.right - 10;
-      cx = ax - rr.left;
+      cx = kr.left + kr.width / 2 - rr.left;
       cy =
         Math.min(Math.max(kr.top + kr.height / 2, cr.top + 4), cr.bottom - 4) -
         rr.top;
     } else {
-      cx = cr.left + 12 - rr.left;
+      // Keys dropped from select: hub = mid of the active result row.
+      const x0 = Math.max(ar.left, cr.left);
+      const x1 = Math.min(ar.right, cr.right);
+      cx = (x0 + x1) / 2 - rr.left;
       cy =
         Math.min(Math.max(ar.top + ar.height / 2, cr.top + 4), cr.bottom - 4) -
         rr.top;
     }
 
-    // Side anchors: exact key field inside left/right docks (outer edge toward center).
-    if (!leftA || !rightA) {
+    // Side hubs = first join-key field on each dock (paired left_on / right_on).
+    // Allow one-sided beam when the other side has no match.
+    if (!leftA && !rightA) {
       setBeam(null);
       return;
     }
-    const la = leftA.getBoundingClientRect();
-    const ra = rightA.getBoundingClientRect();
+    const la = leftA?.getBoundingClientRect();
+    const ra = rightA?.getBoundingClientRect();
     setBeam({
-      lx: la.right - rr.left,
-      ly: la.top + la.height / 2 - rr.top,
+      lx: la ? la.right - rr.left : cx - 24,
+      ly: la ? la.top + la.height / 2 - rr.top : cy,
       cx,
       cy,
-      rx: ra.left - rr.left,
-      ry: ra.top + ra.height / 2 - rr.top,
+      rx: ra ? ra.left - rr.left : cx + 24,
+      ry: ra ? ra.top + ra.height / 2 - rr.top : cy,
     });
   }, []);
 
@@ -404,6 +477,16 @@ export function JoinLens({
     },
     [updateBeam],
   );
+
+  // Bring join-key column into the center viewport when the active row changes.
+  useEffect(() => {
+    const rowEl = activeRowElRef.current;
+    if (!rowEl) return;
+    const keyCell = rowEl.querySelector(
+      '[data-join-origin="key"]',
+    ) as HTMLElement | null;
+    keyCell?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [scrollToken, activeIndex]);
 
   useEffect(() => {
     updateBeam();
@@ -434,14 +517,15 @@ export function JoinLens({
       <SideCard
         title="Left"
         columns={leftCols}
-        rows={activeExpl?.left_rows ?? []}
-        matchCount={activeExpl?.left_match_count ?? 0}
+        rows={leftPinned.rows}
         maxMatches={maxMatches}
+        keyMatchCount={activeExpl?.left_match_count ?? 0}
+        pinned={leftPinned.pinned}
         keyNames={leftOn}
         emptyHint={
           loading
             ? "resolving…"
-            : "No left row for this key (or still loading)."
+            : "No left row for this join key (or still loading)."
         }
         scrollToken={`L:${scrollToken}`}
         onAnchorEl={onLeftAnchor}
@@ -481,14 +565,15 @@ export function JoinLens({
       <SideCard
         title="Right"
         columns={rightCols}
-        rows={activeExpl?.right_rows ?? []}
-        matchCount={activeExpl?.right_match_count ?? 0}
+        rows={rightPinned.rows}
         maxMatches={maxMatches}
+        keyMatchCount={activeExpl?.right_match_count ?? 0}
+        pinned={rightPinned.pinned}
         keyNames={rightOn}
         emptyHint={
           loading
             ? "resolving…"
-            : "No right row for this key (or still loading)."
+            : "No right row for this join key (or still loading)."
         }
         scrollToken={`R:${scrollToken}`}
         onAnchorEl={onRightAnchor}

@@ -296,6 +296,8 @@ function App() {
   ]);
 
   // Join diagnostics (DESIGN §9) — async, never blocks Apply / canvas.
+  // Skip until ON keys exist: a new Join is often saved with left_on=[], and
+  // the engine rejects that with "left_on/right_on must be non-empty…".
   useEffect(() => {
     const step =
       selectedStepIndex != null && activeQuery
@@ -306,6 +308,16 @@ function App() {
       setJoinDiagError(null);
       setJoinDiagLoading(false);
       setDiagView(null);
+      return;
+    }
+    const { left_on, right_on } = step.payload;
+    if (
+      left_on.length === 0 ||
+      left_on.length !== right_on.length
+    ) {
+      setJoinDiag(null);
+      setJoinDiagError(null);
+      setJoinDiagLoading(false);
       return;
     }
     let cancelled = false;
@@ -1035,13 +1047,33 @@ function App() {
     setError(null);
   }
 
+  function highlightKeysForDiag(kind: JoinDiagKind): string[] {
+    if (!joinDiag) return [];
+    // Only highlight keys that exist on that side — mixing left_on+right_on
+    // marks the wrong columns after the SideCard / sample format change.
+    switch (kind) {
+      case "left":
+      case "unmatched_left":
+        return joinDiag.left_on;
+      case "right":
+      case "unmatched_right":
+      case "right_dups":
+        return joinDiag.right_on;
+      case "fanout":
+        return [...joinDiag.left_on, ...joinDiag.right_on];
+      case "output":
+      default:
+        return joinDiag.left_on;
+    }
+  }
+
   async function openJoinDiagnostic(
     kind: JoinDiagKind,
     sample: JoinDiagSample | null,
     label: string,
   ) {
     if (!joinDiag || !activeQueryId) return;
-    const keys = [...joinDiag.left_on, ...joinDiag.right_on];
+    const highlightKeys = highlightKeysForDiag(kind);
     const sampleLimit = joinDiag.sample_limit;
 
     if (sample) {
@@ -1051,7 +1083,7 @@ function App() {
         rows: sample.rows,
         totalCount: sample.total_count,
         sampleLimit,
-        highlightKeys: keys,
+        highlightKeys,
       });
       setBottomTab("data");
       return;
@@ -1106,7 +1138,7 @@ function App() {
         rows: result.rows,
         totalCount: total,
         sampleLimit,
-        highlightKeys: keys,
+        highlightKeys,
       });
       setBottomTab("data");
     } catch (e) {

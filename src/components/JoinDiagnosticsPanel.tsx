@@ -70,6 +70,11 @@ export function JoinDiagnosticsPanel({ loading, error, diag, onOpen }: Props) {
         {diag?.sample_limit ?? 50}) in Data. A clean sample is not proof for the
         full input.
       </p>
+      {!loading && !error && !diag && (
+        <p className="text-[10px] text-slate-600">
+          Set join keys and Apply — then counts appear here.
+        </p>
+      )}
       {error && (
         <p className="text-[11px] text-amber-500/90">{error}</p>
       )}

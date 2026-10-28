@@ -89,6 +89,51 @@ export function joinDiagnostics(
   });
 }
 
+export type JoinKeyTuple = { values: unknown[] };
+
+export type JoinRowExplanation = {
+  fingerprint: string;
+  key_values: unknown[];
+  left_match_count: number;
+  right_match_count: number;
+  left_rows: unknown[][];
+  right_rows: unknown[][];
+};
+
+export type ExplainJoinRowsResult = {
+  host_query_id: string;
+  join_step_index: number;
+  right_query_id: string;
+  left_on: string[];
+  right_on: string[];
+  left_columns: { name: string; type: string }[];
+  right_columns: { name: string; type: string }[];
+  max_matches: number;
+  explanations: JoinRowExplanation[];
+};
+
+/** Batch where-provenance for Join Lens (≤24 keys/offsets, ≤6 matches/side). */
+export function explainJoinRows(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  opts: {
+    keys?: JoinKeyTuple[];
+    /** Preview row indices when join keys are absent from the visible select. */
+    previewOffsets?: number[];
+  },
+  connections: ConnectionDef[] = [],
+): Promise<ExplainJoinRowsResult> {
+  return invoke<ExplainJoinRowsResult>("explain_join_rows", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    keys: opts.keys ?? [],
+    previewOffsets: opts.previewOffsets ?? null,
+    connections,
+  });
+}
+
 export interface ExportResult {
   path: string;
   /** Relative paths; directories end with `/`. */

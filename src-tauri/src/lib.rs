@@ -1,9 +1,10 @@
 use dwh_engine::{
     collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
-    join_diagnostics as run_join_diagnostics, list_postgres_objects as run_list_postgres_objects,
-    preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
-    set_extensions_dir, test_postgres_connection as run_test_postgres_connection, DbSession,
-    JoinDiagnostics, PostgresColumn, PostgresObject, PreviewResult,
+    explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
+    list_postgres_objects as run_list_postgres_objects, preview_pipeline as run_preview_steps,
+    preview_workspace as run_preview_workspace, set_extensions_dir,
+    test_postgres_connection as run_test_postgres_connection, DbSession, ExplainJoinRowsResult,
+    JoinDiagnostics, JoinKeyTuple, PostgresColumn, PostgresObject, PreviewResult,
 };
 mod secrets_io;
 mod settings_io;
@@ -89,6 +90,30 @@ fn join_diagnostics(
 ) -> Result<JoinDiagnostics, String> {
     let conns = connections.unwrap_or_default();
     run_join_diagnostics(&db, &workspace, &conns, &host_query_id, join_step_index)
+}
+
+/// Join Lens: batch where-provenance (keys and/or preview row offsets).
+#[tauri::command]
+fn explain_join_rows(
+    workspace: Workspace,
+    host_query_id: String,
+    join_step_index: usize,
+    keys: Option<Vec<JoinKeyTuple>>,
+    preview_offsets: Option<Vec<u64>>,
+    connections: Option<Vec<ConnectionDef>>,
+    db: State<'_, DbSession>,
+) -> Result<ExplainJoinRowsResult, String> {
+    let conns = connections.unwrap_or_default();
+    let key_slice = keys.unwrap_or_default();
+    run_explain_join_rows(
+        &db,
+        &workspace,
+        &conns,
+        &host_query_id,
+        join_step_index,
+        &key_slice,
+        preview_offsets.as_deref(),
+    )
 }
 
 /// dbt model SQL for one query (Model tab). Seeds from DuckDB/PG when available.
@@ -626,6 +651,7 @@ pub fn run() {
             preview_pipeline,
             preview_workspace,
             join_diagnostics,
+            explain_join_rows,
             preview_dbt_model,
             export_dbt,
             list_export_tree,

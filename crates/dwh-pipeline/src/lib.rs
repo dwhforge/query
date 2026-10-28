@@ -16,7 +16,7 @@ pub mod sql_escape;
 
 pub use compiler::{CompiledCtes, GraphCompiler, PipelineCompiler};
 pub use graph::cte_name;
-pub use sql_escape::quote_ident;
+pub use sql_escape::{escape_sql_string, quote_ident};
 pub use connection::{ConnectionDef, ConnectionKind, PostgresParams, S3Params};
 pub use dialect::{
     sql_rename_column, sql_union_all, validate_target_execution, workspace_needs_s3_landing,

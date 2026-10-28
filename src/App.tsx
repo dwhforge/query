@@ -14,6 +14,7 @@ import {
   JoinDiagnosticsPanel,
   type JoinDiagKind,
 } from "./components/JoinDiagnosticsPanel";
+import { JoinLens } from "./components/JoinLens";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import {
@@ -124,6 +125,8 @@ function App() {
     sampleLimit: number;
     highlightKeys: string[];
   } | null>(null);
+  /** Join Lens mode on Data (where-provenance docks). Default on when Join selected. */
+  const [joinLensOn, setJoinLensOn] = useState(true);
   /** FromQuery parent id (child / derived query root). */
   const [fromQueryId, setFromQueryId] = useState("");
   const [appendOtherId, setAppendOtherId] = useState("");
@@ -1640,6 +1643,19 @@ function App() {
       ? activeQuery.steps[selectedStepIndex]
       : null;
 
+  const joinLensTarget =
+    activeQueryId &&
+    selectedStepIndex !== null &&
+    selectedStep?.type === "Join" &&
+    selectedStep.payload.left_on.length > 0
+      ? {
+          hostQueryId: activeQueryId,
+          joinStepIndex: selectedStepIndex,
+          leftOn: selectedStep.payload.left_on,
+          rightOn: selectedStep.payload.right_on,
+        }
+      : null;
+
   /** Columns to pick from — prefer live preview of the active/focus query. */
   const columnChoices = useMemo(() => {
     const fromPreview =
@@ -1955,7 +1971,13 @@ function App() {
                 onDeriveQuery={deriveQueryFrom}
               />
             </div>
-            <div className="flex min-h-[28vh] flex-col border-t border-[var(--line)] bg-[#060d14]">
+            <div
+              className={`flex flex-col border-t border-[var(--line)] bg-[#060d14] ${
+                joinLensOn && joinLensTarget && !diagView
+                  ? "min-h-[34vh]"
+                  : "min-h-[28vh]"
+              }`}
+            >
               <div className="flex items-center justify-between gap-3 px-4 pt-2">
                 <div className="flex items-end gap-3">
                   <div
@@ -1996,19 +2018,35 @@ function App() {
                       "select a query"}
                   </span>
                 </div>
-                <span className="pb-1.5 text-xs text-slate-500">
-                  {bottomTab === "data"
-                    ? diagView
-                      ? `diag · ${diagView.rows.length}/${diagView.totalCount} · ${diagView.columns.length} cols`
-                      : loading
-                        ? "running…"
-                        : preview
-                          ? `${preview.rows.length} rows · ${preview.columns.length} cols`
-                          : "—"
-                    : modelPreview
-                      ? `${modelPreview.model_name}.sql · dbt`
-                      : "—"}
-                </span>
+                <div className="flex items-center gap-2 pb-1.5">
+                  {joinLensTarget && bottomTab === "data" && !diagView && (
+                    <button
+                      type="button"
+                      onClick={() => setJoinLensOn((v) => !v)}
+                      className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                        joinLensOn
+                          ? "border-teal-500/50 bg-teal-500/15 text-teal-200"
+                          : "border-slate-700 text-slate-500 hover:text-slate-300"
+                      }`}
+                      title="Show left/right source rows linked to the focused result row"
+                    >
+                      Join Lens
+                    </button>
+                  )}
+                  <span className="text-xs text-slate-500">
+                    {bottomTab === "data"
+                      ? diagView
+                        ? `diag · ${diagView.rows.length}/${diagView.totalCount} · ${diagView.columns.length} cols`
+                        : loading
+                          ? "running…"
+                          : preview
+                            ? `${preview.rows.length} rows · ${preview.columns.length} cols`
+                            : "—"
+                      : modelPreview
+                        ? `${modelPreview.model_name}.sql · dbt`
+                        : "—"}
+                  </span>
+                </div>
               </div>
               {(error || exportMsg || diagView) && (
                 <div className="space-y-1 px-4 pb-2">
@@ -2047,13 +2085,33 @@ function App() {
                 </div>
               )}
               <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
-                <div className="h-[22vh] overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
+                <div
+                  className={`overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40 ${
+                    joinLensOn && joinLensTarget && !diagView
+                      ? "h-[28vh]"
+                      : "h-[22vh]"
+                  }`}
+                >
                   {bottomTab === "data" ? (
                     diagView ? (
                       <PreviewTable
                         columns={diagView.columns}
                         rows={diagView.rows}
                         highlightKeys={diagView.highlightKeys}
+                      />
+                    ) : preview &&
+                      joinLensOn &&
+                      joinLensTarget ? (
+                      <JoinLens
+                        enabled
+                        workspace={project.workspace}
+                        hostQueryId={joinLensTarget.hostQueryId}
+                        joinStepIndex={joinLensTarget.joinStepIndex}
+                        leftOn={joinLensTarget.leftOn}
+                        rightOn={joinLensTarget.rightOn}
+                        connections={connections}
+                        columns={preview.columns}
+                        rows={preview.rows}
                       />
                     ) : preview ? (
                       <PreviewTable

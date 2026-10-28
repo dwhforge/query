@@ -76,14 +76,15 @@ export const HELP_SECTIONS: HelpSection[] = [
   },
   {
     id: "join-diag",
-    title: "Join diagnostics",
+    title: "Join diagnostics & Join Lens",
     paragraphs: [
-      "Select a Join step to see investigation counts beside its settings. Counts use the full inputs after preceding transforms (not the preview’s 50-row limit). Click a row to open a bounded sample in Data; a clean sample is not proof for the full input.",
+      "Select a Join step. In Data, toggle Join Lens: scroll/hover a result row to see matching left/right input rows in side docks, with link beams when the row is on screen. Inspector counts remain available for full-input stats.",
     ],
     bullets: [
-      "Left / right input row counts and Join output count",
-      "Unmatched left / right (input rows with zero matches)",
-      "Fan-out left rows (more than one right match) and duplicate right-key groups",
+      "Join Lens fetches only keys for the focused + visible rows (debounced, cached; capped batch)",
+      "Works even if join keys are omitted from a later SelectColumns (recovers via preview row offsets)",
+      "Result columns tinted: join (ON of this Join) · left · right · calc (downstream)",
+      "Inspector: left/right/output counts, unmatched, fan-out, duplicate right keys → sample in Data",
       "Does not block editing while computing (ADR-0007)",
       "Persisted Join expectations → dbt tests: not shipped yet",
     ],

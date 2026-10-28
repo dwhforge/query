@@ -1,6 +1,7 @@
 mod export_e2e;
 mod extensions;
 mod join_diagnostics;
+mod join_lens;
 mod load_seeds;
 mod postgres_catalog;
 mod preview;
@@ -14,6 +15,10 @@ pub use extensions::{
 pub use join_diagnostics::{
     join_diagnostics, join_diagnostics_with_limit, JoinDiagSample, JoinDiagnostics,
     JOIN_DIAG_SAMPLE_LIMIT,
+};
+pub use join_lens::{
+    explain_join_rows, fingerprint_key, ExplainJoinRowsResult, JoinKeyTuple, JoinRowExplanation,
+    JOIN_LENS_MAX_KEYS, JOIN_LENS_MAX_MATCHES,
 };
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{

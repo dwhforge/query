@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-10-24)
+Accepted (2026-10-24) — **long-term**. Near-term does **not** implement H1/H2; safe re-export first — [ADR-0018](0018-return-and-edit.md).
 
 ## Context
 
@@ -17,7 +17,7 @@ This is not “export once to dbt”. Round-trip needs a canonical IR and discip
 | Phase | When | What |
 |-------|------|------|
 | **H0 (now)** | v1 foundation | Workspace AST = **single source of truth**. Visual edits AST; SQL/dbt are **one-way projections**. Read-only “Show SQL” is OK. |
-| **H1** | after multi-source + dbt export DoD | Split view: visual steps + editable SQL **per step** with parse-back for a **whitelist** of step kinds. Failed parse → keep text, mark step dirty. |
+| **H1** | After the *Return and edit* acceptance criteria in [ADR-0018](0018-return-and-edit.md) are met | Split view: visual steps + editable SQL **per step** with parse-back for a **whitelist** of step kinds. Failed parse → keep text, mark step dirty. |
 | **H2 (Delphi-like)** | later product priority | Full two-way: graph/canvas ↔ dbt project files ↔ optional pure-SQL workspace. External edits to exported `.sql` can be **imported/reconciled** when structure matches; otherwise conflict UI. |
 
 H2 timing **does not** block the v1 dbt tool. H0 architecture must not close the door on H1/H2 (no “SQL-only UI state without AST”).

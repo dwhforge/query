@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-10-24)
+Accepted (2026-10-24) — still the UI killer. Next release deepens it with investigation + re-export ([ADR-0018](0018-return-and-edit.md)); it does not replace the canvas.
 
 ## Context
 
@@ -19,7 +19,9 @@ The **visual pipeline / workspace editor** is the Ultimate UI killer feature:
 - Instant DuckDB preview bound to focus  
 - Clear path to export (dbt / later SQL) without leaving the visual flow  
 
-Everything else (dbt fidelity, adapters, AI, two-way text) **amplifies** this editor; nothing may ship that makes the visual editor feel secondary, slower, or “form-ware around SQL”.
+Everything else (dbt fidelity, adapters, AI, two-way text) **amplifies** this editor; nothing may ship that makes the visual editor feel secondary or “form-ware around SQL”.
+
+**Expensive checks** (Join diagnostics on large inputs, full-table uniqueness, …) **must not block editing**; their execution scope and progress must be explicit.
 
 ### Bar
 
@@ -36,9 +38,10 @@ Relative to Power Query’s Applied Steps + Merge UX and typical DAG tools:
 |----------|------|
 | P0 | Visual editor core loop: queries, steps, join edges, preview, empty/first-run |
 | P0 | Performance of preview + interaction latency |
-| P1 | dbt export (v1 target) as one gesture from the same canvas |
-| P2 | Two-way SQL/dbt text (ADR-0004) as dual view on the same IR |
-| P2 | Broader PQ transform catalog |
+| P0 / next | Step schema, re-export, Join diagnostics — [ADR-0018](0018-return-and-edit.md) · [DESIGN.md](../DESIGN.md) §9–§10 |
+| P1 | dbt export (v1 target) as one gesture from the same canvas — **baseline largely landed** |
+| P2 | Two-way SQL/dbt text (ADR-0004) — **deferred** after safe re-export |
+| P2 | Broader PQ transform catalog — after next-release DoD |
 
 Canvas/graph view is in-scope for the killer feature (not “list-only forever”). List+detail may ship first as a thin slice; the destination UX is a **visual graph editor**, not a settings page.
 

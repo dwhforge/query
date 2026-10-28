@@ -15,29 +15,37 @@ fn require_prev(prev: &str, op: &str) -> Result<(), String> {
     }
 }
 
+/// Optional schema / dbt hints for emit (ADR-0018).
+#[derive(Debug, Clone, Default)]
+pub struct EmitSchemaOpts<'a> {
+    /// Bare dbt call (`ref('…')` / `source('…','…')`) when physical relation still matches CTE.
+    pub left_dbt_relation: Option<&'a str>,
+    /// Columns leaving the previous step (derived schema).
+    pub prev_columns: Option<&'a [String]>,
+    /// Known final schemas of other queries (Join/Append rights), query_id → columns.
+    pub query_columns: Option<&'a HashMap<String, Vec<String>>>,
+}
+
 /// Emit a mid-chain / transform step. `relations` maps query_id → SQL relation
 /// (CTE name for preview, `{{ ref('…') }}` for dbt).
-///
-/// `left_dbt_relation`: bare dbt call for the left side's columns when known
-/// (`source('sys','t')` / `ref('stg_x')`) — used so join can drop right cols that
-/// already exist on the left (Postgres rejects duplicate names).
 pub fn emit_transform_step(
     step: &TransformationStep,
     prev: &str,
     relations: &HashMap<String, String>,
     dialect: WarehouseDialect,
 ) -> Result<String, String> {
-    emit_transform_step_ex(step, prev, relations, dialect, None)
+    emit_transform_step_ex(step, prev, relations, dialect, EmitSchemaOpts::default())
 }
 
-/// Like [`emit_transform_step`], with optional left-side dbt relation for join column merge.
+/// Like [`emit_transform_step`], with schema / left-dbt options.
 pub fn emit_transform_step_ex(
     step: &TransformationStep,
     prev: &str,
     relations: &HashMap<String, String>,
     dialect: WarehouseDialect,
-    left_dbt_relation: Option<&str>,
+    opts: EmitSchemaOpts<'_>,
 ) -> Result<String, String> {
+    let left_dbt_relation = opts.left_dbt_relation;
     match step {
         TransformationStep::Filter { condition } => {
             require_prev(prev, "Filter")?;
@@ -54,6 +62,12 @@ pub fn emit_transform_step_ex(
         }
         TransformationStep::RenameColumn { from, to } => {
             require_prev(prev, "RenameColumn")?;
+            if let Some(cols) = opts.prev_columns {
+                return Ok(format!(
+                    "SELECT {} FROM {prev}",
+                    rename_select_list(cols, from, to)?
+                ));
+            }
             sql_rename_column(dialect, prev, from, to, left_dbt_relation)
         }
         TransformationStep::DeriveColumn { name, expression } => {
@@ -144,6 +158,26 @@ pub fn emit_transform_step_ex(
             if other_query_ids.is_empty() {
                 return Err("Append: other_query_ids empty".into());
             }
+            // Portable BY NAME when step schemas are known (ADR-0018) — both dialects.
+            if let (Some(left_cols), Some(qcols)) = (opts.prev_columns, opts.query_columns) {
+                let mut rights = Vec::with_capacity(other_query_ids.len());
+                let mut all_known = true;
+                for oid in other_query_ids {
+                    let other = relations
+                        .get(oid)
+                        .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
+                    match qcols.get(oid) {
+                        Some(cols) => rights.push((other.clone(), cols.clone())),
+                        None => {
+                            all_known = false;
+                            break;
+                        }
+                    }
+                }
+                if all_known {
+                    return sql_union_all_aligned(prev, left_cols, &rights);
+                }
+            }
             match dialect {
                 WarehouseDialect::Duckdb => {
                     let mut left = format!("SELECT * FROM {prev}");
@@ -156,10 +190,9 @@ pub fn emit_transform_step_ex(
                     Ok(left)
                 }
                 WarehouseDialect::Postgres => {
-                    // Same meaning as DuckDB BY NAME: match columns by name, fill missing with NULL.
                     let left_rel = left_dbt_relation.ok_or_else(|| {
-                        "Append (postgres): need a known left relation (LoadPostgres/FromQuery \
-                         before schema-changing steps) for name-aligned UNION"
+                        "Append (postgres): need step schema or a known left relation \
+                         (LoadPostgres/FromQuery) for name-aligned UNION"
                             .to_string()
                     })?;
                     let mut right_models = Vec::with_capacity(other_query_ids.len());
@@ -264,6 +297,35 @@ fn emit_join_unequal_keys(
 
 /// Fold for DuckDB `UNION ALL BY NAME` matching: **ASCII** A–Z only (not Unicode case).
 /// `"Имя"` and `"имя"` stay distinct; `"Amount"` / `"amount"` collide.
+/// Portable RenameColumn projection when prior columns are known.
+pub fn rename_select_list(cols: &[String], from: &str, to: &str) -> Result<String, String> {
+    validate_unambiguous_ascii_names(cols, "RenameColumn")?;
+    let fold_from = ascii_fold_name(from);
+    let mut found = false;
+    let mut parts = Vec::with_capacity(cols.len());
+    for c in cols {
+        if ascii_fold_name(c) == fold_from {
+            if found {
+                return Err(format!(
+                    "RenameColumn: ambiguous match for '{from}' in {:?}",
+                    cols
+                ));
+            }
+            found = true;
+            parts.push(format!("{} AS {}", quote_ident(c), quote_ident(to)));
+        } else {
+            parts.push(format!("{} AS {}", quote_ident(c), quote_ident(c)));
+        }
+    }
+    if !found {
+        return Err(format!(
+            "RenameColumn: column '{from}' not in schema {:?}",
+            cols
+        ));
+    }
+    Ok(parts.join(", "))
+}
+
 pub fn ascii_fold_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
@@ -572,7 +634,10 @@ mod tests {
             "s0",
             &rel,
             WarehouseDialect::Postgres,
-            Some("source('sys', 'data_extraction_sources')"),
+            EmitSchemaOpts {
+                left_dbt_relation: Some("source('sys', 'data_extraction_sources')"),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(sql.contains("_left_names"));
@@ -714,7 +779,10 @@ mod tests {
             "s0",
             &rel,
             WarehouseDialect::Postgres,
-            Some("ref('stg_sales_eu')"),
+            EmitSchemaOpts {
+                left_dbt_relation: Some("ref('stg_sales_eu')"),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(!sql.contains("UNION ALL SELECT *"));
@@ -767,13 +835,65 @@ mod tests {
             "s0",
             &HashMap::new(),
             WarehouseDialect::Postgres,
-            Some("ref('stg_sales')"),
+            EmitSchemaOpts {
+                left_dbt_relation: Some("ref('stg_sales')"),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(!sql.contains("EXCLUDE"));
         assert!(sql.contains("ref('stg_sales')"));
         assert!(sql.contains("AS \"amount\""));
         assert!(sql.contains("'amt'"));
+    }
+
+    #[test]
+    fn rename_and_append_postgres_use_schema_not_jinja() {
+        let mut rel = HashMap::new();
+        rel.insert("us".into(), "{{ ref('stg_us') }}".into());
+        let mut qcols = HashMap::new();
+        qcols.insert(
+            "us".into(),
+            vec!["id".into(), "amount".into(), "currency".into()],
+        );
+        let before_rename = vec!["id".into(), "amt".into()];
+        let after_rename = vec!["id".into(), "amount".into()];
+
+        let ren = emit_transform_step_ex(
+            &TransformationStep::RenameColumn {
+                from: "amt".into(),
+                to: "amount".into(),
+            },
+            "s0",
+            &rel,
+            WarehouseDialect::Postgres,
+            EmitSchemaOpts {
+                prev_columns: Some(&before_rename),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!ren.contains("EXCLUDE"));
+        assert!(!ren.contains("get_columns_in_relation"));
+        assert!(ren.contains("\"amt\" AS \"amount\""));
+
+        let app = emit_transform_step_ex(
+            &TransformationStep::Append {
+                other_query_ids: vec!["us".into()],
+            },
+            "s1",
+            &rel,
+            WarehouseDialect::Postgres,
+            EmitSchemaOpts {
+                prev_columns: Some(&after_rename),
+                query_columns: Some(&qcols),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!app.contains("_lmap"));
+        assert!(app.contains("NULL AS \"currency\""));
+        assert!(app.contains("{{ ref('stg_us') }}"));
     }
 
     #[test]

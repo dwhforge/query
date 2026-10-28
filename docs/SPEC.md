@@ -1,7 +1,10 @@
-# DWHForge Query — Engineering Spec (v1)
+# DWHForge Query — Engineering Spec (v1 baseline)
 
 Canon: product name **DWHForge Query** ([ADR-0016](adr/0016-product-rename-dwhforge-query.md)). Positioning — [ADR-0001](adr/0001-product-positioning.md).  
-Docs language: English (OSS under consideration, not decided).
+Docs language: English. License: **MIT**.
+
+**Active product DoD:** [DESIGN.md](DESIGN.md) §10 · decisions [ADR-0018](adr/0018-return-and-edit.md).  
+This SPEC remains the **engineering contract** and **v1 baseline** checklist (§5–§7).
 
 **Local app dir** `~/.dwhforge-query/`: `secrets.json` (credentials) · `settings.json` (defaults / last-used Export dialect). Project IR stays in `.dwhproj.json` (`target_dialect` per project).
 
@@ -134,7 +137,7 @@ CLI twin (same IR): `dwh-export <project.json> <output_dir> [--name NAME] [--tar
 
 Postgres UI: object picker — connect → browse catalog → select schema-qualified relation ([ADR-0010](adr/0010-postgres-object-picker.md)). Describe: select Postgres source → column/types in inspector.
 
-## 5. DbtProducer (v1 DoD)
+## 5. DbtProducer (v1 baseline DoD)
 
 ### 5.0 dbt major targets
 
@@ -169,7 +172,8 @@ Generates:
 - Join/transform work → intermediate (or collapsed per-query model in early slice).  
 - **Simplification (allowed early):** one dbt model per query = SQL for that query’s step chain with `ref()`/`source()`.  
 - Focus query’s last model → `mart_<name>.sql`.  
-- DoD **per target**: `dbt run` with no hand-edits on fixture 2 CSVs + Join. V1 DoD can land before V2.
+- Baseline DoD **per target**: `dbt run` with no hand-edits on fixture 2 CSVs + Join. V1 can land before V2.  
+- **Next:** re-export stability + result check vs preview — [DESIGN.md](DESIGN.md) §10 B–C · [ADR-0018](adr/0018-return-and-edit.md).
 
 ### 5.2 Export validation (offline parse)
 
@@ -193,7 +197,9 @@ dbt parse --no-partial-parse --project-dir <root> --profiles-dir <root>
 - **Export dbt** button (`DbtTarget`).  
 - Read-only SQL panel (projection; see ADR-0004).
 
-## 7. MVP Done Definition (v1)
+## 7. MVP Done Definition (v1 baseline)
+
+> **Status:** baseline acceptance for the first shippable loop. **Not** the active release bar — see [DESIGN.md](DESIGN.md) §10.
 
 1. Linux: DuckDB session; **`postgres` extension required when `LoadPostgres` is used** (offline-first load — [ADR-0011](adr/0011-offline-duckdb-extensions.md)). **Parquet** via core `read_parquet` (UI + AST). Spatial may stay best-effort.  
 2. Workspace: ≥2 queries (CSV and/or Postgres), Join, preview ≤50.  
@@ -203,14 +209,15 @@ dbt parse --no-partial-parse --project-dir <root> --profiles-dir <root>
 
 Postgres mandate: [ADR-0008](adr/0008-postgres-required.md).
 
-## 8. Two-way visual ↔ text (roadmap, not v1 DoD)
+## 8. Two-way visual ↔ text (deferred)
 
-See [ADR-0004](adr/0004-two-way-visual-text.md).
+See [ADR-0004](adr/0004-two-way-visual-text.md). **Near-term substitute:** deterministic re-export ([ADR-0018](adr/0018-return-and-edit.md)) — not H1 parse-back.
 
-- **v1:** visual → AST → SQL/dbt (one-way). Optional read-only SQL panel.  
-- **H1:** editable SQL per step + parse-back whitelist.  
-- **H2:** Delphi-like sync visual ↔ dbt project / pure SQL bundle + conflict reconcile.
+- **Baseline:** visual → AST → SQL/dbt (one-way). Optional read-only SQL panel.  
+- **H1 (later):** editable SQL per step + parse-back whitelist.  
+- **H2 (later):** Delphi-like sync visual ↔ dbt project / pure SQL bundle + conflict reconcile.
 
-## 9. Non-goals (v1)
+## 9. Non-goals
 
-Fuzzy merge, full PQ catalog, AI (stub OK), Python producer polish, DnD validate, full two-way round-trip.
+Fuzzy merge, full PQ catalog, AI (stub OK until schema/re-export land), Python producer polish, DnD validate, full two-way round-trip.  
+Also deferred: [DESIGN.md](DESIGN.md) §7 · [ADR-0018](adr/0018-return-and-edit.md).

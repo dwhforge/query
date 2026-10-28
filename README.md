@@ -77,11 +77,15 @@ cargo run -p dwh-pipeline --bin dwh-export -- \
   path/to/project.dwhproj.json /tmp/dwh-out --validate
 ```
 
-UI **Export** always writes the tree then runs offline `dbt parse` (no warehouse). `dbt run` stays on the target machine / CI:
+UI **Export** always writes the tree then runs offline `dbt parse` (no warehouse). That is an **author gate only** — green parse ≠ correct data. `dbt run` stays on the target machine / CI:
 
 ```bash
 cd /tmp/dwh-out/<project_name> && dbt run --profiles-dir ./
 ```
+
+Re-export writes `.dwhforge-export.json` (owned-file hashes) and refuses if you hand-edited generator-owned files.
+
+**Automated e2e (DuckDB):** `cargo test -p dwh-engine export_run_compare` (needs `dbt` + `dbt-duckdb`, e.g. `./scripts/fetch-dbt-venv.sh`). Covers CSV → Rename → Append → export → `dbt run` → row compare vs preview. **Postgres-target e2e is not automated** — export with `target_dialect=postgres` against landed PG sources and run `dbt run` manually; do not treat DuckDB CI as Postgres coverage.
 
 ### VS Code / Cursor
 
@@ -118,12 +122,12 @@ fixtures/  docs/
 
 | | |
 |--|--|
-| [DESIGN](docs/DESIGN.md) | Product horizons, UX north star |
+| [DESIGN](docs/DESIGN.md) | Product horizons, next DoD (§10), Join MVP (§9) |
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | Modules, Workspace IR |
-| [SPEC](docs/SPEC.md) | Contracts, commands, dbt DoD |
+| [SPEC](docs/SPEC.md) | Contracts, commands, v1 baseline DoD |
 | [DEMOS](docs/DEMOS.md) | Demo workspaces · practice coverage |
 | [COMPETITIVE](docs/COMPETITIVE.md) | Landscape & wedge |
-| [adr/](docs/adr/) | Decisions |
+| [adr/](docs/adr/) | Decisions ([ADR-0018](docs/adr/0018-return-and-edit.md) = return-and-edit) |
 
 ## Download
 

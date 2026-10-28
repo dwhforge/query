@@ -84,7 +84,9 @@ export function EmptyHero({
         </button>
       </div>
       <p className="mt-6 text-[11px] text-slate-600">
-        Later: <span className="text-slate-500">Help → Load demo</span>
+        <span className="text-slate-500">Help → User guide</span>
+        {" · "}
+        <span className="text-slate-500">Help → Load demo</span>
         {" · "}
         Shortcuts: <kbd className="text-slate-500">⌘O</kbd> open ·{" "}
         <kbd className="text-slate-500">E</kbd> export ·{" "}

@@ -49,7 +49,9 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 
 ### C — Not covered (do not claim)
 
-Incremental / snapshot / SCD2, tests & docs as first-class, macros/packages, exposures/metrics, unit tests, ephemeral config UI, Jinja control flow, cross-db.
+Incremental / snapshot / SCD2, full tests & docs as first-class, macros/packages, exposures/metrics, unit tests, ephemeral config UI, Jinja control flow, cross-db.
+
+**Next release** may emit a **narrow** slice of dbt tests from Join expectations ([DESIGN.md](DESIGN.md) §9 · [ADR-0018](adr/0018-return-and-edit.md)) — still not “tests/docs as a product surface”.
 
 ---
 

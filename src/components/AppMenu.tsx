@@ -19,6 +19,7 @@ export interface AppMenuProps {
   onNewConnection: () => void;
   onSetTargetDialect: (d: WarehouseDialect) => void;
   onLoadDemo: (id: DemoId) => void;
+  onOpenHelp: () => void;
 }
 
 type MenuId = "file" | "view" | "project" | "help";
@@ -129,6 +130,7 @@ export function AppMenu({
   onNewConnection,
   onSetTargetDialect,
   onLoadDemo,
+  onOpenHelp,
 }: AppMenuProps) {
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null);
   const navRef = useRef<HTMLElement>(null);
@@ -250,6 +252,8 @@ export function AppMenu({
           onClick={() => toggle("help")}
           onHoverOpen={() => setOpenMenu("help")}
         >
+          <Item label="User guide…" onClick={() => run(onOpenHelp)} />
+          <Sep />
           <SubLabel>Load demo</SubLabel>
           <Item
             label="Sales — medallion · join · top-N"

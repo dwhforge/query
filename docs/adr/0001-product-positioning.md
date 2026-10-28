@@ -14,7 +14,7 @@ Accepted (2026-10-24)
 
 Do not confuse with Power BI: the reference is **Power Query** (Get Data / Applied Steps / Merge), not PBI reports.
 
-Open-source licensing is **possible but not decided**; documentation stays in English.
+Licensing: **MIT**; documentation stays in English.
 
 ## Decision
 
@@ -33,5 +33,6 @@ Open-source licensing is **possible but not decided**; documentation stays in En
 
 - Join/Append and multiple sources are must-haves before “complex dbt”, not afterthoughts.  
 - The linear prototype (`Vec<Step>`) remains the special case of one query in a workspace.  
-- v1 success metric: `dbt run` on a generated project with ≥2 sources and ≥1 join.  
+- v1 **baseline** success metric: `dbt run` on a generated project with ≥2 sources and ≥1 join.  
+- **Active** success metric: return-and-edit loop + investigation — [ADR-0018](0018-return-and-edit.md).  
 - Do not build UI that edits only dbt text without writing back into Workspace.

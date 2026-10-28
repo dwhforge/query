@@ -1,6 +1,9 @@
 pub mod dbt;
 
-pub use dbt::{preview_dbt_model_sql, DbtProducer, PreviewDbtModel};
+pub use dbt::{
+    build_export_plan, dbt_model_name, preview_dbt_model_sql, preview_dbt_model_sql_with_seeds,
+    DbtProducer, PreviewDbtModel,
+};
 
 use crate::dialect::WarehouseDialect;
 use crate::model::Workspace;

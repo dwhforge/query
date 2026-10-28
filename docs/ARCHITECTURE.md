@@ -24,9 +24,9 @@ flowchart LR
 4. One compile path: Workspace → SQL CTEs **and** Workspace → dbt models.  
 5. Raw table data never goes to an LLM.
 
-ADRs: [0001](adr/0001-product-positioning.md) … [0008](adr/0008-postgres-required.md) (see `docs/adr/`).
+ADRs: see `docs/adr/` ([ADR-0018](adr/0018-return-and-edit.md) = near-term product bet).
 
-**IR rule (H0):** Workspace AST is the only source of truth; DuckDB SQL and dbt files are projections. Two-way parse-back is H1/H2, not a v1 DoD.
+**IR rule (H0):** Workspace AST is the only source of truth; DuckDB SQL and dbt files are projections. Two-way parse-back is H1/H2 — **deferred**; near-term is **per-step result schema** + deterministic re-export ([ADR-0018](adr/0018-return-and-edit.md)).
 
 ## 3. Modules
 

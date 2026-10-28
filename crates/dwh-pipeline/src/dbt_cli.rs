@@ -89,14 +89,17 @@ fn truncate_log(s: &str) -> String {
     format!("{}…\n[log truncated]", &s[..cut])
 }
 
-/// Run `dbt parse --no-partial-parse` with project + profiles in `project_root`.
-/// Soft-fails when `dbt` is missing (ok=false, install hint in log).
-pub fn dbt_parse(project_root: &str, dbt_bin: Option<&Path>) -> DbtParseOutcome {
+fn run_dbt_subcommand(
+    project_root: &str,
+    dbt_bin: Option<&Path>,
+    subcommand: &str,
+    missing_hint: &str,
+) -> DbtParseOutcome {
     let root = Path::new(project_root);
     if !root.is_dir() {
         return DbtParseOutcome {
             ok: false,
-            log: format!("dbt parse: not a directory: {project_root}"),
+            log: format!("dbt {subcommand}: not a directory: {project_root}"),
         };
     }
 
@@ -107,22 +110,23 @@ pub fn dbt_parse(project_root: &str, dbt_bin: Option<&Path>) -> DbtParseOutcome 
             None => {
                 return DbtParseOutcome {
                     ok: false,
-                    log: "dbt not found. Install with ./scripts/fetch-dbt-venv.sh \
-or `pip install 'dbt-core>=1.7,<2' dbt-duckdb`, then ensure `dbt` is on PATH."
-                        .into(),
+                    log: missing_hint.into(),
                 };
             }
         },
     };
 
+    // `current_dir` = project root so DuckDB `path: 'local.duckdb'` lands next to dbt_project.yml
+    // (dbt-duckdb resolves relative paths against process cwd, not --project-dir).
     let output = Command::new(&bin)
+        .current_dir(root)
         .args([
-            "parse",
+            subcommand,
             "--no-partial-parse",
             "--project-dir",
-            project_root,
+            ".",
             "--profiles-dir",
-            project_root,
+            ".",
         ])
         .output();
 
@@ -142,9 +146,9 @@ or `pip install 'dbt-core>=1.7,<2' dbt-duckdb`, then ensure `dbt` is on PATH."
             }
             if log.trim().is_empty() {
                 log = if out.status.success() {
-                    "dbt parse: ok".into()
+                    format!("dbt {subcommand}: ok")
                 } else {
-                    format!("dbt parse failed (exit {:?})", out.status.code())
+                    format!("dbt {subcommand} failed (exit {:?})", out.status.code())
                 };
             }
             DbtParseOutcome {
@@ -157,6 +161,30 @@ or `pip install 'dbt-core>=1.7,<2' dbt-duckdb`, then ensure `dbt` is on PATH."
             log: format!("failed to run {}: {e}", bin.display()),
         },
     }
+}
+
+/// Run `dbt parse --no-partial-parse` with project + profiles in `project_root`.
+/// Soft-fails when `dbt` is missing (ok=false, install hint in log).
+pub fn dbt_parse(project_root: &str, dbt_bin: Option<&Path>) -> DbtParseOutcome {
+    run_dbt_subcommand(
+        project_root,
+        dbt_bin,
+        "parse",
+        "dbt not found. Install with ./scripts/fetch-dbt-venv.sh \
+or `pip install 'dbt-core>=1.7,<2' dbt-duckdb`, then ensure `dbt` is on PATH.",
+    )
+}
+
+/// Run `dbt run` against the generated project (needs warehouse reachable via profiles).
+/// Soft-fails when `dbt` is missing. Distinct from [`dbt_parse`] (author gate only).
+pub fn dbt_run(project_root: &str, dbt_bin: Option<&Path>) -> DbtParseOutcome {
+    run_dbt_subcommand(
+        project_root,
+        dbt_bin,
+        "run",
+        "dbt not found (needed for e2e `dbt run`). Install with ./scripts/fetch-dbt-venv.sh \
+or `pip install 'dbt-core>=1.7,<2' dbt-duckdb`.",
+    )
 }
 
 #[cfg(test)]

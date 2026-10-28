@@ -1,6 +1,6 @@
 # Competitive landscape & positioning
 
-Canon name: **DWHForge Query**. Related: [ADR-0001](adr/0001-product-positioning.md), [ADR-0016](adr/0016-product-rename-dwhforge-query.md), [DESIGN.md](DESIGN.md).
+Canon name: **DWHForge Query**. Related: [ADR-0001](adr/0001-product-positioning.md), [ADR-0016](adr/0016-product-rename-dwhforge-query.md), [DESIGN.md](DESIGN.md), [ADR-0018](adr/0018-return-and-edit.md).
 
 Snapshot date: 2026-10. Treat names/features as moving targets; re-check before GTM claims.
 
@@ -126,16 +126,18 @@ Suggested hero line options:
 
 ## 5. Implications for roadmap (positioning-driven)
 
-Order that reinforces DE/DBA/dev (without rewriting v1 DoD):
+> Historical list below. Active sequence: [ADR-0018](adr/0018-return-and-edit.md) · [DESIGN.md](DESIGN.md) §10.
 
-1. **Honest SQL panel** + copy (even if read-only) — already on path.  
-2. **`project.json` on disk** + Export shows file tree.  
-3. **Postgres describe / schema inspector** in Sources.  
-4. **CLI `export`** mirroring UI `export_dbt`.  
-5. **dbt v2 producer** (credibility of version matrix).  
-6. Then richer PQ transforms / two-way parse-back — still under “developer owns the text”.
+1. Honest SQL panel + copy — partial.  
+2. `project.json` / Export tree — partial.  
+3. Postgres describe / picker — partial ([ADR-0010](adr/0010-postgres-object-picker.md)).  
+4. CLI `export` — landed (`dwh-export`).  
+5. **dbt v2 producer** — after return-and-edit DoD ([ADR-0006](adr/0006-dbt-version-matrix.md)).  
+6. Two-way parse-back — deferred ([ADR-0004](adr/0004-two-way-visual-text.md)).
 
-Success metric stays: `dbt run` with no hand-edits — that *is* the DE proof. Marketing should say that out loud.
+**Active success metric:** users return to change projects — [ADR-0018](adr/0018-return-and-edit.md). Baseline: `dbt run` with no hand-edits.
+
+**External promise:** *Assemble and verify transforms on real data. Keep the result as SQL/dbt in your own infrastructure.*
 
 ---
 
@@ -143,8 +145,9 @@ Success metric stays: `dbt run` with no hand-edits — that *is* the DE proof. M
 
 | Doc | Role |
 |-----|------|
-| [DESIGN.md](DESIGN.md) | Horizons, UX killer, persona |
-| [SPEC.md](SPEC.md) | Contracts / DoD |
+| [DESIGN.md](DESIGN.md) | Horizons, next DoD, Join MVP |
+| [ADR-0018](adr/0018-return-and-edit.md) | Return-and-edit decisions |
+| [SPEC.md](SPEC.md) | Contracts / baseline v1 DoD |
 | [ADR-0001](adr/0001-product-positioning.md) | dbt-first, PQ-path |
 | [ADR-0005](adr/0005-ux-blow-away.md) | UX bar |
 | [ADR-0007](adr/0007-visual-pipeline-editor-killer.md) | Visual as killer feature |

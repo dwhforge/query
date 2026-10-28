@@ -1,5 +1,5 @@
 use dwh_engine::{
-    describe_postgres_object as run_describe_postgres_object,
+    collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
     list_postgres_objects as run_list_postgres_objects, set_extensions_dir,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
     test_postgres_connection as run_test_postgres_connection, DbSession, PostgresColumn,
@@ -9,9 +9,10 @@ mod secrets_io;
 mod settings_io;
 
 use dwh_pipeline::{
-    dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql, resolve_dbt_bin,
-    ConnectionDef, DbtProducer, DbtTarget, ExportResult, OutputProducer, PreviewDbtModel,
-    Project, QueryDef, TransformationStep, WarehouseDialect, Workspace,
+    dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql,
+    preview_dbt_model_sql_with_seeds, resolve_dbt_bin, ConnectionDef, DbtProducer, DbtTarget,
+    ExportResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
+    Workspace,
 };
 use settings_io::AppSettings;
 use serde::{Deserialize, Serialize};
@@ -77,15 +78,23 @@ fn preview_workspace(
     run_preview_workspace(&db, &workspace, &conns)
 }
 
-/// dbt model SQL for one query (Model tab — updates with selection, no DuckDB).
+/// dbt model SQL for one query (Model tab). Seeds from DuckDB/PG when available.
 #[tauri::command]
 fn preview_dbt_model(
     workspace: Workspace,
     query_id: String,
     target_dialect: Option<WarehouseDialect>,
+    connections: Option<Vec<ConnectionDef>>,
+    db: State<'_, DbSession>,
 ) -> Result<PreviewDbtModel, String> {
     let dialect = target_dialect.unwrap_or_default();
-    preview_dbt_model_sql(&workspace, &query_id, dialect)
+    let conns = connections.unwrap_or_default();
+    let seeds = collect_load_seeds(&db, &workspace, &conns).unwrap_or_default();
+    if seeds.is_empty() {
+        preview_dbt_model_sql(&workspace, &query_id, dialect)
+    } else {
+        preview_dbt_model_sql_with_seeds(&workspace, &query_id, dialect, &seeds)
+    }
 }
 
 fn tauri_dbt_bin_candidates(app: Option<&AppHandle>) -> Vec<PathBuf> {
@@ -111,10 +120,21 @@ fn export_dbt(
     output_dir: String,
     dbt_target: Option<DbtTarget>,
     target_dialect: Option<WarehouseDialect>,
+    connections: Option<Vec<ConnectionDef>>,
+    db: State<'_, DbSession>,
 ) -> Result<ExportResult, String> {
     let target = dbt_target.unwrap_or(DbtTarget::V1);
     let dialect = target_dialect.unwrap_or_default();
-    let path = DbtProducer.produce(&pipeline_name, &workspace, &output_dir, target, dialect)?;
+    let conns = connections.unwrap_or_default();
+    let seeds = collect_load_seeds(&db, &workspace, &conns).unwrap_or_default();
+    let path = DbtProducer.produce_with_seeds(
+        &pipeline_name,
+        &workspace,
+        &output_dir,
+        target,
+        dialect,
+        &seeds,
+    )?;
     let files = walk_export_tree(&path)?;
     let mut result = ExportResult::with_files(path.clone(), files);
 

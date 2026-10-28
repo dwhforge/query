@@ -28,11 +28,13 @@ export function previewDbtModel(
   workspace: Workspace,
   queryId: string,
   targetDialect: WarehouseDialect = "duckdb",
+  connections: ConnectionDef[] = [],
 ): Promise<PreviewDbtModel> {
   return invoke<PreviewDbtModel>("preview_dbt_model", {
     workspace,
     queryId,
     targetDialect,
+    connections,
   });
 }
 
@@ -59,6 +61,7 @@ export function exportDbt(
   outputDir: string,
   dbtTarget: DbtTarget = "v1",
   targetDialect: WarehouseDialect = "duckdb",
+  connections: ConnectionDef[] = [],
 ): Promise<ExportResult> {
   return invoke<ExportResult>("export_dbt", {
     pipelineName,
@@ -66,6 +69,7 @@ export function exportDbt(
     outputDir,
     dbtTarget,
     targetDialect,
+    connections,
   });
 }
 

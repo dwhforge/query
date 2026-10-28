@@ -8,6 +8,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ConnectionEditor } from "./components/ConnectionEditor";
 import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
+import { HelpDialog } from "./components/HelpDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
@@ -138,6 +139,7 @@ function App() {
   /** Dialog outcome: catalog-only source vs source+query. */
   const [pickerIntent, setPickerIntent] = useState<"source" | "query">("query");
   const [connEditorOpen, setConnEditorOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [connEditorKind, setConnEditorKind] =
     useState<ConnectionKind>("postgres");
   const [editingConnection, setEditingConnection] =
@@ -277,7 +279,12 @@ function App() {
       return;
     }
     let cancelled = false;
-    void previewDbtModel(project.workspace, id, projectDialect(project))
+    void previewDbtModel(
+      project.workspace,
+      id,
+      projectDialect(project),
+      connections,
+    )
       .then((m) => {
         if (!cancelled) {
           setModelPreview(m);
@@ -305,6 +312,7 @@ function App() {
     activeQueryId,
     focusQueryId,
     queries.length,
+    connections,
   ]);
 
   const syncInspectorFromQuery = useCallback(
@@ -1413,6 +1421,7 @@ function App() {
         dir,
         project.dbt_target,
         dialect,
+        connections,
       );
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
@@ -1673,7 +1682,10 @@ function App() {
           void handleSetTargetDialect(d)
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
+        onOpenHelp={() => setHelpOpen(true)}
       />
+
+      <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       <ConnectionEditor
         open={connEditorOpen}

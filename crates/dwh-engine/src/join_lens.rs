@@ -17,10 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
-/// Max distinct key tuples per `explain_join_rows` call.
+/// Max distinct key tuples / preview offsets per `explain_join_rows` call.
 pub const JOIN_LENS_MAX_KEYS: usize = 24;
-/// Max matching input rows returned per side per key.
+/// Max matching input rows returned per side after pinning to the result row.
 pub const JOIN_LENS_MAX_MATCHES: usize = 6;
+/// Candidate key-matches fetched before pin (ORDER BY 1 is arbitrary — need headroom).
+pub const JOIN_LENS_CANDIDATE_MATCHES: usize = 48;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinKeyTuple {
@@ -92,7 +94,35 @@ pub fn explain_join_rows(
         return Err("Join cannot be the first step".into());
     }
 
-    let owned_keys: Vec<JoinKeyTuple> = if !keys.is_empty() {
+    // Offsets mode: one explanation per preview row (no key-dedupe) so Left/Right
+    // can pin to *this* result row instead of the first key match.
+    let offset_ctx: Option<OffsetResolve> = if keys.is_empty() {
+        let offs = preview_offsets
+            .filter(|o| !o.is_empty())
+            .ok_or_else(|| "explain_join_rows: provide keys or preview_offsets".to_string())?;
+        if offs.len() > JOIN_LENS_MAX_KEYS {
+            return Err(format!(
+                "explain_join_rows: at most {JOIN_LENS_MAX_KEYS} offsets (got {})",
+                offs.len()
+            ));
+        }
+        let compiled = GraphCompiler::new(&resolved).compile_ctes()?;
+        Some(resolve_preview_offsets(
+            db,
+            &compiled.definitions,
+            host_query_id,
+            join_step_index,
+            &host.steps,
+            left_on,
+            offs,
+        )?)
+    } else {
+        None
+    };
+
+    let owned_keys: Vec<JoinKeyTuple> = if let Some(ctx) = &offset_ctx {
+        ctx.keys.clone()
+    } else {
         for k in keys {
             if k.values.len() != left_on.len() {
                 return Err(format!(
@@ -103,28 +133,6 @@ pub fn explain_join_rows(
             }
         }
         keys.to_vec()
-    } else if let Some(offs) = preview_offsets {
-        if offs.is_empty() {
-            return Err("explain_join_rows: empty keys and offsets".into());
-        }
-        if offs.len() > JOIN_LENS_MAX_KEYS {
-            return Err(format!(
-                "explain_join_rows: at most {JOIN_LENS_MAX_KEYS} offsets (got {})",
-                offs.len()
-            ));
-        }
-        let compiled = GraphCompiler::new(&resolved).compile_ctes()?;
-        resolve_keys_from_preview_offsets(
-            db,
-            &compiled.definitions,
-            host_query_id,
-            join_step_index,
-            &host.steps,
-            left_on,
-            offs,
-        )?
-    } else {
-        return Err("explain_join_rows: provide keys or preview_offsets".into());
     };
 
     if owned_keys.len() > JOIN_LENS_MAX_KEYS {
@@ -134,18 +142,34 @@ pub fn explain_join_rows(
         ));
     }
 
-    // Dedupe by fingerprint while preserving request order.
-    let mut seen = HashSet::new();
-    let mut unique: Vec<JoinKeyTuple> = Vec::new();
-    let mut fingerprints: Vec<String> = Vec::new();
-    for k in &owned_keys {
-        let fp = fingerprint_key(&k.values);
-        if seen.insert(fp.clone()) {
-            unique.push(k.clone());
-            fingerprints.push(fp);
+    // Key mode: dedupe. Offset mode: keep 1:1 with preview rows.
+    let (batch_keys, fingerprints, pin_results): (
+        Vec<JoinKeyTuple>,
+        Vec<String>,
+        Option<(Vec<ColumnMetadata>, Vec<Vec<JsonValue>>)>,
+    ) = if let Some(ctx) = &offset_ctx {
+        let fps: Vec<String> = (0..ctx.keys.len())
+            .map(|i| format!("off:{}", i))
+            .collect();
+        (
+            ctx.keys.clone(),
+            fps,
+            Some((ctx.columns.clone(), ctx.rows.clone())),
+        )
+    } else {
+        let mut seen = HashSet::new();
+        let mut unique: Vec<JoinKeyTuple> = Vec::new();
+        let mut fps: Vec<String> = Vec::new();
+        for k in &owned_keys {
+            let fp = fingerprint_key(&k.values);
+            if seen.insert(fp.clone()) {
+                unique.push(k.clone());
+                fps.push(fp);
+            }
         }
-    }
-    let unique_refs: Vec<&JoinKeyTuple> = unique.iter().collect();
+        (unique, fps, None)
+    };
+    let batch_refs: Vec<&JoinKeyTuple> = batch_keys.iter().collect();
 
     let left_cte = cte_name(host_query_id, join_step_index - 1);
     let right_cte = {
@@ -159,7 +183,7 @@ pub fn explain_join_rows(
     };
 
     let compiled = GraphCompiler::new(&resolved).compile_ctes()?;
-    let batch_sql = values_batch_sql(&unique_refs, left_on.len())?;
+    let batch_sql = values_batch_sql(&batch_refs, left_on.len())?;
     let left_on_join = left_on
         .iter()
         .enumerate()
@@ -172,7 +196,12 @@ pub fn explain_join_rows(
         .map(|(i, c)| format!("r.{} = b.k{i}", quote_ident(c)))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let max_m = JOIN_LENS_MAX_MATCHES;
+    // Fetch a wider candidate pool so pin can find the real parent, then trim.
+    let cand_m = if pin_results.is_some() {
+        JOIN_LENS_CANDIDATE_MATCHES
+    } else {
+        JOIN_LENS_MAX_MATCHES
+    };
 
     let with_prefix = format!("WITH \n{},\n{batch_sql}", compiled.definitions);
 
@@ -197,7 +226,7 @@ pub fn explain_join_rows(
              ROW_NUMBER() OVER (PARTITION BY b.ord ORDER BY 1) AS _rn\n\
            FROM batch b\n\
            INNER JOIN {left_cte} l ON {left_on_join}\n\
-         ) x WHERE _rn <= {max_m}\n\
+         ) x WHERE _rn <= {cand_m}\n\
          ORDER BY _ord, _rn"
     );
     let right_samp_sql = format!(
@@ -207,7 +236,7 @@ pub fn explain_join_rows(
              ROW_NUMBER() OVER (PARTITION BY b.ord ORDER BY 1) AS _rn\n\
            FROM batch b\n\
            INNER JOIN {right_cte} r ON {right_on_join}\n\
-         ) x WHERE _rn <= {max_m}\n\
+         ) x WHERE _rn <= {cand_m}\n\
          ORDER BY _ord, _rn"
     );
 
@@ -236,11 +265,42 @@ pub fn explain_join_rows(
         Ok(map)
     })?;
 
-    let (left_columns, left_by_ord) = fetch_side_samples(db, &left_samp_sql)?;
-    let (right_columns, right_by_ord) = fetch_side_samples(db, &right_samp_sql)?;
+    let (left_columns, mut left_by_ord) = fetch_side_samples(db, &left_samp_sql)?;
+    let (right_columns, mut right_by_ord) = fetch_side_samples(db, &right_samp_sql)?;
 
-    let mut explanations = Vec::with_capacity(unique.len());
-    for (i, k) in unique.iter().enumerate() {
+    if let Some((result_cols, result_rows)) = &pin_results {
+        let left_names: Vec<String> = left_columns.iter().map(|c| c.name.clone()).collect();
+        let right_names: Vec<String> = right_columns.iter().map(|c| c.name.clone()).collect();
+        let result_names: Vec<String> = result_cols.iter().map(|c| c.name.clone()).collect();
+        for (i, result_row) in result_rows.iter().enumerate() {
+            let ord = i as i64;
+            if let Some(rows) = left_by_ord.get_mut(&ord) {
+                *rows = pin_side_rows(
+                    rows,
+                    &left_names,
+                    result_row,
+                    &result_names,
+                    left_on,
+                    right_on,
+                    true,
+                );
+            }
+            if let Some(rows) = right_by_ord.get_mut(&ord) {
+                *rows = pin_side_rows(
+                    rows,
+                    &right_names,
+                    result_row,
+                    &result_names,
+                    left_on,
+                    right_on,
+                    false,
+                );
+            }
+        }
+    }
+
+    let mut explanations = Vec::with_capacity(batch_keys.len());
+    for (i, k) in batch_keys.iter().enumerate() {
         let ord = i as i64;
         explanations.push(JoinRowExplanation {
             fingerprint: fingerprints[i].clone(),
@@ -265,8 +325,16 @@ pub fn explain_join_rows(
     })
 }
 
+struct OffsetResolve {
+    keys: Vec<JoinKeyTuple>,
+    columns: Vec<ColumnMetadata>,
+    /// Full preview rows aligned with `keys` / request offset order.
+    rows: Vec<Vec<JsonValue>>,
+}
+
 /// Rebuild post-Join steps while always retaining `left_on` keys (even if SelectColumns dropped them).
-fn resolve_keys_from_preview_offsets(
+/// Returns join keys **and** full preview rows so Left/Right can pin to this result row.
+fn resolve_preview_offsets(
     db: &DbSession,
     workspace_cte_defs: &str,
     host_query_id: &str,
@@ -274,7 +342,7 @@ fn resolve_keys_from_preview_offsets(
     steps: &[TransformationStep],
     left_on: &[String],
     offsets: &[u64],
-) -> Result<Vec<JoinKeyTuple>, String> {
+) -> Result<OffsetResolve, String> {
     let join_cte = cte_name(host_query_id, join_step_index);
     let mut key_names: Vec<String> = left_on.to_vec();
     let mut extras: Vec<String> = Vec::new();
@@ -346,83 +414,226 @@ fn resolve_keys_from_preview_offsets(
         prev = name;
     }
 
-    let key_select = key_names
-        .iter()
-        .enumerate()
-        .map(|(i, c)| format!("{} AS k{i}", quote_ident(c)))
-        .collect::<Vec<_>>()
-        .join(", ");
     let off_list = offsets
         .iter()
         .map(|o| o.to_string())
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Full preview rows (LIMIT 50 = preview window) for pin + key extraction.
     let sql = format!(
         "WITH \n{workspace_cte_defs},\n{}\n,\n  lens_numbered AS (\n\
-           SELECT ROW_NUMBER() OVER () - 1 AS __off, {key_select}\n\
+           SELECT ROW_NUMBER() OVER () - 1 AS __off, *\n\
            FROM {prev}\n\
            LIMIT 50\n\
          )\n\
-         SELECT __off, {} FROM lens_numbered WHERE __off IN ({off_list})\n\
+         SELECT * FROM lens_numbered WHERE __off IN ({off_list})\n\
          ORDER BY __off",
         extras.join(",\n"),
-        (0..key_names.len())
-            .map(|i| format!("k{i}"))
-            .collect::<Vec<_>>()
-            .join(", "),
     );
 
     db.with_conn(|conn| {
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("lens keys: {e}"))?;
-        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
-        let mut by_off: HashMap<u64, JoinKeyTuple> = HashMap::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let off: i64 = row.get(0).map_err(|e| e.to_string())?;
-            let mut values = Vec::with_capacity(key_names.len());
-            for i in 0..key_names.len() {
-                values.push(duck_value_to_json(&row, i + 1)?);
-            }
-            by_off.insert(off as u64, JoinKeyTuple { values });
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("lens offsets: {e}"))?;
+        let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+        let schema = arrow.get_schema();
+        let batches: Vec<RecordBatch> = arrow.collect();
+        if schema.fields().is_empty() {
+            return Err("lens offsets: empty schema".into());
         }
-        let mut out = Vec::with_capacity(offsets.len());
+        // col 0 = __off; rest = preview columns
+        let columns: Vec<ColumnMetadata> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|f| ColumnMetadata {
+                name: f.name().clone(),
+                col_type: map_type(f.data_type()),
+            })
+            .collect();
+        let key_idx: Vec<usize> = key_names
+            .iter()
+            .map(|k| {
+                columns
+                    .iter()
+                    .position(|c| ascii_fold_name(&c.name) == ascii_fold_name(k))
+                    .ok_or_else(|| format!("join key '{k}' missing from preview recovery"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut by_off: HashMap<u64, (JoinKeyTuple, Vec<JsonValue>)> = HashMap::new();
+        for batch in &batches {
+            let n = batch.num_rows();
+            let cols = batch.num_columns();
+            for r in 0..n {
+                let off = cell_i64(batch.column(0).as_ref(), r)? as u64;
+                let mut row = Vec::with_capacity(cols - 1);
+                for c in 1..cols {
+                    row.push(cell_json(batch.column(c).as_ref(), r));
+                }
+                let values: Vec<JsonValue> = key_idx.iter().map(|&i| row[i].clone()).collect();
+                by_off.insert(off, (JoinKeyTuple { values }, row));
+            }
+        }
+
+        let mut keys = Vec::with_capacity(offsets.len());
+        let mut rows = Vec::with_capacity(offsets.len());
         for o in offsets {
-            let k = by_off.get(o).ok_or_else(|| {
+            let (k, row) = by_off.get(o).ok_or_else(|| {
                 format!("preview offset {o} out of range for Join Lens key recovery")
             })?;
-            out.push(k.clone());
+            keys.push(k.clone());
+            rows.push(row.clone());
         }
-        Ok(out)
+        Ok(OffsetResolve {
+            keys,
+            columns,
+            rows,
+        })
     })
 }
 
-fn duck_value_to_json(row: &duckdb::Row<'_>, idx: usize) -> Result<JsonValue, String> {
-    // Prefer string round-trip then number/bool — robust across types.
-    if let Ok(v) = row.get::<_, Option<i64>>(idx) {
-        return Ok(match v {
-            None => JsonValue::Null,
-            Some(n) => JsonValue::from(n),
-        });
+fn json_values_equal(a: &JsonValue, b: &JsonValue) -> bool {
+    if a == b {
+        return true;
     }
-    if let Ok(v) = row.get::<_, Option<f64>>(idx) {
-        return Ok(match v {
-            None => JsonValue::Null,
-            Some(f) => serde_json::Number::from_f64(f)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null),
-        });
+    match (a, b) {
+        (JsonValue::Null, JsonValue::Null) => true,
+        (JsonValue::Number(n), JsonValue::String(s)) | (JsonValue::String(s), JsonValue::Number(n)) => {
+            s.parse::<f64>()
+                .ok()
+                .and_then(|f| n.as_f64().map(|g| (f - g).abs() < f64::EPSILON))
+                .unwrap_or(false)
+        }
+        (JsonValue::Number(n), other) | (other, JsonValue::Number(n)) => {
+            other.as_f64() == n.as_f64()
+                || other.as_i64() == n.as_i64()
+                || other.as_u64() == n.as_u64()
+        }
+        _ => a.to_string() == b.to_string(),
     }
-    if let Ok(v) = row.get::<_, Option<bool>>(idx) {
-        return Ok(match v {
-            None => JsonValue::Null,
-            Some(b) => JsonValue::Bool(b),
-        });
+}
+
+/// Rank/filter key-matches so the dock shows the parent of *this* result row.
+fn pin_side_rows(
+    side_rows: &[Vec<JsonValue>],
+    side_names: &[String],
+    result_row: &[JsonValue],
+    result_names: &[String],
+    left_on: &[String],
+    right_on: &[String],
+    is_left: bool,
+) -> Vec<Vec<JsonValue>> {
+    if side_rows.len() <= 1 {
+        return side_rows
+            .iter()
+            .take(JOIN_LENS_MAX_MATCHES)
+            .cloned()
+            .collect();
     }
-    let v: Option<String> = row.get(idx).map_err(|e| e.to_string())?;
-    Ok(match v {
-        None => JsonValue::Null,
-        Some(s) => JsonValue::String(s),
-    })
+    let side_by_fold: HashMap<String, usize> = side_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (ascii_fold_name(n), i))
+        .collect();
+    let result_by_fold: HashMap<String, usize> = result_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (ascii_fold_name(n), i))
+        .collect();
+
+    let mut checks: Vec<(usize, usize, bool)> = Vec::new(); // side_idx, result_idx, is_key
+    let mut used = HashSet::new();
+
+    for (k, left_name) in left_on.iter().enumerate() {
+        let Some(&result_idx) = result_by_fold.get(&ascii_fold_name(left_name)) else {
+            continue;
+        };
+        let side_name = if is_left {
+            left_name.as_str()
+        } else {
+            right_on.get(k).map(|s| s.as_str()).unwrap_or(left_name.as_str())
+        };
+        let Some(&side_idx) = side_by_fold.get(&ascii_fold_name(side_name)) else {
+            continue;
+        };
+        if used.insert(side_idx) {
+            checks.push((side_idx, result_idx, true));
+        }
+    }
+
+    let key_folds: HashSet<String> = left_on.iter().map(|c| ascii_fold_name(c)).collect();
+    for (result_idx, name) in result_names.iter().enumerate() {
+        let f = ascii_fold_name(name);
+        if key_folds.contains(&f) {
+            continue;
+        }
+        let bare = f
+            .rsplit_once("__")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_else(|| f.clone());
+        let side_idx = side_by_fold
+            .get(&f)
+            .or_else(|| side_by_fold.get(&bare))
+            .copied();
+        let Some(side_idx) = side_idx else { continue };
+        // Only pin on columns that belong to this side (name present on side).
+        if used.insert(side_idx) {
+            checks.push((side_idx, result_idx, false));
+        }
+    }
+
+    let non_key = checks.iter().filter(|(_, _, is_key)| !*is_key).count();
+    if non_key == 0 {
+        return side_rows
+            .iter()
+            .take(JOIN_LENS_MAX_MATCHES)
+            .cloned()
+            .collect();
+    }
+
+    let mut scored: Vec<(usize, &Vec<JsonValue>)> = side_rows
+        .iter()
+        .map(|row| {
+            let score = checks
+                .iter()
+                .filter(|(si, ri, _)| {
+                    row.get(*si)
+                        .zip(result_row.get(*ri))
+                        .map(|(a, b)| json_values_equal(a, b))
+                        .unwrap_or(false)
+                })
+                .count();
+            (score, row)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let perfect = checks.len();
+    let best = scored[0].0;
+    let key_only = checks.len() - non_key;
+    let out: Vec<Vec<JsonValue>> = if best == perfect {
+        scored
+            .iter()
+            .filter(|(s, _)| *s == perfect)
+            .map(|(_, r)| (*r).clone())
+            .take(JOIN_LENS_MAX_MATCHES)
+            .collect()
+    } else if best > key_only {
+        scored
+            .iter()
+            .filter(|(s, _)| *s == best)
+            .map(|(_, r)| (*r).clone())
+            .take(JOIN_LENS_MAX_MATCHES)
+            .collect()
+    } else {
+        scored
+            .iter()
+            .map(|(_, r)| (*r).clone())
+            .take(JOIN_LENS_MAX_MATCHES)
+            .collect()
+    };
+    out
 }
 
 fn values_batch_sql(keys: &[&JoinKeyTuple], arity: usize) -> Result<String, String> {
@@ -693,5 +904,59 @@ mod tests {
         assert_eq!(out.explanations.len(), 2);
         assert!(!out.explanations[0].key_values.is_empty());
         assert!(out.explanations[0].right_match_count >= 1);
+    }
+
+    #[test]
+    fn offset_pins_left_parent_not_first_key_match() {
+        // sample.csv: row0 EU qty=3, row2 EU qty=2 — same join key, different left parent.
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sample.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+        };
+        let db = DbSession::new().unwrap();
+        let out = explain_join_rows(&db, &ws, &[], "fact", 1, &[], Some(&[0, 2])).unwrap();
+        assert_eq!(out.explanations.len(), 2);
+        let left0 = &out.explanations[0].left_rows;
+        let left2 = &out.explanations[1].left_rows;
+        assert_eq!(left0.len(), 1, "row0 should pin to one left parent");
+        assert_eq!(left2.len(), 1, "row2 should pin to one left parent");
+        // qty is column index 3 on left (date, region, amount, qty)
+        let qty_idx = out
+            .left_columns
+            .iter()
+            .position(|c| c.name == "qty")
+            .expect("qty");
+        assert_ne!(
+            left0[0][qty_idx], left2[0][qty_idx],
+            "different result rows must not share the first EU left match"
+        );
     }
 }

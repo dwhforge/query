@@ -2,9 +2,23 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "type": "node-terminal",
+      "request": "launch",
+      "name": "DWHForge (Electron UI)",
+      "command": "npm run electron:dev",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "node-terminal",
+      "request": "launch",
+      "name": "Vite FE only (no Electron)",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}"
+    },
+    {
       "type": "lldb",
       "request": "launch",
-      "name": "dwh-host (release)",
+      "name": "dwh-host only (no UI)",
       "cargo": {
         "args": ["build", "--release", "-p", "dwh-host"],
         "filter": {
@@ -53,20 +67,6 @@
         }
       },
       "args": ["${input:csvPath}", "${input:filterCondition}"],
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "type": "node-terminal",
-      "request": "launch",
-      "name": "Vite FE only",
-      "command": "npm run dev",
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "type": "node-terminal",
-      "request": "launch",
-      "name": "npm: electron:dev",
-      "command": "npm run electron:dev",
       "cwd": "${workspaceFolder}"
     }
   ],

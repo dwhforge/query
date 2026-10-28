@@ -19,25 +19,6 @@ function fold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
 
-function fingerprint(values: unknown[]): string {
-  return JSON.stringify(values);
-}
-
-function extractKey(
-  row: unknown[],
-  columns: ColumnMetadata[],
-  leftOn: string[],
-): unknown[] | null {
-  const byFold = new Map(columns.map((c, i) => [fold(c.name), i]));
-  const values: unknown[] = [];
-  for (const name of leftOn) {
-    const idx = byFold.get(fold(name));
-    if (idx === undefined) return null;
-    values.push(row[idx] ?? null);
-  }
-  return values;
-}
-
 function cellStr(v: unknown): string {
   if (v === null || v === undefined) return "∅";
   return String(v);
@@ -218,6 +199,8 @@ export function JoinLens({
     setActiveIndex(0);
   }, [hostQueryId, joinStepIndex, leftOn.join("\0"), rightOn.join("\0")]);
 
+  // Always explain by preview row offset (not join-key alone). Same key can have
+  // many left parents; key-cache made the beam stick to the first key match.
   useEffect(() => {
     if (!enabled || rows.length === 0 || leftOn.length === 0) return;
 
@@ -229,39 +212,21 @@ export function JoinLens({
       idxs.add(Math.min(activeIndex, rows.length - 1));
       for (let i = start; i < end && idxs.size < MAX_KEYS; i++) idxs.add(i);
 
-      const keysPresent = leftOn.every((k) =>
-        columns.some((c) => fold(c.name) === fold(k)),
-      );
-
-      const missingKeys: { values: unknown[] }[] = [];
       const missingOffsets: number[] = [];
-      const seen = new Set<string>();
       for (const i of idxs) {
-        if (keysPresent) {
-          const vals = extractKey(rows[i], columns, leftOn);
-          if (!vals) continue;
-          const fp = fingerprint(vals);
-          if (cacheRef.current.has(fp) || seen.has(fp)) continue;
-          seen.add(fp);
-          missingKeys.push({ values: vals });
-        } else {
-          const fp = `off:${i}`;
-          if (cacheRef.current.has(fp) || seen.has(fp)) continue;
-          seen.add(fp);
-          missingOffsets.push(i);
-        }
-        if (missingKeys.length + missingOffsets.length >= MAX_KEYS) break;
+        const fp = `off:${i}`;
+        if (cacheRef.current.has(fp)) continue;
+        missingOffsets.push(i);
+        if (missingOffsets.length >= MAX_KEYS) break;
       }
-      if (missingKeys.length === 0 && missingOffsets.length === 0) return;
+      if (missingOffsets.length === 0) return;
 
       setLoading(true);
       void explainJoinRows(
         workspace,
         hostQueryId,
         joinStepIndex,
-        keysPresent
-          ? { keys: missingKeys }
-          : { previewOffsets: missingOffsets },
+        { previewOffsets: missingOffsets },
         connections,
       )
         .then((res: ExplainJoinRowsResult) => {
@@ -269,17 +234,10 @@ export function JoinLens({
           setLeftCols(res.left_columns);
           setRightCols(res.right_columns);
           setMaxMatches(res.max_matches);
-          if (keysPresent) {
-            for (const ex of res.explanations) {
-              cacheRef.current.set(ex.fingerprint, ex);
-            }
-          } else {
-            // Map explanations back onto the requested offsets (same order).
-            missingOffsets.forEach((off, i) => {
-              const ex = res.explanations[i];
-              if (ex) cacheRef.current.set(`off:${off}`, ex);
-            });
-          }
+          missingOffsets.forEach((off, i) => {
+            const ex = res.explanations[i];
+            if (ex) cacheRef.current.set(`off:${off}`, ex);
+          });
           setCacheTick((n) => n + 1);
           setLoading(false);
         })
@@ -306,22 +264,12 @@ export function JoinLens({
     connections,
   ]);
 
-  const keysPresent = useMemo(
-    () => leftOn.every((k) => columns.some((c) => fold(c.name) === fold(k))),
-    [leftOn, columns],
-  );
-
   const activeExpl = useMemo(() => {
     void cacheTick;
     if (!enabled || rows.length === 0) return null;
     const idx = Math.min(activeIndex, rows.length - 1);
-    if (!keysPresent) {
-      return cacheRef.current.get(`off:${idx}`) ?? null;
-    }
-    const vals = extractKey(rows[idx], columns, leftOn);
-    if (!vals) return null;
-    return cacheRef.current.get(fingerprint(vals)) ?? null;
-  }, [activeIndex, rows, columns, leftOn, enabled, cacheTick, keysPresent]);
+    return cacheRef.current.get(`off:${idx}`) ?? null;
+  }, [activeIndex, rows, columns, leftOn, enabled, cacheTick]);
 
   const columnOrigins = useMemo(() => {
     if (leftCols.length === 0 && rightCols.length === 0) {

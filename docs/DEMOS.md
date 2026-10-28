@@ -37,6 +37,7 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | A11 | Mid-pipeline SQL escape | CustomSql + `{{prev_step}}` | sql |
 | A12 | Multi-hop int→mart | FromQuery chain | sales, union, sql |
 | A13 | Postgres source | LoadPostgres | UI only (needs DSN) |
+| A14 | Chained RIGHT OUTER (multi-join) | Two Join steps, different rights | right |
 
 ### B — Partial
 
@@ -93,3 +94,22 @@ Categories: A1, A5, A9, A12.
 | `sales_top3` | `int_sales_top3` | From(enriched) → Filter |
 
 Categories: A2, A10, A11, A12; B2 via CustomSql.
+
+### 4. `right` — Two RIGHT OUTER joins (coverage)
+
+Sparse fact has only `EU/web` and `US/store`. Dims also have `APAC` and `partner` with no facts.
+
+| Query (UI) | dbt model (export) | Steps |
+|------------|-------------------|--------|
+| `dim_region` | `stg_dim_region` | LoadCsv |
+| `dim_channel` | `stg_dim_channel` | LoadCsv |
+| `sparse_sales` | `stg_sparse_sales` | LoadCsv (2 rows) |
+| `coverage` ★focus | `mart_coverage` | From(sparse) → **RIGHT** Join(dim_region) → **RIGHT** Join(dim_channel) |
+
+How to read it:
+
+1. Select the **first** Join step in History (region) — Data previews **through that Join only** (APAC appears). Join Lens **Linked**: left/right = parents of the center row; **Probe**: unmatched diag samples → ask if linked.
+2. Select the **second** Join (channel) — Data/Lens switch to that join’s output (all channels, incl. `partner`). Unmatched lefts from the first join can disappear — RIGHT privileges the new right side.
+3. Canvas shows **two** join edges; a third drag appends another Join (does not wipe prior ones).
+
+Categories: A1, A3, A14.

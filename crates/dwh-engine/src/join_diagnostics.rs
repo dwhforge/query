@@ -114,7 +114,7 @@ pub fn join_diagnostics_with_limit(
         rq.steps.len() - 1
     });
 
-    let compiled = GraphCompiler::new(&resolved).compile_ctes()?;
+    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
     let on_sql = join_on_sql(left_on, right_on);
     let left_keys_sql = left_on
         .iter()

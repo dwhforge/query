@@ -1,6 +1,6 @@
 use crate::dialect::WarehouseDialect;
 use crate::emit::{emit_transform_step, substitute_query_placeholders};
-use crate::graph::{cte_name, topo_queries};
+use crate::graph::{cte_name, topo_queries_from};
 use crate::model::{TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
 use crate::sql_escape::escape_sql_string;
@@ -40,13 +40,18 @@ impl<'a> GraphCompiler<'a> {
         Self { workspace }
     }
 
-    /// Compile all query steps into a CTE list (topo order).
+    /// Compile focus query + its deps into a CTE list (topo order).
     pub fn compile_ctes(&self) -> Result<CompiledCtes, String> {
+        self.compile_ctes_from(&self.workspace.focus_query_id)
+    }
+
+    /// Compile `root_id` + transitive deps only — unrelated broken queries are ignored.
+    pub fn compile_ctes_from(&self, root_id: &str) -> Result<CompiledCtes, String> {
         if self.workspace.queries.is_empty() {
             return Err("Workspace is empty".into());
         }
 
-        let order = topo_queries(self.workspace)?;
+        let order = topo_queries_from(self.workspace, root_id)?;
         let mut last_cte: HashMap<String, String> = HashMap::new();
         let mut parts: Vec<String> = Vec::new();
 
@@ -256,6 +261,36 @@ mod tests {
     fn empty_steps_error() {
         let steps: Vec<TransformationStep> = vec![];
         assert!(PipelineCompiler::new(&steps).to_sql(true).is_err());
+    }
+
+    #[test]
+    fn preview_ignores_unrelated_broken_query() {
+        // sales_clean starts with RenameColumn (invalid) — must not break preview of sales.
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "sales".into(),
+                    name: "sales".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "sales.csv".into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "sales_clean".into(),
+                    name: "sales_clean".into(),
+                    steps: vec![TransformationStep::RenameColumn {
+                        from: "amount".into(),
+                        to: "revenue".into(),
+                    }],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "sales".into(),
+        };
+        let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
+        assert!(sql.contains("q_sales_s0"));
+        assert!(!sql.contains("sales_clean"));
     }
 
     #[test]

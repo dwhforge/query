@@ -4,12 +4,14 @@ use crate::connections_io;
 use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
-    collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
-    explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
-    list_postgres_objects as run_list_postgres_objects, preview_pipeline as run_preview_steps,
-    preview_workspace as run_preview_workspace, set_extensions_dir,
-    test_postgres_connection as run_test_postgres_connection, DbSession, ExplainJoinRowsResult,
-    JoinDiagnostics, JoinKeyTuple, PostgresColumn, PostgresObject, PreviewResult,
+    blame_unmatched_key as run_blame_unmatched_key, collect_load_seeds,
+    describe_postgres_object as run_describe_postgres_object,
+    explain_join_key as run_explain_join_key, explain_join_rows as run_explain_join_rows,
+    join_diagnostics as run_join_diagnostics, list_postgres_objects as run_list_postgres_objects,
+    preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
+    set_extensions_dir, test_postgres_connection as run_test_postgres_connection,
+    BlameUnmatchedKeyResult, DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult,
+    JoinDiagnostics, JoinKeySide, JoinKeyTuple, PostgresColumn, PostgresObject, PreviewResult,
 };
 use dwh_pipeline::{
     dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql,
@@ -55,6 +57,8 @@ fn fixtures_dir_complete(dir: &Path) -> bool {
         && dir.join("dim_region.csv").is_file()
         && dir.join("sales_eu.csv").is_file()
         && dir.join("sales_us.csv").is_file()
+        && dir.join("sparse_sales.csv").is_file()
+        && dir.join("dim_channel.csv").is_file()
 }
 
 fn set_fixtures_dir(dir: PathBuf) {
@@ -214,6 +218,16 @@ fn demo_sales(fixtures: &Path) -> Result<Workspace, String> {
                         join_type: dwh_pipeline::JoinType::Inner,
                         left_on: vec!["region".into()],
                         right_on: vec!["region".into()],
+                    },
+                    // Mart projection — Join Lens still shows full left/right parents
+                    // (e.g. date on left) even when dropped from the result.
+                    TransformationStep::SelectColumns {
+                        columns: vec![
+                            "region".into(),
+                            "amount".into(),
+                            "qty".into(),
+                            "region_name".into(),
+                        ],
                     },
                     TransformationStep::Filter {
                         condition: "amount > 1000".into(),
@@ -385,14 +399,69 @@ fn demo_sql(fixtures: &Path) -> Result<Workspace, String> {
     })
 }
 
+/// Two sequential RIGHT OUTER joins — dims keep rows missing from sparse fact.
+/// Select each Join step for Join Lens; second RIGHT can drop unmatched lefts
+/// from the first join (RIGHT privileges the new right side).
+fn demo_right_joins(fixtures: &Path) -> Result<Workspace, String> {
+    let sparse = fixture_csv(fixtures, "sparse_sales.csv")?;
+    let dim_r = fixture_csv(fixtures, "dim_region.csv")?;
+    let dim_c = fixture_csv(fixtures, "dim_channel.csv")?;
+    Ok(Workspace {
+        queries: vec![
+            QueryDef {
+                id: "dim_region".into(),
+                name: "dim_region".into(),
+                steps: vec![TransformationStep::LoadCsv { path: dim_r }],
+                execution: Default::default(),
+            },
+            QueryDef {
+                id: "dim_channel".into(),
+                name: "dim_channel".into(),
+                steps: vec![TransformationStep::LoadCsv { path: dim_c }],
+                execution: Default::default(),
+            },
+            QueryDef {
+                id: "sparse_sales".into(),
+                name: "sparse_sales".into(),
+                steps: vec![TransformationStep::LoadCsv { path: sparse }],
+                execution: Default::default(),
+            },
+            QueryDef {
+                id: "coverage".into(),
+                name: "coverage".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sparse_sales".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_region".into(),
+                        join_type: dwh_pipeline::JoinType::Right,
+                        left_on: vec!["region".into()],
+                        right_on: vec!["region".into()],
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_channel".into(),
+                        join_type: dwh_pipeline::JoinType::Right,
+                        left_on: vec!["channel".into()],
+                        right_on: vec!["channel".into()],
+                    },
+                ],
+                execution: Default::default(),
+            },
+        ],
+        focus_query_id: "coverage".into(),
+    })
+}
+
 fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
     let fixtures = find_fixtures_dir()?;
     match name.trim().to_ascii_lowercase().as_str() {
         "sales" | "sample" | "" => demo_sales(&fixtures),
         "union" => demo_union(&fixtures),
         "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
+        "right" | "right_joins" | "coverage" => demo_right_joins(&fixtures),
         other => Err(format!(
-            "Unknown demo '{other}'. Use: sales | union | sql"
+            "Unknown demo '{other}'. Use: sales | union | sql | right"
         )),
     }
 }
@@ -423,6 +492,36 @@ struct ExplainArgs {
     keys: Option<Vec<JoinKeyTuple>>,
     preview_offsets: Option<Vec<u64>>,
     connections: Option<Vec<ConnectionDef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExplainKeyArgs {
+    workspace: Workspace,
+    host_query_id: String,
+    join_step_index: usize,
+    side: String,
+    key_values: Vec<serde_json::Value>,
+    connections: Option<Vec<ConnectionDef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlameKeyArgs {
+    workspace: Workspace,
+    host_query_id: String,
+    join_step_index: usize,
+    side: String,
+    key_values: Vec<serde_json::Value>,
+    connections: Option<Vec<ConnectionDef>>,
+}
+
+fn parse_join_side(side: &str) -> Result<JoinKeySide, String> {
+    match side.trim().to_ascii_lowercase().as_str() {
+        "left" => Ok(JoinKeySide::Left),
+        "right" => Ok(JoinKeySide::Right),
+        other => Err(format!("side must be 'left' or 'right' (got '{other}')")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -635,6 +734,36 @@ impl HostState {
                     a.join_step_index,
                     &keys,
                     a.preview_offsets.as_deref(),
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "explain_join_key" => {
+                let a: ExplainKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let conns = a.connections.unwrap_or_default();
+                let side = parse_join_side(&a.side)?;
+                let out: ExplainJoinKeyResult = run_explain_join_key(
+                    &db,
+                    &a.workspace,
+                    &conns,
+                    &a.host_query_id,
+                    a.join_step_index,
+                    side,
+                    &a.key_values,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "blame_unmatched_key" => {
+                let a: BlameKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let conns = a.connections.unwrap_or_default();
+                let side = parse_join_side(&a.side)?;
+                let out: BlameUnmatchedKeyResult = run_blame_unmatched_key(
+                    &db,
+                    &a.workspace,
+                    &conns,
+                    &a.host_query_id,
+                    a.join_step_index,
+                    side,
+                    &a.key_values,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }

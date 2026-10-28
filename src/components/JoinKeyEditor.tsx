@@ -1,10 +1,13 @@
+import { useEffect, useState } from "react";
 import type { ColumnMetadata } from "../types/pipeline";
 import type { JoinKeyPair } from "../lib/joinKeys";
 import { emptyJoinKeyPair } from "../lib/joinKeys";
 
 type Props = {
-  pairs: JoinKeyPair[];
-  onChange: (pairs: JoinKeyPair[]) => void;
+  /** Seed when the parent remounts (pass `key={stepIndex}` from App). */
+  initialPairs: JoinKeyPair[];
+  /** Draft updates stay local; parent reads via this callback without setState storm. */
+  onDraftChange: (pairs: JoinKeyPair[]) => void;
   leftColumns: ColumnMetadata[];
   rightColumns: ColumnMetadata[];
   leftLoading?: boolean;
@@ -51,30 +54,47 @@ function ColSelect({
 }
 
 export function JoinKeyEditor({
-  pairs,
-  onChange,
+  initialPairs,
+  onDraftChange,
   leftColumns,
   rightColumns,
   leftLoading,
   rightLoading,
 }: Props) {
+  const [pairs, setPairs] = useState<JoinKeyPair[]>(() =>
+    initialPairs.length > 0 ? initialPairs : [emptyJoinKeyPair()],
+  );
+
+  useEffect(() => {
+    const next =
+      initialPairs.length > 0 ? initialPairs : [emptyJoinKeyPair()];
+    setPairs(next);
+    onDraftChange(next);
+    // Only re-seed when parent remounts via key or replaces initialPairs identity on purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional seed-once-per-mount
+  }, []);
+
   const rows = pairs.length > 0 ? pairs : [emptyJoinKeyPair()];
 
+  function commit(next: JoinKeyPair[]) {
+    setPairs(next);
+    onDraftChange(next);
+  }
+
   function updateAt(i: number, patch: Partial<JoinKeyPair>) {
-    const next = rows.map((p, idx) => (idx === i ? { ...p, ...patch } : p));
-    onChange(next);
+    commit(rows.map((p, idx) => (idx === i ? { ...p, ...patch } : p)));
   }
 
   function addPair() {
-    onChange([...rows, emptyJoinKeyPair()]);
+    commit([...rows, emptyJoinKeyPair()]);
   }
 
   function removeAt(i: number) {
     if (rows.length <= 1) {
-      onChange([emptyJoinKeyPair()]);
+      commit([emptyJoinKeyPair()]);
       return;
     }
-    onChange(rows.filter((_, idx) => idx !== i));
+    commit(rows.filter((_, idx) => idx !== i));
   }
 
   return (

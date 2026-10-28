@@ -43,6 +43,8 @@ export type GraphEdgeInfo = {
   kind: GraphEdgeKind;
   hostQueryId: string;
   otherQueryId: string;
+  /** Step index on the host (Join/FromQuery); disambiguates multiple Joins. */
+  stepIndex?: number;
 };
 
 type StepChip = { index: number; label: string };
@@ -318,10 +320,12 @@ function buildGraph(
 
   const edges: Edge[] = [];
   for (const q of queries) {
-    for (const step of q.steps) {
+    for (let stepIdx = 0; stepIdx < q.steps.length; stepIdx++) {
+      const step = q.steps[stepIdx]!;
       if (step.type === "Join") {
         const right = step.payload.right_query_id;
-        const id = `join:${right}->${q.id}`;
+        // Include step index so two Joins (e.g. two RIGHT OUTER) stay distinct.
+        const id = `join:${right}->${q.id}:s${stepIdx}`;
         const selected = selectedEdgeId === id;
         const keys = formatJoinKeyLabel(
           step.payload.left_on,
@@ -340,6 +344,7 @@ function buildGraph(
             labelText,
             hostQueryId: q.id,
             otherQueryId: right,
+            stepIndex: stepIdx,
           } satisfies EdgeData,
           markerEnd: {
             type: MarkerType.ArrowClosed,
@@ -423,7 +428,7 @@ const QueryNode = memo(function QueryNode({
   const { toggleExpand, deriveQuery } = useContext(CanvasActionsCtx);
   return (
     <div
-      className={`min-w-[180px] max-w-[240px] rounded-xl border px-3 py-2.5 shadow-lg backdrop-blur transition ${
+      className={`min-w-[180px] max-w-[240px] rounded-xl border px-3 py-2.5 shadow-lg transition ${
         data.isActive
           ? "border-teal-400/70 bg-slate-900/95 shadow-[0_0_0_1px_rgba(45,212,191,0.35),0_12px_40px_rgba(0,0,0,0.45)]"
           : "border-[var(--line)] bg-[var(--node)]"
@@ -507,6 +512,7 @@ function edgeInfoFromEdge(edge: Edge): GraphEdgeInfo | null {
     kind: d.kind,
     hostQueryId: d.hostQueryId,
     otherQueryId: d.otherQueryId,
+    stepIndex: typeof d.stepIndex === "number" ? d.stepIndex : undefined,
   };
 }
 
@@ -797,7 +803,7 @@ function GraphCanvasInner({
   );
 }
 
-export function GraphCanvas(props: GraphCanvasProps) {
+function GraphCanvasImpl(props: GraphCanvasProps) {
   return (
     <div className="relative h-full min-h-[260px] overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]">
       <ReactFlowProvider>
@@ -811,3 +817,6 @@ export function GraphCanvas(props: GraphCanvasProps) {
     </div>
   );
 }
+
+/** Skip re-render when parent (App) updates unrelated draft fields. */
+export const GraphCanvas = memo(GraphCanvasImpl);

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -23,8 +23,9 @@ interface PreviewTableProps {
   onActiveRowChange?: (index: number) => void;
   onVisibleRangeChange?: (range: { start: number; end: number }) => void;
   onActiveRowElement?: (el: HTMLElement | null) => void;
-  /** Scroll container (for Join Lens beam clamp on horizontal scroll). */
   onScrollParentRef?: (el: HTMLDivElement | null) => void;
+  /** Result rows matching a side-probe selection (Join Lens). */
+  matchedRowIndices?: number[];
 }
 
 function foldKey(s: string): string {
@@ -76,7 +77,7 @@ function originBarClass(o: JoinColumnOrigin | undefined): string {
   }
 }
 
-export function PreviewTable({
+function PreviewTableImpl({
   columns,
   rows,
   highlightKeys = [],
@@ -86,10 +87,15 @@ export function PreviewTable({
   onVisibleRangeChange,
   onActiveRowElement,
   onScrollParentRef,
+  matchedRowIndices,
 }: PreviewTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const rowEls = useRef<Map<number, HTMLElement>>(new Map());
   const hi = new Set(highlightKeys.map(foldKey));
+  const matched = useMemo(
+    () => new Set(matchedRowIndices ?? []),
+    [matchedRowIndices],
+  );
 
   useEffect(() => {
     onScrollParentRef?.(parentRef.current);
@@ -199,6 +205,9 @@ export function PreviewTable({
           {virtualItems.map((virtualRow) => {
             const row = rowModel[virtualRow.index];
             const active = activeRowIndex === virtualRow.index;
+            const isMatch = matched.has(virtualRow.index);
+            const dimUnmatched =
+              matched.size > 0 && !isMatch && !active;
             return (
               <div
                 key={row.id}
@@ -214,7 +223,11 @@ export function PreviewTable({
                 className={`absolute left-0 flex border-b border-slate-800/80 ${
                   active
                     ? "bg-teal-500/15 ring-1 ring-inset ring-teal-500/40"
-                    : "hover:bg-slate-800/40"
+                    : isMatch
+                      ? "bg-teal-500/10 ring-1 ring-inset ring-teal-600/30"
+                      : dimUnmatched
+                        ? "opacity-35 hover:opacity-70 hover:bg-slate-800/40"
+                        : "hover:bg-slate-800/40"
                 }`}
                 style={{
                   height: `${virtualRow.size}px`,
@@ -245,3 +258,5 @@ export function PreviewTable({
     </div>
   );
 }
+
+export const PreviewTable = memo(PreviewTableImpl);

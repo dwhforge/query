@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import {
   emptyS3Params,
   newConnectionId,
@@ -20,7 +20,7 @@ interface Props {
   onSave: (conn: ConnectionDef) => void;
 }
 
-export function ConnectionEditor({
+function ConnectionEditorImpl({
   open,
   initial,
   defaultKind = "postgres",
@@ -80,7 +80,7 @@ export function ConnectionEditor({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog"
       aria-modal="true"
       onMouseDown={(e) => {
@@ -267,6 +267,8 @@ export function ConnectionEditor({
     </div>
   );
 }
+
+export const ConnectionEditor = memo(ConnectionEditorImpl);
 
 function Labeled({
   label,

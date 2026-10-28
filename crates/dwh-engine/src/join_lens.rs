@@ -6,8 +6,8 @@
 use crate::preview::ColumnMetadata;
 use crate::session::DbSession;
 use dwh_pipeline::{
-    ascii_fold_name, cte_name, escape_sql_string, quote_ident, ConnectionDef, GraphCompiler,
-    TransformationStep, Workspace,
+    ascii_fold_name, cte_name, emit_transform_step, escape_sql_string, quote_ident, ConnectionDef,
+    GraphCompiler, TransformationStep, WarehouseDialect, Workspace,
 };
 use duckdb::arrow::array::*;
 use duckdb::arrow::datatypes::DataType;
@@ -106,10 +106,11 @@ pub fn explain_join_rows(
                 offs.len()
             ));
         }
-        let compiled = GraphCompiler::new(&resolved).compile_ctes()?;
+        let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
         Some(resolve_preview_offsets(
             db,
             &compiled.definitions,
+            &compiled.last_by_query,
             host_query_id,
             join_step_index,
             &host.steps,
@@ -182,7 +183,7 @@ pub fn explain_join_rows(
         cte_name(right_query_id, rq.steps.len() - 1)
     };
 
-    let compiled = GraphCompiler::new(&resolved).compile_ctes()?;
+    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
     let batch_sql = values_batch_sql(&batch_refs, left_on.len())?;
     let left_on_join = left_on
         .iter()
@@ -332,11 +333,32 @@ struct OffsetResolve {
     rows: Vec<Vec<JsonValue>>,
 }
 
+fn step_kind_label(step: &TransformationStep) -> &'static str {
+    match step {
+        TransformationStep::LoadCsv { .. } => "LoadCsv",
+        TransformationStep::LoadParquet { .. } => "LoadParquet",
+        TransformationStep::LoadPostgres { .. } => "LoadPostgres",
+        TransformationStep::FromQuery { .. } => "FromQuery",
+        TransformationStep::SqlModel { .. } => "SqlModel",
+        TransformationStep::Filter { .. } => "Filter",
+        TransformationStep::SelectColumns { .. } => "SelectColumns",
+        TransformationStep::RenameColumn { .. } => "RenameColumn",
+        TransformationStep::DeriveColumn { .. } => "DeriveColumn",
+        TransformationStep::GroupBy { .. } => "GroupBy",
+        TransformationStep::SortBy { .. } => "SortBy",
+        TransformationStep::Limit { .. } => "Limit",
+        TransformationStep::Join { .. } => "Join",
+        TransformationStep::Append { .. } => "Append",
+        TransformationStep::CustomSql { .. } => "CustomSql",
+    }
+}
+
 /// Rebuild post-Join steps while always retaining `left_on` keys (even if SelectColumns dropped them).
 /// Returns join keys **and** full preview rows so Left/Right can pin to this result row.
 fn resolve_preview_offsets(
     db: &DbSession,
     workspace_cte_defs: &str,
+    last_by_query: &HashMap<String, String>,
     host_query_id: &str,
     join_step_index: usize,
     steps: &[TransformationStep],
@@ -403,10 +425,42 @@ fn resolve_preview_offsets(
                     .join(", ");
                 format!("SELECT {list} FROM {prev}")
             }
+            TransformationStep::Join {
+                right_query_id,
+                join_type,
+                left_on: j_left,
+                right_on: j_right,
+            } => {
+                // Chained Join after the explained Join (e.g. two RIGHT OUTER).
+                // Keep *original* key_names — we still pin to the earlier Join's ON.
+                let right_cte = last_by_query.get(right_query_id).ok_or_else(|| {
+                    format!(
+                        "Join Lens: right query '{right_query_id}' missing from compiled CTEs"
+                    )
+                })?;
+                let join_kw = join_type.sql_keyword();
+                if j_left == j_right {
+                    let using = j_left
+                        .iter()
+                        .map(|c| quote_ident(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "SELECT * FROM {prev} AS l {join_kw} {right_cte} AS r USING ({using})"
+                    )
+                } else {
+                    emit_transform_step(
+                        step,
+                        &prev,
+                        last_by_query,
+                        WarehouseDialect::Duckdb,
+                    )?
+                }
+            }
             other => {
                 return Err(format!(
-                    "Join Lens: cannot recover keys after {:?} (offsets mode). Keep join keys in the result or avoid this step after Join.",
-                    std::mem::discriminant(other)
+                    "Join Lens: cannot recover keys after {} (offsets mode). Keep join keys in the result or select the Join step (Data previews through that Join).",
+                    step_kind_label(other)
                 ));
             }
         };
@@ -797,6 +851,481 @@ fn map_type(dt: &DataType) -> String {
     }
 }
 
+/// Sample / count cap for `explain_join_key` result + side grids.
+pub const JOIN_LENS_KEY_SAMPLE_LIMIT: usize = 50;
+
+/// Which Join input the key tuple was taken from.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinKeySide {
+    Left,
+    Right,
+}
+
+impl JoinKeySide {
+    fn as_str(self) -> &'static str {
+        match self {
+            JoinKeySide::Left => "left",
+            JoinKeySide::Right => "right",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExplainJoinKeyResult {
+    pub host_query_id: String,
+    pub join_step_index: usize,
+    pub right_query_id: String,
+    pub left_on: Vec<String>,
+    pub right_on: Vec<String>,
+    pub side: String,
+    pub key_values: Vec<JsonValue>,
+    pub left_match_count: u64,
+    pub right_match_count: u64,
+    /// Full Join output rows for this key (not preview LIMIT).
+    pub result_match_count: u64,
+    /// `result_match_count / side_input_count` (0 if side has no rows).
+    pub expansion: f64,
+    pub left_columns: Vec<ColumnMetadata>,
+    pub right_columns: Vec<ColumnMetadata>,
+    pub result_columns: Vec<ColumnMetadata>,
+    pub left_rows: Vec<Vec<JsonValue>>,
+    pub right_rows: Vec<Vec<JsonValue>>,
+    pub result_rows: Vec<Vec<JsonValue>>,
+    pub sample_limit: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BlameUnmatchedKeyResult {
+    pub host_query_id: String,
+    pub join_step_index: usize,
+    pub side: String,
+    pub key_values: Vec<JsonValue>,
+    pub at_source: bool,
+    pub at_source_count: u64,
+    pub at_join_input: bool,
+    pub at_join_input_count: u64,
+    pub partner_at_join: bool,
+    pub partner_count: u64,
+    /// First step on this side's query where the key count dropped to 0.
+    pub dropped_at_step: Option<usize>,
+    pub dropped_at_step_kind: Option<String>,
+    /// `absent_at_source` | `filtered_upstream` | `no_partner` | `present_on_both`
+    pub verdict: String,
+}
+
+/// Explain one join key: how many result / left / right rows, with samples.
+pub fn explain_join_key(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    host_query_id: &str,
+    join_step_index: usize,
+    side: JoinKeySide,
+    key_values: &[JsonValue],
+) -> Result<ExplainJoinKeyResult, String> {
+    let ctx = join_key_context(db, workspace, connections, host_query_id, join_step_index)?;
+    if key_values.len() != ctx.left_on.len() {
+        return Err(format!(
+            "key arity {} != left_on {}",
+            key_values.len(),
+            ctx.left_on.len()
+        ));
+    }
+    let tuple = JoinKeyTuple {
+        values: key_values.to_vec(),
+    };
+    let batch_sql = values_batch_sql(&[&tuple], ctx.left_on.len())?;
+    let with_prefix = format!("WITH \n{},\n{batch_sql}", ctx.compiled.definitions);
+
+    let left_on_join = ctx
+        .left_on
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("l.{} = b.k{i}", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let right_on_join = ctx
+        .right_on
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("r.{} = b.k{i}", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let result_on_join = ctx
+        .left_on
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("j.{} = b.k{i}", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    let lim = JOIN_LENS_KEY_SAMPLE_LIMIT;
+    let left_count = scalar_count(
+        db,
+        &format!(
+            "{with_prefix}\nSELECT COUNT(*)::BIGINT FROM {left} l, batch b WHERE {left_on_join}",
+            left = ctx.left_cte
+        ),
+    )?;
+    let right_count = scalar_count(
+        db,
+        &format!(
+            "{with_prefix}\nSELECT COUNT(*)::BIGINT FROM {right} r, batch b WHERE {right_on_join}",
+            right = ctx.right_cte
+        ),
+    )?;
+    let result_count = scalar_count(
+        db,
+        &format!(
+            "{with_prefix}\nSELECT COUNT(*)::BIGINT FROM {join} j, batch b WHERE {result_on_join}",
+            join = ctx.join_cte
+        ),
+    )?;
+
+    let (left_columns, left_rows) = fetch_plain_sample(
+        db,
+        &format!(
+            "{with_prefix}\n\
+             SELECT l.* FROM {left} l, batch b WHERE {left_on_join} LIMIT {lim}",
+            left = ctx.left_cte
+        ),
+    )?;
+    let (right_columns, right_rows) = fetch_plain_sample(
+        db,
+        &format!(
+            "{with_prefix}\n\
+             SELECT r.* FROM {right} r, batch b WHERE {right_on_join} LIMIT {lim}",
+            right = ctx.right_cte
+        ),
+    )?;
+    let (result_columns, result_rows) = fetch_plain_sample(
+        db,
+        &format!(
+            "{with_prefix}\n\
+             SELECT j.* FROM {join} j, batch b WHERE {result_on_join} LIMIT {lim}",
+            join = ctx.join_cte
+        ),
+    )?;
+
+    let side_count = match side {
+        JoinKeySide::Left => left_count,
+        JoinKeySide::Right => right_count,
+    };
+    let expansion = if side_count == 0 {
+        0.0
+    } else {
+        result_count as f64 / side_count as f64
+    };
+
+    Ok(ExplainJoinKeyResult {
+        host_query_id: host_query_id.to_string(),
+        join_step_index,
+        right_query_id: ctx.right_query_id,
+        left_on: ctx.left_on,
+        right_on: ctx.right_on,
+        side: side.as_str().to_string(),
+        key_values: key_values.to_vec(),
+        left_match_count: left_count,
+        right_match_count: right_count,
+        result_match_count: result_count,
+        expansion,
+        left_columns,
+        right_columns,
+        result_columns,
+        left_rows,
+        right_rows,
+        result_rows,
+        sample_limit: lim,
+    })
+}
+
+/// Why a key has no join partner / disappeared: source vs join-input vs no partner.
+pub fn blame_unmatched_key(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    host_query_id: &str,
+    join_step_index: usize,
+    side: JoinKeySide,
+    key_values: &[JsonValue],
+) -> Result<BlameUnmatchedKeyResult, String> {
+    let ctx = join_key_context(db, workspace, connections, host_query_id, join_step_index)?;
+    if key_values.len() != ctx.left_on.len() {
+        return Err(format!(
+            "key arity {} != left_on {}",
+            key_values.len(),
+            ctx.left_on.len()
+        ));
+    }
+
+    let (query_id, join_input_step, key_names_at_join) = match side {
+        JoinKeySide::Left => (
+            host_query_id.to_string(),
+            join_step_index - 1,
+            ctx.left_on.clone(),
+        ),
+        JoinKeySide::Right => {
+            let rq = ctx
+                .resolved_right_steps_len
+                .checked_sub(1)
+                .ok_or_else(|| "right query has no steps".to_string())?;
+            (ctx.right_query_id.clone(), rq, ctx.right_on.clone())
+        }
+    };
+
+    let side_steps: Vec<TransformationStep> = match side {
+        JoinKeySide::Left => {
+            let host = ctx
+                .resolved
+                .query(host_query_id)
+                .ok_or_else(|| format!("missing host '{host_query_id}'"))?;
+            host.steps[..=join_input_step].to_vec()
+        }
+        JoinKeySide::Right => {
+            let rq = ctx
+                .resolved
+                .query(&ctx.right_query_id)
+                .ok_or_else(|| format!("missing right '{}'", ctx.right_query_id))?;
+            rq.steps.clone()
+        }
+    };
+
+    let source_keys =
+        key_names_at_step(&side_steps, 0, join_input_step, &key_names_at_join);
+    let source_cte = cte_name(&query_id, 0);
+    let join_input_cte = cte_name(&query_id, join_input_step);
+
+    let with_prefix = format!("WITH \n{}", ctx.compiled.definitions);
+    let at_source_count =
+        count_in_cte(db, &with_prefix, &source_cte, &source_keys, key_values).unwrap_or(0);
+    let at_join_input_count = count_in_cte(
+        db,
+        &with_prefix,
+        &join_input_cte,
+        &key_names_at_join,
+        key_values,
+    )?;
+
+    let (partner_cte, partner_keys) = match side {
+        JoinKeySide::Left => (ctx.right_cte.clone(), ctx.right_on.clone()),
+        JoinKeySide::Right => (ctx.left_cte.clone(), ctx.left_on.clone()),
+    };
+    let partner_count =
+        count_in_cte(db, &with_prefix, &partner_cte, &partner_keys, key_values)?;
+
+    let mut dropped_at_step: Option<usize> = None;
+    let mut dropped_at_step_kind: Option<String> = None;
+    if at_source_count > 0 && at_join_input_count == 0 {
+        let mut prev = at_source_count;
+        for step_i in 1..=join_input_step {
+            let names =
+                key_names_at_step(&side_steps, step_i, join_input_step, &key_names_at_join);
+            let cte = cte_name(&query_id, step_i);
+            let n = count_in_cte(db, &with_prefix, &cte, &names, key_values).unwrap_or(0);
+            if prev > 0 && n == 0 {
+                dropped_at_step = Some(step_i);
+                dropped_at_step_kind = side_steps
+                    .get(step_i)
+                    .map(|s| step_kind_label(s).to_string());
+                break;
+            }
+            prev = n;
+        }
+    }
+
+    let at_source = at_source_count > 0;
+    let at_join_input = at_join_input_count > 0;
+    let partner_at_join = partner_count > 0;
+    let verdict = if !at_source {
+        "absent_at_source"
+    } else if at_source && !at_join_input {
+        "filtered_upstream"
+    } else if at_join_input && !partner_at_join {
+        "no_partner"
+    } else {
+        "present_on_both"
+    };
+
+    Ok(BlameUnmatchedKeyResult {
+        host_query_id: host_query_id.to_string(),
+        join_step_index,
+        side: side.as_str().to_string(),
+        key_values: key_values.to_vec(),
+        at_source,
+        at_source_count,
+        at_join_input,
+        at_join_input_count,
+        partner_at_join,
+        partner_count,
+        dropped_at_step,
+        dropped_at_step_kind,
+        verdict: verdict.into(),
+    })
+}
+
+struct JoinKeyCtx {
+    resolved: Workspace,
+    compiled: dwh_pipeline::CompiledCtes,
+    left_on: Vec<String>,
+    right_on: Vec<String>,
+    right_query_id: String,
+    left_cte: String,
+    right_cte: String,
+    join_cte: String,
+    resolved_right_steps_len: usize,
+}
+
+fn join_key_context(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    host_query_id: &str,
+    join_step_index: usize,
+) -> Result<JoinKeyCtx, String> {
+    let resolved = db.prepare_workspace(workspace, connections)?;
+    let host = resolved
+        .query(host_query_id)
+        .ok_or_else(|| format!("missing host query '{host_query_id}'"))?;
+    if join_step_index >= host.steps.len() {
+        return Err(format!(
+            "join_step_index {join_step_index} out of range for query '{host_query_id}'"
+        ));
+    }
+    let TransformationStep::Join {
+        right_query_id,
+        left_on,
+        right_on,
+        ..
+    } = &host.steps[join_step_index]
+    else {
+        return Err(format!(
+            "step {join_step_index} of '{host_query_id}' is not a Join"
+        ));
+    };
+    if left_on.is_empty() || left_on.len() != right_on.len() {
+        return Err("Join: left_on/right_on must be non-empty and same length".into());
+    }
+    if join_step_index == 0 {
+        return Err("Join cannot be the first step".into());
+    }
+    let rq = resolved
+        .query(right_query_id)
+        .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
+    if rq.steps.is_empty() {
+        return Err(format!("right query '{right_query_id}' has no steps"));
+    }
+    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    Ok(JoinKeyCtx {
+        left_cte: cte_name(host_query_id, join_step_index - 1),
+        right_cte: cte_name(right_query_id, rq.steps.len() - 1),
+        join_cte: cte_name(host_query_id, join_step_index),
+        resolved_right_steps_len: rq.steps.len(),
+        left_on: left_on.clone(),
+        right_on: right_on.clone(),
+        right_query_id: right_query_id.clone(),
+        resolved,
+        compiled,
+    })
+}
+
+/// Walk renames backward so source-step counts use the names that existed then.
+fn key_names_at_step(
+    steps: &[TransformationStep],
+    target_step: usize,
+    names_known_at_step: usize,
+    names_at_known: &[String],
+) -> Vec<String> {
+    let mut names = names_at_known.to_vec();
+    if target_step >= names_known_at_step {
+        return names;
+    }
+    for step in steps
+        .iter()
+        .enumerate()
+        .take(names_known_at_step + 1)
+        .skip(target_step + 1)
+        .rev()
+        .map(|(_, s)| s)
+    {
+        if let TransformationStep::RenameColumn { from, to } = step {
+            for n in names.iter_mut() {
+                if ascii_fold_name(n) == ascii_fold_name(to) {
+                    *n = from.clone();
+                }
+            }
+        }
+    }
+    names
+}
+
+fn scalar_count(db: &DbSession, sql: &str) -> Result<u64, String> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let n: i64 = stmt.query_row([], |row| row.get(0)).map_err(|e| e.to_string())?;
+        Ok(n as u64)
+    })
+}
+
+fn count_in_cte(
+    db: &DbSession,
+    with_prefix: &str,
+    cte: &str,
+    key_cols: &[String],
+    key_values: &[JsonValue],
+) -> Result<u64, String> {
+    if key_cols.len() != key_values.len() {
+        return Err("key_cols / key_values length mismatch".into());
+    }
+    let mut preds = Vec::with_capacity(key_cols.len());
+    for (c, v) in key_cols.iter().zip(key_values.iter()) {
+        let lit = json_to_sql_literal(v)?;
+        if matches!(v, JsonValue::Null) {
+            preds.push(format!("{} IS NULL", quote_ident(c)));
+        } else {
+            preds.push(format!("{} = {lit}", quote_ident(c)));
+        }
+    }
+    let where_sql = preds.join(" AND ");
+    scalar_count(
+        db,
+        &format!("{with_prefix}\nSELECT COUNT(*)::BIGINT FROM {cte} WHERE {where_sql}"),
+    )
+}
+
+fn fetch_plain_sample(
+    db: &DbSession,
+    sql: &str,
+) -> Result<(Vec<ColumnMetadata>, Vec<Vec<JsonValue>>), String> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+        let schema = arrow.get_schema();
+        let batches: Vec<RecordBatch> = arrow.collect();
+        let columns: Vec<ColumnMetadata> = schema
+            .fields()
+            .iter()
+            .map(|f| ColumnMetadata {
+                name: f.name().clone(),
+                col_type: map_type(f.data_type()),
+            })
+            .collect();
+        let mut rows = Vec::new();
+        for batch in &batches {
+            let n = batch.num_rows();
+            let cols = batch.num_columns();
+            for r in 0..n {
+                let mut row = Vec::with_capacity(cols);
+                for c in 0..cols {
+                    row.push(cell_json(batch.column(c).as_ref(), r));
+                }
+                rows.push(row);
+            }
+        }
+        Ok((columns, rows))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,6 +1433,25 @@ mod tests {
         assert_eq!(out.explanations.len(), 2);
         assert!(!out.explanations[0].key_values.is_empty());
         assert!(out.explanations[0].right_match_count >= 1);
+        // Side docks use join-input schemas, not the post-Select result.
+        assert!(
+            out.left_columns.iter().any(|c| c.name == "date"),
+            "left parent must keep columns dropped from the result"
+        );
+        assert!(
+            out.left_columns.iter().any(|c| c.name == "region"),
+            "left parent must include join key"
+        );
+        assert!(
+            out.right_columns.iter().any(|c| c.name == "region_name"),
+            "right parent must be full dim row"
+        );
+        let left_row = &out.explanations[0].left_rows[0];
+        assert_eq!(
+            left_row.len(),
+            out.left_columns.len(),
+            "left sample is a full parent record"
+        );
     }
 
     #[test]
@@ -958,5 +1506,241 @@ mod tests {
             left0[0][qty_idx], left2[0][qty_idx],
             "different result rows must not share the first EU left match"
         );
+    }
+
+    #[test]
+    fn explain_first_join_when_second_right_join_follows() {
+        // coverage demo: Join(region) then Join(channel). Explaining join index 1
+        // must replay the second Join in offsets mode (not Discriminant error).
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sparse = fixtures.join("sparse_sales.csv");
+        let dim_r = fixtures.join("dim_region.csv");
+        let dim_c = fixtures.join("dim_channel.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim_region".into(),
+                    name: "dim_region".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim_r.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "dim_channel".into(),
+                    name: "dim_channel".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim_c.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "sparse_sales".into(),
+                    name: "sparse_sales".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: sparse.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "coverage".into(),
+                    name: "coverage".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "sparse_sales".into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim_region".into(),
+                            join_type: JoinType::Right,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region".into()],
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim_channel".into(),
+                            join_type: JoinType::Right,
+                            left_on: vec!["channel".into()],
+                            right_on: vec!["channel".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "coverage".into(),
+        };
+        let db = DbSession::new().unwrap();
+        // First Join (index 1) while second Join still follows in the query.
+        let out = explain_join_rows(&db, &ws, &[], "coverage", 1, &[], Some(&[0])).unwrap();
+        assert_eq!(out.explanations.len(), 1);
+        assert!(
+            !out.explanations[0].right_rows.is_empty()
+                || out.explanations[0].right_match_count >= 1
+                || !out.explanations[0].left_rows.is_empty(),
+            "first Join should resolve at least one parent side: {:?}",
+            out.explanations[0]
+        );
+        // Second Join alone (no steps after).
+        let out2 = explain_join_rows(&db, &ws, &[], "coverage", 2, &[], Some(&[0])).unwrap();
+        assert_eq!(out2.explanations.len(), 1);
+        assert!(
+            out2.right_columns.iter().any(|c| c.name == "channel_name"),
+            "right parent is full dim_channel"
+        );
+    }
+
+    #[test]
+    fn explain_join_key_counts_result_rows() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sample.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+        };
+        let db = DbSession::new().unwrap();
+        let out = explain_join_key(
+            &db,
+            &ws,
+            &[],
+            "fact",
+            1,
+            JoinKeySide::Right,
+            &[JsonValue::String("EU".into())],
+        )
+        .unwrap();
+        assert_eq!(out.right_match_count, 1);
+        assert!(out.result_match_count >= 1);
+        assert!(!out.result_rows.is_empty());
+        assert!(out.expansion >= 1.0);
+    }
+
+    #[test]
+    fn blame_unmatched_key_no_partner() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sales = fixtures.join("sparse_sales.csv");
+        let dim = fixtures.join("dim_channel.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sales.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Right,
+                            left_on: vec!["channel".into()],
+                            right_on: vec!["channel".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+        };
+        let db = DbSession::new().unwrap();
+        // `partner` exists only on dim_channel — no left partner.
+        let blame = blame_unmatched_key(
+            &db,
+            &ws,
+            &[],
+            "fact",
+            1,
+            JoinKeySide::Right,
+            &[JsonValue::String("partner".into())],
+        )
+        .unwrap();
+        assert!(blame.at_join_input);
+        assert_eq!(blame.verdict, "no_partner");
+        assert!(!blame.partner_at_join);
+    }
+
+    #[test]
+    fn blame_filtered_upstream_on_left() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sample.to_string_lossy().into(),
+                        },
+                        TransformationStep::Filter {
+                            condition: "region <> 'EU'".into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+        };
+        let db = DbSession::new().unwrap();
+        let blame = blame_unmatched_key(
+            &db,
+            &ws,
+            &[],
+            "fact",
+            2,
+            JoinKeySide::Left,
+            &[JsonValue::String("EU".into())],
+        )
+        .unwrap();
+        assert_eq!(blame.verdict, "filtered_upstream");
+        assert!(blame.at_source);
+        assert!(!blame.at_join_input);
+        assert_eq!(blame.dropped_at_step, Some(1));
+        assert_eq!(blame.dropped_at_step_kind.as_deref(), Some("Filter"));
     }
 }

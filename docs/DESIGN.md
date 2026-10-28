@@ -138,7 +138,7 @@ Selecting a Join step shows the following diagnostics beside its settings:
 
 ### Explicitly deferred
 
-Cell-level lineage through arbitrary SQL, calculations and aggregation; a universal provenance browser; and rich profiling of every column are not acceptance criteria for Join investigation MVP.
+Cell-level lineage through arbitrary SQL, calculations and aggregation; a universal provenance browser; and rich profiling of every column are not acceptance criteria for Join investigation MVP. An optional AI narrator over Join Lens facts is deferred ([ADR-0019](adr/0019-join-lens-ai-narrator.md)).
 
 ## 10. Next — Definition of Done (*Return and edit*)
 

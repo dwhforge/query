@@ -1,4 +1,4 @@
-export type DemoId = "sales" | "union" | "sql";
+export type DemoId = "sales" | "union" | "sql" | "right";
 
 interface EmptyHeroProps {
   onLoadDemo: (id: DemoId) => void;
@@ -12,6 +12,11 @@ const DEMOS: { id: DemoId; label: string; hint: string }[] = [
   { id: "sales", label: "Sales", hint: "medallion · join · top-N" },
   { id: "union", label: "Union", hint: "Append multi-feed" },
   { id: "sql", label: "SQL hybrid", hint: "SqlModel · window" },
+  {
+    id: "right",
+    label: "Right joins",
+    hint: "two RIGHT OUTER · coverage",
+  },
 ];
 
 export function EmptyHero({

@@ -288,4 +288,87 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn two_right_outers_keep_all_channels() {
+        use dwh_pipeline::JoinType;
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sparse = fixtures.join("sparse_sales.csv");
+        let dim_r = fixtures.join("dim_region.csv");
+        let dim_c = fixtures.join("dim_channel.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim_region".into(),
+                    name: "dim_region".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim_r.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "dim_channel".into(),
+                    name: "dim_channel".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: dim_c.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "sparse_sales".into(),
+                    name: "sparse_sales".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: sparse.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "coverage".into(),
+                    name: "coverage".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "sparse_sales".into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim_region".into(),
+                            join_type: JoinType::Right,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region".into()],
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim_channel".into(),
+                            join_type: JoinType::Right,
+                            left_on: vec!["channel".into()],
+                            right_on: vec!["channel".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "coverage".into(),
+        };
+        let db = DbSession::new().expect("duckdb");
+        let out = preview_workspace(&db, &ws, &[]).expect("preview");
+        assert!(out.columns.iter().any(|c| c.name == "channel_name"));
+        assert!(out.columns.iter().any(|c| c.name == "region_name"));
+        assert!(
+            out.rows.len() >= 3,
+            "expected >=3 channel rows, got {}",
+            out.rows.len()
+        );
+        let ch_i = out
+            .columns
+            .iter()
+            .position(|c| c.name == "channel")
+            .expect("channel");
+        let channels: Vec<String> = out
+            .rows
+            .iter()
+            .map(|r| r[ch_i].as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            channels.iter().any(|c| c == "partner"),
+            "partner must survive second RIGHT OUTER: {channels:?}"
+        );
+    }
 }

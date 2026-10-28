@@ -40,6 +40,7 @@ import {
 } from "./components/PostgresPicker";
 import { PreviewTable } from "./components/PreviewTable";
 import { S3SourceDialog } from "./components/S3SourceDialog";
+import { SelectColumnsEditor } from "./components/SelectColumnsEditor";
 import { SourceSchemaPanel } from "./components/SourceSchemaPanel";
 import { debounce } from "./lib/debounce";
 import {
@@ -114,7 +115,25 @@ function App() {
   const [joinKeyPairs, setJoinKeyPairs] = useState<JoinKeyPair[]>([
     emptyJoinKeyPair(),
   ]);
+  /** Live Join key draft (JoinKeyEditor) — avoids App setState on every keystroke. */
+  const joinKeyDraftRef = useRef<JoinKeyPair[]>(joinKeyPairs);
   const [joinType, setJoinType] = useState<JoinType>("inner");
+  /** Inspector text drafts — read on Apply; typing must not re-render App. */
+  const filterInputRef = useRef<HTMLInputElement>(null);
+  const customSqlRef = useRef<HTMLTextAreaElement>(null);
+  const groupDimsRef = useRef<HTMLInputElement>(null);
+  const groupAggsRef = useRef<HTMLInputElement>(null);
+  const sortColRef = useRef<HTMLInputElement>(null);
+  const limitNRef = useRef<HTMLInputElement>(null);
+  const renameFromRef = useRef<HTMLInputElement>(null);
+  const renameToRef = useRef<HTMLInputElement>(null);
+  const deriveNameRef = useRef<HTMLInputElement>(null);
+  const deriveExprRef = useRef<HTMLInputElement>(null);
+
+  const setJoinKeyPairsBoth = useCallback((pairs: JoinKeyPair[]) => {
+    joinKeyDraftRef.current = pairs;
+    setJoinKeyPairs(pairs);
+  }, []);
   const [joinLeftColumns, setJoinLeftColumns] = useState<ColumnMetadata[]>([]);
   const [joinRightColumns, setJoinRightColumns] = useState<ColumnMetadata[]>(
     [],
@@ -195,8 +214,31 @@ function App() {
     if (queries.length === 0) return null;
     const id = activeQueryId || focusQueryId;
     if (!id || !queries.some((q) => q.id === id)) return null;
+    const q = queries.find((x) => x.id === id);
+    // While a Join step is selected, preview *through that Join only* so Join Lens
+    // row offsets match this join's output (chained Joins change grain/rows).
+    if (
+      q &&
+      selectedStepIndex != null &&
+      q.steps[selectedStepIndex]?.type === "Join"
+    ) {
+      const upto = selectedStepIndex + 1;
+      return {
+        ...project.workspace,
+        focus_query_id: id,
+        queries: project.workspace.queries.map((qq) =>
+          qq.id === id ? { ...qq, steps: qq.steps.slice(0, upto) } : qq,
+        ),
+      };
+    }
     return { ...project.workspace, focus_query_id: id };
-  }, [project.workspace, queries, activeQueryId, focusQueryId]);
+  }, [
+    project.workspace,
+    queries,
+    activeQueryId,
+    focusQueryId,
+    selectedStepIndex,
+  ]);
 
   const setQueries = useCallback(
     (updater: (prev: QueryDef[]) => QueryDef[]) => {
@@ -252,12 +294,18 @@ function App() {
     [runPreview],
   );
 
+  const overlayOpen =
+    connEditorOpen || helpOpen || showPgPicker || showS3Dialog;
+
   useEffect(() => {
-    if (dataWorkspace) debouncedPreview(dataWorkspace, connections);
-  }, [dataWorkspace, connections, debouncedPreview]);
+    // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
+    if (overlayOpen || !dataWorkspace) return;
+    debouncedPreview(dataWorkspace, connections);
+  }, [dataWorkspace, connections, debouncedPreview, overlayOpen]);
 
   // Schema-aware Join: column lists from truncated preview (left before Join, full right).
   useEffect(() => {
+    if (overlayOpen) return;
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -297,12 +345,14 @@ function App() {
     activeQuery,
     project.workspace,
     connections,
+    overlayOpen,
   ]);
 
   // Join diagnostics (DESIGN §9) — async, never blocks Apply / canvas.
   // Skip until ON keys exist: a new Join is often saved with left_on=[], and
   // the engine rejects that with "left_on/right_on must be non-empty…".
   useEffect(() => {
+    if (overlayOpen) return;
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -355,10 +405,12 @@ function App() {
     activeQuery,
     project.workspace,
     connections,
+    overlayOpen,
   ]);
 
   // Model tab: dbt SQL for the selected query (instant, no DuckDB).
   useEffect(() => {
+    if (overlayOpen) return;
     const id = activeQueryId || focusQueryId;
     if (!id || queries.length === 0) {
       setModelPreview(null);
@@ -400,6 +452,7 @@ function App() {
     focusQueryId,
     queries.length,
     connections,
+    overlayOpen,
   ]);
 
   const syncInspectorFromQuery = useCallback(
@@ -410,7 +463,7 @@ function App() {
         setGroupDims("");
         setGroupAggs("count(*) as n");
         setJoinRightId("");
-        setJoinKeyPairs([emptyJoinKeyPair()]);
+        setJoinKeyPairsBoth([emptyJoinKeyPair()]);
         setJoinType("inner");
         setFromQueryId("");
         return;
@@ -432,13 +485,13 @@ function App() {
       const j = q.steps.find((s) => s.type === "Join");
       if (j && j.type === "Join") {
         setJoinRightId(j.payload.right_query_id);
-        setJoinKeyPairs(
+        setJoinKeyPairsBoth(
           pairsFromOn(j.payload.left_on, j.payload.right_on),
         );
         setJoinType(j.payload.join_type);
       } else {
         setJoinRightId("");
-        setJoinKeyPairs([emptyJoinKeyPair()]);
+        setJoinKeyPairsBoth([emptyJoinKeyPair()]);
         setJoinType("inner");
       }
       const fq = q.steps.find((s) => s.type === "FromQuery");
@@ -470,7 +523,7 @@ function App() {
         break;
       case "Join":
         setJoinRightId(step.payload.right_query_id);
-        setJoinKeyPairs(
+        setJoinKeyPairsBoth(
           pairsFromOn(step.payload.left_on, step.payload.right_on),
         );
         setJoinType(step.payload.join_type);
@@ -961,7 +1014,9 @@ function App() {
           ? "demo_sales"
           : id === "union"
             ? "demo_union"
-            : "demo_sql";
+            : id === "right"
+              ? "demo_right_joins"
+              : "demo_sql";
       setProject((p) => ({
         ...p,
         name: projectName,
@@ -997,12 +1052,6 @@ function App() {
     );
   }
 
-  function toggleColumn(name: string) {
-    setSelectedColumns((prev) =>
-      prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name],
-    );
-  }
-
   function applyJoinTo(
     hostQueryId: string,
     rightQueryId: string,
@@ -1021,7 +1070,6 @@ function App() {
     setQueries((prev) =>
       prev.map((q) => {
         if (q.id !== hostQueryId) return q;
-        const without = q.steps.filter((s) => s.type !== "Join");
         const step: TransformationStep = {
           type: "Join",
           payload: {
@@ -1031,14 +1079,26 @@ function App() {
             right_on,
           },
         };
-        const steps = [...without, step];
-        joinIndex = steps.length - 1;
+        // Update existing edge to the same right; otherwise append — keep other
+        // Joins (e.g. two RIGHT OUTER to different dims).
+        const existing = q.steps.findIndex(
+          (s) =>
+            s.type === "Join" && s.payload.right_query_id === rightQueryId,
+        );
+        let steps: TransformationStep[];
+        if (existing >= 0) {
+          steps = q.steps.map((s, i) => (i === existing ? step : s));
+          joinIndex = existing;
+        } else {
+          steps = [...q.steps, step];
+          joinIndex = steps.length - 1;
+        }
         joinStep = step;
         return { ...q, steps };
       }),
     );
     setJoinRightId(rightQueryId);
-    setJoinKeyPairs(
+    setJoinKeyPairsBoth(
       left_on.length > 0
         ? pairsFromOn(left_on, right_on)
         : [emptyJoinKeyPair()],
@@ -1102,16 +1162,19 @@ function App() {
     try {
       let ws: Workspace;
       if (kind === "left") {
+        const leftSteps = (
+          project.workspace.queries.find((q) => q.id === activeQueryId)
+            ?.steps ?? []
+        ).slice(0, joinDiag.join_step_index);
+        if (leftSteps.length === 0) {
+          setJoinDiagError("Join has no left input (need a step before Join)");
+          return;
+        }
         ws = {
           ...project.workspace,
           focus_query_id: activeQueryId,
           queries: project.workspace.queries.map((q) =>
-            q.id === activeQueryId
-              ? {
-                  ...q,
-                  steps: q.steps.slice(0, joinDiag.join_step_index),
-                }
-              : q,
+            q.id === activeQueryId ? { ...q, steps: leftSteps } : q,
           ),
         };
       } else if (kind === "right") {
@@ -1167,24 +1230,27 @@ function App() {
         : (host?.steps.findIndex((s) => s.type === "Join") ??
           host?.steps.length ??
           0);
+    // Steps *before* the Join. upto=0 ⇒ no left input (don't preview empty query).
     const leftUpto = Math.max(0, upto);
+    const leftSteps = host?.steps.slice(0, leftUpto) ?? [];
 
-    const leftWs: Workspace = {
-      ...project.workspace,
-      focus_query_id: hostQueryId,
-      queries: project.workspace.queries.map((q) =>
-        q.id === hostQueryId
-          ? { ...q, steps: q.steps.slice(0, leftUpto) }
-          : q,
-      ),
-    };
+    const leftWs: Workspace | null =
+      leftSteps.length > 0
+        ? {
+            ...project.workspace,
+            focus_query_id: hostQueryId,
+            queries: project.workspace.queries.map((q) =>
+              q.id === hostQueryId ? { ...q, steps: leftSteps } : q,
+            ),
+          }
+        : null;
     const rightWs: Workspace = {
       ...project.workspace,
       focus_query_id: rightQueryId,
     };
 
     const [leftRes, rightRes] = await Promise.all([
-      hostQueryId
+      leftWs
         ? previewWorkspace(leftWs, connections).catch(() => null)
         : Promise.resolve(null),
       rightQueryId
@@ -1202,7 +1268,7 @@ function App() {
     hostQueryId: string,
   ) {
     // Prefer complete pairs already in the inspector; else schema-suggest; never fake "id".
-    let pairs = joinKeyPairs;
+    let pairs = joinKeyDraftRef.current;
     if (!joinPairsComplete(pairs)) {
       try {
         const host = queries.find((q) => q.id === hostQueryId);
@@ -1227,10 +1293,18 @@ function App() {
     setActiveQueryId(edge.hostQueryId);
     if (edge.kind === "join") {
       setJoinRightId(edge.otherQueryId);
-      const idx = host?.steps.findIndex((s) => s.type === "Join") ?? -1;
+      const idx =
+        edge.stepIndex != null &&
+        host?.steps[edge.stepIndex]?.type === "Join"
+          ? edge.stepIndex
+          : (host?.steps.findIndex(
+              (s) =>
+                s.type === "Join" &&
+                s.payload.right_query_id === edge.otherQueryId,
+            ) ?? -1);
       const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
-        setJoinKeyPairs(
+        setJoinKeyPairsBoth(
           pairsFromOn(j.payload.left_on, j.payload.right_on),
         );
         setJoinType(j.payload.join_type);
@@ -1258,13 +1332,55 @@ function App() {
   }
 
   function removeEdgeOnCanvas(edge: GraphEdgeInfo) {
+    if (edge.kind === "from") {
+      const host = queries.find((q) => q.id === edge.hostQueryId);
+      if (host) {
+        const withoutFrom = host.steps.filter(
+          (s) =>
+            !(
+              s.type === "FromQuery" &&
+              s.payload.query_id === edge.otherQueryId
+            ),
+        );
+        const stillHasRoot = withoutFrom.some(
+          (s) =>
+            s.type === "LoadCsv" ||
+            s.type === "LoadParquet" ||
+            s.type === "LoadPostgres" ||
+            s.type === "FromQuery" ||
+            s.type === "SqlModel",
+        );
+        if (!stillHasRoot && withoutFrom.length > 0) {
+          setError(
+            "Cannot remove FromQuery while later steps remain — delete those steps first.",
+          );
+          return;
+        }
+      }
+    }
     setQueries((prev) =>
       prev.map((q) => {
         if (q.id !== edge.hostQueryId) return q;
         if (edge.kind === "join") {
           return {
             ...q,
-            steps: q.steps.filter((s) => s.type !== "Join"),
+            steps: q.steps.filter((s, i) => {
+              if (s.type !== "Join") return true;
+              if (
+                edge.stepIndex != null &&
+                i === edge.stepIndex &&
+                s.payload.right_query_id === edge.otherQueryId
+              ) {
+                return false;
+              }
+              if (
+                edge.stepIndex == null &&
+                s.payload.right_query_id === edge.otherQueryId
+              ) {
+                return false;
+              }
+              return true;
+            }),
           };
         }
         if (edge.kind === "from") {
@@ -1406,7 +1522,22 @@ function App() {
   );
 
   function removeStepAt(index: number) {
-    updateActiveSteps((steps) => steps.filter((_, i) => i !== index));
+    updateActiveSteps((steps) => {
+      const victim = steps[index];
+      if (!victim) return steps;
+      const isRoot =
+        victim.type === "LoadCsv" ||
+        victim.type === "LoadParquet" ||
+        victim.type === "LoadPostgres" ||
+        victim.type === "FromQuery" ||
+        victim.type === "SqlModel";
+      // Deleting the root while later transforms remain → "требует предыдущий шаг".
+      if (isRoot && steps.length > 1) {
+        setError("Remove later steps first, or clear the query — root step is required.");
+        return steps;
+      }
+      return steps.filter((_, i) => i !== index);
+    });
     setSelectedStepIndex((prev) => {
       if (prev === null) return null;
       if (prev === index) return Math.max(0, index - 1);
@@ -1704,6 +1835,7 @@ function App() {
       ? {
           hostQueryId: activeQueryId,
           joinStepIndex: selectedStepIndex,
+          rightQueryId: selectedStep.payload.right_query_id,
           leftOn: selectedStep.payload.left_on,
           rightOn: selectedStep.payload.right_on,
         }
@@ -1724,11 +1856,17 @@ function App() {
     let cancelled = false;
     const hostId = activeQueryId;
     const upto = selectedStepIndex;
+    const upstreamSteps =
+      activeQuery?.steps.slice(0, upto) ?? [];
+    if (upstreamSteps.length === 0) {
+      setUpstreamColumnNames([]);
+      return;
+    }
     const leftWs: Workspace = {
       ...project.workspace,
       focus_query_id: hostId,
       queries: project.workspace.queries.map((q) =>
-        q.id === hostId ? { ...q, steps: q.steps.slice(0, upto) } : q,
+        q.id === hostId ? { ...q, steps: upstreamSteps } : q,
       ),
     };
     void previewWorkspace(leftWs, connections)
@@ -1745,6 +1883,7 @@ function App() {
     };
   }, [
     activeQueryId,
+    activeQuery,
     selectedStepIndex,
     selectedStep?.type,
     project.workspace,
@@ -1827,7 +1966,7 @@ function App() {
           });
           setJoinRightId(peer);
           if (left_on.length === 0) {
-            setJoinKeyPairs([emptyJoinKeyPair()]);
+            setJoinKeyPairsBoth([emptyJoinKeyPair()]);
           }
         }
         break;
@@ -2219,15 +2358,18 @@ function App() {
                       joinLensOn &&
                       joinLensTarget ? (
                       <JoinLens
-                        enabled
+                        enabled={joinLensOn && !overlayOpen}
                         workspace={project.workspace}
                         hostQueryId={joinLensTarget.hostQueryId}
                         joinStepIndex={joinLensTarget.joinStepIndex}
+                        rightQueryId={joinLensTarget.rightQueryId}
                         leftOn={joinLensTarget.leftOn}
                         rightOn={joinLensTarget.rightOn}
                         connections={connections}
                         columns={preview.columns}
                         rows={preview.rows}
+                        joinDiag={joinDiag}
+                        joinDiagLoading={joinDiagLoading}
                       />
                     ) : preview ? (
                       <PreviewTable
@@ -2436,8 +2578,9 @@ function App() {
                           export is this body.
                         </p>
                         <textarea
-                          value={customSql}
-                          onChange={(e) => setCustomSql(e.target.value)}
+                          key={`sqlmodel-${selectedStepIndex}`}
+                          ref={customSqlRef}
+                          defaultValue={customSql}
                           rows={8}
                           spellCheck={false}
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
@@ -2447,9 +2590,13 @@ function App() {
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
+                            const raw =
+                              customSqlRef.current?.value.trim() ??
+                              customSql.trim();
+                            setCustomSql(raw);
                             replaceStepAt(selectedStepIndex, {
                               type: "SqlModel",
-                              payload: { raw_sql: customSql.trim() },
+                              payload: { raw_sql: raw },
                             });
                           }}
                         >
@@ -2460,16 +2607,20 @@ function App() {
                     {selectedStep.type === "Filter" && (
                       <>
                         <input
+                          key={`filter-${selectedStepIndex}-${filterCondition}`}
+                          ref={filterInputRef}
                           type="text"
-                          value={filterCondition}
-                          onChange={(e) => setFilterCondition(e.target.value)}
+                          defaultValue={filterCondition}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter" && selectedStepIndex !== null) {
+                            if (
+                              e.key === "Enter" &&
+                              selectedStepIndex !== null
+                            ) {
+                              const condition = e.currentTarget.value.trim();
+                              setFilterCondition(condition);
                               replaceStepAt(selectedStepIndex, {
                                 type: "Filter",
-                                payload: {
-                                  condition: filterCondition.trim(),
-                                },
+                                payload: { condition },
                               });
                             }
                           }}
@@ -2481,9 +2632,13 @@ function App() {
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
+                            const condition =
+                              filterInputRef.current?.value.trim() ??
+                              filterCondition.trim();
+                            setFilterCondition(condition);
                             replaceStepAt(selectedStepIndex, {
                               type: "Filter",
-                              payload: { condition: filterCondition.trim() },
+                              payload: { condition },
                             });
                           }}
                         >
@@ -2491,90 +2646,36 @@ function App() {
                         </button>
                       </>
                     )}
-                    {selectedStep.type === "SelectColumns" && (
-                      <>
-                        {columnChoices.length > 0 && (
-                          <>
-                            <div className="flex gap-1">
-                              <button
-                                type="button"
-                                className="flex-1 rounded border border-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
-                                onClick={() =>
-                                  setSelectedColumns([...columnChoices])
-                                }
-                              >
-                                Select all
-                              </button>
-                              <button
-                                type="button"
-                                className="flex-1 rounded border border-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:border-slate-600 hover:text-slate-200"
-                                onClick={() => setSelectedColumns([])}
-                              >
-                                Clear
-                              </button>
-                            </div>
-                            <ul className="max-h-40 space-y-0.5 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-1.5">
-                              {columnChoices.map((name) => {
-                                const checked = selectedColumns.includes(name);
-                                return (
-                                  <li key={name}>
-                                    <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-200 hover:bg-slate-900">
-                                      <input
-                                        type="checkbox"
-                                        checked={checked}
-                                        onChange={() => toggleColumn(name)}
-                                        className="rounded border-slate-600"
-                                      />
-                                      <span className="font-mono">{name}</span>
-                                    </label>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          </>
-                        )}
-                        <input
-                          type="text"
-                          value={selectedColumns.join(", ")}
-                          onChange={(e) =>
-                            setSelectedColumns(
-                              e.target.value
-                                .split(",")
-                                .map((s) => s.trim())
-                                .filter(Boolean),
-                            )
-                          }
-                          placeholder="date, region, amount"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
+                    {selectedStep.type === "SelectColumns" &&
+                      selectedStepIndex !== null && (
+                        <SelectColumnsEditor
+                          key={`sc-${selectedStepIndex}-${selectedColumns.join(",")}`}
+                          initialColumns={selectedColumns}
+                          choices={columnChoices}
+                          onApply={(columns) => {
+                            setSelectedColumns(columns);
                             replaceStepAt(selectedStepIndex, {
                               type: "SelectColumns",
-                              payload: { columns: [...selectedColumns] },
+                              payload: { columns },
                             });
                           }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
+                        />
+                      )}
                     {selectedStep.type === "GroupBy" && (
                       <>
                         <input
+                          key={`gdims-${selectedStepIndex}-${groupDims}`}
+                          ref={groupDimsRef}
                           type="text"
-                          value={groupDims}
-                          onChange={(e) => setGroupDims(e.target.value)}
+                          defaultValue={groupDims}
                           placeholder="dimensions: region"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                         />
                         <input
+                          key={`gaggs-${selectedStepIndex}-${groupAggs}`}
+                          ref={groupAggsRef}
                           type="text"
-                          value={groupAggs}
-                          onChange={(e) => setGroupAggs(e.target.value)}
+                          defaultValue={groupAggs}
                           placeholder="sum(qty) as qty"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                         />
@@ -2583,15 +2684,21 @@ function App() {
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
-                            const dimensions = groupDims
+                            const dimsRaw =
+                              groupDimsRef.current?.value ?? groupDims;
+                            const aggsRaw =
+                              groupAggsRef.current?.value ?? groupAggs;
+                            const dimensions = dimsRaw
                               .split(",")
                               .map((s) => s.trim())
                               .filter(Boolean);
-                            const aggregates = groupAggs
+                            const aggregates = aggsRaw
                               .split(",")
                               .map((s) => s.trim())
                               .filter(Boolean);
                             if (!dimensions.length || !aggregates.length) return;
+                            setGroupDims(dimsRaw);
+                            setGroupAggs(aggsRaw);
                             replaceStepAt(selectedStepIndex, {
                               type: "GroupBy",
                               payload: { dimensions, aggregates },
@@ -2645,8 +2752,11 @@ function App() {
                           <option value="full">full</option>
                         </select>
                         <JoinKeyEditor
-                          pairs={joinKeyPairs}
-                          onChange={setJoinKeyPairs}
+                          key={`jk-${selectedStepIndex}-${joinRightId}`}
+                          initialPairs={joinKeyPairs}
+                          onDraftChange={(p) => {
+                            joinKeyDraftRef.current = p;
+                          }}
                           leftColumns={joinLeftColumns}
                           rightColumns={joinRightColumns}
                           leftLoading={joinColsLoading}
@@ -2654,14 +2764,14 @@ function App() {
                         />
                         <button
                           type="button"
-                          disabled={
-                            !joinRightId || !joinPairsComplete(joinKeyPairs)
-                          }
+                          disabled={!joinRightId}
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
-                            const { left_on, right_on } =
-                              pairsToOn(joinKeyPairs);
+                            const draft = joinKeyDraftRef.current;
+                            if (!joinPairsComplete(draft)) return;
+                            const { left_on, right_on } = pairsToOn(draft);
+                            setJoinKeyPairsBoth(draft);
                             replaceStepAt(selectedStepIndex, {
                               type: "Join",
                               payload: {
@@ -2720,9 +2830,10 @@ function App() {
                       <>
                         <div className="flex gap-1">
                           <input
+                            key={`sort-${selectedStepIndex}-${sortCol}`}
+                            ref={sortColRef}
                             list="inspector-cols"
-                            value={sortCol}
-                            onChange={(e) => setSortCol(e.target.value)}
+                            defaultValue={sortCol}
                             placeholder="column"
                             className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                           />
@@ -2737,14 +2848,18 @@ function App() {
                         </div>
                         <button
                           type="button"
-                          disabled={!sortCol.trim()}
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
+                            const column =
+                              sortColRef.current?.value.trim() ??
+                              sortCol.trim();
+                            if (!column) return;
+                            setSortCol(column);
                             replaceStepAt(selectedStepIndex, {
                               type: "SortBy",
                               payload: {
-                                column: sortCol.trim(),
+                                column,
                                 descending: sortDesc,
                               },
                             });
@@ -2757,10 +2872,11 @@ function App() {
                     {selectedStep.type === "Limit" && (
                       <>
                         <input
+                          key={`limit-${selectedStepIndex}-${limitN}`}
+                          ref={limitNRef}
                           type="number"
                           min={1}
-                          value={limitN}
-                          onChange={(e) => setLimitN(e.target.value)}
+                          defaultValue={limitN}
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                         />
                         <button
@@ -2768,8 +2884,11 @@ function App() {
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
-                            const n = Number.parseInt(limitN, 10);
+                            const raw =
+                              limitNRef.current?.value ?? limitN;
+                            const n = Number.parseInt(raw, 10);
                             if (!Number.isFinite(n) || n < 1) return;
+                            setLimitN(String(n));
                             replaceStepAt(selectedStepIndex, {
                               type: "Limit",
                               payload: { n },
@@ -2783,29 +2902,36 @@ function App() {
                     {selectedStep.type === "RenameColumn" && (
                       <>
                         <input
-                          value={renameFrom}
-                          onChange={(e) => setRenameFrom(e.target.value)}
+                          key={`ren-from-${selectedStepIndex}-${renameFrom}`}
+                          ref={renameFromRef}
+                          defaultValue={renameFrom}
                           placeholder="from"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                         />
                         <input
-                          value={renameTo}
-                          onChange={(e) => setRenameTo(e.target.value)}
+                          key={`ren-to-${selectedStepIndex}-${renameTo}`}
+                          ref={renameToRef}
+                          defaultValue={renameTo}
                           placeholder="to"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                         />
                         <button
                           type="button"
-                          disabled={!renameFrom.trim() || !renameTo.trim()}
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
+                            const from =
+                              renameFromRef.current?.value.trim() ??
+                              renameFrom.trim();
+                            const to =
+                              renameToRef.current?.value.trim() ??
+                              renameTo.trim();
+                            if (!from || !to) return;
+                            setRenameFrom(from);
+                            setRenameTo(to);
                             replaceStepAt(selectedStepIndex, {
                               type: "RenameColumn",
-                              payload: {
-                                from: renameFrom.trim(),
-                                to: renameTo.trim(),
-                              },
+                              payload: { from, to },
                             });
                           }}
                         >
@@ -2816,29 +2942,36 @@ function App() {
                     {selectedStep.type === "DeriveColumn" && (
                       <>
                         <input
-                          value={deriveName}
-                          onChange={(e) => setDeriveName(e.target.value)}
+                          key={`der-name-${selectedStepIndex}-${deriveName}`}
+                          ref={deriveNameRef}
+                          defaultValue={deriveName}
                           placeholder="name"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                         />
                         <input
-                          value={deriveExpr}
-                          onChange={(e) => setDeriveExpr(e.target.value)}
+                          key={`der-expr-${selectedStepIndex}-${deriveExpr}`}
+                          ref={deriveExprRef}
+                          defaultValue={deriveExpr}
                           placeholder="expression"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                         />
                         <button
                           type="button"
-                          disabled={!deriveName.trim() || !deriveExpr.trim()}
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
+                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
+                            const name =
+                              deriveNameRef.current?.value.trim() ??
+                              deriveName.trim();
+                            const expression =
+                              deriveExprRef.current?.value.trim() ??
+                              deriveExpr.trim();
+                            if (!name || !expression) return;
+                            setDeriveName(name);
+                            setDeriveExpr(expression);
                             replaceStepAt(selectedStepIndex, {
                               type: "DeriveColumn",
-                              payload: {
-                                name: deriveName.trim(),
-                                expression: deriveExpr.trim(),
-                              },
+                              payload: { name, expression },
                             });
                           }}
                         >
@@ -2853,8 +2986,9 @@ function App() {
                           optional {"{{query:id}}"}.
                         </p>
                         <textarea
-                          value={customSql}
-                          onChange={(e) => setCustomSql(e.target.value)}
+                          key={`customsql-${selectedStepIndex}`}
+                          ref={customSqlRef}
+                          defaultValue={customSql}
                           rows={5}
                           spellCheck={false}
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
@@ -2864,9 +2998,13 @@ function App() {
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
                           onClick={() => {
                             if (selectedStepIndex === null) return;
+                            const raw =
+                              customSqlRef.current?.value.trim() ??
+                              customSql.trim();
+                            setCustomSql(raw);
                             replaceStepAt(selectedStepIndex, {
                               type: "CustomSql",
-                              payload: { raw_sql: customSql.trim() },
+                              payload: { raw_sql: raw },
                             });
                           }}
                         >

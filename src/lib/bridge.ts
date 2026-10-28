@@ -143,6 +143,81 @@ export function explainJoinRows(
   });
 }
 
+export type JoinKeySide = "left" | "right";
+
+export type ExplainJoinKeyResult = {
+  host_query_id: string;
+  join_step_index: number;
+  right_query_id: string;
+  left_on: string[];
+  right_on: string[];
+  side: string;
+  key_values: unknown[];
+  left_match_count: number;
+  right_match_count: number;
+  result_match_count: number;
+  expansion: number;
+  left_columns: { name: string; type: string }[];
+  right_columns: { name: string; type: string }[];
+  result_columns: { name: string; type: string }[];
+  left_rows: unknown[][];
+  right_rows: unknown[][];
+  result_rows: unknown[][];
+  sample_limit: number;
+};
+
+export type BlameUnmatchedKeyResult = {
+  host_query_id: string;
+  join_step_index: number;
+  side: string;
+  key_values: unknown[];
+  at_source: boolean;
+  at_source_count: number;
+  at_join_input: boolean;
+  at_join_input_count: number;
+  partner_at_join: boolean;
+  partner_count: number;
+  dropped_at_step: number | null;
+  dropped_at_step_kind: string | null;
+  verdict: "absent_at_source" | "filtered_upstream" | "no_partner" | "present_on_both" | string;
+};
+
+export function explainJoinKey(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  side: JoinKeySide,
+  keyValues: unknown[],
+  connections: ConnectionDef[] = [],
+): Promise<ExplainJoinKeyResult> {
+  return invoke<ExplainJoinKeyResult>("explain_join_key", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    side,
+    keyValues,
+    connections,
+  });
+}
+
+export function blameUnmatchedKey(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  side: JoinKeySide,
+  keyValues: unknown[],
+  connections: ConnectionDef[] = [],
+): Promise<BlameUnmatchedKeyResult> {
+  return invoke<BlameUnmatchedKeyResult>("blame_unmatched_key", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    side,
+    keyValues,
+    connections,
+  });
+}
+
 export interface ExportResult {
   path: string;
   files: string[];

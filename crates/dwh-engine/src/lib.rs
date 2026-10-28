@@ -17,8 +17,10 @@ pub use join_diagnostics::{
     JOIN_DIAG_SAMPLE_LIMIT,
 };
 pub use join_lens::{
-    explain_join_rows, fingerprint_key, ExplainJoinRowsResult, JoinKeyTuple, JoinRowExplanation,
-    JOIN_LENS_MAX_KEYS, JOIN_LENS_MAX_MATCHES,
+    blame_unmatched_key, explain_join_key, explain_join_rows, fingerprint_key,
+    BlameUnmatchedKeyResult, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinKeySide,
+    JoinKeyTuple, JoinRowExplanation, JOIN_LENS_KEY_SAMPLE_LIMIT, JOIN_LENS_MAX_KEYS,
+    JOIN_LENS_MAX_MATCHES,
 };
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{

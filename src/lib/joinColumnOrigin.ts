@@ -9,6 +9,15 @@ export type SidePinResult = {
   pinned: boolean;
 };
 
+export type SidePinIndexResult = {
+  /** Indices into the full side-row list. */
+  indices: number[];
+  /** Key-level matches before pin (fan-out size). */
+  keyMatchCount: number;
+  /** True when non-key columns uniquely identified parent row(s). */
+  pinned: boolean;
+};
+
 function fold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
@@ -165,4 +174,90 @@ export function pinSideRowsToResult(args: {
   }
   scored.sort((a, b) => b.score - a.score);
   return { rows: scored.map((s) => s.row), pinned: false };
+}
+
+/**
+ * Same as {@link pinSideRowsToResult}, but returns indices into `sideRows`
+ * and the pre-pin key-match count (for UI copy: "1 parent" vs "3 share key").
+ */
+export function pinSideIndicesToResult(args: {
+  side: "left" | "right";
+  sideRows: unknown[][];
+  sideColumns: { name: string }[];
+  resultRow: unknown[];
+  resultColumns: { name: string }[];
+  origins: JoinColumnOrigin[];
+  leftOn: string[];
+  rightOn: string[];
+}): SidePinIndexResult {
+  const { sideRows } = args;
+  if (sideRows.length === 0) {
+    return { indices: [], keyMatchCount: 0, pinned: false };
+  }
+
+  // First restrict to join-key matches (same as SideCard "linked by key").
+  const sideKeyNames =
+    args.side === "left" ? args.leftOn : args.rightOn;
+  const resultKeyNames = args.leftOn;
+  const sideByFold = new Map(
+    args.sideColumns.map((c, i) => [fold(c.name), i] as const),
+  );
+  const resultByFold = new Map(
+    args.resultColumns.map((c, i) => [fold(c.name), i] as const),
+  );
+  const keyPairs: { sideIdx: number; resultIdx: number }[] = [];
+  for (let k = 0; k < resultKeyNames.length; k++) {
+    const resultIdx = resultByFold.get(fold(resultKeyNames[k]!));
+    const sideIdx = sideByFold.get(fold(sideKeyNames[k] ?? resultKeyNames[k]!));
+    if (resultIdx === undefined || sideIdx === undefined) continue;
+    keyPairs.push({ sideIdx, resultIdx });
+  }
+
+  const keyMatchIdx: number[] = [];
+  for (let i = 0; i < sideRows.length; i++) {
+    const row = sideRows[i]!;
+    let ok = true;
+    for (const p of keyPairs) {
+      if (!valuesEqual(row[p.sideIdx], args.resultRow[p.resultIdx])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok && keyPairs.length > 0) keyMatchIdx.push(i);
+  }
+  // No key columns on result → nothing to link.
+  if (keyPairs.length === 0) {
+    return { indices: [], keyMatchCount: 0, pinned: false };
+  }
+  if (keyMatchIdx.length === 0) {
+    return { indices: [], keyMatchCount: 0, pinned: false };
+  }
+  if (keyMatchIdx.length === 1) {
+    return {
+      indices: keyMatchIdx,
+      keyMatchCount: 1,
+      pinned: false,
+    };
+  }
+
+  const subset = keyMatchIdx.map((i) => sideRows[i]!);
+  const pinned = pinSideRowsToResult({
+    ...args,
+    sideRows: subset,
+  });
+  // Map pinned rows back to original indices (stable by first exact row ref match).
+  const used = new Set<number>();
+  const indices: number[] = [];
+  for (const prow of pinned.rows) {
+    const orig = keyMatchIdx.find((i) => sideRows[i] === prow && !used.has(i));
+    if (orig !== undefined) {
+      used.add(orig);
+      indices.push(orig);
+    }
+  }
+  return {
+    indices: indices.length > 0 ? indices : keyMatchIdx,
+    keyMatchCount: keyMatchIdx.length,
+    pinned: pinned.pinned,
+  };
 }

@@ -267,6 +267,10 @@ export function AppMenu({
             label="SQL hybrid — SqlModel · window"
             onClick={() => run(() => onLoadDemo("sql"))}
           />
+          <Item
+            label="Right joins — two RIGHT OUTER · coverage"
+            onClick={() => run(() => onLoadDemo("right"))}
+          />
         </MenuBarItem>
       </nav>
 

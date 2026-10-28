@@ -23,11 +23,20 @@ fs.rmSync(staging, { recursive: true, force: true });
 fs.mkdirSync(staging, { recursive: true });
 
 const hostName = platform === "windows" ? "dwh-host.exe" : "dwh-host";
-const hostSrc = path.join(root, "target", "release", hostName);
-if (!fs.existsSync(hostSrc)) {
-  console.error(`Missing ${hostSrc}`);
+const hostCandidates = [
+  process.env.DWH_HOST_BIN,
+  path.join(root, "target", "release", hostName),
+  // cargo zigbuild (glibc-pinned Linux release)
+  path.join(root, "target", "x86_64-unknown-linux-gnu", "release", hostName),
+].filter(Boolean);
+const hostSrc = hostCandidates.find((p) => fs.existsSync(p));
+if (!hostSrc) {
+  console.error(
+    `Missing ${hostName}. Tried:\n${hostCandidates.map((p) => `  ${p}`).join("\n")}`,
+  );
   process.exit(1);
 }
+console.log(`Using host: ${hostSrc}`);
 
 const dist = path.join(root, "dist");
 if (!fs.existsSync(dist)) {

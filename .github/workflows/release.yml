@@ -35,7 +35,8 @@ jobs:
             | **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` (no sudo / no WebKitGTK) |
             | **`*-electron-windows-x64.zip`** | Windows — unpack, `DWHForge-Query.cmd` |
 
-            Chromium is bundled via Electron. No DuckDB CDN at runtime.
+            Linux host linked for **glibc ≥ 2.28** (RHEL 8 / РЕД ОС 7.3+ / Ubuntu 20.04+).
+            Chromium via Electron. No DuckDB CDN at runtime.
 
   linux-electron:
     needs: prepare
@@ -49,10 +50,17 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+
+      - name: Install zig (glibc-aware linker)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
       - name: npm install
         run: npm install --no-audit --no-fund
@@ -60,10 +68,17 @@ jobs:
       - name: Fetch DuckDB extensions
         run: ./scripts/fetch-duckdb-extensions.sh
 
-      - name: Build dwh-host
+      - name: Build dwh-host for glibc 2.28+
         run: |
-          cargo build -p dwh-host --release
+          cargo install cargo-zigbuild --locked
+          # Pull prebuilt libduckdb into target/, then zig-link host against glibc 2.28
+          cargo build -p dwh-engine --release
           ./scripts/sync-duckdb-lib.sh
+          cargo zigbuild -p dwh-host --release --target x86_64-unknown-linux-gnu.2.28
+          mkdir -p target/release
+          cp -f target/x86_64-unknown-linux-gnu/release/dwh-host target/release/dwh-host
+          echo "GLIBC symbols (expect max ≤ 2.28):"
+          objdump -T target/release/dwh-host | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -8
 
       - name: Flatten postgres extension alias
         run: |
@@ -74,6 +89,7 @@ jobs:
           fi
           test -f "$EXT/postgres_scanner.duckdb_extension"
           test -f fixtures/sample.csv
+          test -x target/release/dwh-host
 
       - name: Build UI + portable Electron
         run: |

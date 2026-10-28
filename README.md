@@ -133,7 +133,7 @@ extensions/ fixtures/ docs/
 | **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` (no sudo / no WebKitGTK) |
 | **`*-electron-windows-x64.zip`** | Windows — unpack, `DWHForge-Query.cmd` |
 
-Chromium is bundled via Electron. Builds ship **offline**: DuckDB + `extensions/` (no CDN). CI: tag `v*` → `.github/workflows/release.yml`.
+Chromium via Electron. Linux **glibc ≥ 2.28** (RHEL 8 / РЕД ОС 7.3+ / Ubuntu 20.04+). Offline DuckDB + `extensions/`. CI: tag `v*` → `.github/workflows/release.yml`.
 
 ## License
 

@@ -21,7 +21,7 @@ Turning Export into a hidden `dbt run` materializer would blur the product into 
 2. **Do not** run `debug` / `compile` / `run` on Export.
 3. Files remain on disk if parse fails or `dbt` is missing (`dbt_parse_ok` + log in `ExportResult`).
 4. **CLI** `dwh-export --validate` opts into the same parse; default off for headless without dbt.
-5. Prefer managed venv via `scripts/fetch-dbt-venv.sh` (`src-tauri/dbt-venv`), else `PATH`.
+5. Prefer managed venv via `scripts/fetch-dbt-venv.sh` (`dbt-venv/`), else `PATH`.
 
 ## Consequences
 

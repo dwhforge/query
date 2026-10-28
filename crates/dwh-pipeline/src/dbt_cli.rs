@@ -12,21 +12,17 @@ pub struct DbtParseOutcome {
     pub log: String,
 }
 
-/// Candidate locations for a managed venv next to the Tauri crate / app.
+/// Candidate locations for a managed venv next to the app / repo.
 pub fn default_dbt_venv_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    // Dev: repo `src-tauri/dbt-venv` (from dwh-pipeline crate or cwd).
     let pipeline_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     out.push(
         pipeline_manifest
-            .join("../../src-tauri/dbt-venv/bin/dbt")
+            .join("../../dbt-venv/bin/dbt")
             .canonicalize()
-            .unwrap_or_else(|_| {
-                pipeline_manifest.join("../../src-tauri/dbt-venv/bin/dbt")
-            }),
+            .unwrap_or_else(|_| pipeline_manifest.join("../../dbt-venv/bin/dbt")),
     );
     if let Ok(cwd) = std::env::current_dir() {
-        out.push(cwd.join("src-tauri/dbt-venv/bin/dbt"));
         out.push(cwd.join("dbt-venv/bin/dbt"));
     }
     out

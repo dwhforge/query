@@ -3,28 +3,29 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && DWH_ELECTRON_BUILD=1 vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "host:build": "cargo build -p dwh-host --release",
+    "electron:dev": "npm run host:build && node scripts/electron-dev.mjs",
+    "electron:pack": "npm run host:build && npm run build && node scripts/pack-portable-electron.mjs",
+    "start": "npm run electron:dev"
   },
   "dependencies": {
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.12",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@xyflow/react": "^12.12.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.13",
-    "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^37.2.0",
     "tailwindcss": "^4.1.13",
     "typescript": "~5.8.3",
     "vite": "^6.3.5"

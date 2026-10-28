@@ -4,15 +4,11 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "DWHForge Query: Tauri Dev",
+      "name": "dwh-host (release)",
       "cargo": {
-        "args": [
-          "build",
-          "--manifest-path=${workspaceFolder}/src-tauri/Cargo.toml",
-          "--no-default-features"
-        ],
+        "args": ["build", "--release", "-p", "dwh-host"],
         "filter": {
-          "name": "dwh-rs-query",
+          "name": "dwh-host",
           "kind": "bin"
         }
       },
@@ -20,28 +16,10 @@
       "cwd": "${workspaceFolder}",
       "env": {
         "RUST_BACKTRACE": "1",
-        "LD_LIBRARY_PATH": "${workspaceFolder}/target/debug:${workspaceFolder}/target/duckdb-download/x86_64-unknown-linux-gnu/v2.0.0:${env:LD_LIBRARY_PATH}"
-      },
-      "preLaunchTask": "ui:dev"
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "DWHForge Query: Tauri Release Debug",
-      "cargo": {
-        "args": [
-          "build",
-          "--release",
-          "--manifest-path=${workspaceFolder}/src-tauri/Cargo.toml"
-        ],
-        "filter": {
-          "name": "dwh-rs-query",
-          "kind": "bin"
-        }
-      },
-      "args": [],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "ui:build"
+        "DWH_EXTENSIONS_DIR": "${workspaceFolder}/extensions",
+        "DWH_FIXTURES_DIR": "${workspaceFolder}/fixtures",
+        "LD_LIBRARY_PATH": "${workspaceFolder}/target/release:${env:LD_LIBRARY_PATH}"
+      }
     },
     {
       "type": "lldb",
@@ -87,8 +65,8 @@
     {
       "type": "node-terminal",
       "request": "launch",
-      "name": "npm: tauri dev",
-      "command": "npm run tauri dev",
+      "name": "npm: electron:dev",
+      "command": "npm run electron:dev",
       "cwd": "${workspaceFolder}"
     }
   ],
@@ -104,16 +82,6 @@
       "type": "promptString",
       "description": "Optional SQL WHERE condition (empty allowed)",
       "default": "amount > 1000"
-    }
-  ],
-  "compounds": [
-    {
-      "name": "Full stack: Vite + note",
-      "configurations": ["Vite FE only"],
-      "presentation": {
-        "order": 1,
-        "group": "dwh"
-      }
     }
   ]
 }

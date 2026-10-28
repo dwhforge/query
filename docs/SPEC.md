@@ -114,7 +114,7 @@ Rules: [ADR-0002](adr/0002-multi-query-workspace.md), [ADR-0003](adr/0003-join-a
 
 `PipelineCompiler` (linear) remains a thin wrapper over a single-query workspace.
 
-## 4. Tauri commands
+## 4. Host commands (Electron → dwh-host)
 
 | Command | In | Out |
 |---------|----|-----|
@@ -186,7 +186,7 @@ dbt parse --no-partial-parse --project-dir <root> --profiles-dir <root>
 - **In scope:** project structure, YAML, Jinja, `ref`/`source` graph — **no warehouse connection**.
 - **Out of scope on Export:** `dbt debug`, `dbt compile`, `dbt run` (those need a data platform; `run` remains DoD on the target machine / CI).
 - Missing `dbt`: soft-fail (`dbt_parse_ok: false` + install hint); **files still written**.
-- Resolve binary: `src-tauri/dbt-venv/bin/dbt` ([`scripts/fetch-dbt-venv.sh`](../scripts/fetch-dbt-venv.sh)) → else `PATH`.
+- Resolve binary: `dbt-venv/bin/dbt` ([`scripts/fetch-dbt-venv.sh`](../scripts/fetch-dbt-venv.sh)) → else `PATH`.
 
 ## 6. Frontend (v1)
 

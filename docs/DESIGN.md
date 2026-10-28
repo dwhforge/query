@@ -4,7 +4,7 @@
 
 **DWHForge Query** is a local desktop workbench: build a transform graph from one or many sources, preview in DuckDB, and **export a real dbt project**.
 
-- Stack: Tauri + React/TS/Tailwind + Rust + DuckDB  
+- Stack: Electron + React/TS/Tailwind + Rust (`dwh-host`) + DuckDB  
 - Brand / app id: **DWHForge Query** · `com.dwhforge.query` ([ADR-0016](adr/0016-product-rename-dwhforge-query.md))  
 - Repo path may still be `dwh-rs-query`  
 - Raw data never leaves the machine (AI receives only schema / steps / prompt)  

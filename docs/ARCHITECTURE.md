@@ -4,7 +4,8 @@
 
 ```mermaid
 flowchart LR
-  UI[React_UI] -->|Tauri_invoke| Core[Rust_Core]
+  UI[React_UI] -->|Electron_IPC| Host[dwh_host]
+  Host --> Core[Rust_Core]
   Core --> WS[Workspace]
   WS --> Compiler[GraphCompiler]
   Compiler --> SQL[CTE_SQL]
@@ -35,7 +36,8 @@ ADRs: see `docs/adr/` ([ADR-0018](adr/0018-return-and-edit.md) = near-term produ
 | `crates/dwh-pipeline` | `TransformationStep`, `Workspace`, `GraphCompiler` |
 | `crates/dwh-pipeline/producers` | `OutputProducer`, `DbtProducer` |
 | `crates/dwh-engine` | DuckDB session, preview |
-| `src-tauri` | IPC commands |
+| `crates/dwh-host` | Localhost JSON-RPC sidecar (Electron) |
+| `electron/` | Desktop shell |
 | `src/` | Queries UI, History, Preview, Export |
 
 ## 4. Compile flow

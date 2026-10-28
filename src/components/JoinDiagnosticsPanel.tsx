@@ -1,4 +1,4 @@
-import type { JoinDiagSample, JoinDiagnostics } from "../lib/tauri";
+import type { JoinDiagSample, JoinDiagnostics } from "../lib/bridge";
 
 export type JoinDiagKind =
   | "left"

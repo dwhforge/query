@@ -10,7 +10,6 @@ pub fn dwh_home_dir() -> Result<PathBuf, String> {
 }
 
 fn dirs_next_home() -> Option<PathBuf> {
-    // Prefer $HOME; fall back to dirs crate pattern without extra dep.
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
@@ -43,7 +42,6 @@ pub fn save_secrets_file(file: &SecretsFile) -> Result<(), String> {
     Ok(())
 }
 
-/// Write project JSON without secrets/root_path; upsert secrets for this project id.
 pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<(), String> {
     let (disk, secrets) = project_for_disk(project);
     let json = disk.to_json_pretty()?;
@@ -58,11 +56,9 @@ pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<(), St
     Ok(())
 }
 
-/// Load project JSON and merge secrets from `~/.dwhforge-query/secrets.json`.
 pub fn load_project_with_secrets(path: &str) -> Result<Project, String> {
     let raw = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut project = Project::from_json(&raw)?;
-    // Ignore any legacy root_path in file; caller sets from open path.
     project.root_path = None;
     let store = load_secrets_file()?;
     if let Some(map) = store.projects.get(&project.id) {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dwh-pipeline", "crates/dwh-engine", "src-tauri"]
+members = ["crates/dwh-pipeline", "crates/dwh-engine", "crates/dwh-host"]
 
 [workspace.package]
 version = "0.1.0"

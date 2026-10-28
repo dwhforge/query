@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import type {
   ConnectionDef,
   PreviewResult,
@@ -9,6 +8,21 @@ import type {
 } from "../types/pipeline";
 
 export type DbtTarget = "v1" | "v2";
+
+function bridge() {
+  const dwh = window.dwh;
+  if (!dwh?.invoke) {
+    throw new Error(
+      "DWH bridge missing — run under Electron (npm run electron:dev)",
+    );
+  }
+  return dwh;
+}
+
+/** IPC → dwh-host JSON-RPC. */
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return bridge().invoke<T>(cmd, args);
+}
 
 export function previewWorkspace(
   workspace: Workspace,
@@ -23,7 +37,6 @@ export type PreviewDbtModel = {
   sql: string;
 };
 
-/** Compiled dbt model body for one query (Model tab). */
 export function previewDbtModel(
   workspace: Workspace,
   queryId: string,
@@ -45,7 +58,6 @@ export function previewPipeline(
   return invoke<PreviewResult>("preview_pipeline", { steps, connections });
 }
 
-/** Bounded Join diagnostic sample (DESIGN §9). */
 export type JoinDiagSample = {
   columns: { name: string; type: string }[];
   rows: unknown[][];
@@ -53,7 +65,6 @@ export type JoinDiagSample = {
   total_count: number;
 };
 
-/** Full-input counts + samples for one Join step. */
 export type JoinDiagnostics = {
   host_query_id: string;
   join_step_index: number;
@@ -112,14 +123,12 @@ export type ExplainJoinRowsResult = {
   explanations: JoinRowExplanation[];
 };
 
-/** Batch where-provenance for Join Lens (≤24 keys/offsets, ≤6 matches/side). */
 export function explainJoinRows(
   workspace: Workspace,
   hostQueryId: string,
   joinStepIndex: number,
   opts: {
     keys?: JoinKeyTuple[];
-    /** Preview row indices when join keys are absent from the visible select. */
     previewOffsets?: number[];
   },
   connections: ConnectionDef[] = [],
@@ -136,11 +145,8 @@ export function explainJoinRows(
 
 export interface ExportResult {
   path: string;
-  /** Relative paths; directories end with `/`. */
   files: string[];
-  /** Offline `dbt parse` succeeded (no warehouse). */
   dbt_parse_ok: boolean;
-  /** Captured parse log (may be truncated). */
   dbt_parse_log: string;
 }
 
@@ -174,7 +180,6 @@ export function loadDemoWorkspace(
   return invoke<Workspace>("load_demo_workspace", { name });
 }
 
-/** @deprecated prefer loadDemoWorkspace("sales") */
 export function loadSampleWorkspace(): Promise<Workspace> {
   return loadDemoWorkspace("sales");
 }
@@ -226,18 +231,14 @@ export function loadProject(path: string): Promise<Project> {
   return invoke<Project>("load_project", { path });
 }
 
-/** Last Save/Open `.dwhproj.json` path (app session) — for restore on launch. */
 export function getLastProjectPath(): Promise<string | null> {
   return invoke<string | null>("get_last_project_path");
 }
 
-/** App defaults in `~/.dwhforge-query/settings.json` (not secrets, not project IR). */
 export interface AppSettings {
   default_target_dialect: WarehouseDialect;
   default_dbt_target: DbtTarget;
-  /** Explorer sidebar width (px). */
   explorer_width_px?: number;
-  /** Inspector sidebar width (px). */
   inspector_width_px?: number;
 }
 
@@ -247,4 +248,24 @@ export function getAppSettings(): Promise<AppSettings> {
 
 export function setAppSettings(settings: AppSettings): Promise<void> {
   return invoke<void>("set_app_settings", { settings });
+}
+
+/** Electron dialog helpers. */
+export function openDialog(opts?: {
+  multiple?: boolean;
+  directory?: boolean;
+  filters?: { name: string; extensions: string[] }[];
+}): Promise<string | string[] | null> {
+  return bridge().open(opts);
+}
+
+export function saveDialog(opts?: {
+  defaultPath?: string;
+  filters?: { name: string; extensions: string[] }[];
+}): Promise<string | null> {
+  return bridge().save(opts);
+}
+
+export function revealItemInDir(path: string): Promise<void> {
+  return bridge().revealItemInDir(path);
 }

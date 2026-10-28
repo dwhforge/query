@@ -45,19 +45,12 @@ Power Query *mental model* (multi-query, Applied Steps, Merge) — not Power BI 
 # Once: local dbt Core 1.x venv for offline `dbt parse` on Export
 ./scripts/fetch-dbt-venv.sh
 
-# Linux desktop deps (once)
-sudo apt update && sudo apt install -y \
-  pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev librsvg2-dev \
-  patchelf libssl-dev libgtk-3-dev libayatana-appindicator3-dev
-
 npm install
-npm run tauri dev
-```
-
-After the first `cargo build -p dwh-engine`, sync the shared lib next to binaries:
-
-```bash
+cargo build -p dwh-host --release
 ./scripts/sync-duckdb-lib.sh
+
+# Desktop shell = Electron (Chromium bundled — no system WebKitGTK / dnf)
+npm run electron:dev
 ```
 
 DuckDB **v2** via `duckdb-rs` **prebuilt** lib (not Cargo `bundled` — that rebuilds C++ for a long time). Runtime layout: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)).
@@ -89,13 +82,13 @@ Re-export writes `.dwhforge-export.json` (owned-file hashes) and refuses if you 
 
 ### VS Code / Cursor
 
-[`.vscode/launch.json`](.vscode/launch.json) — **DWHForge Query: Tauri Dev** (LLDB + Vite), headless `dwh-preview`, tasks for pipeline tests. Extensions: [`.vscode/extensions.json`](.vscode/extensions.json).
+[`.vscode/launch.json`](.vscode/launch.json) — Electron + `dwh-host`, headless `dwh-preview`. Extensions: [`.vscode/extensions.json`](.vscode/extensions.json).
 
 ## Stack
 
 | Layer | Choice |
 |-------|--------|
-| Shell | Tauri 2 |
+| Shell | Electron + Rust `dwh-host` sidecar |
 | UI | React + TypeScript + Vite |
 | IR / export | Rust (`dwh-pipeline`) |
 | Preview | DuckDB (`dwh-engine`) |
@@ -104,9 +97,10 @@ Re-export writes `.dwhforge-export.json` (owned-file hashes) and refuses if you 
 ```text
 crates/dwh-pipeline   Workspace, steps, compiler, DbtProducer, dwh-export
 crates/dwh-engine     DuckDB session, preview, dwh-preview
+crates/dwh-host       Localhost JSON-RPC sidecar
+electron/             Electron main / preload
 src/                  React UI
-src-tauri/            Tauri IPC
-fixtures/  docs/
+extensions/ fixtures/ docs/
 ```
 
 ## Naming
@@ -136,13 +130,10 @@ fixtures/  docs/
 
 | Package | Use on |
 |---------|--------|
-| `.tar.gz` | **Linux, no sudo** — unpack, `./DWHForge-Query` |
-| `.zip` | **Windows, no installer** — unpack, `DWHForge-Query.exe` |
-| `.deb` | Debian / Ubuntu |
-| `.rpm` | RHEL / Rocky / Alma / Fedora (`sudo` required to install) |
-| NSIS `.exe` | Windows installer |
+| **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` (no sudo / no WebKitGTK) |
+| **`*-electron-windows-x64.zip`** | Windows — unpack, `DWHForge-Query.cmd` |
 
-Builds ship **offline**: bundled DuckDB shared lib + `extensions/` (no CDN at runtime). CI: tag `v*` → `.github/workflows/release.yml` (Linux + Windows).
+Chromium is bundled via Electron. Builds ship **offline**: DuckDB + `extensions/` (no CDN). CI: tag `v*` → `.github/workflows/release.yml`.
 
 ## License
 

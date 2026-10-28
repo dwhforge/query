@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { listPostgresObjects, type PostgresObject } from "../lib/tauri";
+import { listPostgresObjects, type PostgresObject } from "../lib/bridge";
 import type { ConnectionDef } from "../types/pipeline";
 
 export interface PostgresSelection {

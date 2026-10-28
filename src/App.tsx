@@ -3,8 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
 }
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  openDialog as open,
+  revealItemInDir,
+  saveDialog as save,
+} from "./lib/bridge";
 import { ConnectionEditor } from "./components/ConnectionEditor";
 import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
@@ -57,7 +60,7 @@ import {
   type JoinDiagnostics,
   type PreviewDbtModel,
   type PostgresColumn,
-} from "./lib/tauri";
+} from "./lib/bridge";
 import {
   connectionById,
   emptyProject,

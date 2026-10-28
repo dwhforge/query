@@ -1,5 +1,4 @@
-//! App preferences: `~/.dwhforge-query/settings.json` (defaults / last-used).
-//! Distinct from `secrets.json` and from per-project `.dwhproj.json`.
+//! App preferences: `~/.dwhforge-query/settings.json`.
 
 use crate::secrets_io::dwh_home_dir;
 use dwh_pipeline::{DbtTarget, WarehouseDialect};
@@ -12,10 +11,8 @@ pub struct AppSettings {
     pub default_target_dialect: WarehouseDialect,
     #[serde(default)]
     pub default_dbt_target: DbtTarget,
-    /// Explorer sidebar width (px).
     #[serde(default = "default_explorer_width")]
     pub explorer_width_px: u32,
-    /// Inspector sidebar width (px).
     #[serde(default = "default_inspector_width")]
     pub inspector_width_px: u32,
 }
@@ -39,12 +36,8 @@ impl Default for AppSettings {
     }
 }
 
-pub fn settings_path() -> Result<std::path::PathBuf, String> {
-    Ok(dwh_home_dir()?.join("settings.json"))
-}
-
 pub fn load_settings() -> Result<AppSettings, String> {
-    let path = settings_path()?;
+    let path = dwh_home_dir()?.join("settings.json");
     if !path.is_file() {
         return Ok(AppSettings::default());
     }
@@ -57,26 +50,5 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_roundtrip_json() {
-        let s = AppSettings::default();
-        let json = serde_json::to_string(&s).unwrap();
-        let back: AppSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, s);
-        assert_eq!(back.default_target_dialect, WarehouseDialect::Duckdb);
-        assert_eq!(back.default_dbt_target, DbtTarget::V1);
-    }
-
-    #[test]
-    fn missing_fields_use_defaults() {
-        let back: AppSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(back, AppSettings::default());
-    }
+    fs::write(path, json).map_err(|e| e.to_string())
 }

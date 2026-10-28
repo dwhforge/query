@@ -4,8 +4,8 @@ import type {
   ConnectionDef,
   Workspace,
 } from "../types/pipeline";
-import type { ExplainJoinRowsResult, JoinRowExplanation } from "../lib/tauri";
-import { explainJoinRows } from "../lib/tauri";
+import type { ExplainJoinRowsResult, JoinRowExplanation } from "../lib/bridge";
+import { explainJoinRows } from "../lib/bridge";
 import { classifyJoinColumnOrigins } from "../lib/joinColumnOrigin";
 import { PreviewTable } from "./PreviewTable";
 

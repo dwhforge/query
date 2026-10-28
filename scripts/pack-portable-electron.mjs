@@ -2,8 +2,11 @@
 /**
  * Portable Linux/Windows folder: Electron + dwh-host + DuckDB + extensions + fixtures.
  * Output: dist-portable/dwhforge-query-<ver>-electron-<os>-x64/
+ *
+ * Electron is **copied** from the build tree's node_modules (already downloaded by
+ * `npm install`). Do not re-npm-install into staging — that skips the binary when
+ * electron is only a devDependency / omit=dev.
  */
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,14 +35,22 @@ if (!fs.existsSync(dist)) {
   process.exit(1);
 }
 
-// Copy app sources needed at runtime
-for (const rel of ["dist", "electron", "package.json"]) {
-  const src = path.join(root, rel);
-  const dest = path.join(staging, rel);
-  fs.cpSync(src, dest, { recursive: true });
+const electronPkg = path.join(root, "node_modules", "electron");
+const electronBinName = platform === "windows" ? "electron.exe" : "electron";
+const electronBinSrc = path.join(electronPkg, "dist", electronBinName);
+if (!fs.existsSync(electronBinSrc)) {
+  console.error(
+    `Missing Electron binary at ${electronBinSrc}\n` +
+      `Run: npm install   (electron must download its dist/)`,
+  );
+  process.exit(1);
 }
 
-// Host + native libs
+// Minimal app payload (UI is prebuilt; no need for react/etc in node_modules)
+for (const rel of ["dist", "electron", "package.json"]) {
+  fs.cpSync(path.join(root, rel), path.join(staging, rel), { recursive: true });
+}
+
 fs.copyFileSync(hostSrc, path.join(staging, hostName));
 
 const libCandidates = [
@@ -59,12 +70,21 @@ fs.cpSync(path.join(root, "fixtures"), path.join(staging, "fixtures"), {
   recursive: true,
 });
 
-// Install production node deps + electron into staging
-spawnSync("npm", ["install", "--omit=dev", "electron@37.2.0"], {
-  cwd: staging,
-  stdio: "inherit",
-  shell: true,
-});
+// Bundle Electron runtime (binary + libs under dist/)
+const electronDest = path.join(staging, "node_modules", "electron");
+fs.mkdirSync(path.dirname(electronDest), { recursive: true });
+fs.cpSync(electronPkg, electronDest, { recursive: true });
+
+const electronBinDest = path.join(electronDest, "dist", electronBinName);
+if (!fs.existsSync(electronBinDest)) {
+  console.error(`Pack failed: electron binary missing after copy: ${electronBinDest}`);
+  process.exit(1);
+}
+try {
+  fs.chmodSync(electronBinDest, 0o755);
+} catch {
+  /* windows */
+}
 
 const readme = `DWHForge Query ${ver} — portable Electron (${platform})
 
@@ -72,7 +92,7 @@ Run:
   Linux:   ./DWHForge-Query
   Windows: DWHForge-Query.cmd
 
-No system WebKitGTK / dnf required (Chromium bundled via Electron).
+No system WebKitGTK / dnf / Node.js required (Chromium bundled).
 DuckDB + extensions/ are included.
 `;
 fs.writeFileSync(path.join(staging, "README.txt"), readme);
@@ -86,9 +106,16 @@ export DWH_EXTENSIONS_DIR="$DIR/extensions"
 export DWH_FIXTURES_DIR="$DIR/fixtures"
 export ELECTRON_DISABLE_SANDBOX=1
 cd "$DIR"
-exec "$DIR/node_modules/.bin/electron" "$DIR" --no-sandbox --disable-gpu-sandbox
+ELECTRON_BIN="$DIR/node_modules/electron/dist/electron"
+if [[ ! -x "\$ELECTRON_BIN" ]]; then
+  echo "Missing Electron binary: \$ELECTRON_BIN" >&2
+  exit 1
+fi
+exec "\$ELECTRON_BIN" "\$DIR" --no-sandbox --disable-gpu-sandbox
 `;
-  fs.writeFileSync(path.join(staging, "DWHForge-Query"), launcher, { mode: 0o755 });
+  fs.writeFileSync(path.join(staging, "DWHForge-Query"), launcher, {
+    mode: 0o755,
+  });
 } else {
   const launcher = `@echo off
 set DIR=%~dp0
@@ -96,11 +123,11 @@ set PATH=%DIR%;%PATH%
 set DWH_EXTENSIONS_DIR=%DIR%extensions
 set DWH_FIXTURES_DIR=%DIR%fixtures
 cd /d "%DIR%"
-"%DIR%node_modules\\electron\\dist\\electron.exe" "%DIR%"
+"%DIR%node_modules\\electron\\dist\\electron.exe" "%DIR%" --no-sandbox
 `;
   fs.writeFileSync(path.join(staging, "DWHForge-Query.cmd"), launcher);
 }
 
-// Patch main to find resources beside app when portable
 console.log(`Wrote ${staging}`);
-console.log("Pack tarball yourself if needed: tar -C dist-portable -czf …");
+console.log(`Electron: ${electronBinDest}`);
+console.log("Pack: tar -C dist-portable -czf <name>.tar.gz <dirname>");

@@ -19,7 +19,9 @@ use dwh_pipeline::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -488,8 +490,63 @@ struct GlobalConnectionsArgs {
     connections: Vec<ConnectionDef>,
 }
 
+/// Small LRU for structural DuckDB previews (LIMIT 50). Avoids recompile+rerun
+/// when the UI re-requests the same workspace (step select, tab switch, Lens).
+struct PreviewCache {
+    map: HashMap<u64, Value>,
+    order: Vec<u64>,
+    capacity: usize,
+}
+
+impl PreviewCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: Vec::new(),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: u64) -> Option<Value> {
+        if !self.map.contains_key(&key) {
+            return None;
+        }
+        self.order.retain(|k| *k != key);
+        self.order.push(key);
+        self.map.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: u64, value: Value) {
+        if self.map.insert(key, value).is_none() {
+            self.order.push(key);
+        } else {
+            self.order.retain(|k| *k != key);
+            self.order.push(key);
+        }
+        while self.order.len() > self.capacity {
+            if let Some(old) = self.order.first().copied() {
+                self.order.remove(0);
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn fingerprint_json(parts: &[&Value]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in parts {
+        if let Ok(bytes) = serde_json::to_vec(p) {
+            bytes.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 pub struct HostState {
     pub db: Mutex<DbSession>,
+    preview_cache: Mutex<PreviewCache>,
 }
 
 impl HostState {
@@ -497,26 +554,63 @@ impl HostState {
         configure_paths();
         Ok(Self {
             db: Mutex::new(DbSession::new()?),
+            preview_cache: Mutex::new(PreviewCache::new(8)),
         })
     }
 
     pub fn dispatch(&self, cmd: &str, args: Value) -> Result<Value, String> {
-        let db = self.db.lock().map_err(|e| e.to_string())?;
         match cmd {
             "preview_pipeline" => {
-                let a: PreviewArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: PreviewArgs =
+                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
                 let steps = a.steps.ok_or("preview_pipeline: missing steps")?;
                 let conns = a.connections.unwrap_or_default();
+                let steps_v = serde_json::to_value(&steps).unwrap_or(Value::Null);
+                let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
+                let key = fingerprint_json(&[&Value::String("pipeline".into()), &steps_v, &conns_v]);
+                if let Ok(mut cache) = self.preview_cache.lock() {
+                    if let Some(hit) = cache.get(key) {
+                        return Ok(hit);
+                    }
+                }
+                let db = self.db.lock().map_err(|e| e.to_string())?;
                 let out: PreviewResult = run_preview_steps(&db, &steps, &conns)?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
+                drop(db);
+                if let Ok(mut cache) = self.preview_cache.lock() {
+                    cache.insert(key, val.clone());
+                }
+                Ok(val)
             }
             "preview_workspace" => {
-                let a: PreviewArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: PreviewArgs =
+                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
                 let ws = a.workspace.ok_or("preview_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
+                let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
+                let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
+                let key = fingerprint_json(&[&Value::String("workspace".into()), &ws_v, &conns_v]);
+                if let Ok(mut cache) = self.preview_cache.lock() {
+                    if let Some(hit) = cache.get(key) {
+                        return Ok(hit);
+                    }
+                }
+                let db = self.db.lock().map_err(|e| e.to_string())?;
                 let out = run_preview_workspace(&db, &ws, &conns)?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
+                drop(db);
+                if let Ok(mut cache) = self.preview_cache.lock() {
+                    cache.insert(key, val.clone());
+                }
+                Ok(val)
             }
+            _ => self.dispatch_locked(cmd, args),
+        }
+    }
+
+    fn dispatch_locked(&self, cmd: &str, args: Value) -> Result<Value, String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        match cmd {
             "join_diagnostics" => {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();

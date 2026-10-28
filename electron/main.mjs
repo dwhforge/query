@@ -7,7 +7,7 @@ import {
 } from "electron";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,8 +23,17 @@ if (process.platform === "linux") {
 
 /** @type {import('node:child_process').ChildProcess | null} */
 let hostProc = null;
-/** @type {number | null} */
-let hostPort = null;
+/** @type {{ kind: "unix", path: string } | { kind: "tcp", port: number } | null} */
+let hostEndpoint = null;
+/** @type {import('node:net').Socket | null} */
+let hostSock = null;
+/** @type {Promise<import('node:net').Socket> | null} */
+let hostConnecting = null;
+/** @type {Buffer} */
+let hostBuf = Buffer.alloc(0);
+let rpcNextId = 1;
+/** @type {Map<number, { resolve: (v: unknown) => void, reject: (e: Error) => void }>} */
+const rpcPending = new Map();
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
 
@@ -156,18 +165,34 @@ function startHost() {
     const onData = (buf) => {
       const text = buf.toString();
       process.stderr.write(text);
-      const m = text.match(/DWH_HOST_READY\s+(\d+)/);
-      if (m && !settled) {
+      // DWH_HOST_READY unix <path>  |  DWH_HOST_READY tcp <port>
+      // Legacy: DWH_HOST_READY <port>
+      const mUnix = text.match(/DWH_HOST_READY\s+unix\s+(\S+)/);
+      const mTcp = text.match(/DWH_HOST_READY\s+tcp\s+(\d+)/);
+      const mLegacy = text.match(/DWH_HOST_READY\s+(\d+)\b/);
+      if (settled) return;
+      if (mUnix) {
         settled = true;
         clearTimeout(failTimer);
-        hostPort = Number(m[1]);
-        resolve(hostPort);
+        hostEndpoint = { kind: "unix", path: mUnix[1] };
+        resolve(hostEndpoint);
+      } else if (mTcp) {
+        settled = true;
+        clearTimeout(failTimer);
+        hostEndpoint = { kind: "tcp", port: Number(mTcp[1]) };
+        resolve(hostEndpoint);
+      } else if (mLegacy) {
+        settled = true;
+        clearTimeout(failTimer);
+        hostEndpoint = { kind: "tcp", port: Number(mLegacy[1]) };
+        resolve(hostEndpoint);
       }
     };
     hostProc.stdout?.on("data", onData);
     hostProc.stderr?.on("data", (b) => process.stderr.write(b));
     hostProc.on("exit", (code) => {
-      hostPort = null;
+      hostEndpoint = null;
+      closeHostSock("dwh-host exited");
       if (!settled) {
         settled = true;
         clearTimeout(failTimer);
@@ -177,41 +202,105 @@ function startHost() {
   });
 }
 
-function rpc(cmd, args) {
-  return new Promise((resolve, reject) => {
-    if (!hostPort) {
-      reject(new Error("dwh-host is not running"));
-      return;
+function closeHostSock(reason) {
+  hostConnecting = null;
+  if (hostSock) {
+    try {
+      hostSock.destroy();
+    } catch {
+      /* ignore */
     }
-    const body = JSON.stringify({ cmd, args: args ?? {} });
-    const req = http.request(
-      {
-        host: "127.0.0.1",
-        port: hostPort,
-        path: "/rpc",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          try {
-            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            if (parsed.ok) resolve(parsed.result);
-            else reject(parsed.error || "host error");
-          } catch (e) {
-            reject(String(e));
-          }
-        });
-      },
-    );
-    req.on("error", reject);
-    req.write(body);
-    req.end();
+    hostSock = null;
+  }
+  hostBuf = Buffer.alloc(0);
+  for (const [, p] of rpcPending) {
+    p.reject(new Error(reason || "host socket closed"));
+  }
+  rpcPending.clear();
+}
+
+function onHostData(chunk) {
+  hostBuf = Buffer.concat([hostBuf, chunk]);
+  while (hostBuf.length >= 4) {
+    const len = hostBuf.readUInt32LE(0);
+    if (hostBuf.length < 4 + len) break;
+    const body = hostBuf.subarray(4, 4 + len);
+    hostBuf = hostBuf.subarray(4 + len);
+    let parsed;
+    try {
+      parsed = JSON.parse(body.toString("utf8"));
+    } catch (e) {
+      console.error("[dwh] bad host frame", e);
+      continue;
+    }
+    const id = parsed.id;
+    const pending = id != null ? rpcPending.get(id) : null;
+    if (pending) {
+      rpcPending.delete(id);
+      if (parsed.ok) pending.resolve(parsed.result);
+      else pending.reject(new Error(parsed.error || "host error"));
+    }
+  }
+}
+
+function connectHostSock() {
+  if (!hostEndpoint) {
+    return Promise.reject(new Error("dwh-host is not running"));
+  }
+  if (hostSock && !hostSock.destroyed) {
+    return Promise.resolve(hostSock);
+  }
+  if (hostConnecting) return hostConnecting;
+
+  hostConnecting = new Promise((resolve, reject) => {
+    const sock =
+      hostEndpoint.kind === "unix"
+        ? net.createConnection(hostEndpoint.path)
+        : net.createConnection({ host: "127.0.0.1", port: hostEndpoint.port });
+    sock.setNoDelay(true);
+    sock.once("connect", () => {
+      hostSock = sock;
+      hostBuf = Buffer.alloc(0);
+      hostConnecting = null;
+      resolve(sock);
+    });
+    sock.on("data", onHostData);
+    sock.once("error", (e) => {
+      hostConnecting = null;
+      closeHostSock(String(e));
+      reject(e);
+    });
+    sock.on("close", () => {
+      if (hostSock === sock) {
+        hostSock = null;
+        for (const [, p] of rpcPending) {
+          p.reject(new Error("host socket closed"));
+        }
+        rpcPending.clear();
+      }
+    });
+  });
+  return hostConnecting;
+}
+
+async function rpc(cmd, args) {
+  const sock = await connectHostSock();
+  const id = rpcNextId++;
+  const payload = Buffer.from(
+    JSON.stringify({ id, cmd, args: args ?? {} }),
+    "utf8",
+  );
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(payload.length, 0);
+  return new Promise((resolve, reject) => {
+    rpcPending.set(id, { resolve, reject });
+    sock.write(Buffer.concat([header, payload]), (err) => {
+      if (err) {
+        rpcPending.delete(id);
+        closeHostSock(String(err));
+        reject(err);
+      }
+    });
   });
 }
 

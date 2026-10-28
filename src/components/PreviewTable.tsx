@@ -102,17 +102,21 @@ export function PreviewTable({
       const origin = columnOrigins?.[index];
       const on = origin === "key" || hi.has(foldKey(col.name));
       const label = origin ? JOIN_ORIGIN_LABEL[origin] : on ? "join" : null;
+      const tip = label ? `${col.name} · ${label}` : col.name;
       return (
-        <span className="flex flex-col gap-0.5">
-          <span className={`relative font-medium ${originHeaderClass(origin ?? (on ? "key" : undefined))}`}>
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span
+            title={tip}
+            className={`relative block truncate pl-1.5 font-medium ${originHeaderClass(origin ?? (on ? "key" : undefined))}`}
+          >
             <span
-              className={`absolute -left-2 top-0.5 h-3 w-0.5 rounded-full ${originBarClass(origin ?? (on ? "key" : undefined))}`}
+              className={`absolute left-0 top-0.5 h-3 w-0.5 rounded-full ${originBarClass(origin ?? (on ? "key" : undefined))}`}
               aria-hidden
             />
             {col.name}
-            {label ? ` · ${label}` : ""}
           </span>
-          <span className="text-[10px] uppercase tracking-wide text-slate-500">
+          <span className="truncate text-[10px] uppercase tracking-wide text-slate-500">
+            {label ? `${label} · ` : ""}
             {col.type}
           </span>
         </span>
@@ -176,7 +180,7 @@ export function PreviewTable({
             headerGroup.headers.map((header) => (
               <div
                 key={header.id}
-                className="w-[140px] shrink-0 px-3 py-2 text-left text-xs"
+                className="w-[140px] min-w-0 shrink-0 overflow-hidden px-3 py-2 text-left text-xs"
               >
                 {flexRender(
                   header.column.columnDef.header,
@@ -224,7 +228,7 @@ export function PreviewTable({
                     <div
                       key={cell.id}
                       data-join-origin={origin ?? undefined}
-                      className="w-[140px] shrink-0 px-3 py-2 text-xs"
+                      className="w-[140px] min-w-0 shrink-0 overflow-hidden px-3 py-2 text-xs"
                     >
                       {flexRender(
                         cell.column.columnDef.cell,

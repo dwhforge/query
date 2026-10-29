@@ -33,11 +33,10 @@ case "$ARCH" in
 esac
 PLATFORM="${OS_NAME}_${ARCH_NAME}"
 
-# Staging (versioned) + ship folders (flat, next to app)
+# Staging (versioned) + ship folder (flat, next to app)
 STAGE="$ROOT/third_party/duckdb-extensions/${VERSION}/${PLATFORM}"
-SHIP_TAURI="$ROOT/src-tauri/extensions"
 SHIP_ROOT="$ROOT/extensions"
-mkdir -p "$STAGE" "$SHIP_TAURI" "$SHIP_ROOT"
+mkdir -p "$STAGE" "$SHIP_ROOT"
 
 BASE="https://extensions.duckdb.org/${VERSION}/${PLATFORM}"
 EXT_FILES=(postgres_scanner httpfs aws)
@@ -49,9 +48,8 @@ for name in "${EXT_FILES[@]}"; do
   echo "Fetching $url"
   curl -fsSL "$url" -o "$gz"
   gzip -df "$gz"
-  cp -f "$out" "$SHIP_TAURI/"
   cp -f "$out" "$SHIP_ROOT/"
-  echo "  -> $SHIP_TAURI/${name}.duckdb_extension"
+  echo "  -> $SHIP_ROOT/${name}.duckdb_extension"
 done
 
 # Alias used by some loaders (copy on Windows — no symlink privilege needed)
@@ -65,29 +63,27 @@ alias_postgres() {
     ln -sfn postgres_scanner.duckdb_extension "$dst"
   fi
 }
-alias_postgres "$SHIP_TAURI"
 alias_postgres "$SHIP_ROOT"
 
-cat > "$SHIP_TAURI/README.md" <<'EOF'
+cat > "$SHIP_ROOT/README.md" <<'EOF'
 # App-sidecar DuckDB extensions
 
-These files ship **next to the application** (Tauri bundle resources → `extensions/`).
+These files ship **next to the application** (`extensions/`).
 
-Bundled DuckDB (in-process) loads them with `LOAD '/…/extensions/<file>'` — **no INSTALL**, no network.
+Bundled DuckDB loads them with `LOAD '…/extensions/<file>'` — **no INSTALL**, no network.
 
 Required:
 - `postgres_scanner.duckdb_extension` — Postgres
 - `httpfs.duckdb_extension` — s3:// and https://
 - `aws.duckdb_extension` — optional S3 credentials helper
 
-Refresh: `../../scripts/fetch-duckdb-extensions.sh`
+Refresh: `../scripts/fetch-duckdb-extensions.sh`
 EOF
 
 echo
 echo "Ship layout (no install at runtime):"
-echo "  $SHIP_TAURI/"
-echo "  $SHIP_ROOT/   (also used when binary is run from repo with ./extensions)"
-ls -lah "$SHIP_TAURI"
+echo "  $SHIP_ROOT/"
+ls -lah "$SHIP_ROOT"
 
 # If cargo already downloaded the prebuilt core lib, place it next to binaries.
 if [[ -x "$ROOT/scripts/sync-duckdb-lib.sh" ]]; then

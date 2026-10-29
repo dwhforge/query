@@ -74,7 +74,8 @@ pub fn apply_step_schema(
     match step {
         TransformationStep::LoadCsv { .. }
         | TransformationStep::LoadParquet { .. }
-        | TransformationStep::LoadPostgres { .. } => {
+        | TransformationStep::LoadPostgres { .. }
+        | TransformationStep::LoadDuckdb { .. } => {
             if step_idx != 0 {
                 return Err(format!(
                     "query '{query_id}': Load* must be the first step (got index {step_idx})"
@@ -93,7 +94,9 @@ pub fn apply_step_schema(
         TransformationStep::SqlModel { .. } => Ok(None),
         TransformationStep::Filter { .. }
         | TransformationStep::SortBy { .. }
-        | TransformationStep::Limit { .. } => Ok(prev.map(|p| p.to_vec())),
+        | TransformationStep::Limit { .. }
+        | TransformationStep::NormalizeKey { .. }
+        | TransformationStep::ApplyKeyMap { .. } => Ok(prev.map(|p| p.to_vec())),
         TransformationStep::SelectColumns { columns } => {
             if columns.is_empty() {
                 return Err("SelectColumns: empty columns".into());
@@ -261,6 +264,7 @@ mod tests {
                 ),
             ],
             focus_query_id: "all".into(),
+            key_maps: vec![],
         };
         let mut seeds = HashMap::new();
         seeds.insert("eu".into(), vec!["id".into(), "amt".into()]);
@@ -307,6 +311,7 @@ mod tests {
                 }],
             )],
             focus_query_id: "a".into(),
+            key_maps: vec![],
         };
         let schemas = infer_workspace_schemas(&ws, &HashMap::new()).unwrap();
         assert!(schemas.query_final("a").is_none());

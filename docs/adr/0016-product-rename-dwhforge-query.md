@@ -14,7 +14,7 @@ Working name **DWH-RS-QUERY** / `dwh-rs-query` was internal. Public brand should
 |-------|------|
 | Product / UI / window title | **DWHForge Query** |
 | Local data dir | `~/.dwhforge-query/` (secrets + settings) |
-| Tauri identifier | `com.dwhforge.query` |
+| App identifier | `com.dwhforge.query` |
 | Repo / Cargo crate paths | may stay `dwh-rs-query` until a mechanical rename; docs call out the brand |
 
 Under `~/.dwhforge-query/`:

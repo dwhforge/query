@@ -1,4 +1,4 @@
-import type { PostgresColumn } from "../lib/tauri";
+import type { PostgresColumn } from "../lib/bridge";
 import type { SourceDef } from "../types/pipeline";
 
 interface SourceSchemaPanelProps {

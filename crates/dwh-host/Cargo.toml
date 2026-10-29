@@ -1,0 +1,15 @@
+[package]
+name = "dwh-host"
+version = "0.1.0"
+edition = "2021"
+description = "Local JSON-RPC host for DWHForge Query (Electron sidecar)"
+
+[[bin]]
+name = "dwh-host"
+path = "src/main.rs"
+
+[dependencies]
+dwh-engine = { path = "../dwh-engine" }
+dwh-pipeline = { path = "../dwh-pipeline" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -4,7 +4,7 @@ Implement only after proposal / specs / design review. Stop before Join diagnost
 
 ## 1. Step schema seeds
 
-- [x] 1.1 Add `collect_load_seeds(workspace, connections, db)` in engine (or tauri glue): PG describe + DuckDB file describe → `HashMap<query_id, Vec<String>>`
+- [x] 1.1 Add `collect_load_seeds(workspace, connections, db)` in engine (or host glue): PG describe + DuckDB file describe → `HashMap<query_id, Vec<String>>`
 - [x] 1.2 Extend `DbtProducer` with `produce_with_seeds` (CLI keeps empty seeds or same helper)
 - [x] 1.3 Wire `export_dbt` (and optionally `preview_dbt_model`) to collect seeds then produce/compile
 - [x] 1.4 Fail clearly when Postgres Rename→Append cannot emit (no seeds / unknown schema / no left_dbt)

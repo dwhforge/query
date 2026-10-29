@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { ConnectionDef } from "../types/pipeline";
 
 export interface S3SourceSelection {
@@ -14,7 +14,7 @@ interface Props {
   onSelect: (sel: S3SourceSelection) => void;
 }
 
-export function S3SourceDialog({
+function S3SourceDialogImpl({
   open,
   connections,
   onClose,
@@ -48,7 +48,7 @@ export function S3SourceDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog"
       aria-modal="true"
       onMouseDown={(e) => {
@@ -142,3 +142,5 @@ export function S3SourceDialog({
     </div>
   );
 }
+
+export const S3SourceDialog = memo(S3SourceDialogImpl);

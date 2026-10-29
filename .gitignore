@@ -14,20 +14,11 @@ dist-ssr
 
 # DuckDB extension binaries (fetch via scripts/fetch-duckdb-extensions.sh)
 extensions/*.duckdb_extension
-src-tauri/extensions/*.duckdb_extension
 third_party/duckdb-extensions/**/*.duckdb_extension
 third_party/duckdb-extensions/**/*.gz
 
-# Prebuilt DuckDB shared lib (scripts/sync-duckdb-lib.sh)
-src-tauri/libduckdb.so
-src-tauri/libduckdb.dylib
-src-tauri/duckdb.dll
-
-# Demo CSVs copied into bundle resources (scripts/sync-fixtures.sh); source of truth is /fixtures
-src-tauri/fixtures/
-
-# Local dbt Core 1.x venv (scripts/fetch-dbt-venv.sh) — offline parse on Export
-src-tauri/dbt-venv/
+# Local dbt Core 1.x venv (scripts/fetch-dbt-venv.sh)
+dbt-venv/
 
 # Editor directories and files
 .vscode/*
@@ -36,7 +27,6 @@ src-tauri/dbt-venv/
 !.vscode/tasks.json
 .idea
 target/
-/src-tauri/target/
 .DS_Store
 *.suo
 *.ntvs*

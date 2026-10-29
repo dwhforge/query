@@ -37,9 +37,101 @@ impl ConnectionSecret {
 /// On-disk secrets file shape (`~/.dwhforge-query/secrets.json`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct SecretsFile {
-    /// `project_id` → `connection_id` → secret
+    /// Global connection secrets (`connection_id` → secret). Preferred store.
+    #[serde(default)]
+    pub connections: BTreeMap<String, ConnectionSecret>,
+    /// Legacy: `project_id` → `connection_id` → secret (migrated into `connections`).
     #[serde(default)]
     pub projects: BTreeMap<String, BTreeMap<String, ConnectionSecret>>,
+}
+
+/// Merge `incoming` into `existing` without wiping filled fields.
+pub fn merge_secret_prefer_existing(
+    existing: &ConnectionSecret,
+    incoming: &ConnectionSecret,
+) -> ConnectionSecret {
+    ConnectionSecret {
+        postgres_connection_string: pick_secret(
+            &existing.postgres_connection_string,
+            &incoming.postgres_connection_string,
+        ),
+        s3_access_key_id: pick_secret(&existing.s3_access_key_id, &incoming.s3_access_key_id),
+        s3_secret_access_key: pick_secret(
+            &existing.s3_secret_access_key,
+            &incoming.s3_secret_access_key,
+        ),
+        s3_session_token: pick_secret(&existing.s3_session_token, &incoming.s3_session_token),
+    }
+}
+
+fn pick_secret(existing: &Option<String>, incoming: &Option<String>) -> Option<String> {
+    match (existing, incoming) {
+        (Some(e), _) if !e.is_empty() => Some(e.clone()),
+        (_, Some(i)) if !i.is_empty() => Some(i.clone()),
+        (Some(e), _) => Some(e.clone()),
+        (_, other) => other.clone(),
+    }
+}
+
+/// Upsert connection secrets into the global map (no overwrite of richer existing).
+pub fn upsert_global_secrets(
+    store: &mut SecretsFile,
+    secrets: &BTreeMap<String, ConnectionSecret>,
+) {
+    for (id, incoming) in secrets {
+        if incoming.is_empty() {
+            continue;
+        }
+        match store.connections.get(id) {
+            None => {
+                store.connections.insert(id.clone(), incoming.clone());
+            }
+            Some(existing) => {
+                let merged = merge_secret_prefer_existing(existing, incoming);
+                store.connections.insert(id.clone(), merged);
+            }
+        }
+    }
+}
+
+/// Move legacy per-project secrets into the global `connections` map.
+pub fn migrate_legacy_project_secrets(store: &mut SecretsFile) {
+    let legacy: Vec<(String, BTreeMap<String, ConnectionSecret>)> =
+        store.projects.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (_project_id, map) in legacy {
+        upsert_global_secrets(store, &map);
+    }
+    store.projects.clear();
+}
+
+/// Strip secrets from a connection list; return shells + secret map.
+pub fn connections_for_disk(
+    connections: &[ConnectionDef],
+) -> (Vec<ConnectionDef>, BTreeMap<String, ConnectionSecret>) {
+    let mut shells = Vec::with_capacity(connections.len());
+    let mut secrets = BTreeMap::new();
+    for conn in connections {
+        let mut shell = conn.clone();
+        let sec = extract_connection_secret(&shell);
+        if !sec.is_empty() {
+            secrets.insert(shell.id.clone(), sec);
+        }
+        strip_connection_secrets(&mut shell);
+        shells.push(shell);
+    }
+    (shells, secrets)
+}
+
+/// Apply secret map onto a connection list (in place).
+pub fn merge_connection_list_secrets(
+    connections: &mut [ConnectionDef],
+    secrets: &BTreeMap<String, ConnectionSecret>,
+) {
+    for conn in connections.iter_mut() {
+        if let Some(sec) = secrets.get(&conn.id) {
+            merge_connection_secret(conn, sec);
+        }
+    }
 }
 
 /// Pull secrets out of a connection; leave non-secret endpoint metadata in place.
@@ -99,22 +191,21 @@ pub fn merge_connection_secret(conn: &mut ConnectionDef, secret: &ConnectionSecr
                 s3.session_token = Some(v.clone());
             }
         }
+        // DuckDB file path is not a secret — nothing to merge.
+        ConnectionKind::Duckdb => {}
     }
 }
 
-/// Project document safe to write: no `root_path`, connections stripped of secrets.
-/// Returns `(disk_project, secrets_for_this_project)`.
+/// Project document safe to write: no `root_path`, **no connections** (global store).
+///
+/// Returns `(disk_project, secrets_extracted_from_any_inline_connections)` for
+/// one-shot migration into the global secrets map. Connections are cleared on disk.
 pub fn project_for_disk(project: &Project) -> (Project, BTreeMap<String, ConnectionSecret>) {
     let mut disk = project.clone();
     disk.root_path = None;
-    let mut secrets = BTreeMap::new();
-    for conn in &mut disk.connections {
-        let sec = extract_connection_secret(conn);
-        if !sec.is_empty() {
-            secrets.insert(conn.id.clone(), sec);
-        }
-        strip_connection_secrets(conn);
-    }
+    let (_shells, secrets) = connections_for_disk(&disk.connections);
+    // Connections are app-global — never persist them in the project file.
+    disk.connections.clear();
     // Prefer connection_id; drop legacy inline DSN on sources when id present.
     for src in &mut disk.sources {
         if src.connection_id.is_some() {
@@ -124,13 +215,9 @@ pub fn project_for_disk(project: &Project) -> (Project, BTreeMap<String, Connect
     (disk, secrets)
 }
 
-/// Apply a project's secret map onto connections (in place).
+/// Apply a secret map onto the project's connections (in place).
 pub fn merge_project_secrets(project: &mut Project, secrets: &BTreeMap<String, ConnectionSecret>) {
-    for conn in &mut project.connections {
-        if let Some(sec) = secrets.get(&conn.id) {
-            merge_connection_secret(conn, sec);
-        }
-    }
+    merge_connection_list_secrets(&mut project.connections, secrets);
 }
 
 #[cfg(test)]
@@ -148,6 +235,7 @@ mod tests {
                 connection_string: "postgresql://u:p@localhost/db".into(),
             }),
             s3: None,
+        duckdb: None,
         };
         let sec = extract_connection_secret(&c);
         strip_connection_secrets(&mut c);
@@ -177,6 +265,7 @@ mod tests {
                     connection_string: "postgresql://u:p@localhost/db".into(),
                 }),
                 s3: None,
+            duckdb: None,
             }],
             sources: vec![],
             workspace: Workspace {
@@ -189,8 +278,13 @@ mod tests {
                     execution: Default::default(),
                 }],
                 focus_query_id: "q_main".into(),
+                key_maps: vec![],
             },
             dbt_target: DbtTarget::V1,
+            execution_engine: crate::destination::ExecutionEngine::Duckdb,
+            destination: crate::destination::Destination::duckdb("local.duckdb"),
+            outputs: vec![],
+            materialization: crate::destination::Materialization::Table,
             target_dialect: WarehouseDialect::Duckdb,
             target_connection_id: None,
             last_dbt_export_path: None,
@@ -198,13 +292,7 @@ mod tests {
         };
         let (disk, secrets) = project_for_disk(&p);
         assert!(disk.root_path.is_none());
-        assert!(disk
-            .connections[0]
-            .postgres
-            .as_ref()
-            .unwrap()
-            .connection_string
-            .is_empty());
+        assert!(disk.connections.is_empty());
         assert_eq!(
             secrets.get("conn_local").unwrap().postgres_connection_string.as_deref(),
             Some("postgresql://u:p@localhost/db")
@@ -212,5 +300,51 @@ mod tests {
         let json = disk.to_json_pretty().unwrap();
         assert!(!json.contains("root_path"));
         assert!(!json.contains("postgresql://"));
+    }
+
+    #[test]
+    fn upsert_global_does_not_wipe_richer() {
+        let mut store = SecretsFile::default();
+        store.connections.insert(
+            "c1".into(),
+            ConnectionSecret {
+                postgres_connection_string: Some("postgresql://keep".into()),
+                ..Default::default()
+            },
+        );
+        let mut incoming = BTreeMap::new();
+        incoming.insert(
+            "c1".into(),
+            ConnectionSecret {
+                postgres_connection_string: Some("postgresql://new".into()),
+                ..Default::default()
+            },
+        );
+        incoming.insert(
+            "c2".into(),
+            ConnectionSecret {
+                postgres_connection_string: Some("postgresql://c2".into()),
+                ..Default::default()
+            },
+        );
+        upsert_global_secrets(&mut store, &incoming);
+        assert_eq!(
+            store
+                .connections
+                .get("c1")
+                .unwrap()
+                .postgres_connection_string
+                .as_deref(),
+            Some("postgresql://keep")
+        );
+        assert_eq!(
+            store
+                .connections
+                .get("c2")
+                .unwrap()
+                .postgres_connection_string
+                .as_deref(),
+            Some("postgresql://c2")
+        );
     }
 }

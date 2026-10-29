@@ -4,7 +4,7 @@
 
 **DWHForge Query** is a local desktop workbench: build a transform graph from one or many sources, preview in DuckDB, and **export a real dbt project**.
 
-- Stack: Tauri + React/TS/Tailwind + Rust + DuckDB  
+- Stack: Electron + React/TS/Tailwind + Rust (`dwh-host`) + DuckDB  
 - Brand / app id: **DWHForge Query** · `com.dwhforge.query` ([ADR-0016](adr/0016-product-rename-dwhforge-query.md))  
 - Repo path may still be `dwh-rs-query`  
 - Raw data never leaves the machine (AI receives only schema / steps / prompt)  
@@ -138,7 +138,15 @@ Selecting a Join step shows the following diagnostics beside its settings:
 
 ### Explicitly deferred
 
-Cell-level lineage through arbitrary SQL, calculations and aggregation; a universal provenance browser; and rich profiling of every column are not acceptance criteria for Join investigation MVP.
+Cell-level lineage through arbitrary SQL, calculations and aggregation; a universal provenance browser; and rich profiling of every column are not acceptance criteria for Join investigation MVP. An optional AI narrator over Join Lens facts is deferred ([ADR-0019](adr/0019-join-lens-ai-narrator.md)).
+
+### Key mapping (fix keys before Join)
+
+Unmatched / near-miss keys are fixed with explicit steps, not fuzzy Join ON ([ADR-0020](adr/0020-join-key-mapping.md)):
+
+- **Near-miss** → `NormalizeKey` (trim/case/spaces/zeros) on Left / Right / Both
+- **Aliases** → `KeyMap` From→To table + `ApplyKeyMap`; export as `seeds/map_*.csv` (table after `dbt seed`). After first export the seed is source of truth (sync back into the editor).
+- EmptyHero includes a virtual Key mapping playground; full demo: Help → Load demo → Key mapping (F&B brands, `dirty_join` / `daily_pnl` / `monthly_pnl`). UI workflows: [keymap-workflows.md](keymap-workflows.md).
 
 ## 10. Next — Definition of Done (*Return and edit*)
 

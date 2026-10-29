@@ -2,21 +2,21 @@
 
 ## Status
 
-Accepted (2026-10-25)
+Accepted (2026-10-25); **amended 2026-10-29** — one execution engine + one destination (not a conflated `target_dialect`).
 
 ## Context
 
-Real DE projects read from **many** systems (Postgres, MySQL, MSSQL, files, S3, …) and materialize into **one** warehouse per dbt run. Extensibility must not conflate “how we connect to a source” with “which SQL we emit for models.”
+Real DE projects read from **many** systems (Postgres, MySQL, MSSQL, files, S3, DuckDB files, …) and materialize into **one** destination per dbt run. Extensibility must not conflate “how we connect to a source” with “which SQL we emit” or “where we materialize.”
 
-Related: [ADR-0012](0012-connections.md) (Connection ≠ Source ≠ Query), [ADR-0014](0014-query-execution-affinity.md) (target dialect, structural preview).
+Related: [ADR-0012](0012-connections.md) (Connection ≠ Source ≠ Query), [ADR-0014](0014-query-execution-affinity.md) (engine vs destination).
 
 ## Decision
 
-### 1. One project target
+### 1. One execution engine + one destination
 
-`Project.target_dialect` is **exactly one** warehouse DBMS for export / model SQL (v1: `duckdb` | `postgres`; later: more targets).
+`Project.execution_engine` is exactly one SQL dialect for emit. `Project.destination` is exactly one materialization sink. They may differ (e.g. duckdb engine → postgres destination via ATTACH).
 
-Changing target re-emits SQL; a project does not run two warehouse targets at once.
+A project does not run two engines or two destinations at once.
 
 ### 2. Many source kinds
 
@@ -27,9 +27,9 @@ Sources grow via **connectors**, not by forking the transform IR:
 | `ConnectionKind` + params | Auth / endpoint (PG DSN, S3, later MySQL, MSSQL, …) | Add kind + UI picker |
 | `Load*` / SourceDef | Object identity (table, path) + `connection_id` | Add Load step variant or generic `LoadRemote` |
 | Preview federation | Prefer DuckDB scanners / httpfs where available | Per-connector capability |
-| Landing | When target cannot read source live | Required for some source×target pairs |
+| Landing | When **execution engine** cannot read source live | Required for postgres engine + file/S3; **not** for duckdb engine → postgres destination |
 
-**Source DBMS type ≠ target DBMS type is supported and expected.**
+**Source DBMS type ≠ engine/destination is supported and expected** (including DuckDB file sources via read-only ATTACH).
 
 ### 3. Shared transform emit (mandatory direction)
 

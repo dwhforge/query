@@ -23,9 +23,9 @@ extensions/
 ```
 
 2. Runtime: **only** `LOAD '/abs/path/to/*.duckdb_extension'` — **never** `INSTALL` from the network.  
-3. Discovery order: Tauri `resource_dir/extensions` → `{exe_dir}/extensions` → `DWH_EXTENSIONS_DIR` → dev `src-tauri/extensions`.  
-4. Fetch/populate once on a networked machine: `scripts/fetch-duckdb-extensions.sh [v2.0.0]` → copies into `src-tauri/extensions` (+ repo `extensions/`). Must match pinned `duckdb-rs` (~1.20000 → DuckDB **v2.0.0**). Session opens with `allow_extensions_metadata_mismatch` so CDN `v2.0.0` artifacts load against bundled `source_id` `d54cbbe3df` (same release).  
-5. Tauri bundles `src-tauri/extensions/*` as resources.  
+3. Discovery order: `DWH_EXTENSIONS_DIR` → `{exe_dir}/extensions` → repo `extensions/`.  
+4. Fetch/populate once on a networked machine: `scripts/fetch-duckdb-extensions.sh [v2.0.0]` → `extensions/`. Must match pinned `duckdb-rs` (~1.20000 → DuckDB **v2.0.0**). Session opens with `allow_extensions_metadata_mismatch` so CDN `v2.0.0` artifacts load against bundled `source_id` `d54cbbe3df` (same release).  
+5. Electron portable pack copies `extensions/` next to `dwh-host`.  
 6. Local Parquet/CSV = DuckDB core; `s3://` needs `httpfs`; Postgres needs `postgres_scanner`.
 
 ## Consequences

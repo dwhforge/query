@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -23,8 +23,9 @@ interface PreviewTableProps {
   onActiveRowChange?: (index: number) => void;
   onVisibleRangeChange?: (range: { start: number; end: number }) => void;
   onActiveRowElement?: (el: HTMLElement | null) => void;
-  /** Scroll container (for Join Lens beam clamp on horizontal scroll). */
   onScrollParentRef?: (el: HTMLDivElement | null) => void;
+  /** Result rows matching a side-probe selection (Join Lens). */
+  matchedRowIndices?: number[];
 }
 
 function foldKey(s: string): string {
@@ -76,7 +77,7 @@ function originBarClass(o: JoinColumnOrigin | undefined): string {
   }
 }
 
-export function PreviewTable({
+function PreviewTableImpl({
   columns,
   rows,
   highlightKeys = [],
@@ -86,10 +87,15 @@ export function PreviewTable({
   onVisibleRangeChange,
   onActiveRowElement,
   onScrollParentRef,
+  matchedRowIndices,
 }: PreviewTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const rowEls = useRef<Map<number, HTMLElement>>(new Map());
   const hi = new Set(highlightKeys.map(foldKey));
+  const matched = useMemo(
+    () => new Set(matchedRowIndices ?? []),
+    [matchedRowIndices],
+  );
 
   useEffect(() => {
     onScrollParentRef?.(parentRef.current);
@@ -102,17 +108,21 @@ export function PreviewTable({
       const origin = columnOrigins?.[index];
       const on = origin === "key" || hi.has(foldKey(col.name));
       const label = origin ? JOIN_ORIGIN_LABEL[origin] : on ? "join" : null;
+      const tip = label ? `${col.name} · ${label}` : col.name;
       return (
-        <span className="flex flex-col gap-0.5">
-          <span className={`relative font-medium ${originHeaderClass(origin ?? (on ? "key" : undefined))}`}>
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span
+            title={tip}
+            className={`relative block truncate pl-1.5 font-medium ${originHeaderClass(origin ?? (on ? "key" : undefined))}`}
+          >
             <span
-              className={`absolute -left-2 top-0.5 h-3 w-0.5 rounded-full ${originBarClass(origin ?? (on ? "key" : undefined))}`}
+              className={`absolute left-0 top-0.5 h-3 w-0.5 rounded-full ${originBarClass(origin ?? (on ? "key" : undefined))}`}
               aria-hidden
             />
             {col.name}
-            {label ? ` · ${label}` : ""}
           </span>
-          <span className="text-[10px] uppercase tracking-wide text-slate-500">
+          <span className="truncate text-[10px] uppercase tracking-wide text-slate-500">
+            {label ? `${label} · ` : ""}
             {col.type}
           </span>
         </span>
@@ -176,7 +186,7 @@ export function PreviewTable({
             headerGroup.headers.map((header) => (
               <div
                 key={header.id}
-                className="w-[140px] shrink-0 px-3 py-2 text-left text-xs"
+                className="w-[140px] min-w-0 shrink-0 overflow-hidden px-3 py-2 text-left text-xs"
               >
                 {flexRender(
                   header.column.columnDef.header,
@@ -195,6 +205,9 @@ export function PreviewTable({
           {virtualItems.map((virtualRow) => {
             const row = rowModel[virtualRow.index];
             const active = activeRowIndex === virtualRow.index;
+            const isMatch = matched.has(virtualRow.index);
+            const dimUnmatched =
+              matched.size > 0 && !isMatch && !active;
             return (
               <div
                 key={row.id}
@@ -210,7 +223,11 @@ export function PreviewTable({
                 className={`absolute left-0 flex border-b border-slate-800/80 ${
                   active
                     ? "bg-teal-500/15 ring-1 ring-inset ring-teal-500/40"
-                    : "hover:bg-slate-800/40"
+                    : isMatch
+                      ? "bg-teal-500/10 ring-1 ring-inset ring-teal-600/30"
+                      : dimUnmatched
+                        ? "opacity-35 hover:opacity-70 hover:bg-slate-800/40"
+                        : "hover:bg-slate-800/40"
                 }`}
                 style={{
                   height: `${virtualRow.size}px`,
@@ -224,7 +241,7 @@ export function PreviewTable({
                     <div
                       key={cell.id}
                       data-join-origin={origin ?? undefined}
-                      className="w-[140px] shrink-0 px-3 py-2 text-xs"
+                      className="w-[140px] min-w-0 shrink-0 overflow-hidden px-3 py-2 text-xs"
                     >
                       {flexRender(
                         cell.column.columnDef.cell,
@@ -241,3 +258,5 @@ export function PreviewTable({
     </div>
   );
 }
+
+export const PreviewTable = memo(PreviewTableImpl);

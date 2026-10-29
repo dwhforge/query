@@ -1,5 +1,6 @@
-//! Warehouse dialect + Query execution affinity (ADR-0014).
+//! Warehouse dialect + Query execution affinity (ADR-0014, amended: engine ≠ destination).
 
+use crate::destination::ExecutionEngine;
 use crate::model::{QueryDef, TransformationStep};
 use serde::{Deserialize, Serialize};
 
@@ -39,25 +40,32 @@ impl QueryExecution {
     }
 }
 
-/// Why a Query cannot use `execution=target` for the given dialect.
+/// Why a Query cannot use `execution=target` for the given **execution engine**.
+///
+/// `execution=target` means SQL/dialect honesty for `execution_engine`, not the
+/// materialization destination (DuckDB→PG still authors DuckDB SQL).
 pub fn validate_target_execution(
     query: &QueryDef,
     dialect: WarehouseDialect,
 ) -> Result<(), String> {
+    validate_engine_execution(query, ExecutionEngine::from_dialect(dialect))
+}
+
+pub fn validate_engine_execution(
+    query: &QueryDef,
+    engine: ExecutionEngine,
+) -> Result<(), String> {
     if query.execution != QueryExecution::Target {
         return Ok(());
     }
-    match dialect {
-        WarehouseDialect::Duckdb => {
-            // DuckDB can federate CSV/Parquet/Postgres in preview; target=duckdb is fine.
-            Ok(())
-        }
-        WarehouseDialect::Postgres => {
+    match engine {
+        ExecutionEngine::Duckdb => Ok(()),
+        ExecutionEngine::Postgres => {
             for (idx, step) in query.steps.iter().enumerate() {
                 match step {
                     TransformationStep::LoadCsv { .. } => {
                         return Err(format!(
-                            "Query '{}': step {idx} LoadCsv cannot run on postgres target — use execution=local or land the file first",
+                            "Query '{}': step {idx} LoadCsv cannot run on postgres execution engine — use execution=local, switch engine to duckdb (Files→PG route), or land the file first",
                             query.name
                         ));
                     }
@@ -67,7 +75,13 @@ pub fn validate_target_execution(
                             || path.starts_with("https://") =>
                     {
                         return Err(format!(
-                            "Query '{}': step {idx} remote Parquet cannot run on postgres target without landing — use execution=local or land to PG first",
+                            "Query '{}': step {idx} remote Parquet cannot run on postgres execution engine without landing — use duckdb engine or land to PG first",
+                            query.name
+                        ));
+                    }
+                    TransformationStep::LoadDuckdb { .. } => {
+                        return Err(format!(
+                            "Query '{}': step {idx} LoadDuckdb requires duckdb execution engine",
                             query.name
                         ));
                     }

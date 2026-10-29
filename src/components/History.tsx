@@ -16,6 +16,7 @@ function isRootStep(step: TransformationStep): boolean {
     step.type === "LoadCsv" ||
     step.type === "LoadParquet" ||
     step.type === "LoadPostgres" ||
+    step.type === "LoadDuckdb" ||
     step.type === "FromQuery" ||
     step.type === "SqlModel"
   );
@@ -42,6 +43,11 @@ export function stepSummaryLine(
       return {
         kind: "Postgres",
         detail: `${step.payload.schema || "public"}.${step.payload.table_name}`,
+      };
+    case "LoadDuckdb":
+      return {
+        kind: "DuckDB",
+        detail: `${step.payload.schema || "main"}.${step.payload.table_name}`,
       };
     case "FromQuery":
       return { kind: "From", detail: qname(step.payload.query_id) };
@@ -99,6 +105,16 @@ export function stepSummaryLine(
       };
     case "CustomSql":
       return { kind: "Custom SQL", detail: "snippet" };
+    case "NormalizeKey":
+      return {
+        kind: "NormalizeKey",
+        detail: `${step.payload.columns.join(", ")} · ${step.payload.ops.join("→")}`,
+      };
+    case "ApplyKeyMap":
+      return {
+        kind: "ApplyKeyMap",
+        detail: `${step.payload.column} ← ${step.payload.map_id}`,
+      };
     default:
       return { kind: "Step", detail: "" };
   }

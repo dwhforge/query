@@ -12,7 +12,7 @@ export interface TableSchema {
 export type JoinType = "inner" | "left" | "right" | "full";
 
 /** ADR-0012 — how to reach a system (creds / endpoint). Not a Source. */
-export type ConnectionKind = "postgres" | "s3";
+export type ConnectionKind = "postgres" | "s3" | "duckdb";
 
 export interface PostgresParams {
   connection_string: string;
@@ -32,12 +32,19 @@ export interface S3Params {
   verify_ssl: boolean;
 }
 
+export interface DuckdbParams {
+  path: string;
+  /** Default true — source ATTACH is read-only. */
+  read_only?: boolean;
+}
+
 export interface ConnectionDef {
   id: string;
   name: string;
   kind: ConnectionKind;
   postgres?: PostgresParams;
   s3?: S3Params;
+  duckdb?: DuckdbParams;
 }
 
 export type TransformationStep =
@@ -60,7 +67,25 @@ export type TransformationStep =
   | { type: "Filter"; payload: { condition: string } }
   | { type: "SelectColumns"; payload: { columns: string[] } }
   | { type: "RenameColumn"; payload: { from: string; to: string } }
-  | { type: "DeriveColumn"; payload: { name: string; expression: string } }
+  | {
+      type: "LoadDuckdb";
+      payload: {
+        connection_id?: string;
+        path?: string;
+        schema: string;
+        table_name: string;
+      };
+    }
+  | {
+      type: "DeriveColumn";
+      payload: {
+        name: string;
+        expression?: string;
+        mode?: DeriveMode;
+        op?: DeriveOp;
+        sql_dialect?: SqlDialectTag;
+      };
+    }
   | {
       type: "GroupBy";
       payload: { dimensions: string[]; aggregates: string[] };
@@ -77,13 +102,97 @@ export type TransformationStep =
       };
     }
   | { type: "Append"; payload: { other_query_ids: string[] } }
-  | { type: "CustomSql"; payload: { raw_sql: string } };
+  | { type: "CustomSql"; payload: { raw_sql: string } }
+  | {
+      type: "NormalizeKey";
+      payload: { columns: string[]; ops: NormalizeOp[] };
+    }
+  | {
+      type: "ApplyKeyMap";
+      payload: { column: string; map_id: string; entries?: KeyMapEntry[] };
+    };
+
+/** Deterministic key cleanup ops (near-miss Apply). */
+export type NormalizeOp =
+  | "trim"
+  | "lower"
+  | "upper"
+  | "collapse_space"
+  | "ltrim_zeros";
+
+export interface KeyMapEntry {
+  from: string;
+  to: string;
+}
+
+/** Where the From→To table lives (ADR-0020). */
+export type KeyMapStorage =
+  | { kind: "seed" }
+  | { kind: "ref"; model: string }
+  | {
+      kind: "source";
+      source: string;
+      table: string;
+      /** Postgres connection for read / write-back. */
+      connection_id?: string;
+    };
+
+/** Named From→To join-key alias table (ADR-0020). */
+export interface KeyMapDef {
+  id: string;
+  name: string;
+  entries: KeyMapEntry[];
+  /** Default seed; or bind to existing dbt ref / source. */
+  storage?: KeyMapStorage;
+  from_column?: string;
+  to_column?: string;
+}
 
 /** Preview engine for this Query node only (ADR-0014). */
 export type QueryExecution = "local" | "target";
 
-/** Warehouse dialect for dbt export + `execution=target` preview. */
+/** Warehouse dialect for SQL emit (= execution_engine). */
 export type WarehouseDialect = "duckdb" | "postgres";
+
+/** Where transform SQL is authored / which dbt adapter runs. */
+export type ExecutionEngine = "duckdb" | "postgres";
+
+/** Where published outputs materialize. */
+export type DestinationKind = "duckdb" | "postgres";
+
+export interface Destination {
+  kind: DestinationKind;
+  connection_id?: string;
+  duckdb_path?: string;
+  /** Postgres schema for published marts (default `public`). */
+  schema?: string;
+}
+
+export type Materialization = "view" | "table";
+
+export type DeriveMode = "op" | "sql";
+export type SqlDialectTag = "duckdb" | "postgres" | "unknown";
+export type DeriveOpId =
+  | "month_start"
+  | "year_month"
+  | "coalesce_null"
+  | "cast"
+  | "col_diff"
+  | "trim_case";
+export type TrimCaseMode =
+  | "trim"
+  | "lower"
+  | "upper"
+  | "trim_lower"
+  | "trim_upper";
+
+export interface DeriveOp {
+  id: DeriveOpId;
+  column: string;
+  column_b?: string;
+  value?: string;
+  case_mode?: TrimCaseMode;
+}
 
 export interface QueryDef {
   id: string;
@@ -97,10 +206,12 @@ export interface QueryDef {
 export interface Workspace {
   queries: QueryDef[];
   focus_query_id: string;
+  /** Join-key alias maps (ADR-0020). */
+  key_maps?: KeyMapDef[];
 }
 
 /** Object catalog entry — may reference a Connection. */
-export type SourceKind = "csv" | "parquet" | "postgres";
+export type SourceKind = "csv" | "parquet" | "postgres" | "duckdb";
 
 export interface SourceDef {
   id: string;
@@ -121,6 +232,7 @@ export interface CanvasLayout {
 
 /**
  * IDE / dbt project container (ADR-0009 + ADR-0012).
+ * Engine ≠ destination (four routes).
  */
 export interface Project {
   id: string;
@@ -131,9 +243,16 @@ export interface Project {
   workspace: Workspace;
   /** dbt Core line (v1/v2) — not warehouse dialect. */
   dbt_target: "v1" | "v2";
-  /** Export emit + target preview dialect (ADR-0014). */
+  /** SQL emit / free-SQL dialect owner. */
+  execution_engine?: ExecutionEngine;
+  /** Where published outputs materialize. */
+  destination?: Destination;
+  /** Query ids published as marts (empty → focus only). */
+  outputs?: string[];
+  materialization?: Materialization;
+  /** Legacy mirror of execution_engine — kept for older files. */
   target_dialect?: WarehouseDialect;
-  /** Postgres connection when `target_dialect=postgres`. */
+  /** Legacy postgres dest connection — folded into destination. */
   target_connection_id?: string;
   last_dbt_export_path?: string;
   canvas?: CanvasLayout;
@@ -207,12 +326,19 @@ export function emptyS3Params(): S3Params {
 export type ProjectDefaults = {
   default_target_dialect?: WarehouseDialect;
   default_dbt_target?: "v1" | "v2";
+  default_execution_engine?: ExecutionEngine;
+  default_destination_kind?: DestinationKind;
 };
 
 export function emptyProject(
   name = "Untitled",
   defaults?: ProjectDefaults,
 ): Project {
+  const engine =
+    defaults?.default_execution_engine ??
+    defaults?.default_target_dialect ??
+    "duckdb";
+  const destKind = defaults?.default_destination_kind ?? engine;
   return {
     id: newProjectId(name),
     name,
@@ -220,7 +346,52 @@ export function emptyProject(
     sources: [],
     workspace: { queries: [], focus_query_id: "" },
     dbt_target: defaults?.default_dbt_target ?? "v1",
-    target_dialect: defaults?.default_target_dialect ?? "duckdb",
+    execution_engine: engine,
+    destination:
+      destKind === "postgres"
+        ? { kind: "postgres" }
+        : { kind: "duckdb", duckdb_path: "local.duckdb" },
+    outputs: [],
+    materialization: "table",
+    target_dialect: engine,
+  };
+}
+
+/** Normalize legacy projects that only have `target_dialect`. */
+export function migrateProject(p: Project): Project {
+  const engine: ExecutionEngine =
+    p.execution_engine ?? p.target_dialect ?? "duckdb";
+  let destination = p.destination;
+  if (!destination) {
+    if (engine === "postgres" || p.target_dialect === "postgres") {
+      destination = {
+        kind: "postgres",
+        connection_id: p.target_connection_id,
+      };
+    } else {
+      destination = { kind: "duckdb", duckdb_path: "local.duckdb" };
+    }
+  } else if (
+    destination.kind === "postgres" &&
+    !destination.connection_id &&
+    p.target_connection_id
+  ) {
+    destination = {
+      ...destination,
+      connection_id: p.target_connection_id,
+    };
+  }
+  return {
+    ...p,
+    execution_engine: engine,
+    destination,
+    outputs: p.outputs ?? [],
+    materialization: p.materialization ?? "table",
+    target_dialect: engine,
+    target_connection_id:
+      destination.kind === "postgres"
+        ? destination.connection_id
+        : p.target_connection_id,
   };
 }
 
@@ -228,8 +399,56 @@ export function queryExecution(q: QueryDef): QueryExecution {
   return q.execution ?? "local";
 }
 
+/** SQL emit dialect = execution engine. */
 export function projectDialect(p: Project): WarehouseDialect {
-  return p.target_dialect ?? "duckdb";
+  return p.execution_engine ?? p.target_dialect ?? "duckdb";
+}
+
+export function projectEngine(p: Project): ExecutionEngine {
+  return p.execution_engine ?? p.target_dialect ?? "duckdb";
+}
+
+export function projectDestination(p: Project): Destination {
+  return (
+    migrateProject(p).destination ?? {
+      kind: "duckdb",
+      duckdb_path: "local.duckdb",
+    }
+  );
+}
+
+/** True when query exports as `mart_*` (destination publish). Empty outputs → focus only. */
+export function isPublishedOutput(p: Project, queryId: string): boolean {
+  const outs = p.outputs ?? [];
+  if (outs.length === 0) {
+    return queryId === p.workspace.focus_query_id;
+  }
+  return outs.includes(queryId);
+}
+
+/** Toggle query in `Project.outputs`. Empty list restores focus-only legacy. */
+export function togglePublishedOutput(p: Project, queryId: string): Project {
+  const m = migrateProject(p);
+  const focus = m.workspace.focus_query_id;
+  const outs = m.outputs ?? [];
+  let next: string[];
+  if (outs.length === 0) {
+    if (queryId === focus) return m;
+    next = [focus, queryId].filter(Boolean);
+  } else if (outs.includes(queryId)) {
+    next = outs.filter((id) => id !== queryId);
+  } else {
+    next = [...outs, queryId];
+  }
+  return { ...m, outputs: next };
+}
+
+/** Short label for menubar badge. */
+export function routeLabel(p: Project): string {
+  const eng = projectEngine(p);
+  const dest = projectDestination(p).kind;
+  if (eng === dest) return eng;
+  return `${eng}→${dest}`;
 }
 
 export function connectionById(

@@ -37,6 +37,12 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | A11 | Mid-pipeline SQL escape | CustomSql + `{{prev_step}}` | sql |
 | A12 | Multi-hop int→mart | FromQuery chain | sales, union, sql |
 | A13 | Postgres source | LoadPostgres | UI only (needs DSN) |
+| A14 | Chained RIGHT OUTER (multi-join) | Two Join steps, different rights | right |
+| A15 | Join-key From→To map + dbt seed | KeyMap + ApplyKeyMap → `seeds/map_*.csv` | keymap (+ EmptyHero) |
+| A16 | Dual-feed name aliases → dim | same map on sales + spend spellings | keymap (`sales_canon` / `spend_canon`) |
+| A17 | Daily combine + cleaned metric | multi-key Join + Derive net | keymap (`daily_pnl`) |
+| A18 | Monthly rollup after clean | GroupBy month | keymap (`monthly_pnl`) |
+| A19 | Unmatched → Add to map (Lens) | dirty join without map | keymap (`dirty_join`) |
 
 ### B — Partial
 
@@ -45,7 +51,7 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | B1 | Multi-key Join | UI: dual column pickers + multi-key pairs (schema from preview) |
 | B2 | Top-N per group / window | CustomSql only (see `sql` demo) |
 | B3 | Anti-join | CustomSql |
-| B4 | Seeds | CSV Load proxy, not `seeds/` |
+| B4 | Seeds (general) | KeyMap seeds shipped (A15); other seed use-cases still LoadCsv proxy |
 
 ### C — Not covered (do not claim)
 
@@ -93,3 +99,41 @@ Categories: A1, A5, A9, A12.
 | `sales_top3` | `int_sales_top3` | From(enriched) → Filter |
 
 Categories: A2, A10, A11, A12; B2 via CustomSql.
+
+### 4. `right` — Two RIGHT OUTER joins (coverage)
+
+Sparse fact has only `EU/web` and `US/store`. Dims also have `APAC` and `partner` with no facts.
+
+| Query (UI) | dbt model (export) | Steps |
+|------------|-------------------|--------|
+| `dim_region` | `stg_dim_region` | LoadCsv |
+| `dim_channel` | `stg_dim_channel` | LoadCsv |
+| `sparse_sales` | `stg_sparse_sales` | LoadCsv (2 rows) |
+| `coverage` ★focus | `mart_coverage` | From(sparse) → **RIGHT** Join(dim_region) → **RIGHT** Join(dim_channel) |
+
+How to read it:
+
+1. Select the **first** Join step in History (region) — Data previews **through that Join only** (APAC appears). Join Lens **Linked**: left/right = parents of the center row; **Probe**: unmatched diag samples → ask if linked.
+2. Select the **second** Join (channel) — Data/Lens switch to that join’s output (all channels, incl. `partner`). Unmatched lefts from the first join can disappear — RIGHT privileges the new right side.
+3. Canvas shows **two** join edges; a third drag appends another Join (does not wipe prior ones).
+
+Categories: A1, A3, A14.
+
+### 5. `keymap` — F&B company aliases (ADR-0020)
+
+Food & beverage brands: POS/sales vs cost feed spell names differently. Fixtures: 15 companies × 60 days (~900 rows/fact). Walkthrough: [keymap-workflows.md](keymap-workflows.md).
+
+| Query (UI) | dbt model (export) | Steps |
+|------------|-------------------|--------|
+| `dim_company` | `stg_dim_company` | LoadCsv (canonical id + name + category) |
+| `sales_daily` | `stg_sales_daily` | LoadCsv — e.g. `Starbucks Coffee` |
+| `res_consumption` | `stg_res_consumption` | LoadCsv — e.g. `STARBUCKS CORP` |
+| `dirty_join` | `int_dirty_join` | From(sales_daily) → LEFT Join(dim) **no map** — Lens |
+| `sales_canon` | `int_sales_canon` | From(sales_daily) → ApplyKeyMap → rename → Join dim |
+| `spend_canon` | `int_spend_canon` | From(res_consumption) → ApplyKeyMap → rename |
+| `daily_pnl` ★focus | `mart_daily_pnl` | Join sales⋈spend on id+day → net_revenue |
+| `monthly_pnl` | `int_monthly_pnl` | GroupBy company × category × month |
+
+`Workspace.key_maps`: `map_company_alias` (30 From→To rows). Export → `seeds/map_company_alias.csv`.
+
+Categories: A1, A3, A5, A8, A15–A19.

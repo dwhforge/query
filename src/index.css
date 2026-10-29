@@ -29,7 +29,7 @@ body,
 }
 
 html {
-  /* Native <select>/<option> stay readable in WebKitGTK / Tauri */
+  /* Native <select>/<option> stay readable under color-scheme: dark */
   color-scheme: dark;
 }
 
@@ -40,7 +40,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Explicit colors — WebKit often paints white select chrome with invisible text */
+/* Explicit colors — some Chromium builds paint washed-out select chrome otherwise */
 select,
 input,
 textarea,
@@ -77,6 +77,19 @@ select option {
   50% {
     stroke-opacity: 0.95;
   }
+}
+
+@keyframes op-progress-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+.op-progress-indeterminate {
+  animation: op-progress-slide 1.15s ease-in-out infinite;
 }
 
 .anim-rise {

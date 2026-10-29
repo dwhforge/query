@@ -12,7 +12,7 @@ ADR-0009 deferred save/load. Connections (ADR-0012), Sources, and Workspace must
 
 1. Canonical on-disk document: pretty-printed JSON matching `dwh_pipeline::Project`.  
 2. Suggested extension: `.dwhproj.json` (still valid JSON).  
-3. Tauri commands: `save_project(path, project)`, `load_project(path)`.  
+3. Host commands: `save_project(path, project)`, `load_project(path)`.  
 4. UI: **Save** / **Open** (+ Ctrl/Cmd+S / Ctrl/Cmd+O).  
 5. `root_path` is **runtime-only** (set from Open/Save path; **not** written into the file).  
 6. Entity ids are **slug-based** (`src_sample`, `q_sales`, `conn_postgres`) — not random tokens.  

@@ -72,33 +72,79 @@ pub fn cte_name(query_id: &str, step_idx: usize) -> String {
     format!("q_{}_s{}", sanitize_id(query_id), step_idx)
 }
 
-/// Topological order of query ids. Error on unknown deps or cycles.
-pub fn topo_queries(workspace: &Workspace) -> Result<Vec<String>, String> {
+/// All query ids reachable as dependencies of `root_id` (including itself).
+pub fn reachable_from(workspace: &Workspace, root_id: &str) -> Result<HashSet<String>, String> {
     let ids: HashSet<String> = workspace.queries.iter().map(|q| q.id.clone()).collect();
-    if !ids.contains(&workspace.focus_query_id) {
+    if !ids.contains(root_id) {
+        return Err(format!("query '{root_id}' not found in workspace"));
+    }
+    let mut need = HashSet::new();
+    let mut stack = vec![root_id.to_string()];
+    while let Some(id) = stack.pop() {
+        if !need.insert(id.clone()) {
+            continue;
+        }
+        let q = workspace
+            .query(&id)
+            .ok_or_else(|| format!("missing query {id}"))?;
+        for dep in direct_deps(&q.steps) {
+            if !ids.contains(&dep) {
+                return Err(format!(
+                    "query '{id}' references unknown query '{dep}'"
+                ));
+            }
+            if dep == id {
+                return Err(format!("query '{id}' cannot depend on itself"));
+            }
+            stack.push(dep);
+        }
+    }
+    Ok(need)
+}
+
+/// Topological order of **all** query ids. Error on unknown deps or cycles.
+pub fn topo_queries(workspace: &Workspace) -> Result<Vec<String>, String> {
+    if !workspace
+        .queries
+        .iter()
+        .any(|q| q.id == workspace.focus_query_id)
+    {
         return Err(format!(
             "focus_query_id '{}' not found in workspace",
             workspace.focus_query_id
         ));
     }
+    let all: HashSet<String> = workspace.queries.iter().map(|q| q.id.clone()).collect();
+    topo_subset(workspace, &all)
+}
 
+/// Topological order of `root_id` and its transitive deps only.
+/// Preview/compile of one query must not fail because an unrelated query is empty/broken.
+pub fn topo_queries_from(workspace: &Workspace, root_id: &str) -> Result<Vec<String>, String> {
+    let need = reachable_from(workspace, root_id)?;
+    topo_subset(workspace, &need)
+}
+
+fn topo_subset(workspace: &Workspace, need: &HashSet<String>) -> Result<Vec<String>, String> {
     let mut indegree: HashMap<String, usize> = HashMap::new();
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
 
-    for q in &workspace.queries {
-        indegree.entry(q.id.clone()).or_insert(0);
+    for id in need {
+        indegree.entry(id.clone()).or_insert(0);
+    }
+    for id in need {
+        let q = workspace
+            .query(id)
+            .ok_or_else(|| format!("missing query {id}"))?;
         for dep in direct_deps(&q.steps) {
-            if !ids.contains(&dep) {
-                return Err(format!(
-                    "query '{}' references unknown query '{}'",
-                    q.id, dep
-                ));
+            if !need.contains(&dep) {
+                continue;
             }
-            if dep == q.id {
-                return Err(format!("query '{}' cannot depend on itself", q.id));
+            if dep == *id {
+                return Err(format!("query '{id}' cannot depend on itself"));
             }
-            adj.entry(dep.clone()).or_default().push(q.id.clone());
-            *indegree.entry(q.id.clone()).or_insert(0) += 1;
+            adj.entry(dep.clone()).or_default().push(id.clone());
+            *indegree.entry(id.clone()).or_insert(0) += 1;
             indegree.entry(dep).or_insert(0);
         }
     }
@@ -108,9 +154,7 @@ pub fn topo_queries(workspace: &Workspace) -> Result<Vec<String>, String> {
         .filter(|(_, d)| **d == 0)
         .map(|(id, _)| id.clone())
         .collect();
-    queue
-        .make_contiguous()
-        .sort(); // deterministic
+    queue.make_contiguous().sort(); // deterministic
 
     let mut order = Vec::new();
     while let Some(id) = queue.pop_front() {
@@ -129,7 +173,7 @@ pub fn topo_queries(workspace: &Workspace) -> Result<Vec<String>, String> {
         }
     }
 
-    if order.len() != workspace.queries.len() {
+    if order.len() != need.len() {
         return Err("cycle detected in query dependencies".into());
     }
     Ok(order)
@@ -170,6 +214,7 @@ mod tests {
 },
             ],
             focus_query_id: "joined".into(),
+            key_maps: vec![],
         };
         let order = topo_queries(&ws).unwrap();
         assert!(

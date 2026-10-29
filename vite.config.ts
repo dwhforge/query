@@ -4,10 +4,13 @@ import tailwindcss from "@tailwindcss/vite";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 
-const host = process.env.TAURI_DEV_HOST;
+const host = process.env.VITE_DEV_HOST;
+const electron = process.env.DWH_ELECTRON === "1";
 
 export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
+  // Relative asset URLs for Electron file:// / asar load.
+  base: electron || process.env.DWH_ELECTRON_BUILD === "1" ? "./" : "/",
   clearScreen: false,
   server: {
     port: 1420,
@@ -21,10 +24,8 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // Ignore Rust/Cargo and other heavy trees — watching them hits
-      // ENOSPC (inotify limit) and kills Vite → Tauri "Connection refused".
       ignored: [
-        "**/src-tauri/**",
+        "**/electron/**",
         "**/target/**",
         "**/dbt-venv/**",
         "**/extensions/**",

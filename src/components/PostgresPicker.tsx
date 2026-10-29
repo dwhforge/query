@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { listPostgresObjects, type PostgresObject } from "../lib/tauri";
+import { memo, useEffect, useMemo, useState } from "react";
+import { listPostgresObjects, type PostgresObject } from "../lib/bridge";
 import type { ConnectionDef } from "../types/pipeline";
 
 export interface PostgresSelection {
@@ -32,7 +32,7 @@ function kindBadge(kind: string): string {
   }
 }
 
-export function PostgresPicker({
+function PostgresPickerImpl({
   open,
   connections,
   onClose,
@@ -135,7 +135,7 @@ export function PostgresPicker({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog"
       aria-modal="true"
       onMouseDown={(e) => {
@@ -313,3 +313,5 @@ export function PostgresPicker({
     </div>
   );
 }
+
+export const PostgresPicker = memo(PostgresPickerImpl);

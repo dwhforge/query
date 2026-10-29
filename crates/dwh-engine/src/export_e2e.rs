@@ -13,7 +13,7 @@ mod tests {
     };
     use duckdb::params;
     use serde_json::Value as JsonValue;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::env::temp_dir;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -62,46 +62,62 @@ mod tests {
                 },
             ],
             focus_query_id: "sales_all".into(),
+            key_maps: vec![],
         }
     }
 
+    /// Type-tagged cell fingerprint. Numbers may normalize 1200 vs 1200.0;
+    /// strings are never coerced to numbers (so "001" ≠ "1").
     fn cell_key(v: &JsonValue) -> String {
         match v {
             JsonValue::Null => "∅".into(),
-            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Bool(b) => format!("b:{b}"),
             JsonValue::Number(n) => {
-                // Normalize 1200 vs 1200.0 for preview vs warehouse.
                 if let Some(f) = n.as_f64() {
                     if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) {
-                        return format!("{}", f as i64);
+                        return format!("n:{}", f as i64);
                     }
-                    return format!("{f}");
+                    return format!("n:{f}");
                 }
-                n.to_string()
+                format!("n:{n}")
             }
-            JsonValue::String(s) => {
-                if let Ok(f) = s.parse::<f64>() {
-                    if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) {
-                        return format!("{}", f as i64);
-                    }
-                }
-                s.clone()
-            }
-            other => other.to_string(),
+            JsonValue::String(s) => format!("s:{s}"),
+            other => format!("o:{other}"),
         }
     }
 
-    fn row_multiset(columns: &[String], rows: &[Vec<JsonValue>]) -> BTreeSet<String> {
-        rows.iter()
-            .map(|r| {
-                columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("{c}={}", cell_key(r.get(i).unwrap_or(&JsonValue::Null))))
-                    .collect::<Vec<_>>()
-                    .join("|")
-            })
-            .collect()
+    #[test]
+    fn cell_key_keeps_leading_zeros_as_strings() {
+        assert_ne!(
+            cell_key(&JsonValue::String("001".into())),
+            cell_key(&JsonValue::String("1".into()))
+        );
+        assert_ne!(
+            cell_key(&JsonValue::String("001".into())),
+            cell_key(&JsonValue::Number(1.into()))
+        );
+        assert_eq!(
+            cell_key(&JsonValue::Number(serde_json::Number::from_f64(1200.0).unwrap())),
+            cell_key(&JsonValue::Number(1200.into()))
+        );
+    }
+
+    /// row fingerprint → multiplicity (preserves duplicate distribution).
+    fn row_multiset(
+        columns: &[String],
+        rows: &[Vec<JsonValue>],
+    ) -> BTreeMap<String, usize> {
+        let mut m = BTreeMap::new();
+        for r in rows {
+            let key = columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{c}={}", cell_key(r.get(i).unwrap_or(&JsonValue::Null))))
+                .collect::<Vec<_>>()
+                .join("|");
+            *m.entry(key).or_insert(0) += 1;
+        }
+        m
     }
 
     fn read_mart_table(
@@ -152,7 +168,15 @@ mod tests {
                         .map(JsonValue::Number)
                         .unwrap_or(JsonValue::Null),
                     ValueRef::Text(b) => JsonValue::String(String::from_utf8_lossy(b).into()),
-                    ValueRef::Date32(d) => JsonValue::Number((d as i64).into()),
+                    ValueRef::Date32(d) => {
+                        let s = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                            .and_then(|epoch| {
+                                epoch.checked_add_signed(chrono::Duration::days(i64::from(d)))
+                            })
+                            .map(|dt| dt.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| d.to_string());
+                        JsonValue::String(s)
+                    }
                     other => JsonValue::String(format!("{other:?}")),
                 };
                 out.push(cell);
@@ -232,7 +256,7 @@ mod tests {
         assert!(ran.ok, "dbt run failed:\n{}", ran.log);
 
         let focus = ws.query("sales_all").unwrap();
-        let mart = dbt_model_name(&ws, focus);
+        let mart = dbt_model_name(&ws, focus, &[]);
         let duckdb_file = Path::new(&path).join("local.duckdb");
         assert!(duckdb_file.is_file(), "dbt duckdb missing");
 

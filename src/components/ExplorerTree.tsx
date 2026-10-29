@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  ConnectionDef,
-  Project,
-  QueryDef,
-  SourceDef,
+import {
+  isPublishedOutput,
+  type ConnectionDef,
+  type KeyMapDef,
+  type Project,
+  type QueryDef,
+  type SourceDef,
 } from "../types/pipeline";
 
 interface ExplorerTreeProps {
   project: Project;
   activeQueryId: string | null;
   selectedSourceId: string | null;
+  selectedKeyMapId?: string | null;
   expanded: Record<string, boolean>;
   onToggle: (key: string) => void;
   onSelectQuery: (id: string) => void;
@@ -33,6 +36,10 @@ interface ExplorerTreeProps {
   onNewSqlModel: () => void;
   onRenameQuery: (queryId: string, name: string) => void;
   onRenameSource: (sourceId: string, name: string) => void;
+  onSelectKeyMap: (map: KeyMapDef) => void;
+  onAddKeyMap: () => void;
+  onRenameKeyMap: (mapId: string, name: string) => void;
+  onDeleteKeyMap: (mapId: string) => void;
 }
 
 function SectionHeader({
@@ -208,10 +215,18 @@ function sourceKindHint(s: SourceDef): string {
   return s.kind;
 }
 
+function keyMapStorageHint(m: KeyMapDef): string {
+  const s = m.storage ?? { kind: "seed" as const };
+  if (s.kind === "ref") return "ref";
+  if (s.kind === "source") return "src";
+  return "seed";
+}
+
 export function ExplorerTree({
   project,
   activeQueryId,
   selectedSourceId,
+  selectedKeyMapId = null,
   expanded,
   onToggle,
   onSelectQuery,
@@ -233,17 +248,23 @@ export function ExplorerTree({
   onNewSqlModel,
   onRenameQuery,
   onRenameSource,
+  onSelectKeyMap,
+  onAddKeyMap,
+  onRenameKeyMap,
+  onDeleteKeyMap,
 }: ExplorerTreeProps) {
   const connectionsOpen = expanded.connections !== false;
   const sourcesOpen = expanded.sources !== false;
   const queriesOpen = expanded.queries !== false;
+  const keyMapsOpen = expanded.keyMaps !== false;
   const exportOpen = expanded.export !== false;
   const focus = project.workspace.focus_query_id;
+  const keyMaps = project.workspace.key_maps ?? [];
 
   const [sourcesMenuOpen, setSourcesMenuOpen] = useState(false);
   const [queriesMenuOpen, setQueriesMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState<
-    { kind: "query" | "source"; id: string } | null
+    { kind: "query" | "source" | "keymap"; id: string } | null
   >(null);
 
   function closeMenus() {
@@ -350,16 +371,24 @@ export function ExplorerTree({
             count={project.connections.length}
             onToggle={() => onToggle("connections")}
             actions={
-              <IconBtn title="New connection" onClick={onAddConnection}>
-                +
-              </IconBtn>
+              <>
+                <span
+                  className="mr-0.5 text-[9px] font-medium uppercase tracking-wide text-slate-600"
+                  title="Shared across all projects"
+                >
+                  Global
+                </span>
+                <IconBtn title="New connection" onClick={onAddConnection}>
+                  +
+                </IconBtn>
+              </>
             }
           />
           {connectionsOpen && (
             <ul className="mb-2 ml-3 border-l border-[var(--line)] pl-2">
               {project.connections.length === 0 && (
                 <li className="py-1 text-xs text-slate-600">
-                  PG / S3 credentials — use +
+                  PG / S3 credentials (app-wide) — use +
                 </li>
               )}
               {project.connections.map((c) => (
@@ -531,6 +560,7 @@ export function ExplorerTree({
               {project.workspace.queries.map((q: QueryDef) => {
                 const active = q.id === activeQueryId;
                 const isFocus = q.id === focus;
+                const published = isPublishedOutput(project, q.id);
                 const editing =
                   renaming?.kind === "query" && renaming.id === q.id;
                 return (
@@ -562,12 +592,98 @@ export function ExplorerTree({
                         }`}
                       >
                         <span className="truncate">{q.name}</span>
-                        {isFocus && (
-                          <span className="ml-auto text-[9px] text-teal-400">
-                            ★
-                          </span>
-                        )}
+                        <span className="ml-auto flex shrink-0 items-center gap-1">
+                          {published && (
+                            <span
+                              className="text-[9px] text-amber-400/90"
+                              title="Published to destination (mart)"
+                            >
+                              ↑
+                            </span>
+                          )}
+                          {isFocus && (
+                            <span className="text-[9px] text-teal-400">★</span>
+                          )}
+                        </span>
                       </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div className="px-1">
+          <SectionHeader
+            title="KeyMaps"
+            open={keyMapsOpen}
+            count={keyMaps.length}
+            onToggle={() => onToggle("keyMaps")}
+            actions={
+              <IconBtn title="New KeyMap" onClick={onAddKeyMap}>
+                +
+              </IconBtn>
+            }
+          />
+          {keyMapsOpen && (
+            <ul className="ml-3 border-l border-[var(--line)] pl-2">
+              {keyMaps.length === 0 && (
+                <li className="px-1.5 py-1 text-[11px] text-slate-600">
+                  No maps — + to create
+                </li>
+              )}
+              {keyMaps.map((m) => {
+                const active = selectedKeyMapId === m.id;
+                const isRenaming =
+                  renaming?.kind === "keymap" && renaming.id === m.id;
+                return (
+                  <li key={m.id} className="group/row flex items-center gap-0.5">
+                    {isRenaming ? (
+                      <InlineRename
+                        value={m.name}
+                        onCommit={(name) => {
+                          onRenameKeyMap(m.id, name);
+                          setRenaming(null);
+                        }}
+                        onCancel={() => setRenaming(null)}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onSelectKeyMap(m)}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setRenaming({ kind: "keymap", id: m.id });
+                        }}
+                        title="Open editor · double-click to rename"
+                        className={`flex min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs ${
+                          active
+                            ? "bg-teal-500/15 text-teal-100"
+                            : "text-slate-300 hover:bg-slate-800/80"
+                        }`}
+                      >
+                        <span className="truncate">{m.name}</span>
+                        <span className="ml-auto shrink-0 text-[9px] uppercase text-slate-600">
+                          {keyMapStorageHint(m)} · {m.entries.length}
+                        </span>
+                      </button>
+                    )}
+                    {!isRenaming && (
+                      <IconBtn
+                        title="Delete KeyMap (also removes ApplyKeyMap steps)"
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Delete KeyMap “${m.name}”? ApplyKeyMap steps that use it will be removed.`,
+                            )
+                          ) {
+                            onDeleteKeyMap(m.id);
+                          }
+                        }}
+                      >
+                        ×
+                      </IconBtn>
                     )}
                   </li>
                 );
@@ -603,7 +719,13 @@ export function ExplorerTree({
                   onClick={onExport}
                   className="w-full rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80 hover:text-teal-200"
                 >
-                  dbt ({project.dbt_target}) · {project.target_dialect ?? "duckdb"}
+                  dbt ({project.dbt_target}) ·{" "}
+                  {project.execution_engine ?? project.target_dialect ?? "duckdb"}
+                  {project.destination?.kind &&
+                  project.destination.kind !==
+                    (project.execution_engine ?? project.target_dialect)
+                    ? `→${project.destination.kind}`
+                    : ""}
                 </button>
               </li>
               {project.last_dbt_export_path && (

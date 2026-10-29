@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copy prebuilt libduckdb next to Cargo binaries / Tauri (download-lib layout).
+# Copy prebuilt libduckdb next to Cargo binaries (Electron dwh-host sidecar).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
@@ -21,8 +21,7 @@ echo "Using $SRC"
 
 for dest in \
   "$TARGET_DIR/debug" \
-  "$TARGET_DIR/release" \
-  "$ROOT/src-tauri"; do
+  "$TARGET_DIR/release"; do
   mkdir -p "$dest"
   cp -f "$SRC" "$dest/$BASE"
   echo "  -> $dest/$BASE"

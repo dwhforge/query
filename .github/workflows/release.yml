@@ -1,5 +1,4 @@
-# Linux + Windows release. DuckDB lib + extensions bundled (no CDN at runtime).
-# Artifacts: portable tar.gz / zip (no sudo/admin) + deb + rpm + NSIS.
+# Electron + dwh-host portable releases.
 name: release
 
 on:
@@ -13,8 +12,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  APPIMAGE_EXTRACT_AND_RUN: "1"
-  NO_STRIP: "true"
 
 jobs:
   prepare:
@@ -35,29 +32,17 @@ jobs:
 
             | Artifact | Notes |
             |----------|--------|
-            | **`.tar.gz`** | **Linux** — unpack and `./DWHForge-Query` (no sudo) |
-            | **`.zip`** | **Windows** — unpack and `DWHForge-Query.exe` |
-            | `.deb` | Debian / Ubuntu (`sudo apt/dpkg -i`) |
-            | `.rpm` | RHEL / Rocky / Fedora (`sudo dnf/rpm -i`) |
-            | `.exe` (NSIS) | Windows installer |
+            | **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` |
+            | **`*-electron-windows-x64.zip`** | Windows — unpack, `DWHForge-Query.cmd` |
 
-            Linux portable still needs system WebKitGTK once per machine.
-            Windows needs WebView2 (usually preinstalled).
-            No DuckDB CDN at runtime.
+            Linux host linked for **glibc ≥ 2.28** (RHEL 8 / РЕД ОС 7.3+ / Ubuntu 20.04+).
+            Chromium via Electron. No DuckDB CDN at runtime.
 
-  linux:
+  linux-electron:
     needs: prepare
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux deps (WebKit / Tauri / rpm)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            patchelf libssl-dev libgtk-3-dev libdbus-1-dev pkg-config \
-            curl wget file rpm
 
       - uses: actions/setup-node@v4
         with:
@@ -65,66 +50,63 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
 
-      - name: npm ci
-        run: npm ci
+      - name: Install zig (glibc-aware linker)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
-      - name: Fetch DuckDB extensions (offline bundle)
+      - name: npm install
+        run: npm install --no-audit --no-fund
+
+      - name: Fetch DuckDB extensions
         run: ./scripts/fetch-duckdb-extensions.sh
 
-      - name: Build engine (pulls prebuilt libduckdb)
-        run: cargo build -p dwh-engine --release
-
-      - name: Sync libduckdb.so into src-tauri resources
-        run: ./scripts/sync-duckdb-lib.sh
-
-      - name: Sync demo fixtures into src-tauri resources
+      - name: Build dwh-host for glibc 2.28+
         run: |
-          chmod +x ./scripts/sync-fixtures.sh
-          ./scripts/sync-fixtures.sh
+          cargo install cargo-zigbuild --locked
+          # Pull prebuilt libduckdb into target/, then zig-link host against glibc 2.28
+          cargo build -p dwh-engine --release
+          ./scripts/sync-duckdb-lib.sh
+          cargo zigbuild -p dwh-host --release --target x86_64-unknown-linux-gnu.2.28
+          mkdir -p target/release
+          cp -f target/x86_64-unknown-linux-gnu/release/dwh-host target/release/dwh-host
+          echo "GLIBC symbols (expect max ≤ 2.28):"
+          objdump -T target/release/dwh-host | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -8
 
-      - name: Flatten postgres extension symlink (bundle-safe)
+      - name: Flatten postgres extension alias
         run: |
-          EXT=src-tauri/extensions
+          EXT=extensions
           if [[ -L "$EXT/postgres.duckdb_extension" ]]; then
             rm -f "$EXT/postgres.duckdb_extension"
             cp -f "$EXT/postgres_scanner.duckdb_extension" "$EXT/postgres.duckdb_extension"
           fi
-          test -f src-tauri/libduckdb.so
-          test -f src-tauri/fixtures/sample.csv
           test -f "$EXT/postgres_scanner.duckdb_extension"
+          test -f fixtures/sample.csv
+          test -x target/release/dwh-host
 
-      - name: Tauri build (deb + rpm + binary)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NO_STRIP: "true"
-        with:
-          releaseId: ${{ needs.prepare.outputs.release_id }}
-          tagName: ${{ github.ref_name }}
-          releaseDraft: false
-          prerelease: false
-          # Skip AppImage (linuxdeploy fragile on GHA). tar.gz is the portable path.
-          args: --bundles deb,rpm
-
-      - name: Pack portable tar.gz
+      - name: Build UI + portable Electron
         run: |
-          chmod +x ./scripts/pack-portable-linux.sh
-          ./scripts/pack-portable-linux.sh "${GITHUB_REF_NAME}"
+          npm run build
+          node scripts/pack-portable-electron.mjs "${GITHUB_REF_NAME}"
 
-      - name: Upload portable tar.gz to release
+      - name: Tar + upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          FILE=$(ls dist-portable/dwhforge-query-*-linux-x86_64.tar.gz | head -1)
-          gh release upload "$TAG" "$FILE" --clobber --repo "${{ github.repository }}"
+          DIR=$(ls -d dist-portable/dwhforge-query-*-electron-linux-x64 | head -1)
+          OUT="${DIR}.tar.gz"
+          tar -C dist-portable -czf "$OUT" "$(basename "$DIR")"
+          gh release upload "$TAG" "$OUT" --clobber --repo "${{ github.repository }}"
 
-  windows:
+  windows-electron:
     needs: prepare
     runs-on: windows-latest
     steps:
@@ -141,63 +123,43 @@ jobs:
         with:
           workspaces: ". -> target"
 
-      - name: npm ci
+      - name: npm install
         shell: bash
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
-      - name: Fetch DuckDB extensions (offline bundle)
+      - name: Fetch DuckDB extensions
         shell: bash
         run: ./scripts/fetch-duckdb-extensions.sh
 
-      - name: Build engine (pulls prebuilt duckdb.dll)
-        shell: bash
-        run: cargo build -p dwh-engine --release
-
-      - name: Sync duckdb.dll into src-tauri resources
-        shell: bash
-        run: ./scripts/sync-duckdb-lib.sh
-
-      - name: Sync demo fixtures into src-tauri resources
+      - name: Build dwh-host
         shell: bash
         run: |
-          chmod +x ./scripts/sync-fixtures.sh
-          ./scripts/sync-fixtures.sh
+          cargo build -p dwh-host --release
+          ./scripts/sync-duckdb-lib.sh
 
-      - name: Verify Windows resources
+      - name: Ensure postgres alias is a file
         shell: bash
         run: |
-          EXT=src-tauri/extensions
-          # Ensure postgres alias is a real file (NSIS-safe)
+          EXT=extensions
           if [[ ! -f "$EXT/postgres.duckdb_extension" ]]; then
             cp -f "$EXT/postgres_scanner.duckdb_extension" "$EXT/postgres.duckdb_extension"
           fi
-          test -f src-tauri/duckdb.dll
-          test -f src-tauri/fixtures/sample.csv
-          test -f "$EXT/postgres_scanner.duckdb_extension"
-          test -f "$EXT/httpfs.duckdb_extension"
+          test -f target/release/dwh-host.exe || test -f target/release/dwh-host
+          test -f fixtures/sample.csv
 
-      - name: Tauri build (NSIS installer)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          releaseId: ${{ needs.prepare.outputs.release_id }}
-          tagName: ${{ github.ref_name }}
-          releaseDraft: false
-          prerelease: false
-          args: --bundles nsis
-
-      - name: Pack portable zip
+      - name: Build UI + portable Electron
         shell: bash
         run: |
-          chmod +x ./scripts/pack-portable-windows.sh
-          ./scripts/pack-portable-windows.sh "${GITHUB_REF_NAME}"
+          npm run build
+          node scripts/pack-portable-electron.mjs "${GITHUB_REF_NAME}"
 
-      - name: Upload portable zip to release
+      - name: Zip + upload
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          FILE=$(ls dist-portable/dwhforge-query-*-windows-x86_64.zip | head -1)
-          gh release upload "$TAG" "$FILE" --clobber --repo "${{ github.repository }}"
+          DIR=$(ls -d dist-portable/dwhforge-query-*-electron-windows-x64 | head -1)
+          OUT="${DIR}.zip"
+          (cd dist-portable && zip -r "$(basename "$OUT")" "$(basename "$DIR")")
+          gh release upload "$TAG" "$OUT" --clobber --repo "${{ github.repository }}"

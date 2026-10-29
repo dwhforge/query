@@ -46,10 +46,10 @@ const SPATIAL: ExtSpec = ExtSpec {
     files: &["spatial.duckdb_extension"],
 };
 
-/// Optional directory set by the host (Tauri resource dir / tests) before session start.
+/// Optional directory set by the host (`DWH_EXTENSIONS_DIR` / tests) before session start.
 static EXTENSIONS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
-/// Pin the extensions folder (call once from Tauri/`main` before `DbSession::new`).
+/// Pin the extensions folder (call once from `dwh-host` before `DbSession::new`).
 pub fn set_extensions_dir(dir: PathBuf) {
     let _ = EXTENSIONS_DIR_OVERRIDE.set(dir);
 }
@@ -112,16 +112,11 @@ pub fn resolve_extensions_dir() -> Option<PathBuf> {
         }
     }
 
-    // CWD (useful for `cargo run` / `tauri dev` from repo root)
+    // CWD (useful for `cargo run` / Electron from repo root)
     if let Ok(cwd) = env::current_dir() {
         let beside = cwd.join("extensions");
         if beside.is_dir() {
             return Some(beside);
-        }
-        // Dev: flat folder maintained by fetch script
-        let tauri_ext = cwd.join("src-tauri/extensions");
-        if tauri_ext.is_dir() {
-            return Some(tauri_ext);
         }
     }
 
@@ -152,10 +147,7 @@ pub fn resolve_extensions_dir() -> Option<PathBuf> {
 
     // Relative to this crate (cargo test)
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        manifest.join("../../src-tauri/extensions"),
-        manifest.join("../../extensions"),
-    ] {
+    for candidate in [manifest.join("../../extensions")] {
         if candidate.is_dir() {
             return Some(candidate);
         }

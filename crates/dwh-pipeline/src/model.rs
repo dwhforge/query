@@ -1,4 +1,5 @@
 use crate::connection::ConnectionDef;
+use crate::derive_ops::{DeriveMode, DeriveOp, SqlDialectTag};
 use crate::dialect::QueryExecution;
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,17 @@ pub enum TransformationStep {
         schema: String,
         table_name: String,
     },
+    /// Read a relation from an attached DuckDB database file (read-only source).
+    LoadDuckdb {
+        #[serde(default)]
+        connection_id: Option<String>,
+        /// Absolute / project-relative path to `.duckdb` when connection_id absent.
+        #[serde(default)]
+        path: String,
+        #[serde(default = "default_pg_schema")]
+        schema: String,
+        table_name: String,
+    },
     /// Start from another query’s output (`ref` in dbt). Must be the first step.
     FromQuery { query_id: String },
     /// Hand-written SQL as the query root (ready-made model body). Must be first.
@@ -55,7 +67,20 @@ pub enum TransformationStep {
     Filter { condition: String },
     SelectColumns { columns: Vec<String> },
     RenameColumn { from: String, to: String },
-    DeriveColumn { name: String, expression: String },
+    /// Derived column: ready-made op or free SQL (legacy projects = Sql + expression).
+    DeriveColumn {
+        name: String,
+        /// Free SQL when `mode=sql` (also set when migrating legacy projects).
+        #[serde(default)]
+        expression: String,
+        #[serde(default)]
+        mode: DeriveMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<DeriveOp>,
+        /// Dialect of `expression` when mode=sql; unknown if not determinable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sql_dialect: Option<SqlDialectTag>,
+    },
     GroupBy {
         dimensions: Vec<String>,
         aggregates: Vec<String>,
@@ -71,6 +96,146 @@ pub enum TransformationStep {
     },
     Append { other_query_ids: Vec<String> },
     CustomSql { raw_sql: String },
+    /// Deterministic key cleanup before Join (trim/case/spaces/zeros). Overwrites in place.
+    NormalizeKey {
+        columns: Vec<String>,
+        ops: Vec<NormalizeOp>,
+    },
+    /// Remap join-key values via a KeyMap (`from` → `to`). Entries are a snapshot for emit.
+    ApplyKeyMap {
+        column: String,
+        map_id: String,
+        #[serde(default)]
+        entries: Vec<KeyMapEntry>,
+    },
+}
+
+/// One From→To alias row. `from` must be unique within a [`KeyMapDef`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct KeyMapEntry {
+    pub from: String,
+    pub to: String,
+}
+
+/// Where the From→To table lives (ADR-0020). Default = generated dbt seed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeyMapStorage {
+    /// Write / sync `seeds/map_*.csv` (git SoT after first export).
+    #[default]
+    Seed,
+    /// Existing dbt model: `{{ ref('model') }}`.
+    Ref {
+        model: String,
+    },
+    /// Existing dbt source: `{{ source('name', 'table') }}`.
+    Source {
+        source: String,
+        table: String,
+        /// Optional Postgres connection for read/write-back (UI / host).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_id: Option<String>,
+    },
+}
+
+fn default_from_col() -> String {
+    "from".into()
+}
+fn default_to_col() -> String {
+    "to".into()
+}
+
+/// Named join-key alias table (project resource).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct KeyMapDef {
+    pub id: String,
+    pub name: String,
+    /// Row cache for editor / DuckDB preview (SoT when `storage=seed`).
+    #[serde(default)]
+    pub entries: Vec<KeyMapEntry>,
+    /// Backend relation — seed (default), dbt ref, or dbt source.
+    #[serde(default)]
+    pub storage: KeyMapStorage,
+    /// Column on the map relation used as From (default `from`).
+    #[serde(default = "default_from_col")]
+    pub from_column: String,
+    /// Column on the map relation used as To (default `to`).
+    #[serde(default = "default_to_col")]
+    pub to_column: String,
+}
+
+impl KeyMapDef {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            entries: vec![],
+            storage: KeyMapStorage::Seed,
+            from_column: default_from_col(),
+            to_column: default_to_col(),
+        }
+    }
+
+    /// Reject empty / duplicate `from` (after trim) and empty `to` for seed-backed maps.
+    pub fn validate(&self) -> Result<(), String> {
+        match &self.storage {
+            KeyMapStorage::Ref { model } => {
+                if model.trim().is_empty() {
+                    return Err(format!("KeyMap '{}': ref model is empty", self.id));
+                }
+            }
+            KeyMapStorage::Source { source, table, .. } => {
+                if source.trim().is_empty() || table.trim().is_empty() {
+                    return Err(format!(
+                        "KeyMap '{}': source name and table are required",
+                        self.id
+                    ));
+                }
+            }
+            KeyMapStorage::Seed => {}
+        }
+        if self.from_column.trim().is_empty() || self.to_column.trim().is_empty() {
+            return Err(format!(
+                "KeyMap '{}': from_column/to_column must be non-empty",
+                self.id
+            ));
+        }
+        // External relations may have empty local entries (SoT is the table).
+        if matches!(self.storage, KeyMapStorage::Seed) || !self.entries.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            for e in &self.entries {
+                let from = e.from.trim();
+                if from.is_empty() {
+                    return Err(format!("KeyMap '{}': empty from", self.id));
+                }
+                if e.to.is_empty() {
+                    return Err(format!("KeyMap '{}': empty to for from '{from}'", self.id));
+                }
+                if !seen.insert(from.to_string()) {
+                    return Err(format!(
+                        "KeyMap '{}': duplicate from '{from}'",
+                        self.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_seed_backed(&self) -> bool {
+        matches!(self.storage, KeyMapStorage::Seed)
+    }
+}
+
+/// Deterministic normalize ops (near-miss Apply → NormalizeKey). Order = nest order.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizeOp {
+    Trim,
+    Lower,
+    Upper,
+    CollapseSpace,
+    LtrimZeros,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -87,6 +252,9 @@ pub struct QueryDef {
 pub struct Workspace {
     pub queries: Vec<QueryDef>,
     pub focus_query_id: String,
+    /// Join-key alias maps (ADR-0020). Source of truth in project JSON; seeds on export.
+    #[serde(default)]
+    pub key_maps: Vec<KeyMapDef>,
 }
 
 impl Workspace {
@@ -99,7 +267,12 @@ impl Workspace {
                 execution: QueryExecution::default(),
             }],
             focus_query_id: "main".into(),
+            key_maps: vec![],
         }
+    }
+
+    pub fn key_map(&self, id: &str) -> Option<&KeyMapDef> {
+        self.key_maps.iter().find(|m| m.id == id)
     }
 
     pub fn query(&self, id: &str) -> Option<&QueryDef> {

@@ -398,6 +398,7 @@ dependencies = [
 name = "dwh-engine"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "duckdb",
  "dwh-pipeline",
  "serde",

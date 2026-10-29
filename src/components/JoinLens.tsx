@@ -961,8 +961,16 @@ function JoinLensImpl({
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
               }`}
+              title="Unmatched diagnostics samples — click a side row → Add to map…"
             >
               Probe
+              {joinDiag &&
+                (joinDiag.unmatched_left_count > 0 ||
+                  joinDiag.unmatched_right_count > 0) && (
+                  <span className="ml-1 text-amber-300/90">
+                    ·{joinDiag.unmatched_left_count + joinDiag.unmatched_right_count}
+                  </span>
+                )}
             </button>
           </div>
           <span className="text-[9px] text-slate-600">·</span>
@@ -1058,6 +1066,44 @@ function JoinLensImpl({
             </span>
           )}
         </div>
+        {sideMode === "probe" &&
+          onMapKey &&
+          joinDiag &&
+          (joinDiag.unmatched_left_count > 0 ||
+            joinDiag.unmatched_right_count > 0) &&
+          !sideProbe && (
+            <div className="shrink-0 border-b border-amber-950/50 bg-amber-950/25 px-2 py-1.5 text-[10px] leading-snug text-amber-100/90">
+              <span className="font-semibold text-amber-200/95">Unmatched</span>
+              {" · "}
+              {joinDiag.unmatched_left_count > 0 && (
+                <span>
+                  L {joinDiag.unmatched_left_count}
+                  {unmatchedLeft &&
+                  unmatchedLeft.rows.length < joinDiag.unmatched_left_count
+                    ? ` (sample ${unmatchedLeft.rows.length})`
+                    : ""}
+                </span>
+              )}
+              {joinDiag.unmatched_left_count > 0 &&
+                joinDiag.unmatched_right_count > 0 &&
+                " · "}
+              {joinDiag.unmatched_right_count > 0 && (
+                <span>
+                  R {joinDiag.unmatched_right_count}
+                  {unmatchedRight &&
+                  unmatchedRight.rows.length < joinDiag.unmatched_right_count
+                    ? ` (sample ${unmatchedRight.rows.length})`
+                    : ""}
+                </span>
+              )}
+              <span className="text-amber-200/70">
+                {" "}
+                — click a Left/Right row, then{" "}
+                <span className="font-semibold">Add to map…</span>
+                {" "}(or Near-miss → NormalizeKey for trim/case)
+              </span>
+            </div>
+          )}
         {(nearMissLoading ||
           (nearMiss && nearMiss.hypotheses.length > 0)) && (
           <div className="shrink-0 space-y-1 border-b border-teal-950/60 bg-teal-950/20 px-2 py-1">

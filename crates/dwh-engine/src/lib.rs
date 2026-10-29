@@ -1,3 +1,4 @@
+mod arrow_json;
 mod export_e2e;
 mod extensions;
 mod join_diagnostics;

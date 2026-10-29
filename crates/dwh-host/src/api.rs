@@ -461,70 +461,295 @@ fn demo_right_joins(fixtures: &Path) -> Result<Workspace, String> {
     })
 }
 
-/// Dirty channel codes → dim_channel via KeyMap (ADR-0020). Hero playground twin.
+/// F&B company-name mapping lab (ADR-0020).
+/// 15 brands × 60 days: `sales_daily` vs `res_consumption` spell names differently;
+/// `dim_company` is canonical; KeyMap aliases → company_id; daily PnL → monthly.
 fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
     use dwh_pipeline::{KeyMapDef, KeyMapEntry};
-    let sales = fixture_csv(fixtures, "alias_sales.csv")?;
-    let dim = fixture_csv(fixtures, "dim_channel.csv")?;
-    let mut map = KeyMapDef::new("map_channel_alias", "channel aliases");
-    map.entries = vec![
+    let sales = fixture_csv(fixtures, "sales_daily.csv")?;
+    let spend = fixture_csv(fixtures, "res_consumption.csv")?;
+    let dim = fixture_csv(fixtures, "dim_company.csv")?;
+
+    let mut company_map = KeyMapDef::new("map_company_alias", "F&B company aliases");
+    // sales_daily `company` + res_consumption `org_name` → dim_company.company_id
+    company_map.entries = vec![
         KeyMapEntry {
-            from: "www".into(),
-            to: "web".into(),
+            from: "Starbucks Coffee".into(),
+            to: "STBUX".into(),
         },
         KeyMapEntry {
-            from: "shop".into(),
-            to: "store".into(),
+            from: "STARBUCKS CORP".into(),
+            to: "STBUX".into(),
         },
         KeyMapEntry {
-            from: "prt".into(),
-            to: "partner".into(),
+            from: "Nestle SA".into(),
+            to: "NESTLE".into(),
         },
         KeyMapEntry {
-            from: "Web ".into(),
-            to: "web".into(),
+            from: "NESTLÉ INTERNATIONAL".into(),
+            to: "NESTLE".into(),
+        },
+        KeyMapEntry {
+            from: "Coca Cola Co".into(),
+            to: "KO".into(),
+        },
+        KeyMapEntry {
+            from: "THE COCA-COLA COMPANY".into(),
+            to: "KO".into(),
+        },
+        KeyMapEntry {
+            from: "Pepsi Co".into(),
+            to: "PEP".into(),
+        },
+        KeyMapEntry {
+            from: "PEPSICO INC".into(),
+            to: "PEP".into(),
+        },
+        KeyMapEntry {
+            from: "Danone Group".into(),
+            to: "DANO".into(),
+        },
+        KeyMapEntry {
+            from: "DANONE SA".into(),
+            to: "DANO".into(),
+        },
+        KeyMapEntry {
+            from: "Diageo plc".into(),
+            to: "UBL".into(),
+        },
+        KeyMapEntry {
+            from: "DIAGEO PLC".into(),
+            to: "UBL".into(),
+        },
+        KeyMapEntry {
+            from: "Heineken NV".into(),
+            to: "HEIN".into(),
+        },
+        KeyMapEntry {
+            from: "HEINEKEN N.V.".into(),
+            to: "HEIN".into(),
+        },
+        KeyMapEntry {
+            from: "Anheuser-Busch".into(),
+            to: "ABEV".into(),
+        },
+        KeyMapEntry {
+            from: "AB INBEV".into(),
+            to: "ABEV".into(),
+        },
+        KeyMapEntry {
+            from: "McDonalds".into(),
+            to: "MCD".into(),
+        },
+        KeyMapEntry {
+            from: "MCDONALD'S CORP".into(),
+            to: "MCD".into(),
+        },
+        KeyMapEntry {
+            from: "Yum Brands".into(),
+            to: "YUM".into(),
+        },
+        KeyMapEntry {
+            from: "YUM! BRANDS INC".into(),
+            to: "YUM".into(),
+        },
+        KeyMapEntry {
+            from: "Costa".into(),
+            to: "COSTA".into(),
+        },
+        KeyMapEntry {
+            from: "COSTA COFFEE LTD".into(),
+            to: "COSTA".into(),
+        },
+        KeyMapEntry {
+            from: "RedBull GmbH".into(),
+            to: "REDD".into(),
+        },
+        KeyMapEntry {
+            from: "RED BULL GMBH".into(),
+            to: "REDD".into(),
+        },
+        KeyMapEntry {
+            from: "Mondelez Int".into(),
+            to: "MOND".into(),
+        },
+        KeyMapEntry {
+            from: "MONDELEZ INTERNATIONAL".into(),
+            to: "MOND".into(),
+        },
+        KeyMapEntry {
+            from: "Unilever PLC".into(),
+            to: "UNIL".into(),
+        },
+        KeyMapEntry {
+            from: "UNILEVER N.V.".into(),
+            to: "UNIL".into(),
+        },
+        KeyMapEntry {
+            from: "Keurig DrPepper".into(),
+            to: "KDP".into(),
+        },
+        KeyMapEntry {
+            from: "KEURIG DR PEPPER".into(),
+            to: "KDP".into(),
         },
     ];
+
     Ok(Workspace {
         queries: vec![
             QueryDef {
-                id: "dim_channel".into(),
-                name: "dim_channel".into(),
+                id: "dim_company".into(),
+                name: "dim_company".into(),
                 steps: vec![TransformationStep::LoadCsv { path: dim }],
                 execution: Default::default(),
             },
             QueryDef {
-                id: "alias_sales".into(),
-                name: "alias_sales".into(),
+                id: "sales_daily".into(),
+                name: "sales_daily".into(),
+                steps: vec![TransformationStep::LoadCsv { path: sales }],
+                execution: Default::default(),
+            },
+            QueryDef {
+                id: "res_consumption".into(),
+                name: "res_consumption".into(),
+                steps: vec![TransformationStep::LoadCsv { path: spend }],
+                execution: Default::default(),
+            },
+            // Case A — no map: sales names ≠ company_id → Join Lens Probe / Add to map…
+            QueryDef {
+                id: "dirty_join".into(),
+                name: "dirty_join".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv { path: sales },
-                    TransformationStep::ApplyKeyMap {
-                        column: "channel".into(),
-                        map_id: map.id.clone(),
-                        entries: map.entries.clone(),
+                    TransformationStep::FromQuery {
+                        query_id: "sales_daily".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_company".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["company".into()],
+                        right_on: vec!["company_id".into()],
                     },
                 ],
                 execution: Default::default(),
             },
+            // Case B — continue sales_daily → map spellings → company_id + dim
             QueryDef {
-                id: "enriched".into(),
-                name: "enriched".into(),
+                id: "sales_canon".into(),
+                name: "sales_canon".into(),
                 steps: vec![
                     TransformationStep::FromQuery {
-                        query_id: "alias_sales".into(),
+                        query_id: "sales_daily".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: "company".into(),
+                        map_id: company_map.id.clone(),
+                        entries: company_map.entries.clone(),
+                    },
+                    TransformationStep::RenameColumn {
+                        from: "company".into(),
+                        to: "company_id".into(),
                     },
                     TransformationStep::Join {
-                        right_query_id: "dim_channel".into(),
+                        right_query_id: "dim_company".into(),
                         join_type: dwh_pipeline::JoinType::Left,
-                        left_on: vec!["channel".into()],
-                        right_on: vec!["channel".into()],
+                        left_on: vec!["company_id".into()],
+                        right_on: vec!["company_id".into()],
+                    },
+                ],
+                execution: Default::default(),
+            },
+            // Case B' — continue res_consumption → same map on org_name
+            QueryDef {
+                id: "spend_canon".into(),
+                name: "spend_canon".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "res_consumption".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: "org_name".into(),
+                        map_id: company_map.id.clone(),
+                        entries: company_map.entries.clone(),
+                    },
+                    TransformationStep::RenameColumn {
+                        from: "org_name".into(),
+                        to: "company_id".into(),
+                    },
+                ],
+                execution: Default::default(),
+            },
+            // Case C — one row per company×day: units, revenue, spend, cleaned net
+            QueryDef {
+                id: "daily_pnl".into(),
+                name: "daily_pnl".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "sales_canon".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "spend_canon".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["company_id".into(), "day".into()],
+                        right_on: vec!["company_id".into(), "day".into()],
+                    },
+                    TransformationStep::SelectColumns {
+                        columns: vec![
+                            "company_name".into(),
+                            "company_id".into(),
+                            "category".into(),
+                            "day".into(),
+                            "units".into(),
+                            "revenue".into(),
+                            "spend".into(),
+                        ],
+                    },
+                    TransformationStep::DeriveColumn {
+                        name: "net_revenue".into(),
+                        expression: "revenue - coalesce(spend, 0)".into(),
+                    },
+                    TransformationStep::SortBy {
+                        column: "day".into(),
+                        descending: false,
+                    },
+                ],
+                execution: Default::default(),
+            },
+            // Case D — monthly rollup of cleaned net
+            QueryDef {
+                id: "monthly_pnl".into(),
+                name: "monthly_pnl".into(),
+                steps: vec![
+                    TransformationStep::FromQuery {
+                        query_id: "daily_pnl".into(),
+                    },
+                    TransformationStep::DeriveColumn {
+                        name: "month".into(),
+                        expression: "strftime(day::DATE, '%Y-%m')".into(),
+                    },
+                    TransformationStep::GroupBy {
+                        dimensions: vec![
+                            "company_name".into(),
+                            "category".into(),
+                            "month".into(),
+                        ],
+                        aggregates: vec![
+                            "sum(units) as units".into(),
+                            "sum(revenue) as revenue".into(),
+                            "sum(spend) as spend".into(),
+                            "sum(net_revenue) as net_revenue".into(),
+                            "count(*) as n_days".into(),
+                        ],
+                    },
+                    TransformationStep::SortBy {
+                        column: "month".into(),
+                        descending: false,
                     },
                 ],
                 execution: Default::default(),
             },
         ],
-        focus_query_id: "enriched".into(),
-        key_maps: vec![map],
+        focus_query_id: "daily_pnl".into(),
+        key_maps: vec![company_map],
     })
 }
 

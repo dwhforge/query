@@ -43,6 +43,10 @@ export type KeyMapEditorProps = {
   onSave?: () => void;
   onDelete?: () => void;
   saveLabel?: string;
+  /** Linked dbt export folder — drives seed SoT strip (ADR-0020). */
+  exportPath?: string | null;
+  /** Opened from Join Lens — show Apply guidance. */
+  joinApplyHint?: string | null;
   /** Compact for Hero playground. */
   compact?: boolean;
   title?: string;
@@ -65,6 +69,8 @@ export function KeyMapEditor({
   onSave,
   onDelete,
   saveLabel = "Save map",
+  exportPath = null,
+  joinApplyHint = null,
   compact = false,
   title,
 }: KeyMapEditorProps) {
@@ -310,6 +316,37 @@ export function KeyMapEditor({
   const sourceStorage =
     map.storage?.kind === "source" ? map.storage : null;
   const refStorage = map.storage?.kind === "ref" ? map.storage : null;
+  const kind = storageKind(map.storage);
+  const sotLine = (() => {
+    if (kind === "source") {
+      const loc =
+        sourceStorage?.source && sourceStorage?.table
+          ? `${sourceStorage.source}.${sourceStorage.table}`
+          : "pick schema.table";
+      return {
+        label: "SoT · warehouse table",
+        detail: `${loc} · Save does full replace write-back`,
+      };
+    }
+    if (kind === "ref") {
+      return {
+        label: "SoT · dbt ref",
+        detail: refStorage?.model?.trim()
+          ? `{{ ref('${refStorage.model}') }} · project cache only (no write-back)`
+          : "set model name · project cache only",
+      };
+    }
+    if (exportPath) {
+      return {
+        label: "SoT · export seed",
+        detail: `seeds/${seedName}.csv · Save pushes CSV into linked export`,
+      };
+    }
+    return {
+      label: "SoT · project",
+      detail: `not exported yet · Export creates seeds/${seedName}.csv`,
+    };
+  })();
   const settingsPanel = !compact && (
     <div className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto border-slate-800 p-4 md:w-72 md:border-r lg:w-80">
       <label className={labelClass}>
@@ -617,27 +654,6 @@ export function KeyMapEditor({
           {rowsStatus}
         </span>
       )}
-      {onApply && (
-        <div className="ml-auto flex gap-1.5">
-          {(["left", "right", "both"] as ApplySide[]).map((side) => (
-            <button
-              key={side}
-              type="button"
-              onClick={() => {
-                const v = validateKeyMapEntries(map.entries);
-                if (!v.ok) {
-                  setError(v.error);
-                  return;
-                }
-                onApply(side);
-              }}
-              className="rounded-md bg-teal-500/90 px-2.5 py-1.5 text-[12px] font-semibold text-slate-950 hover:bg-teal-400"
-            >
-              Apply {side}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 
@@ -776,6 +792,32 @@ export function KeyMapEditor({
         )}
       </div>
 
+      {!compact && joinApplyHint && onApply && (
+        <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-[12px] leading-snug text-amber-100/90">
+          <span className="font-semibold text-amber-200">From Join Lens</span>
+          {" — "}
+          {joinApplyHint}{" "}
+          <span className="text-amber-200/80">
+            Buttons <span className="font-semibold">Apply left / right / both</span>{" "}
+            are in the toolbar above the From→To grid (not in the picker dialog).
+          </span>
+        </div>
+      )}
+
+      {!compact && (
+        <div
+          className="flex shrink-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-slate-800/80 bg-slate-950/50 px-4 py-1.5"
+          title={exportPath ?? undefined}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-teal-400/85">
+            {sotLine.label}
+          </span>
+          <span className="font-mono text-[10px] text-slate-500">
+            {sotLine.detail}
+          </span>
+        </div>
+      )}
+
       <div
         className={`flex min-h-0 flex-1 ${
           compact ? "flex-col" : "flex-col md:flex-row"
@@ -811,13 +853,41 @@ export function KeyMapEditor({
         </div>
       </div>
 
-      {!compact && (onSave || onDelete) && (
-        <div className="flex shrink-0 items-center gap-2 border-t border-slate-800 px-4 py-3">
+      {!compact && (onSave || onDelete || onApply) && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-800 px-4 py-3">
+          {onApply && (
+            <>
+              <span className="mr-1 text-[11px] text-slate-500">
+                Insert ApplyKeyMap before Join:
+              </span>
+              {(["left", "right", "both"] as ApplySide[]).map((side) => (
+                <button
+                  key={side}
+                  type="button"
+                  onClick={() => {
+                    const v = validateKeyMapEntries(map.entries);
+                    if (!v.ok) {
+                      setError(v.error);
+                      return;
+                    }
+                    onApply(side);
+                  }}
+                  className="rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                >
+                  Apply {side}
+                </button>
+              ))}
+            </>
+          )}
           {onSave && (
             <button
               type="button"
               onClick={onSave}
-              className="rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+              className={
+                onApply
+                  ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700"
+                  : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+              }
             >
               {saveLabel}
             </button>
@@ -832,7 +902,9 @@ export function KeyMapEditor({
             </button>
           )}
           <span className="ml-auto text-[11px] text-slate-600">
-            Enter moves cells · Enter on last To adds a row
+            {onApply
+              ? "Apply left = remap the left join key on this query"
+              : "Enter moves cells · Enter on last To adds a row"}
           </span>
         </div>
       )}

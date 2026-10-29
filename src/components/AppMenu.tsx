@@ -325,7 +325,7 @@ export function AppMenu({
             onClick={() => run(() => onLoadDemo("right"))}
           />
           <Item
-            label="Key mapping — From→To · seed table"
+            label="Key mapping — F&B aliases · daily → month"
             onClick={() => run(() => onLoadDemo("keymap"))}
           />
         </MenuBarItem>

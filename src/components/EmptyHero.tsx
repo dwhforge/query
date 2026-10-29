@@ -25,25 +25,33 @@ const DEMOS: { id: DemoId; label: string; hint: string }[] = [
   {
     id: "keymap",
     label: "Key mapping",
-    hint: "From→To · seed table",
+    hint: "F&B aliases · 900×2 rows",
   },
 ];
 
-/** Virtual project sample — unmatched dirty keys vs dim partners (Hero only). */
-const HERO_UNMATCHED = ["www", "shop", "prt", "Web "];
-const HERO_PARTNERS = ["web", "store", "partner"];
+/** Virtual sample — sales vs spend brand spellings → company_id (Hero only). */
+const HERO_UNMATCHED = [
+  "Starbucks Coffee",
+  "Coca Cola Co",
+  "McDonalds",
+  "STARBUCKS CORP",
+  "THE COCA-COLA COMPANY",
+  "MCDONALD'S CORP",
+];
+const HERO_PARTNERS = ["STBUX", "KO", "MCD"];
 const HERO_QUERIES = [
-  { id: "alias_sales", role: "fact", note: "dirty channel codes" },
-  { id: "dim_channel", role: "dim", note: "canonical keys" },
-  { id: "enriched", role: "join", note: "LEFT join · map before join" },
+  { id: "dirty_join", role: "probe", note: "sales ⋈ dim · no map" },
+  { id: "daily_pnl", role: "day", note: "units · revenue · spend · net" },
+  { id: "monthly_pnl", role: "month", note: "15 brands × month" },
 ];
 
 function initialHeroMap(): KeyMapDef {
-  const map = emptyKeyMap("channel aliases");
-  map.id = "map_channel_alias";
+  const map = emptyKeyMap("F&B company aliases");
+  map.id = "map_company_alias";
   map.entries = [
-    { from: "www", to: "web" },
-    { from: "shop", to: "store" },
+    { from: "Starbucks Coffee", to: "STBUX" },
+    { from: "Coca Cola Co", to: "KO" },
+    { from: "STARBUCKS CORP", to: "STBUX" },
   ];
   return map;
 }
@@ -74,8 +82,8 @@ export function EmptyHero({
             DWHForge Query
           </h2>
           <p className="anim-rise-delay-2 mt-4 max-w-md text-base leading-relaxed text-slate-400 lg:mx-0 mx-auto">
-            Join keys that almost match — map them in a From→To table, ship as a
-            dbt seed. Same idea as Power Query / Alteryx, without fuzzy merge.
+            F&B brands spelled differently in sales vs cost feeds — map to a
+            canonical id, ship as a dbt seed. No fuzzy merge.
           </p>
           <div className="anim-rise-delay-2 mt-8 w-full">
             <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
@@ -143,7 +151,7 @@ export function EmptyHero({
                 Try it — virtual project
               </p>
               <p className="mt-0.5 text-[11px] text-slate-500">
-                alias_sales ⋈ dim_channel · edit map, then open full demo
+                15 brands · open demo (~900 rows/day grain + monthly)
               </p>
             </div>
             <button
@@ -177,7 +185,7 @@ export function EmptyHero({
           )}
           {unmatchedLeft.length === 0 && (
             <p className="mb-1.5 text-left text-[10px] text-teal-300/80">
-              All sample dirty keys mapped — open the demo to Apply on the join.
+              All sample aliases mapped — open the demo for daily / monthly PnL.
             </p>
           )}
 
@@ -187,7 +195,7 @@ export function EmptyHero({
             pickToOptions={HERO_PARTNERS}
             suggestedFrom={HERO_UNMATCHED}
             compact
-            title="Channel aliases"
+            title="F&B company aliases"
           />
         </div>
       </div>

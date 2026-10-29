@@ -212,6 +212,13 @@ function App() {
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportFiles, setExportFiles] = useState<string[]>([]);
+  /** Add to map… — choose which KeyMap when several exist. */
+  const [mapPickPending, setMapPickPending] = useState<{
+    fromValues: string[];
+    joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
+  } | null>(null);
+  /** Selected target in the picker: map id, or `"__new__"`. */
+  const [mapPickChoice, setMapPickChoice] = useState<string | null>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [sourceColumns, setSourceColumns] = useState<PostgresColumn[] | null>(
     null,
@@ -335,7 +342,11 @@ function App() {
   );
 
   const overlayOpen =
-    connEditorOpen || helpOpen || showPgPicker || showS3Dialog;
+    connEditorOpen ||
+    helpOpen ||
+    showPgPicker ||
+    showS3Dialog ||
+    Boolean(mapPickPending);
 
   useEffect(() => {
     // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
@@ -1950,27 +1961,61 @@ function App() {
     }));
   }
 
+  function openMapWithFromValues(
+    map: KeyMapDef,
+    fromValues: string[],
+    joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>,
+  ) {
+    const existingFrom = new Set(
+      map.entries.map((e) => e.from.trim()).filter(Boolean),
+    );
+    const merged = {
+      ...map,
+      entries: [
+        ...map.entries,
+        ...fromValues
+          .filter((f) => f.trim() && !existingFrom.has(f.trim()))
+          .map((from) => ({ from, to: "" })),
+      ],
+    };
+    openKeyMapEditor(merged, {
+      suggestedFrom: fromValues,
+      joinCtx,
+    });
+  }
+
   function handleMapKeyFromLens(_side: "left" | "right", fromValues: string[]) {
-    if (!joinLensTarget) return;
-    const existing = project.workspace.key_maps?.[0];
-    const map = existing
-      ? {
-          ...existing,
-          entries: [
-            ...existing.entries,
-            ...fromValues
-              .filter((f) => !existing.entries.some((e) => e.from.trim() === f))
-              .map((from) => ({ from, to: "" })),
-          ],
-        }
-      : {
+    if (!joinLensTarget || fromValues.length === 0) return;
+    const maps = project.workspace.key_maps ?? [];
+    const joinCtx = { ...joinLensTarget };
+    if (maps.length === 0) {
+      openMapWithFromValues(
+        {
           ...emptyKeyMap("join aliases"),
           entries: fromValues.map((from) => ({ from, to: "" })),
-        };
-    openKeyMapEditor(map, {
-      suggestedFrom: fromValues,
-      joinCtx: { ...joinLensTarget },
-    });
+        },
+        fromValues,
+        joinCtx,
+      );
+      return;
+    }
+    if (maps.length === 1) {
+      openMapWithFromValues(maps[0]!, fromValues, joinCtx);
+      return;
+    }
+    // Prefer a map whose name/id hints at the join column (channel → channel aliases).
+    const colHint = (joinCtx.leftOn[0] ?? joinCtx.rightOn[0] ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+    const suggested =
+      (colHint
+        ? maps.find((m) => {
+            const hay = `${m.id} ${m.name}`.toLowerCase();
+            return colHint.length >= 3 && hay.includes(colHint);
+          })
+        : undefined) ?? maps[0]!;
+    setMapPickChoice(suggested.id);
+    setMapPickPending({ fromValues, joinCtx });
   }
 
   async function refreshExportTree(exportPath: string | undefined) {
@@ -2503,6 +2548,176 @@ function App() {
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
 
+      {mapPickPending && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="map-pick-title"
+          onClick={() => {
+            setMapPickPending(null);
+            setMapPickChoice(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-slate-700 bg-[#0a1520] p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              id="map-pick-title"
+              className="text-base font-semibold text-slate-100"
+            >
+              Add unmatched key to a KeyMap
+            </h2>
+            <p className="mt-1.5 text-[13px] leading-snug text-slate-400">
+              This value did not find a join partner. Pick a From→To table below,
+              then <span className="text-slate-300">OK</span> opens a{" "}
+              <span className="text-slate-300">KeyMap tab</span> (next to
+              Pipeline canvas) — fill <span className="text-slate-300">To</span>{" "}
+              there and press{" "}
+              <span className="text-slate-300">Apply left</span> (inserts the
+              map step before this Join).
+            </p>
+            <div className="mt-3 rounded-lg border border-amber-900/40 bg-amber-950/30 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-200/80">
+                Unmatched
+                {mapPickPending.fromValues.length > 1
+                  ? ` · ${mapPickPending.fromValues.length} keys`
+                  : ""}
+              </p>
+              <p className="mt-0.5 font-mono text-[13px] text-amber-100">
+                {mapPickPending.fromValues
+                  .slice(0, 8)
+                  .map((v) => JSON.stringify(v))
+                  .join(", ")}
+                {mapPickPending.fromValues.length > 8 ? "…" : ""}
+              </p>
+              {(mapPickPending.joinCtx.leftOn[0] ||
+                mapPickPending.joinCtx.rightOn[0]) && (
+                <p className="mt-1 font-mono text-[10px] text-slate-500">
+                  join on{" "}
+                  {mapPickPending.joinCtx.leftOn[0] ?? "?"}
+                  {" = "}
+                  {mapPickPending.joinCtx.rightOn[0] ?? "?"}
+                </p>
+              )}
+            </div>
+            <fieldset className="mt-3">
+              <legend className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                Target KeyMap
+              </legend>
+              <ul className="mt-1.5 max-h-52 space-y-1 overflow-auto">
+                {(project.workspace.key_maps ?? []).map((m) => {
+                  const selected = mapPickChoice === m.id;
+                  return (
+                    <li key={m.id}>
+                      <label
+                        className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 ${
+                          selected
+                            ? "border-teal-600/70 bg-teal-500/10"
+                            : "border-slate-800 bg-slate-950/60 hover:border-slate-600"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="map-pick-target"
+                          className="mt-1 accent-teal-400"
+                          checked={selected}
+                          onChange={() => setMapPickChoice(m.id)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium text-slate-100">
+                            {m.name}
+                          </span>
+                          <span className="block font-mono text-[10px] text-slate-500">
+                            {m.id} · {m.entries.length} row
+                            {m.entries.length === 1 ? "" : "s"}
+                          </span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+                <li>
+                  <label
+                    className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 ${
+                      mapPickChoice === "__new__"
+                        ? "border-teal-600/70 bg-teal-500/10"
+                        : "border-slate-800 bg-slate-950/60 hover:border-slate-600"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="map-pick-target"
+                      className="mt-1 accent-teal-400"
+                      checked={mapPickChoice === "__new__"}
+                      onChange={() => setMapPickChoice("__new__")}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium text-slate-100">
+                        Create a new KeyMap
+                      </span>
+                      <span className="block text-[10px] text-slate-500">
+                        Empty From→To table, then Apply on the join
+                      </span>
+                    </span>
+                  </label>
+                </li>
+              </ul>
+            </fieldset>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-400 hover:text-slate-200"
+                onClick={() => {
+                  setMapPickPending(null);
+                  setMapPickChoice(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!mapPickChoice}
+                className="rounded-lg bg-teal-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={() => {
+                  const pending = mapPickPending;
+                  const choice = mapPickChoice;
+                  if (!choice) return;
+                  setMapPickPending(null);
+                  setMapPickChoice(null);
+                  if (choice === "__new__") {
+                    openMapWithFromValues(
+                      {
+                        ...emptyKeyMap("join aliases"),
+                        entries: pending.fromValues.map((from) => ({
+                          from,
+                          to: "",
+                        })),
+                      },
+                      pending.fromValues,
+                      pending.joinCtx,
+                    );
+                    return;
+                  }
+                  const map = (project.workspace.key_maps ?? []).find(
+                    (m) => m.id === choice,
+                  );
+                  if (!map) return;
+                  openMapWithFromValues(
+                    map,
+                    pending.fromValues,
+                    pending.joinCtx,
+                  );
+                }}
+              >
+                OK — open map
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConnectionEditor
         open={connEditorOpen}
         initial={editingConnection}
@@ -2695,6 +2910,20 @@ function App() {
                   map={keyMapEditor.map}
                   pickToOptions={keyMapEditor.pickTo}
                   suggestedFrom={keyMapEditor.suggestedFrom}
+                  exportPath={project.last_dbt_export_path}
+                  joinApplyHint={
+                    keyMapEditor.joinCtx
+                      ? `fill To for the unmatched From row(s), then Apply ${
+                          keyMapEditor.joinCtx.leftOn[0]
+                            ? "left"
+                            : "right"
+                        } to insert ApplyKeyMap before Join on ${
+                          keyMapEditor.joinCtx.leftOn[0] ??
+                          keyMapEditor.joinCtx.rightOn[0] ??
+                          "key"
+                        }.`
+                      : null
+                  }
                   postgresConnections={project.connections.filter(
                     (c) => c.kind === "postgres",
                   )}
@@ -2747,7 +2976,11 @@ function App() {
                   saveLabel={
                     keyMapEditor.map.storage?.kind === "source"
                       ? "Save to warehouse"
-                      : "Save map"
+                      : keyMapEditor.map.storage?.kind === "ref"
+                        ? "Save to project"
+                        : project.last_dbt_export_path
+                          ? "Save → seed CSV"
+                          : "Save map"
                   }
                   onApply={
                     keyMapEditor.joinCtx

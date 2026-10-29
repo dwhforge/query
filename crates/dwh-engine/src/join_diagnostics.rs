@@ -3,6 +3,7 @@
 //! Counts cover full Join inputs after preceding transforms. Samples are bounded
 //! (default 50) and labeled separately — a clean sample is not full-input proof.
 
+use crate::arrow_json::{batches_to_rows, map_arrow_type};
 use crate::preview::{ColumnMetadata, PreviewResult};
 use crate::session::DbSession;
 use dwh_pipeline::{
@@ -287,120 +288,15 @@ fn run_sql_preview(db: &DbSession, sql: String) -> Result<PreviewResult, String>
             .iter()
             .map(|f| ColumnMetadata {
                 name: f.name().clone(),
-                col_type: map_arrow_type_local(f.data_type()),
+                col_type: map_arrow_type(f.data_type()),
             })
             .collect();
         Ok(PR {
             columns,
-            rows: batches_to_rows_local(&batches),
+            rows: batches_to_rows(&batches),
             sql,
         })
     })
-}
-
-fn map_arrow_type_local(dt: &duckdb::arrow::datatypes::DataType) -> String {
-    use duckdb::arrow::datatypes::DataType;
-    match dt {
-        DataType::Boolean => "BOOLEAN".into(),
-        DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64 => "INTEGER".into(),
-        DataType::Float16 | DataType::Float32 | DataType::Float64 => "FLOAT".into(),
-        DataType::Utf8 | DataType::LargeUtf8 => "VARCHAR".into(),
-        DataType::Date32 | DataType::Date64 => "DATE".into(),
-        other => format!("{other:?}"),
-    }
-}
-
-fn batches_to_rows_local(batches: &[RecordBatch]) -> Vec<Vec<JsonValue>> {
-    use duckdb::arrow::array::*;
-    use duckdb::arrow::datatypes::DataType;
-    let mut rows = Vec::new();
-    for batch in batches {
-        let n = batch.num_rows();
-        let cols = batch.num_columns();
-        for r in 0..n {
-            let mut row = Vec::with_capacity(cols);
-            for c in 0..cols {
-                let array = batch.column(c);
-                if array.is_null(r) {
-                    row.push(JsonValue::Null);
-                    continue;
-                }
-                let v = match array.data_type() {
-                    DataType::Boolean => {
-                        let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                        JsonValue::Bool(a.value(r))
-                    }
-                    DataType::Int8 => {
-                        let a = array.as_any().downcast_ref::<Int8Array>().unwrap();
-                        JsonValue::from(a.value(r) as i64)
-                    }
-                    DataType::Int16 => {
-                        let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
-                        JsonValue::from(a.value(r) as i64)
-                    }
-                    DataType::Int32 => {
-                        let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
-                        JsonValue::from(a.value(r) as i64)
-                    }
-                    DataType::Int64 => {
-                        let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                        JsonValue::from(a.value(r))
-                    }
-                    DataType::UInt8 => {
-                        let a = array.as_any().downcast_ref::<UInt8Array>().unwrap();
-                        JsonValue::from(a.value(r) as u64)
-                    }
-                    DataType::UInt16 => {
-                        let a = array.as_any().downcast_ref::<UInt16Array>().unwrap();
-                        JsonValue::from(a.value(r) as u64)
-                    }
-                    DataType::UInt32 => {
-                        let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-                        JsonValue::from(a.value(r) as u64)
-                    }
-                    DataType::UInt64 => {
-                        let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                        JsonValue::from(a.value(r))
-                    }
-                    DataType::Float32 => {
-                        let a = array.as_any().downcast_ref::<Float32Array>().unwrap();
-                        serde_json::Number::from_f64(a.value(r) as f64)
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null)
-                    }
-                    DataType::Float64 => {
-                        let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                        serde_json::Number::from_f64(a.value(r))
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null)
-                    }
-                    DataType::Utf8 => {
-                        let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                        JsonValue::String(a.value(r).to_string())
-                    }
-                    DataType::LargeUtf8 => {
-                        let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                        JsonValue::String(a.value(r).to_string())
-                    }
-                    DataType::Date32 => {
-                        let a = array.as_any().downcast_ref::<Date32Array>().unwrap();
-                        JsonValue::from(a.value(r))
-                    }
-                    _ => JsonValue::String(format!("{:?}", array.data_type())),
-                };
-                row.push(v);
-            }
-            rows.push(row);
-        }
-    }
-    rows
 }
 
 #[cfg(test)]

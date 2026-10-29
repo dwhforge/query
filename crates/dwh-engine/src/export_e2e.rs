@@ -153,7 +153,15 @@ mod tests {
                         .map(JsonValue::Number)
                         .unwrap_or(JsonValue::Null),
                     ValueRef::Text(b) => JsonValue::String(String::from_utf8_lossy(b).into()),
-                    ValueRef::Date32(d) => JsonValue::Number((d as i64).into()),
+                    ValueRef::Date32(d) => {
+                        let s = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                            .and_then(|epoch| {
+                                epoch.checked_add_signed(chrono::Duration::days(i64::from(d)))
+                            })
+                            .map(|dt| dt.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| d.to_string());
+                        JsonValue::String(s)
+                    }
                     other => JsonValue::String(format!("{other:?}")),
                 };
                 out.push(cell);

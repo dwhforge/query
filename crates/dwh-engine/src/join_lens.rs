@@ -3,6 +3,7 @@
 //! Client should request only keys for visible / focused result rows, debounce,
 //! and cache by fingerprint. Server caps batch size and matches per side.
 
+use crate::arrow_json::{array_value_to_json, map_arrow_type};
 use crate::preview::ColumnMetadata;
 use crate::session::DbSession;
 use dwh_pipeline::{
@@ -782,75 +783,11 @@ fn cell_i64(array: &dyn Array, row: usize) -> Result<i64, String> {
 }
 
 fn cell_json(array: &dyn Array, row: usize) -> JsonValue {
-    if array.is_null(row) {
-        return JsonValue::Null;
-    }
-    match array.data_type() {
-        DataType::Boolean => {
-            let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            JsonValue::Bool(a.value(row))
-        }
-        DataType::Int8 => JsonValue::from(array.as_any().downcast_ref::<Int8Array>().unwrap().value(row) as i64),
-        DataType::Int16 => JsonValue::from(array.as_any().downcast_ref::<Int16Array>().unwrap().value(row) as i64),
-        DataType::Int32 => JsonValue::from(array.as_any().downcast_ref::<Int32Array>().unwrap().value(row) as i64),
-        DataType::Int64 => JsonValue::from(array.as_any().downcast_ref::<Int64Array>().unwrap().value(row)),
-        DataType::UInt8 => JsonValue::from(array.as_any().downcast_ref::<UInt8Array>().unwrap().value(row) as u64),
-        DataType::UInt16 => JsonValue::from(array.as_any().downcast_ref::<UInt16Array>().unwrap().value(row) as u64),
-        DataType::UInt32 => JsonValue::from(array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row) as u64),
-        DataType::UInt64 => JsonValue::from(array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row)),
-        DataType::Float32 => serde_json::Number::from_f64(
-            array.as_any().downcast_ref::<Float32Array>().unwrap().value(row) as f64,
-        )
-        .map(JsonValue::Number)
-        .unwrap_or(JsonValue::Null),
-        DataType::Float64 => serde_json::Number::from_f64(
-            array.as_any().downcast_ref::<Float64Array>().unwrap().value(row),
-        )
-        .map(JsonValue::Number)
-        .unwrap_or(JsonValue::Null),
-        DataType::Utf8 => JsonValue::String(
-            array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(row)
-                .to_string(),
-        ),
-        DataType::LargeUtf8 => JsonValue::String(
-            array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .unwrap()
-                .value(row)
-                .to_string(),
-        ),
-        DataType::Date32 => JsonValue::from(
-            array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .unwrap()
-                .value(row),
-        ),
-        _ => JsonValue::String(format!("{:?}", array.data_type())),
-    }
+    array_value_to_json(array, row)
 }
 
 fn map_type(dt: &DataType) -> String {
-    match dt {
-        DataType::Boolean => "BOOLEAN".into(),
-        DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64 => "INTEGER".into(),
-        DataType::Float16 | DataType::Float32 | DataType::Float64 => "FLOAT".into(),
-        DataType::Utf8 | DataType::LargeUtf8 => "VARCHAR".into(),
-        DataType::Date32 | DataType::Date64 => "DATE".into(),
-        other => format!("{other:?}"),
-    }
+    map_arrow_type(dt)
 }
 
 /// Sample / count cap for `explain_join_key` result + side grids.

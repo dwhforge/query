@@ -38,7 +38,11 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | A12 | Multi-hop int→mart | FromQuery chain | sales, union, sql |
 | A13 | Postgres source | LoadPostgres | UI only (needs DSN) |
 | A14 | Chained RIGHT OUTER (multi-join) | Two Join steps, different rights | right |
-| A15 | Join-key From→To map + dbt seed | KeyMap + ApplyKeyMap → `seeds/map_*.csv` | keymap (+ EmptyHero playground) |
+| A15 | Join-key From→To map + dbt seed | KeyMap + ApplyKeyMap → `seeds/map_*.csv` | keymap (+ EmptyHero) |
+| A16 | Dual-feed name aliases → dim | same map on sales + spend spellings | keymap (`sales_canon` / `spend_canon`) |
+| A17 | Daily combine + cleaned metric | multi-key Join + Derive net | keymap (`daily_pnl`) |
+| A18 | Monthly rollup after clean | GroupBy month | keymap (`monthly_pnl`) |
+| A19 | Unmatched → Add to map (Lens) | dirty join without map | keymap (`dirty_join`) |
 
 ### B — Partial
 
@@ -115,16 +119,21 @@ How to read it:
 
 Categories: A1, A3, A14.
 
-### 5. `keymap` — From→To join-key aliases (ADR-0020)
+### 5. `keymap` — F&B company aliases (ADR-0020)
 
-Dirty fact channels (`www`, `shop`, `prt`, `Web `) vs clean `dim_channel`. EmptyHero shows the same map as an interactive playground before loading the canvas.
+Food & beverage brands: POS/sales vs cost feed spell names differently. Fixtures: 15 companies × 60 days (~900 rows/fact). Walkthrough: [keymap-workflows.md](keymap-workflows.md).
 
 | Query (UI) | dbt model (export) | Steps |
 |------------|-------------------|--------|
-| `dim_channel` | `stg_dim_channel` | LoadCsv |
-| `alias_sales` | `stg_alias_sales` | LoadCsv → **ApplyKeyMap**(channel) |
-| `enriched` ★focus | `mart_enriched` | From(alias_sales) → LEFT Join(dim_channel) |
+| `dim_company` | `stg_dim_company` | LoadCsv (canonical id + name + category) |
+| `sales_daily` | `stg_sales_daily` | LoadCsv — e.g. `Starbucks Coffee` |
+| `res_consumption` | `stg_res_consumption` | LoadCsv — e.g. `STARBUCKS CORP` |
+| `dirty_join` | `int_dirty_join` | From(sales_daily) → LEFT Join(dim) **no map** — Lens |
+| `sales_canon` | `int_sales_canon` | From(sales_daily) → ApplyKeyMap → rename → Join dim |
+| `spend_canon` | `int_spend_canon` | From(res_consumption) → ApplyKeyMap → rename |
+| `daily_pnl` ★focus | `mart_daily_pnl` | Join sales⋈spend on id+day → net_revenue |
+| `monthly_pnl` | `int_monthly_pnl` | GroupBy company × category × month |
 
-`Workspace.key_maps` holds `map_channel_alias`. Export writes `seeds/map_channel_alias.csv` and models `ref` it. After first export, edit the seed — reopen syncs into the KeyMap editor.
+`Workspace.key_maps`: `map_company_alias` (30 From→To rows). Export → `seeds/map_company_alias.csv`.
 
-Categories: A1, A3, A15.
+Categories: A1, A3, A5, A8, A15–A19.

@@ -512,10 +512,10 @@ function App() {
         if (!cancelled) {
           setModelPreview(null);
           const msg = typeof e === "string" ? e : String(e);
-          // Old Tauri binary without the new command — needs full restart, not HMR.
+          // Stale dwh-host without the new command — full restart, not HMR.
           setModelError(
             /not found/i.test(msg)
-              ? "Backend outdated: stop & restart Tauri Dev (HMR won’t load preview_dbt_model)."
+              ? "Backend outdated: stop & restart electron:dev (HMR won’t reload dwh-host)."
               : msg,
           );
         }

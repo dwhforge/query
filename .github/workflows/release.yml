@@ -1,4 +1,4 @@
-# Electron + dwh-host portable releases (no system WebKitGTK).
+# Electron + dwh-host portable releases.
 name: release
 
 on:
@@ -32,7 +32,7 @@ jobs:
 
             | Artifact | Notes |
             |----------|--------|
-            | **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` (no sudo / no WebKitGTK) |
+            | **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` |
             | **`*-electron-windows-x64.zip`** | Windows — unpack, `DWHForge-Query.cmd` |
 
             Linux host linked for **glibc ≥ 2.28** (RHEL 8 / РЕД ОС 7.3+ / Ubuntu 20.04+).

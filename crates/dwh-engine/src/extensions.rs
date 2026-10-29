@@ -46,10 +46,10 @@ const SPATIAL: ExtSpec = ExtSpec {
     files: &["spatial.duckdb_extension"],
 };
 
-/// Optional directory set by the host (Tauri resource dir / tests) before session start.
+/// Optional directory set by the host (`DWH_EXTENSIONS_DIR` / tests) before session start.
 static EXTENSIONS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
-/// Pin the extensions folder (call once from Tauri/`main` before `DbSession::new`).
+/// Pin the extensions folder (call once from `dwh-host` before `DbSession::new`).
 pub fn set_extensions_dir(dir: PathBuf) {
     let _ = EXTENSIONS_DIR_OVERRIDE.set(dir);
 }

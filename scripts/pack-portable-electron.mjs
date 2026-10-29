@@ -101,8 +101,7 @@ Run:
   Linux:   ./DWHForge-Query
   Windows: DWHForge-Query.cmd
 
-No system WebKitGTK / dnf / Node.js required (Chromium bundled).
-DuckDB + extensions/ are included.
+Chromium via Electron (no system WebView). DuckDB + extensions/ included.
 `;
 fs.writeFileSync(path.join(staging, "README.txt"), readme);
 

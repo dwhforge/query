@@ -1,4 +1,4 @@
-//! Command dispatch — same surface as the former Tauri invoke API (camelCase args).
+//! Command dispatch — Electron IPC → JSON-RPC (camelCase args).
 
 use crate::connections_io;
 use crate::secrets_io;

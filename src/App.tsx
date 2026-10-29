@@ -182,6 +182,8 @@ function App() {
     totalCount: number;
     sampleLimit: number;
     highlightKeys: string[];
+    /** When set, banner can open KeyMap with these unmatched key values. */
+    mapSide?: "left" | "right";
   } | null>(null);
   /** Join Lens mode on Data (where-provenance docks). Default on when Join selected. */
   const [joinLensOn, setJoinLensOn] = useState(true);
@@ -1219,6 +1221,12 @@ function App() {
         totalCount: sample.total_count,
         sampleLimit,
         highlightKeys,
+        mapSide:
+          kind === "unmatched_left"
+            ? "left"
+            : kind === "unmatched_right"
+              ? "right"
+              : undefined,
       });
       setBottomTab("data");
       return;
@@ -2896,13 +2904,51 @@ function App() {
                         {" · "}
                         clean sample ≠ full-input proof
                       </span>
-                      <button
-                        type="button"
-                        className="shrink-0 text-teal-300/80 hover:text-teal-100"
-                        onClick={() => setDiagView(null)}
-                      >
-                        Back to preview
-                      </button>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {diagView.mapSide &&
+                          diagView.rows.length > 0 &&
+                          joinLensTarget && (
+                            <button
+                              type="button"
+                              className="rounded border border-amber-800/60 px-2 py-0.5 text-[10px] text-amber-100 hover:bg-amber-500/10"
+                              onClick={() => {
+                                const fold = (s: string) => s.toLowerCase();
+                                const keyIdx = diagView.highlightKeys
+                                  .map((k) =>
+                                    diagView.columns.findIndex(
+                                      (c) => fold(c.name) === fold(k),
+                                    ),
+                                  )
+                                  .filter((i) => i >= 0);
+                                const seen = new Set<string>();
+                                const fromValues: string[] = [];
+                                for (const row of diagView.rows) {
+                                  for (const i of keyIdx) {
+                                    const v = String(row[i] ?? "").trim();
+                                    if (!v || seen.has(v)) continue;
+                                    seen.add(v);
+                                    fromValues.push(v);
+                                  }
+                                }
+                                if (!fromValues.length) return;
+                                handleMapKeyFromLens(
+                                  diagView.mapSide!,
+                                  fromValues,
+                                );
+                                setDiagView(null);
+                              }}
+                            >
+                              Add to map…
+                            </button>
+                          )}
+                        <button
+                          type="button"
+                          className="text-teal-300/80 hover:text-teal-100"
+                          onClick={() => setDiagView(null)}
+                        >
+                          Back to preview
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>

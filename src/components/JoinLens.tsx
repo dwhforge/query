@@ -168,6 +168,8 @@ type SidePanelProps = {
   emptyHint: string;
   /** Scroll first parent into view when center parents change. */
   scrollToken: string;
+  /** Probe: open KeyMap with selected (or first visible) key. */
+  onAddToMap?: () => void;
 };
 
 function SidePanel({
@@ -187,6 +189,7 @@ function SidePanel({
   statusHint,
   emptyHint,
   scrollToken,
+  onAddToMap,
 }: SidePanelProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const keyFold = new Set(keyNames.map(fold));
@@ -227,12 +230,24 @@ function SidePanel({
             className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[10px] text-slate-200 outline-none placeholder:text-slate-600 focus:ring-1 focus:ring-teal-700"
           />
         )}
-        <div className="text-[10px] leading-snug text-slate-500">
-          {loading ? "loading…" : listModeLabel}
-          {statusHint && (
-            <span className="mt-0.5 block text-[10px] text-slate-400">
-              {statusHint}
-            </span>
+        <div className="flex items-start justify-between gap-1">
+          <div className="min-w-0 text-[10px] leading-snug text-slate-500">
+            {loading ? "loading…" : listModeLabel}
+            {statusHint && (
+              <span className="mt-0.5 block text-[10px] text-slate-400">
+                {statusHint}
+              </span>
+            )}
+          </div>
+          {onAddToMap && visibleIndices.length > 0 && (
+            <button
+              type="button"
+              title="Add selected (or first) key to KeyMap"
+              onClick={onAddToMap}
+              className="shrink-0 rounded border border-amber-800/60 px-1 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
+            >
+              Map…
+            </button>
           )}
         </div>
       </div>
@@ -844,17 +859,39 @@ function JoinLensImpl({
     keyExplainLoading,
   ]);
 
+  function emitMapKey(side: JoinKeySide, rowIndex: number) {
+    if (!onMapKey) return;
+    const row = side === "left" ? leftRows[rowIndex] : rightRows[rowIndex];
+    const cols = side === "left" ? leftCols : rightCols;
+    const keys = side === "left" ? leftOn : rightOn;
+    if (!row) return;
+    const vals = keyValuesFromRow(row, cols, keys)
+      .map((v) => cellStr(v))
+      .filter((v) => v.trim());
+    if (!vals.length) return;
+    onMapKey(side, vals);
+  }
+
   const switchMode = (next: SideMode) => {
     if (next === sideMode) return;
     setSideMode(next);
-    setLeftSel(null);
-    setRightSel(null);
     setMatchesOnly(false);
     setSearchLeft("");
     setSearchRight("");
     setKeyExplain(null);
     setKeyBlame(null);
     setKeyExplainError(null);
+    if (next === "probe") {
+      // Prefer first unmatched left (common case); else first right.
+      const leftIdx = probeLeftRows.length > 0 ? 0 : null;
+      const rightIdx =
+        leftIdx == null && probeRightRows.length > 0 ? 0 : null;
+      setLeftSel(leftIdx);
+      setRightSel(rightIdx);
+    } else {
+      setLeftSel(null);
+      setRightSel(null);
+    }
   };
 
   if (!enabled) {
@@ -887,6 +924,16 @@ function JoinLensImpl({
         onSelect={(index) => {
           setLeftSel((prev) => (prev === index ? null : index));
         }}
+        onAddToMap={
+          onMapKey && sideMode === "probe" && visibleLeft.length > 0
+            ? () => {
+                const idx = leftSel ?? visibleLeft[0]!;
+                setLeftSel(idx);
+                setRightSel(null);
+                emitMapKey("left", idx);
+              }
+            : undefined
+        }
       />
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-800/80">
@@ -963,6 +1010,31 @@ function JoinLensImpl({
                     : "Matches only"}
                 </button>
               )}
+              {onMapKey && !pairMode && (
+                <button
+                  type="button"
+                  title="Open KeyMap tab with this key as From"
+                  onClick={() => {
+                    const side: JoinKeySide =
+                      leftSel != null ? "left" : "right";
+                    const row =
+                      leftSel != null
+                        ? leftRows[leftSel!]
+                        : rightRows[rightSel!];
+                    const cols = leftSel != null ? leftCols : rightCols;
+                    const keys = leftSel != null ? leftOn : rightOn;
+                    if (!row) return;
+                    const vals = keyValuesFromRow(row, cols, keys).map((v) =>
+                      cellStr(v),
+                    );
+                    if (!vals.some((v) => v.trim())) return;
+                    onMapKey(side, vals);
+                  }}
+                  className="rounded border border-amber-800/60 px-1.5 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
+                >
+                  Add to map…
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -982,7 +1054,7 @@ function JoinLensImpl({
             <span className="text-[10px] text-slate-600">
               {sideMode === "linked"
                 ? "Parents of the center row · click a parent to explain the key"
-                : "Unmatched sample · click left/right to explain / blame"}
+                : "Unmatched sample · click left/right → Add to map… / blame"}
             </span>
           )}
         </div>
@@ -1102,6 +1174,16 @@ function JoinLensImpl({
         onSelect={(index) => {
           setRightSel((prev) => (prev === index ? null : index));
         }}
+        onAddToMap={
+          onMapKey && sideMode === "probe" && visibleRight.length > 0
+            ? () => {
+                const idx = rightSel ?? visibleRight[0]!;
+                setRightSel(idx);
+                setLeftSel(null);
+                emitMapKey("right", idx);
+              }
+            : undefined
+        }
       />
     </div>
   );

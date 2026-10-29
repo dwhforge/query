@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const DEV_URL = "http://localhost:1420";
 
 const vite = spawn("npx", ["vite", "--port", "1420", "--strictPort"], {
   cwd: root,
@@ -13,17 +14,38 @@ const vite = spawn("npx", ["vite", "--port", "1420", "--strictPort"], {
   shell: true,
 });
 
-await new Promise((r) => setTimeout(r, 1500));
+/** Wait until Vite answers — fixed sleep races → blank Electron window. */
+async function waitForVite(url, attempts = 60) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(500) });
+      if (res.ok) return;
+    } catch {
+      /* not up yet */
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`Vite did not become ready at ${url}`);
+}
+
+try {
+  await waitForVite(DEV_URL);
+} catch (e) {
+  console.error(String(e));
+  vite.kill();
+  process.exit(1);
+}
 
 const electronBin = path.join(root, "node_modules", ".bin", "electron");
+// --disable-gpu: blank white window on some Linux GPU stacks (viz init error).
 const elec = spawn(
   electronBin,
-  [".", "--no-sandbox", "--disable-gpu-sandbox"],
+  [".", "--no-sandbox", "--disable-gpu-sandbox", "--disable-gpu"],
   {
     cwd: root,
     env: {
       ...process.env,
-      VITE_DEV_SERVER_URL: "http://localhost:1420",
+      VITE_DEV_SERVER_URL: DEV_URL,
       ELECTRON_DISABLE_SANDBOX: "1",
     },
     stdio: "inherit",

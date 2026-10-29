@@ -339,6 +339,7 @@ fn step_kind_label(step: &TransformationStep) -> &'static str {
         TransformationStep::LoadCsv { .. } => "LoadCsv",
         TransformationStep::LoadParquet { .. } => "LoadParquet",
         TransformationStep::LoadPostgres { .. } => "LoadPostgres",
+        TransformationStep::LoadDuckdb { .. } => "LoadDuckdb",
         TransformationStep::FromQuery { .. } => "FromQuery",
         TransformationStep::SqlModel { .. } => "SqlModel",
         TransformationStep::Filter { .. } => "Filter",
@@ -393,9 +394,21 @@ fn resolve_preview_offsets(
             TransformationStep::Limit { n } => {
                 format!("SELECT * FROM {prev} LIMIT {n}")
             }
-            TransformationStep::DeriveColumn { name: col, expression } => {
+            TransformationStep::DeriveColumn {
+                name: col,
+                expression,
+                mode,
+                op,
+                ..
+            } => {
+                let expr = dwh_pipeline::resolve_derive_expression(
+                    *mode,
+                    op.as_ref(),
+                    expression,
+                    WarehouseDialect::Duckdb,
+                )?;
                 format!(
-                    "SELECT *, ({expression}) AS {} FROM {prev}",
+                    "SELECT *, ({expr}) AS {} FROM {prev}",
                     quote_ident(col)
                 )
             }

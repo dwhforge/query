@@ -18,7 +18,8 @@ use dwh_engine::{
     PreviewResult,
 };
 use dwh_pipeline::{
-    dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql,
+    dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
+    list_export_tree as walk_export_tree, preview_dbt_model_sql,
     preview_dbt_model_sql_with_seeds, push_key_map_to_export, resolve_dbt_bin,
     sync_key_maps_from_export, ConnectionDef, DbtProducer, DbtTarget, ExportResult, KeyMapDef,
     KeyMapSyncResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
@@ -207,6 +208,9 @@ fn demo_sales(fixtures: &Path) -> Result<Workspace, String> {
                     TransformationStep::DeriveColumn {
                         name: "amount_per_unit".into(),
                         expression: "revenue / nullif(qty, 0)".into(),
+                        mode: Default::default(),
+                        op: None,
+                        sql_dialect: None,
                     },
                 ],
                 execution: Default::default(),
@@ -707,6 +711,9 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                     TransformationStep::DeriveColumn {
                         name: "net_revenue".into(),
                         expression: "revenue - coalesce(spend, 0)".into(),
+                        mode: Default::default(),
+                        op: None,
+                        sql_dialect: None,
                     },
                     TransformationStep::SortBy {
                         column: "day".into(),
@@ -726,6 +733,9 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                     TransformationStep::DeriveColumn {
                         name: "month".into(),
                         expression: "strftime(day::DATE, '%Y-%m')".into(),
+                        mode: Default::default(),
+                        op: None,
+                        sql_dialect: None,
                     },
                     TransformationStep::GroupBy {
                         dimensions: vec![
@@ -874,12 +884,42 @@ struct ExportArgs {
     dbt_target: Option<DbtTarget>,
     target_dialect: Option<WarehouseDialect>,
     connections: Option<Vec<ConnectionDef>>,
+    /// Explicit engine (overrides dialect-alone legacy when set with destination).
+    execution_engine: Option<WarehouseDialect>,
+    destination_kind: Option<WarehouseDialect>,
+    /// Destination Postgres connection id → inject `DWH_PG_DSN` for post-export parse.
+    destination_connection_id: Option<String>,
+    /// Postgres schema for published marts (default `public`).
+    destination_schema: Option<String>,
+    /// Query ids to export as `mart_*` (`Project.outputs`; empty → focus only).
+    #[serde(default)]
+    outputs: Option<Vec<String>>,
+    /// When true, skip post-export `dbt parse` (UI runs parse as a separate phase).
+    #[serde(default)]
+    skip_parse: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PathArg {
     path: String,
+    /// Optional process env for dbt (`DWH_PG_DSN`, …) from destination connection.
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+    connections: Option<Vec<ConnectionDef>>,
+    destination_connection_id: Option<String>,
+}
+
+fn resolve_dbt_cli_env(a: &PathArg) -> HashMap<String, String> {
+    if let Some(env) = &a.env {
+        if !env.is_empty() {
+            return env.clone();
+        }
+    }
+    dbt_env_from_connections(
+        a.connections.as_deref().unwrap_or(&[]),
+        a.destination_connection_id.as_deref(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1163,22 +1203,83 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let seeds = collect_load_seeds(&db, &a.workspace, &conns).unwrap_or_default();
-                let path = DbtProducer.produce_with_seeds(
-                    &a.pipeline_name,
-                    &a.workspace,
-                    &a.output_dir,
-                    target,
-                    dialect,
-                    &seeds,
-                )?;
+                let pg_schema = a
+                    .destination_schema
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("public");
+                let path = match (a.execution_engine, a.destination_kind) {
+                    (Some(eng), Some(dest)) => {
+                        use dwh_pipeline::{DestinationKind, ExecutionEngine};
+                        let engine = ExecutionEngine::from_dialect(eng);
+                        let destination = match dest {
+                            WarehouseDialect::Duckdb => DestinationKind::Duckdb,
+                            WarehouseDialect::Postgres => DestinationKind::Postgres,
+                        };
+                        let published = a.outputs.clone().unwrap_or_default();
+                        DbtProducer.produce_routed_with_schema(
+                            &a.pipeline_name,
+                            &a.workspace,
+                            &a.output_dir,
+                            target,
+                            engine,
+                            destination,
+                            pg_schema,
+                            &published,
+                            &seeds,
+                        )?
+                    }
+                    _ => DbtProducer.produce_with_seeds(
+                        &a.pipeline_name,
+                        &a.workspace,
+                        &a.output_dir,
+                        target,
+                        dialect,
+                        &seeds,
+                    )?,
+                };
                 let files = walk_export_tree(&path)?;
                 let mut result = ExportResult::with_files(path.clone(), files);
+                if a.skip_parse.unwrap_or(false) {
+                    result.dbt_parse_ok = true;
+                    result.dbt_parse_log = String::new();
+                } else {
+                    let candidates = dbt_bin_candidates();
+                    let bin = resolve_dbt_bin(&candidates);
+                    let env = dbt_env_from_connections(
+                        &conns,
+                        a.destination_connection_id.as_deref(),
+                    );
+                    let outcome = dbt_parse_with_env(&path, bin.as_deref(), &env);
+                    result.dbt_parse_ok = outcome.ok;
+                    result.dbt_parse_log = outcome.log;
+                }
+                serde_json::to_value(result).map_err(|e| e.to_string())
+            }
+            "parse_export" => {
+                let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let candidates = dbt_bin_candidates();
                 let bin = resolve_dbt_bin(&candidates);
-                let outcome = dbt_parse(&path, bin.as_deref());
-                result.dbt_parse_ok = outcome.ok;
-                result.dbt_parse_log = outcome.log;
-                serde_json::to_value(result).map_err(|e| e.to_string())
+                let env = resolve_dbt_cli_env(&a);
+                let outcome = dbt_parse_with_env(&a.path, bin.as_deref(), &env);
+                serde_json::to_value(serde_json::json!({
+                    "ok": outcome.ok,
+                    "log": outcome.log,
+                }))
+                .map_err(|e| e.to_string())
+            }
+            "build_export" => {
+                let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let candidates = dbt_bin_candidates();
+                let bin = resolve_dbt_bin(&candidates);
+                let env = resolve_dbt_cli_env(&a);
+                let outcome = dbt_build_with_env(&a.path, bin.as_deref(), &env);
+                serde_json::to_value(serde_json::json!({
+                    "ok": outcome.ok,
+                    "log": outcome.log,
+                }))
+                .map_err(|e| e.to_string())
             }
             "list_export_tree" => {
                 let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;

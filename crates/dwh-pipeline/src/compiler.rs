@@ -3,7 +3,7 @@ use crate::emit::{emit_transform_step, substitute_query_placeholders};
 use crate::graph::{cte_name, topo_queries_from};
 use crate::model::{TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
-use crate::sql_escape::escape_sql_string;
+use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::HashMap;
 
 pub struct GraphCompiler<'a> {
@@ -130,6 +130,18 @@ fn compile_step(
             "SELECT * FROM read_parquet('{}')",
             escape_sql_string(path)
         )),
+        TransformationStep::LoadDuckdb {
+            path,
+            schema,
+            table_name,
+            ..
+        } => {
+            // Preview: session ATTACHes the source file read-only under this alias.
+            let alias = crate::postgres_attach::duckdb_file_attach_alias(path);
+            let q_schema = quote_ident(schema);
+            let q_table = quote_ident(table_name);
+            Ok(format!("SELECT * FROM {alias}.{q_schema}.{q_table}"))
+        }
         TransformationStep::LoadPostgres {
             connection_string,
             schema,

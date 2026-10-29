@@ -15,6 +15,11 @@ import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
 import {
+  OpProgress,
+  type OpProgressState,
+} from "./components/OpProgress";
+import { ErrorBanner } from "./components/ErrorBanner";
+import {
   JoinDiagnosticsPanel,
   type JoinDiagKind,
 } from "./components/JoinDiagnosticsPanel";
@@ -74,6 +79,8 @@ import {
   setGlobalConnections,
   syncKeyMapsFromExport,
   writeKeyMap,
+  parseExport,
+  buildExport,
   type AppSettings,
   type JoinDiagSample,
   type JoinDiagnostics,
@@ -85,13 +92,24 @@ import {
 import {
   connectionById,
   emptyProject,
+  migrateProject,
   newQueryId,
   newSourceId,
+  isPublishedOutput,
+  projectDestination,
   projectDialect,
+  projectEngine,
   queryExecution,
+  routeLabel,
+  togglePublishedOutput,
   syncSourcesFromQueries,
   type ConnectionDef,
   type ConnectionKind,
+  type DestinationKind,
+  type DeriveMode,
+  type DeriveOp,
+  type DeriveOpId,
+  type ExecutionEngine,
   type JoinType,
   type ColumnMetadata,
   type PreviewResult,
@@ -204,6 +222,11 @@ function App() {
   const [renameTo, setRenameTo] = useState("");
   const [deriveName, setDeriveName] = useState("");
   const [deriveExpr, setDeriveExpr] = useState("");
+  const [deriveMode, setDeriveMode] = useState<DeriveMode>("sql");
+  const [deriveOpId, setDeriveOpId] = useState<DeriveOpId>("month_start");
+  const [deriveOpCol, setDeriveOpCol] = useState("");
+  const [deriveOpColB, setDeriveOpColB] = useState("");
+  const [deriveOpValue, setDeriveOpValue] = useState("");
   const [customSql, setCustomSql] = useState("select * from {{prev_step}}");
   const [sqlCopied, setSqlCopied] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
@@ -215,6 +238,7 @@ function App() {
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportFiles, setExportFiles] = useState<string[]>([]);
+  const [opProgress, setOpProgress] = useState<OpProgressState | null>(null);
   /** Add to map… — choose which KeyMap when several exist. */
   const [mapPickPending, setMapPickPending] = useState<{
     fromValues: string[];
@@ -601,7 +625,12 @@ function App() {
         break;
       case "DeriveColumn":
         setDeriveName(step.payload.name);
-        setDeriveExpr(step.payload.expression);
+        setDeriveExpr(step.payload.expression ?? "");
+        setDeriveMode(step.payload.mode ?? (step.payload.op ? "op" : "sql"));
+        setDeriveOpId(step.payload.op?.id ?? "month_start");
+        setDeriveOpCol(step.payload.op?.column ?? "");
+        setDeriveOpColB(step.payload.op?.column_b ?? "");
+        setDeriveOpValue(step.payload.op?.value ?? "");
         break;
       case "SqlModel":
       case "CustomSql":
@@ -1079,10 +1108,79 @@ function App() {
   }
 
   async function handleSetTargetDialect(d: WarehouseDialect) {
-    setProject((p) => ({ ...p, target_dialect: d }));
+    // Legacy: set both engine and destination to the same kind.
+    setProject((p) =>
+      migrateProject({
+        ...p,
+        execution_engine: d,
+        destination:
+          d === "postgres"
+            ? {
+                kind: "postgres",
+                connection_id:
+                  p.destination?.connection_id ?? p.target_connection_id,
+              }
+            : { kind: "duckdb", duckdb_path: "local.duckdb" },
+        target_dialect: d,
+      }),
+    );
     await persistAppSettings({
       ...appSettings,
       default_target_dialect: d,
+    });
+  }
+
+  function handleSetExecutionEngine(e: ExecutionEngine) {
+    setProject((p) =>
+      migrateProject({
+        ...p,
+        execution_engine: e,
+        target_dialect: e,
+      }),
+    );
+  }
+
+  function handleSetDestinationKind(d: DestinationKind) {
+    setProject((p) => {
+      const m = migrateProject(p);
+      const pgConns = m.connections.filter((c) => c.kind === "postgres");
+      return migrateProject({
+        ...m,
+        destination:
+          d === "postgres"
+            ? {
+                kind: "postgres",
+                connection_id:
+                  m.destination?.connection_id ??
+                  m.target_connection_id ??
+                  pgConns[0]?.id,
+                schema: m.destination?.schema ?? "public",
+              }
+            : {
+                kind: "duckdb",
+                duckdb_path: m.destination?.duckdb_path ?? "local.duckdb",
+              },
+        target_connection_id:
+          d === "postgres"
+            ? m.destination?.connection_id ??
+              m.target_connection_id ??
+              pgConns[0]?.id
+            : undefined,
+      });
+    });
+  }
+
+  function handleSetDestinationConnection(id: string | undefined) {
+    setProject((p) => {
+      const m = migrateProject(p);
+      return migrateProject({
+        ...m,
+        destination: {
+          kind: "postgres",
+          connection_id: id,
+        },
+        target_connection_id: id,
+      });
     });
   }
 
@@ -1099,16 +1197,19 @@ function App() {
               : id === "keymap"
                 ? "demo_keymap"
                 : "demo_sql";
-      setProject((p) => ({
-        ...p,
-        name: projectName,
-        // Keep global connections; demos only replace sources/workspace.
-        sources: syncSourcesFromQueries([], ws.queries),
-        workspace: ws,
-        canvas: { positions: {} },
-        dbt_target: appSettings.default_dbt_target,
-        target_dialect: appSettings.default_target_dialect,
-      }));
+      setProject((p) =>
+        migrateProject({
+          ...p,
+          name: projectName,
+          // Keep global connections; demos only replace sources/workspace.
+          sources: syncSourcesFromQueries([], ws.queries),
+          workspace: ws,
+          canvas: { positions: {} },
+          dbt_target: appSettings.default_dbt_target,
+          execution_engine: appSettings.default_target_dialect ?? "duckdb",
+          target_dialect: appSettings.default_target_dialect,
+        }),
+      );
       setActiveQueryId(ws.focus_query_id);
       setSelectedStepIndex(
         ws.queries.find((q) => q.id === ws.focus_query_id)?.steps.length
@@ -1617,6 +1718,7 @@ function App() {
         victim.type === "LoadCsv" ||
         victim.type === "LoadParquet" ||
         victim.type === "LoadPostgres" ||
+        victim.type === "LoadDuckdb" ||
         victim.type === "FromQuery" ||
         victim.type === "SqlModel";
       // Deleting the root while later transforms remain → "требует предыдущий шаг".
@@ -1642,6 +1744,7 @@ function App() {
         s.type === "LoadCsv" ||
         s.type === "LoadParquet" ||
         s.type === "LoadPostgres" ||
+        s.type === "LoadDuckdb" ||
         s.type === "FromQuery" ||
         s.type === "SqlModel";
       if (index === 0 && root(steps[0]!)) return steps;
@@ -1721,11 +1824,11 @@ function App() {
   }
 
   function applyLoadedProject(loaded: Project, pathHint?: string) {
-    const withConnections: Project = {
+    const withConnections: Project = migrateProject({
       ...loaded,
       connections: loaded.connections ?? [],
       root_path: loaded.root_path ?? pathHint,
-    };
+    });
     setProject(withConnections);
     setActiveQueryId(withConnections.workspace.focus_query_id || null);
     void refreshExportTree(withConnections.last_dbt_export_path);
@@ -2163,39 +2266,140 @@ function App() {
     }
   }
 
+  async function handleParseExport() {
+    const path = project.last_dbt_export_path;
+    if (!path) {
+      setError("No export yet — File → Export dbt… first");
+      return;
+    }
+    setOpProgress({
+      kind: "parse",
+      phase: "Validating project (dbt parse)…",
+      percent: null,
+    });
+    try {
+      const dest = projectDestination(project);
+      const r = await parseExport(path, connections, dest.connection_id);
+      if (r.ok) {
+        setExportMsg(`dbt parse OK · ${path}`);
+        setError(null);
+      } else {
+        setExportMsg(`dbt parse failed · ${path}`);
+        setError(r.log || "dbt parse failed");
+      }
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setOpProgress(null);
+    }
+  }
+
+  async function handleBuildExport() {
+    const path = project.last_dbt_export_path;
+    if (!path) {
+      setError("No export yet — File → Export dbt… first");
+      return;
+    }
+    try {
+      const dest = projectDestination(project);
+      if (dest.kind === "postgres") {
+        const dsn = connectionById(project, dest.connection_id)?.postgres
+          ?.connection_string?.trim();
+        if (!dsn) {
+          setError(
+            "Destination PostgreSQL connection has no DSN — set it in Connections, then Build again",
+          );
+          return;
+        }
+      }
+      setOpProgress({
+        kind: "build",
+        phase:
+          dest.kind === "postgres"
+            ? "dbt build (seeds + models → destination)…"
+            : "dbt build (seeds + models)…",
+        percent: null,
+      });
+      const r = await buildExport(path, connections, dest.connection_id);
+      if (r.ok) {
+        setExportMsg(`dbt build OK · ${path}`);
+        setError(null);
+      } else {
+        setExportMsg(`dbt build failed · ${path}`);
+        setError(r.log || "dbt build failed");
+      }
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setOpProgress(null);
+    }
+  }
+
   async function handleExportDbt() {
     if (!workspace) return;
     const dir = await open({ directory: true, multiple: false });
     if (typeof dir !== "string") return;
+    const eng = projectEngine(project);
+    const dest = projectDestination(project);
+    const route =
+      eng === dest.kind ? eng : `${eng}→${dest.kind}`;
     try {
-      const dialect = projectDialect(project);
+      setOpProgress({
+        kind: "export",
+        phase: "Writing dbt project files…",
+        percent: 15,
+      });
       const result = await exportDbt(
         project.name.replace(/\s+/g, "_").toLowerCase() || "dwh_rs_query",
         workspace,
         dir,
         project.dbt_target,
-        dialect,
+        eng,
         connections,
+        eng,
+        dest.kind,
+        dest.connection_id,
+        dest.schema ?? "public",
+        project.outputs ?? [],
+        true,
       );
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
       setTreeExpanded((e) => ({ ...e, export: true }));
       const nFiles = result.files.filter((f) => !f.endsWith("/")).length;
-      const base = `dbt ${project.dbt_target} · ${dialect} → ${result.path} (${nFiles} files)`;
-      if (result.dbt_parse_ok) {
+      const base = `dbt ${project.dbt_target} · ${route} → ${result.path} (${nFiles} files)`;
+
+      setOpProgress({
+        kind: "export",
+        phase: "dbt parse (author gate)…",
+        percent: 55,
+      });
+      const parsed = await parseExport(
+        result.path,
+        connections,
+        dest.connection_id,
+      );
+      setOpProgress({
+        kind: "export",
+        phase: parsed.ok ? "Done" : "Parse reported errors",
+        percent: 100,
+      });
+      if (parsed.ok) {
         setExportMsg(`${base} · dbt parse OK`);
         setError(null);
       } else {
         setExportMsg(`${base} · dbt parse failed (files written)`);
         setError(
-          result.dbt_parse_log?.trim()
-            ? result.dbt_parse_log
+          parsed.log?.trim()
+            ? parsed.log
             : "dbt parse failed (install ./scripts/fetch-dbt-venv.sh or put dbt on PATH)",
         );
       }
     } catch (e) {
       setExportMsg(null);
       setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setOpProgress(null);
     }
   }
 
@@ -2454,7 +2658,18 @@ function App() {
       case "DeriveColumn":
         appendStep({
           type: "DeriveColumn",
-          payload: { name: "derived", expression: "1" },
+          payload: {
+            name: "month",
+            mode: "op",
+            op: {
+              id: "month_start",
+              column: columnChoices.find((c) => /day|date|dt/i.test(c)) ??
+                columnChoices[0] ??
+                "day",
+            },
+            expression: "",
+            sql_dialect: projectEngine(project),
+          },
         });
         break;
       case "FromQuery":
@@ -2572,17 +2787,33 @@ function App() {
         projectName={project.name}
         projectPath={project.root_path}
         targetDialect={projectDialect(project)}
-        canExport={Boolean(workspace)}
+        executionEngine={projectEngine(project)}
+        destinationKind={projectDestination(project).kind}
+        destinationConnectionId={projectDestination(project).connection_id}
+        postgresConnections={project.connections.filter(
+          (c) => c.kind === "postgres",
+        )}
+        routeBadge={`export · ${routeLabel(project)}`}
+        canExport={Boolean(workspace) && !opProgress}
         canCopySql={canCopySql}
         sqlCopied={sqlCopied}
         onOpen={() => void handleOpenProject()}
         onSave={() => void handleSaveProject()}
         onSaveAs={() => void handleSaveProjectAs()}
         onExport={() => void handleExportDbt()}
+        onParseExport={
+          opProgress ? undefined : () => void handleParseExport()
+        }
+        onBuildExport={
+          opProgress ? undefined : () => void handleBuildExport()
+        }
         onViewData={() => setBottomTab("data")}
         onViewModel={() => setBottomTab("model")}
         onCopySql={() => void copySql()}
         onNewConnection={() => openNewConnection("postgres")}
+        onSetExecutionEngine={handleSetExecutionEngine}
+        onSetDestinationKind={handleSetDestinationKind}
+        onSetDestinationConnection={handleSetDestinationConnection}
         onSetTargetDialect={(d: WarehouseDialect) =>
           void handleSetTargetDialect(d)
         }
@@ -2596,6 +2827,7 @@ function App() {
       />
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {opProgress && <OpProgress state={opProgress} />}
 
       {mapPickPending && (
         <div
@@ -3170,9 +3402,10 @@ function App() {
               {(error || exportMsg || diagView) && (
                 <div className="space-y-1 px-4 pb-2">
                   {error && (
-                    <div className="rounded-lg border border-rose-900/50 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">
-                      {error}
-                    </div>
+                    <ErrorBanner
+                      message={error}
+                      onDismiss={() => setError(null)}
+                    />
                   )}
                   {exportMsg && (
                     <div className="rounded-lg border border-teal-900/50 bg-teal-950/30 px-3 py-2 text-sm text-teal-200">
@@ -3357,6 +3590,22 @@ function App() {
                   </button>
                 )}
               </div>
+              {activeQuery && (
+                <label
+                  className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-slate-300"
+                  title="Export as mart_* and materialize to destination (Postgres when duckdb→postgres)"
+                >
+                  <input
+                    type="checkbox"
+                    className="rounded border-slate-600"
+                    checked={isPublishedOutput(project, activeQuery.id)}
+                    onChange={() =>
+                      setProject((p) => togglePublishedOutput(p, activeQuery.id))
+                    }
+                  />
+                  Publish to destination
+                </label>
+              )}
               {activeQuery && (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <span className="text-[10px] uppercase tracking-wide text-slate-500">
@@ -3851,16 +4100,113 @@ function App() {
                           key={`der-name-${selectedStepIndex}-${deriveName}`}
                           ref={deriveNameRef}
                           defaultValue={deriveName}
-                          placeholder="name"
+                          placeholder="column name"
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                         />
-                        <input
-                          key={`der-expr-${selectedStepIndex}-${deriveExpr}`}
-                          ref={deriveExprRef}
-                          defaultValue={deriveExpr}
-                          placeholder="expression"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                        />
+                        <label className="block text-[10px] text-slate-500">
+                          Mode
+                          <select
+                            value={deriveMode}
+                            onChange={(e) =>
+                              setDeriveMode(e.target.value as DeriveMode)
+                            }
+                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                          >
+                            <option value="op">Ready-made operation</option>
+                            <option value="sql">SQL expression</option>
+                          </select>
+                        </label>
+                        {deriveMode === "op" ? (
+                          <>
+                            <select
+                              value={deriveOpId}
+                              onChange={(e) =>
+                                setDeriveOpId(e.target.value as DeriveOpId)
+                              }
+                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                            >
+                              <option value="month_start">
+                                Month start (DATE)
+                              </option>
+                              <option value="year_month">
+                                Year-month text (YYYY-MM)
+                              </option>
+                              <option value="coalesce_null">
+                                Replace NULL
+                              </option>
+                              <option value="cast">Cast type</option>
+                              <option value="col_diff">
+                                Difference of two columns
+                              </option>
+                              <option value="trim_case">
+                                Trim / lower / upper
+                              </option>
+                            </select>
+                            <input
+                              value={deriveOpCol}
+                              onChange={(e) => setDeriveOpCol(e.target.value)}
+                              placeholder="column"
+                              list="derive-cols"
+                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                            />
+                            <datalist id="derive-cols">
+                              {columnChoices.map((c) => (
+                                <option key={c} value={c} />
+                              ))}
+                            </datalist>
+                            {deriveOpId === "col_diff" && (
+                              <input
+                                value={deriveOpColB}
+                                onChange={(e) =>
+                                  setDeriveOpColB(e.target.value)
+                                }
+                                placeholder="column_b"
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                              />
+                            )}
+                            {(deriveOpId === "coalesce_null" ||
+                              deriveOpId === "cast") && (
+                              <input
+                                value={deriveOpValue}
+                                onChange={(e) =>
+                                  setDeriveOpValue(e.target.value)
+                                }
+                                placeholder={
+                                  deriveOpId === "cast"
+                                    ? "type (varchar, date…)"
+                                    : "replacement"
+                                }
+                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                              />
+                            )}
+                            <p className="text-[10px] text-slate-500">
+                              Regenerates for {projectEngine(project)} on
+                              export/preview. Edit as SQL to unlock free text.
+                            </p>
+                            <button
+                              type="button"
+                              className="w-full rounded-lg border border-slate-700 px-3 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
+                              onClick={() => setDeriveMode("sql")}
+                            >
+                              Edit as SQL…
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <input
+                              key={`der-expr-${selectedStepIndex}-${deriveExpr}`}
+                              ref={deriveExprRef}
+                              defaultValue={deriveExpr}
+                              placeholder="SQL expression"
+                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                            />
+                            <p className="text-[10px] text-amber-400/80">
+                              Preview engine: {projectEngine(project)}.
+                              Arbitrary SQL for another dialect is not
+                              validated locally.
+                            </p>
+                          </>
+                        )}
                         <button
                           type="button"
                           className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
@@ -3869,16 +4215,47 @@ function App() {
                             const name =
                               deriveNameRef.current?.value.trim() ??
                               deriveName.trim();
-                            const expression =
-                              deriveExprRef.current?.value.trim() ??
-                              deriveExpr.trim();
-                            if (!name || !expression) return;
-                            setDeriveName(name);
-                            setDeriveExpr(expression);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "DeriveColumn",
-                              payload: { name, expression },
-                            });
+                            if (!name) return;
+                            if (deriveMode === "op") {
+                              if (!deriveOpCol.trim()) return;
+                              const op: DeriveOp = {
+                                id: deriveOpId,
+                                column: deriveOpCol.trim(),
+                                column_b: deriveOpColB.trim() || undefined,
+                                value: deriveOpValue.trim() || undefined,
+                                case_mode:
+                                  deriveOpId === "trim_case"
+                                    ? "trim_lower"
+                                    : undefined,
+                              };
+                              setDeriveName(name);
+                              replaceStepAt(selectedStepIndex, {
+                                type: "DeriveColumn",
+                                payload: {
+                                  name,
+                                  mode: "op",
+                                  op,
+                                  expression: "",
+                                  sql_dialect: projectEngine(project),
+                                },
+                              });
+                            } else {
+                              const expression =
+                                deriveExprRef.current?.value.trim() ??
+                                deriveExpr.trim();
+                              if (!expression) return;
+                              setDeriveName(name);
+                              setDeriveExpr(expression);
+                              replaceStepAt(selectedStepIndex, {
+                                type: "DeriveColumn",
+                                payload: {
+                                  name,
+                                  mode: "sql",
+                                  expression,
+                                  sql_dialect: projectEngine(project),
+                                },
+                              });
+                            }
                           }}
                         >
                           Apply

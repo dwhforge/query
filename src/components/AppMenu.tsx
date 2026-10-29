@@ -1,11 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import type { WarehouseDialect } from "../types/pipeline";
+import type {
+  ConnectionDef,
+  DestinationKind,
+  ExecutionEngine,
+  WarehouseDialect,
+} from "../types/pipeline";
 import type { DemoId } from "./EmptyHero";
 
 export interface AppMenuProps {
   projectName: string;
   projectPath?: string;
+  /** @deprecated prefer executionEngine + destinationKind */
   targetDialect: WarehouseDialect;
+  executionEngine: ExecutionEngine;
+  destinationKind: DestinationKind;
+  destinationConnectionId?: string;
+  postgresConnections: ConnectionDef[];
   canExport: boolean;
   canCopySql: boolean;
   sqlCopied: boolean;
@@ -13,10 +23,16 @@ export interface AppMenuProps {
   onSave: () => void;
   onSaveAs: () => void;
   onExport: () => void;
+  onParseExport?: () => void;
+  onBuildExport?: () => void;
   onViewData: () => void;
   onViewModel: () => void;
   onCopySql: () => void;
   onNewConnection: () => void;
+  onSetExecutionEngine: (e: ExecutionEngine) => void;
+  onSetDestinationKind: (d: DestinationKind) => void;
+  onSetDestinationConnection: (id: string | undefined) => void;
+  /** Legacy: sets both engine and destination to the same dialect. */
   onSetTargetDialect: (d: WarehouseDialect) => void;
   onLoadDemo: (id: DemoId) => void;
   onOpenHelp: () => void;
@@ -25,6 +41,7 @@ export interface AppMenuProps {
   onZoomReset?: () => void;
   onToggleFullscreen?: () => void;
   onCloseWindow?: () => void;
+  routeBadge: string;
 }
 
 type MenuId = "file" | "view" | "project" | "help";
@@ -39,7 +56,6 @@ function MenuBarItem({
 }: {
   label: string;
   open: boolean;
-  /** A menu is open — hover switches to this one. */
   menubarActive: boolean;
   onClick: () => void;
   onHoverOpen: () => void;
@@ -54,22 +70,17 @@ function MenuBarItem({
     >
       <button
         type="button"
-        aria-expanded={open}
-        aria-haspopup="menu"
-        onClick={onClick}
-        className={`rounded px-2.5 py-1 text-xs font-medium transition ${
+        className={`rounded px-2 py-1 text-[12px] ${
           open
-            ? "bg-slate-800 text-teal-200"
-            : "text-slate-300 hover:bg-slate-800/80 hover:text-slate-100"
+            ? "bg-slate-800 text-slate-100"
+            : "text-slate-300 hover:bg-slate-800/80"
         }`}
+        onClick={onClick}
       >
         {label}
       </button>
       {open && (
-        <div
-          role="menu"
-          className="absolute left-0 top-full z-50 mt-0.5 min-w-[12rem] rounded-lg border border-slate-700 bg-[#0a1219] py-1 shadow-xl shadow-black/50"
-        >
+        <div className="absolute left-0 top-full z-50 mt-0.5 min-w-[240px] rounded-md border border-slate-700 bg-slate-900 py-1 shadow-xl">
           {children}
         </div>
       )}
@@ -80,39 +91,34 @@ function MenuBarItem({
 function Item({
   label,
   hint,
-  disabled,
   onClick,
+  disabled,
 }: {
   label: string;
   hint?: string;
-  disabled?: boolean;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
-      role="menuitem"
       disabled={disabled}
+      className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left text-[12px] text-slate-200 hover:bg-slate-800 disabled:opacity-40"
       onClick={onClick}
-      className="flex w-full items-center gap-3 px-3 py-1.5 text-left text-xs text-slate-200 hover:bg-teal-500/15 hover:text-teal-100 disabled:cursor-not-allowed disabled:opacity-40"
     >
-      <span className="min-w-0 flex-1">{label}</span>
-      {hint && (
-        <span className="shrink-0 font-mono text-[10px] text-slate-500">
-          {hint}
-        </span>
-      )}
+      <span>{label}</span>
+      {hint && <span className="text-[10px] text-slate-500">{hint}</span>}
     </button>
   );
 }
 
 function Sep() {
-  return <div className="my-1 border-t border-slate-800" role="separator" />;
+  return <div className="my-1 border-t border-slate-800" />;
 }
 
 function SubLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-3 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+    <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
       {children}
     </div>
   );
@@ -121,7 +127,10 @@ function SubLabel({ children }: { children: React.ReactNode }) {
 export function AppMenu({
   projectName,
   projectPath,
-  targetDialect,
+  executionEngine,
+  destinationKind,
+  destinationConnectionId,
+  postgresConnections,
   canExport,
   canCopySql,
   sqlCopied,
@@ -129,11 +138,15 @@ export function AppMenu({
   onSave,
   onSaveAs,
   onExport,
+  onParseExport,
+  onBuildExport,
   onViewData,
   onViewModel,
   onCopySql,
   onNewConnection,
-  onSetTargetDialect,
+  onSetExecutionEngine,
+  onSetDestinationKind,
+  onSetDestinationConnection,
   onLoadDemo,
   onOpenHelp,
   onZoomIn,
@@ -141,49 +154,35 @@ export function AppMenu({
   onZoomReset,
   onToggleFullscreen,
   onCloseWindow,
+  routeBadge,
 }: AppMenuProps) {
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null);
-  const navRef = useRef<HTMLElement>(null);
+  const rootRef = useRef<HTMLElement>(null);
   const menubarActive = openMenu !== null;
 
   useEffect(() => {
-    if (!menubarActive) return;
     function onDoc(e: MouseEvent) {
-      if (navRef.current && !navRef.current.contains(e.target as Node)) {
-        setOpenMenu(null);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpenMenu(null);
+      if (!rootRef.current?.contains(e.target as Node)) setOpenMenu(null);
     }
     document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menubarActive]);
-
-  function close() {
-    setOpenMenu(null);
-  }
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
 
   function toggle(id: MenuId) {
-    setOpenMenu((cur) => (cur === id ? null : id));
+    setOpenMenu((m) => (m === id ? null : id));
   }
 
   function run(fn: () => void) {
-    close();
+    setOpenMenu(null);
     fn();
   }
 
   return (
-    <header className="relative z-20 flex items-center gap-2 border-b border-[var(--line)] px-3 py-1.5 backdrop-blur">
-      <nav
-        ref={navRef}
-        className="flex items-center gap-0.5"
-        aria-label="Application"
-      >
+    <header
+      ref={rootRef}
+      className="flex h-9 shrink-0 items-center gap-1 border-b border-slate-800 bg-slate-950 px-2"
+    >
+      <nav className="flex items-center gap-0.5">
         <MenuBarItem
           label="File"
           open={openMenu === "file"}
@@ -191,25 +190,32 @@ export function AppMenu({
           onClick={() => toggle("file")}
           onHoverOpen={() => setOpenMenu("file")}
         >
-          <Item label="Open project…" hint="⌘O" onClick={() => run(onOpen)} />
+          <Item label="Open…" hint="⌘O" onClick={() => run(onOpen)} />
           <Item label="Save" hint="⌘S" onClick={() => run(onSave)} />
           <Item label="Save as…" onClick={() => run(onSaveAs)} />
           <Sep />
           <Item
             label="Export dbt…"
-            hint="E"
             disabled={!canExport}
             onClick={() => run(onExport)}
           />
+          {onParseExport && (
+            <Item
+              label="Parse export…"
+              disabled={!canExport}
+              onClick={() => run(onParseExport)}
+            />
+          )}
+          {onBuildExport && (
+            <Item
+              label="Build export…"
+              disabled={!canExport}
+              onClick={() => run(onBuildExport)}
+            />
+          )}
+          <Sep />
           {onCloseWindow && (
-            <>
-              <Sep />
-              <Item
-                label="Close window"
-                hint="⌘W"
-                onClick={() => run(onCloseWindow)}
-              />
-            </>
+            <Item label="Close window" onClick={() => run(onCloseWindow)} />
           )}
         </MenuBarItem>
 
@@ -220,23 +226,18 @@ export function AppMenu({
           onClick={() => toggle("view")}
           onHoverOpen={() => setOpenMenu("view")}
         >
-          <Item label="Data tab" hint="/" onClick={() => run(onViewData)} />
-          <Item label="Model tab" onClick={() => run(onViewModel)} />
-          <Sep />
+          <Item label="Data preview" onClick={() => run(onViewData)} />
+          <Item label="Model SQL" onClick={() => run(onViewModel)} />
           <Item
-            label={sqlCopied ? "Copied" : "Copy SQL"}
+            label={sqlCopied ? "Copied!" : "Copy SQL"}
             disabled={!canCopySql}
             onClick={() => run(onCopySql)}
           />
-          {(onZoomIn || onZoomOut || onToggleFullscreen) && (
+          {(onZoomIn || onZoomOut || onZoomReset || onToggleFullscreen) && (
             <>
               <Sep />
               {onZoomIn && (
-                <Item
-                  label="Zoom in"
-                  hint="⌘+"
-                  onClick={() => run(onZoomIn)}
-                />
+                <Item label="Zoom in" hint="⌘+" onClick={() => run(onZoomIn)} />
               )}
               {onZoomOut && (
                 <Item
@@ -270,31 +271,55 @@ export function AppMenu({
           onClick={() => toggle("project")}
           onHoverOpen={() => setOpenMenu("project")}
         >
-          <Item
-            label="New connection…"
-            onClick={() => run(onNewConnection)}
-          />
+          <Item label="New connection…" onClick={() => run(onNewConnection)} />
           <Sep />
-          <SubLabel>Export warehouse</SubLabel>
+          <SubLabel>Execution engine (SQL dialect)</SubLabel>
           <Item
-            label={
-              targetDialect === "duckdb"
-                ? "✓ DuckDB"
-                : "DuckDB"
-            }
-            onClick={() => run(() => onSetTargetDialect("duckdb"))}
+            label={executionEngine === "duckdb" ? "✓ DuckDB" : "DuckDB"}
+            onClick={() => run(() => onSetExecutionEngine("duckdb"))}
+          />
+          <Item
+            label={executionEngine === "postgres" ? "✓ PostgreSQL" : "PostgreSQL"}
+            onClick={() => run(() => onSetExecutionEngine("postgres"))}
+          />
+          <SubLabel>Destination (materialize)</SubLabel>
+          <Item
+            label={destinationKind === "duckdb" ? "✓ DuckDB file" : "DuckDB file"}
+            onClick={() => run(() => onSetDestinationKind("duckdb"))}
           />
           <Item
             label={
-              targetDialect === "postgres"
-                ? "✓ Postgres"
-                : "Postgres"
+              destinationKind === "postgres" ? "✓ PostgreSQL" : "PostgreSQL"
             }
-            onClick={() => run(() => onSetTargetDialect("postgres"))}
+            onClick={() => run(() => onSetDestinationKind("postgres"))}
           />
+          {destinationKind === "postgres" && (
+            <>
+              <SubLabel>Destination connection</SubLabel>
+              {postgresConnections.length === 0 ? (
+                <p className="px-3 py-1.5 text-[10px] text-amber-400/90">
+                  Add a Postgres connection first
+                </p>
+              ) : (
+                postgresConnections.map((c) => (
+                  <Item
+                    key={c.id}
+                    label={
+                      destinationConnectionId === c.id
+                        ? `✓ ${c.name || c.id}`
+                        : c.name || c.id
+                    }
+                    onClick={() =>
+                      run(() => onSetDestinationConnection(c.id))
+                    }
+                  />
+                ))
+              )}
+            </>
+          )}
           <p className="px-3 py-1.5 text-[10px] leading-snug text-slate-500">
-            Dialect for dbt emit. Preview: local=DuckDB; query
-            execution=target runs on warehouse.
+            Engine = SQL dialect for emit/preview honesty. Destination = where
+            dbt writes. Files/S3 need DuckDB engine (Files→PG via ATTACH).
           </p>
         </MenuBarItem>
 
@@ -331,14 +356,12 @@ export function AppMenu({
         </MenuBarItem>
       </nav>
 
-      <div
-        className="ml-auto flex min-w-0 max-w-[60%] items-center gap-2"
-      >
+      <div className="ml-auto flex min-w-0 max-w-[60%] items-center gap-2">
         <span
           className="shrink-0 rounded border border-slate-700 bg-slate-950/80 px-2 py-0.5 font-mono text-[10px] text-slate-300"
-          title="Project warehouse dialect (dbt export). DuckDB preview emulates dbt-on-duckdb; postgres target needs execution=target for honest live SQL."
+          title="execution_engine → destination"
         >
-          export → {targetDialect}
+          {routeBadge}
         </span>
         <div
           className="min-w-0 flex-1 rounded-md border border-slate-800/80 bg-slate-950/50 px-2.5 py-1 text-right"

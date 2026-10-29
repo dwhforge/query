@@ -16,6 +16,17 @@ fn default_s3_provider() -> String {
 pub enum ConnectionKind {
     Postgres,
     S3,
+    /// Path to an existing `.duckdb` file used as a read-only source.
+    Duckdb,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DuckdbParams {
+    /// Absolute or project-relative path to the `.duckdb` database file.
+    pub path: String,
+    /// When true (default), source ATTACH is read-only so export cannot mutate it.
+    #[serde(default = "default_true")]
+    pub read_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -73,6 +84,8 @@ pub struct ConnectionDef {
     pub postgres: Option<PostgresParams>,
     #[serde(default)]
     pub s3: Option<S3Params>,
+    #[serde(default)]
+    pub duckdb: Option<DuckdbParams>,
 }
 
 impl ConnectionDef {
@@ -80,6 +93,13 @@ impl ConnectionDef {
         self.postgres
             .as_ref()
             .map(|p| p.connection_string.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn duckdb_path(&self) -> Option<&str> {
+        self.duckdb
+            .as_ref()
+            .map(|p| p.path.as_str())
             .filter(|s| !s.is_empty())
     }
 }

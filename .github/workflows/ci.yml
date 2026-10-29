@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch dbt venv
+        run: ./scripts/fetch-dbt-venv.sh
+      - name: Unit tests
+        run: |
+          cargo test -p dwh-pipeline --lib
+          cargo test -p dwh-engine --lib
+      - name: Host build
+        run: cargo build -p dwh-host --release
+
+  integration-matrix:
+    runs-on: ubuntu-latest
+    needs: [rust, frontend]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: dwh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Require Postgres
+        run: pg_isready -h 127.0.0.1 -U postgres
+      - name: Require MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          echo "MinIO failed to start — failing job (no silent skip)" >&2
+          exit 1
+      - name: Fetch dbt venv
+        run: ./scripts/fetch-dbt-venv.sh
+      - name: Route + attach smoke
+        env:
+          DWH_PG_DSN: postgresql://postgres:postgres@127.0.0.1:5432/dwh
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dwh
+        run: |
+          cargo test -p dwh-pipeline --lib files_plus_postgres -- --nocapture
+          cargo test -p dwh-pipeline --lib leading_zero -- --nocapture
+          ./scripts/ci-duckdb-pg-attach.sh

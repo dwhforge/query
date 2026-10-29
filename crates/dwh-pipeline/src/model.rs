@@ -1,4 +1,5 @@
 use crate::connection::ConnectionDef;
+use crate::derive_ops::{DeriveMode, DeriveOp, SqlDialectTag};
 use crate::dialect::QueryExecution;
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,17 @@ pub enum TransformationStep {
         schema: String,
         table_name: String,
     },
+    /// Read a relation from an attached DuckDB database file (read-only source).
+    LoadDuckdb {
+        #[serde(default)]
+        connection_id: Option<String>,
+        /// Absolute / project-relative path to `.duckdb` when connection_id absent.
+        #[serde(default)]
+        path: String,
+        #[serde(default = "default_pg_schema")]
+        schema: String,
+        table_name: String,
+    },
     /// Start from another query’s output (`ref` in dbt). Must be the first step.
     FromQuery { query_id: String },
     /// Hand-written SQL as the query root (ready-made model body). Must be first.
@@ -55,7 +67,20 @@ pub enum TransformationStep {
     Filter { condition: String },
     SelectColumns { columns: Vec<String> },
     RenameColumn { from: String, to: String },
-    DeriveColumn { name: String, expression: String },
+    /// Derived column: ready-made op or free SQL (legacy projects = Sql + expression).
+    DeriveColumn {
+        name: String,
+        /// Free SQL when `mode=sql` (also set when migrating legacy projects).
+        #[serde(default)]
+        expression: String,
+        #[serde(default)]
+        mode: DeriveMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<DeriveOp>,
+        /// Dialect of `expression` when mode=sql; unknown if not determinable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sql_dialect: Option<SqlDialectTag>,
+    },
     GroupBy {
         dimensions: Vec<String>,
         aggregates: Vec<String>,

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  ConnectionDef,
-  KeyMapDef,
-  Project,
-  QueryDef,
-  SourceDef,
+import {
+  isPublishedOutput,
+  type ConnectionDef,
+  type KeyMapDef,
+  type Project,
+  type QueryDef,
+  type SourceDef,
 } from "../types/pipeline";
 
 interface ExplorerTreeProps {
@@ -559,6 +560,7 @@ export function ExplorerTree({
               {project.workspace.queries.map((q: QueryDef) => {
                 const active = q.id === activeQueryId;
                 const isFocus = q.id === focus;
+                const published = isPublishedOutput(project, q.id);
                 const editing =
                   renaming?.kind === "query" && renaming.id === q.id;
                 return (
@@ -590,11 +592,19 @@ export function ExplorerTree({
                         }`}
                       >
                         <span className="truncate">{q.name}</span>
-                        {isFocus && (
-                          <span className="ml-auto text-[9px] text-teal-400">
-                            ★
-                          </span>
-                        )}
+                        <span className="ml-auto flex shrink-0 items-center gap-1">
+                          {published && (
+                            <span
+                              className="text-[9px] text-amber-400/90"
+                              title="Published to destination (mart)"
+                            >
+                              ↑
+                            </span>
+                          )}
+                          {isFocus && (
+                            <span className="text-[9px] text-teal-400">★</span>
+                          )}
+                        </span>
                       </button>
                     )}
                   </li>
@@ -709,7 +719,13 @@ export function ExplorerTree({
                   onClick={onExport}
                   className="w-full rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80 hover:text-teal-200"
                 >
-                  dbt ({project.dbt_target}) · {project.target_dialect ?? "duckdb"}
+                  dbt ({project.dbt_target}) ·{" "}
+                  {project.execution_engine ?? project.target_dialect ?? "duckdb"}
+                  {project.destination?.kind &&
+                  project.destination.kind !==
+                    (project.execution_engine ?? project.target_dialect)
+                    ? `→${project.destination.kind}`
+                    : ""}
                 </button>
               </li>
               {project.last_dbt_export_path && (

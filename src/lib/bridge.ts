@@ -326,6 +326,13 @@ export function exportDbt(
   dbtTarget: DbtTarget = "v1",
   targetDialect: WarehouseDialect = "duckdb",
   connections: ConnectionDef[] = [],
+  executionEngine?: WarehouseDialect,
+  destinationKind?: WarehouseDialect,
+  destinationConnectionId?: string,
+  destinationSchema?: string,
+  outputs?: string[],
+  /** UI progress: write files only; call `parseExport` as a second phase. */
+  skipParse?: boolean,
 ): Promise<ExportResult> {
   return invoke<ExportResult>("export_dbt", {
     pipelineName,
@@ -334,6 +341,63 @@ export function exportDbt(
     dbtTarget,
     targetDialect,
     connections,
+    executionEngine: executionEngine ?? targetDialect,
+    destinationKind: destinationKind ?? targetDialect,
+    destinationConnectionId,
+    destinationSchema: destinationSchema?.trim() || "public",
+    outputs: outputs ?? [],
+    skipParse: skipParse ?? false,
+  });
+}
+
+/** Env for generated profiles (`DWH_PG_DSN` / `DWH_PG_PASSWORD`) from destination PG connection. */
+export function dbtEnvFromConnections(
+  connections: ConnectionDef[],
+  destinationConnectionId?: string,
+): Record<string, string> {
+  const preferred = destinationConnectionId?.trim();
+  const conn =
+    (preferred
+      ? connections.find((c) => c.id === preferred)
+      : undefined) ??
+    connections.find((c) => c.kind === "postgres");
+  const dsn = conn?.postgres?.connection_string?.trim();
+  if (!dsn) return {};
+  const env: Record<string, string> = { DWH_PG_DSN: dsn };
+  const m = dsn.match(/^postgres(?:ql)?:\/\/[^:]+:([^@]+)@/i);
+  if (m?.[1]) env.DWH_PG_PASSWORD = m[1];
+  return env;
+}
+
+export function parseExport(
+  exportPath: string,
+  connections: ConnectionDef[] = [],
+  destinationConnectionId?: string,
+): Promise<{
+  ok: boolean;
+  log: string;
+}> {
+  return invoke("parse_export", {
+    path: exportPath,
+    env: dbtEnvFromConnections(connections, destinationConnectionId),
+    connections,
+    destinationConnectionId,
+  });
+}
+
+export function buildExport(
+  exportPath: string,
+  connections: ConnectionDef[] = [],
+  destinationConnectionId?: string,
+): Promise<{
+  ok: boolean;
+  log: string;
+}> {
+  return invoke("build_export", {
+    path: exportPath,
+    env: dbtEnvFromConnections(connections, destinationConnectionId),
+    connections,
+    destinationConnectionId,
   });
 }
 

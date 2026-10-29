@@ -256,7 +256,7 @@ mod tests {
         assert!(ran.ok, "dbt run failed:\n{}", ran.log);
 
         let focus = ws.query("sales_all").unwrap();
-        let mart = dbt_model_name(&ws, focus);
+        let mart = dbt_model_name(&ws, focus, &[]);
         let duckdb_file = Path::new(&path).join("local.duckdb");
         assert!(duckdb_file.is_file(), "dbt duckdb missing");
 

@@ -164,6 +164,47 @@ impl DbSession {
                 Ok(())
             })?;
         }
+        // External DuckDB sources: ATTACH read-only (working DB stays in-memory / separate).
+        {
+            use dwh_pipeline::{duckdb_file_attach_alias, escape_sql_string};
+            let mut paths = HashSet::new();
+            for q in &resolved.queries {
+                for s in &q.steps {
+                    if let TransformationStep::LoadDuckdb { path, connection_id, .. } = s {
+                        let p = if !path.trim().is_empty() {
+                            path.trim().to_string()
+                        } else if let Some(cid) = connection_id {
+                            connections
+                                .iter()
+                                .find(|c| c.id == *cid)
+                                .and_then(|c| c.duckdb_path())
+                                .unwrap_or("")
+                                .to_string()
+                        } else {
+                            String::new()
+                        };
+                        if !p.is_empty() {
+                            paths.insert(p);
+                        }
+                    }
+                }
+            }
+            if !paths.is_empty() {
+                self.with_conn(|conn| {
+                    for p in &paths {
+                        let alias = duckdb_file_attach_alias(p);
+                        let sql = format!(
+                            "ATTACH IF NOT EXISTS '{}' AS {alias} (READ_ONLY);",
+                            escape_sql_string(p)
+                        );
+                        conn.execute_batch(&sql).map_err(|e| {
+                            format!("ATTACH duckdb source {p}: {e}")
+                        })?;
+                    }
+                    Ok(())
+                })?;
+            }
+        }
         if workspace_needs_httpfs(&resolved, connections) {
             self.ensure_httpfs()?;
             let conn = self.conn.lock().map_err(|e| e.to_string())?;

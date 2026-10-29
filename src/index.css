@@ -79,6 +79,19 @@ select option {
   }
 }
 
+@keyframes op-progress-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+.op-progress-indeterminate {
+  animation: op-progress-slide 1.15s ease-in-out infinite;
+}
+
 .anim-rise {
   animation: rise 0.45s ease-out both;
 }

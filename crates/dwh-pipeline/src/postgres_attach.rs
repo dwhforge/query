@@ -4,12 +4,21 @@ use crate::sql_escape::quote_ident;
 
 /// Stable DuckDB ATTACH alias for a Postgres DSN (opaque identifier).
 pub fn postgres_attach_alias(conn_str: &str) -> String {
+    attach_alias("dwh_pg", conn_str)
+}
+
+/// Stable alias for an attached DuckDB source file (read-only).
+pub fn duckdb_file_attach_alias(path: &str) -> String {
+    attach_alias("dwh_ddb", path)
+}
+
+fn attach_alias(prefix: &str, key: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
-    for b in conn_str.as_bytes() {
+    for b in key.as_bytes() {
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x100000001b3);
     }
-    format!("dwh_pg_{h:016x}")
+    format!("{prefix}_{h:016x}")
 }
 
 /// `alias."schema"."table"` for use inside DuckDB SQL after ATTACH.

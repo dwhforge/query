@@ -1,139 +1,133 @@
 # DWHForge Query
 
-**Visual transforms → real dbt.** A local desktop workbench for data engineers: multi-source pipelines, instant DuckDB preview, export a project you can `dbt run` without hand-edits.
+**Visual pipelines → real dbt → your warehouse.**
 
-Raw data stays on your machine. No cloud account required.
+A local desktop workbench for data engineers: multi-source transforms with a Power Query–like mental model, instant DuckDB preview, and export of a **runnable dbt project**—not a proprietary runtime lock-in.
+
+Raw data and secrets stay on your machine. No cloud account required.
 
 <p align="center">
   <img src="docs/welcome.png" alt="DWHForge Query — visual workspace" width="900" />
 </p>
 
 ```text
-  CSV · Parquet · PostgreSQL
-            │
-            ▼
-   Visual workspace (PQ-like queries + Join)
-            │
-            ▼
-   DuckDB preview  ≤50 rows
-            │
-            ▼
-   dbt project  (staging / intermediate / marts)
+  CSV · Parquet · S3 · PostgreSQL · DuckDB files
+                    │
+                    ▼
+         Visual workspace  (queries · Join · KeyMap · Derive)
+                    │
+                    ▼
+         DuckDB preview  (structural, fast)
+                    │
+                    ▼
+         dbt project   staging / intermediate / marts
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+    local.duckdb         PostgreSQL
+    (working)            (published marts)
 ```
 
-## Why
+## Why this exists
 
-Most “visual ETL” tools stop at a proprietary graph. DWHForge Query treats the graph as an IR and ships **dbt** as the artifact: `sources.yml`, layered models, `profiles.yml`, ready for your warehouse.
+Most visual ETL tools stop at a proprietary graph. DWHForge Query treats the graph as an IR and ships **dbt** as the artifact: layered models, seeds, `sources.yml`, `profiles.yml`—ready for Git, CI, and `dbt build`.
 
-Power Query *mental model* (multi-query, Applied Steps, Merge) — not Power BI reports, not M.
+- **Power Query path** (multi-query, Applied Steps, Merge)—not Power BI reports, not M.
+- **Engine ≠ destination** — author SQL for DuckDB while landing **published** marts in PostgreSQL via ATTACH (no forced CSV landing).
+- **Return-and-edit** — re-export safely; generator-owned files are hash-tracked.
 
-## Features
+## Highlights
 
-- **Multi-query workspace** — sources as queries, Join / Append / Filter / GroupBy / free SQL
-- **Structural preview** — DuckDB in-process; catch bad joins before you leave the editor
-- **dbt export** — runnable project for DuckDB or Postgres target dialect
-- **PostgreSQL sources** — first-class (ATTACH + catalog picker); CSV / Parquet / S3 paths
-- **Secrets + settings off-project** — `~/.dwhforge-query/secrets.json` and `settings.json` (defaults / last Export dialect); not inside `.dwhproj.json`
-- **Offline DuckDB** — bundled engine + sidecar `extensions/` (no CDN install at runtime)
+| Capability | What you get |
+|------------|----------------|
+| **Multi-query workspace** | Sources as queries; Join / Append / Filter / GroupBy / Derive / free SQL |
+| **Join lens & KeyMap** | Diagnose unmatched keys; alias tables as dbt seeds |
+| **Four export routes** | DuckDB↔DuckDB, Files→PG (ATTACH), DuckDB→PG, PG→PG |
+| **Publish controls** | Mark queries **Publish to destination** → `mart_*` in the warehouse |
+| **Export → Parse → Build** | Progress UI; Build runs `dbt build` with DSN from your connection |
+| **Secrets off-project** | `~/.dwhforge-query/secrets.json` — not inside `.dwhproj.json` |
+| **Offline DuckDB** | Bundled engine + `extensions/` (no CDN at runtime) |
 
 ## Quick start
 
+**From source**
+
 ```bash
-# Once: DuckDB extensions (needs network)
-./scripts/fetch-duckdb-extensions.sh
-
-# Once: local dbt Core 1.x venv for offline `dbt parse` on Export
-./scripts/fetch-dbt-venv.sh
-
+./scripts/fetch-duckdb-extensions.sh   # once (network)
+./scripts/fetch-dbt-venv.sh            # once — local dbt Core 1.x + duckdb/postgres adapters
 npm install
 cargo build -p dwh-host --release
 ./scripts/sync-duckdb-lib.sh
-
-# Desktop shell = Electron (Chromium bundled — no system WebKitGTK / dnf)
 npm run electron:dev
 ```
 
-DuckDB **v2** via `duckdb-rs` **prebuilt** lib (not Cargo `bundled` — that rebuilds C++ for a long time). Runtime layout: `<app>/extensions/{postgres_scanner,httpfs,aws}.duckdb_extension` — only `LOAD` from that folder ([ADR-0011](docs/adr/0011-offline-duckdb-extensions.md)).
+**After the window opens**
+
+1. Help → Load demo (e.g. **Key mapping**).
+2. Project → set **execution engine** and **destination** (for Files→Postgres: engine DuckDB, destination PostgreSQL + connection).
+3. Inspector → **Publish to destination** on marts you want in the warehouse.
+4. File → **Export dbt…** → **Build export…**.
+
+Full post-install guide (where dbt lives, DSN, portable layout, troubleshooting):
+
+→ **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**  
+→ **[docs/export-and-run.md](docs/export-and-run.md)** (routes, marts vs stg/int, ATTACH)
 
 ### Headless / CI
 
 ```bash
 cargo test -p dwh-pipeline
+cargo test -p dwh-engine --lib
 
-cargo run -p dwh-engine --bin dwh-preview -- fixtures/sample.csv 'amount > 1000'
-
-cargo run -p dwh-engine --bin dwh-preview -- --join \
-  fixtures/sample.csv fixtures/dim_region.csv region
-
-# Same IR as UI Export (optional offline parse — needs dbt on PATH or fetch-dbt-venv.sh)
+# IR export + optional offline parse
 cargo run -p dwh-pipeline --bin dwh-export -- \
   path/to/project.dwhproj.json /tmp/dwh-out --validate
+
+# DuckDB→Postgres ATTACH smoke (needs DWH_PG_DSN + dbt-venv)
+DWH_PG_DSN='postgresql://…' ./scripts/ci-duckdb-pg-attach.sh
 ```
 
-UI **Export** always writes the tree then runs offline `dbt parse` (no warehouse). That is an **author gate only** — green parse ≠ correct data. `dbt run` stays on the target machine / CI:
-
-```bash
-cd /tmp/dwh-out/<project_name> && dbt run --profiles-dir ./
-```
-
-Re-export writes `.dwhforge-export.json` (owned-file hashes) and refuses if you hand-edited generator-owned files.
-
-**Automated e2e (DuckDB):** `cargo test -p dwh-engine export_run_compare` (needs `dbt` + `dbt-duckdb`, e.g. `./scripts/fetch-dbt-venv.sh`). Covers CSV → Rename → Append → export → `dbt run` → row compare vs preview. **Postgres-target e2e is not automated** — export with `target_dialect=postgres` against landed PG sources and run `dbt run` manually; do not treat DuckDB CI as Postgres coverage.
-
-### VS Code / Cursor
-
-[`.vscode/launch.json`](.vscode/launch.json) — Electron + `dwh-host`, headless `dwh-preview`. Extensions: [`.vscode/extensions.json`](.vscode/extensions.json).
-
-## Stack
+## Architecture (short)
 
 | Layer | Choice |
 |-------|--------|
 | Shell | Electron + Rust `dwh-host` sidecar |
-| UI | React + TypeScript + Vite |
-| IR / export | Rust (`dwh-pipeline`) |
+| UI | React · TypeScript · Vite |
+| IR / export | `dwh-pipeline` |
 | Preview | DuckDB (`dwh-engine`) |
-| Artifact | dbt Core project |
+| Artifact | dbt Core 1.x project |
 
 ```text
-crates/dwh-pipeline   Workspace, steps, compiler, DbtProducer, dwh-export
-crates/dwh-engine     DuckDB session, preview, dwh-preview
-crates/dwh-host       Localhost JSON-RPC sidecar
-electron/             Electron main / preload
+crates/dwh-pipeline   Workspace IR, emit, DbtProducer
+crates/dwh-engine     DuckDB session, preview, join lens
+crates/dwh-host       JSON-RPC sidecar (export / parse / build)
+electron/             Desktop shell
 src/                  React UI
-extensions/ fixtures/ docs/
+docs/                 Product + ADRs + getting started
 ```
 
-## Naming
+## Docs map
 
-| | |
-|--|--|
-| Product | **DWHForge Query** |
-| Secrets / settings | `~/.dwhforge-query/` (`secrets.json`, `settings.json`) |
-| App id | `com.dwhforge.query` |
-| Repo (legacy path) | `dwh-rs-query` |
-
-## Docs
-
-| | |
-|--|--|
-| [DESIGN](docs/DESIGN.md) | Product horizons, next DoD (§10), Join MVP (§9) |
-| [ARCHITECTURE](docs/ARCHITECTURE.md) | Modules, Workspace IR |
-| [SPEC](docs/SPEC.md) | Contracts, commands, v1 baseline DoD |
-| [DEMOS](docs/DEMOS.md) | Demo workspaces · practice coverage |
-| [COMPETITIVE](docs/COMPETITIVE.md) | Landscape & wedge |
-| [adr/](docs/adr/) | Decisions ([ADR-0018](docs/adr/0018-return-and-edit.md) = return-and-edit) |
+| Doc | Contents |
+|-----|----------|
+| [GETTING_STARTED](docs/GETTING_STARTED.md) | Install → dbt-venv → first Export/Build |
+| [export-and-run](docs/export-and-run.md) | Routes, publish/marts, ATTACH, progress ops |
+| [DESIGN](docs/DESIGN.md) | Product horizons & DoD |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Modules & IR |
+| [DEMOS](docs/DEMOS.md) | Demo workspaces |
+| [adr/](docs/adr/) | Decisions (0014 engine×destination, 0017 parse gate, 0018 return-and-edit, 0020 KeyMap, …) |
 
 ## Download
 
-- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/) (latest Linux / Windows)
-- GitHub Releases: [dwhforge/query/releases](https://github.com/dwhforge/query/releases)
+- Site: [dwhforge.github.io/query](https://dwhforge.github.io/query/)
+- Releases: [github.com/dwhforge/query/releases](https://github.com/dwhforge/query/releases)
 
-| Package | Use on |
-|---------|--------|
-| **`*-electron-linux-x64.tar.gz`** | Linux — unpack, `./DWHForge-Query` (no sudo / no WebKitGTK) |
-| **`*-electron-windows-x64.zip`** | Windows — unpack, `DWHForge-Query.cmd` |
+| Package | Platform |
+|---------|----------|
+| `*-electron-linux-x64.tar.gz` | Linux — unpack, `./DWHForge-Query` |
+| `*-electron-windows-x64.zip` | Windows — unpack, `DWHForge-Query.cmd` |
 
-Chromium via Electron. Linux **glibc ≥ 2.28** (RHEL 8 / РЕД ОС 7.3+ / Ubuntu 20.04+). Offline DuckDB + `extensions/`. CI: tag `v*` → `.github/workflows/release.yml`.
+Linux **glibc ≥ 2.28**. After unpack, run `./scripts/fetch-dbt-venv.sh` in the tree (or ship `dbt-venv/`) so Parse/Build find dbt.
 
 ## License
 

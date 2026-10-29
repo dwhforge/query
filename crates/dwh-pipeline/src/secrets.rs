@@ -191,6 +191,8 @@ pub fn merge_connection_secret(conn: &mut ConnectionDef, secret: &ConnectionSecr
                 s3.session_token = Some(v.clone());
             }
         }
+        // DuckDB file path is not a secret — nothing to merge.
+        ConnectionKind::Duckdb => {}
     }
 }
 
@@ -233,6 +235,7 @@ mod tests {
                 connection_string: "postgresql://u:p@localhost/db".into(),
             }),
             s3: None,
+        duckdb: None,
         };
         let sec = extract_connection_secret(&c);
         strip_connection_secrets(&mut c);
@@ -262,6 +265,7 @@ mod tests {
                     connection_string: "postgresql://u:p@localhost/db".into(),
                 }),
                 s3: None,
+            duckdb: None,
             }],
             sources: vec![],
             workspace: Workspace {
@@ -277,6 +281,10 @@ mod tests {
                 key_maps: vec![],
             },
             dbt_target: DbtTarget::V1,
+            execution_engine: crate::destination::ExecutionEngine::Duckdb,
+            destination: crate::destination::Destination::duckdb("local.duckdb"),
+            outputs: vec![],
+            materialization: crate::destination::Materialization::Table,
             target_dialect: WarehouseDialect::Duckdb,
             target_connection_id: None,
             last_dbt_export_path: None,

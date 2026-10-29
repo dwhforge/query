@@ -20,6 +20,8 @@ const ROOT = path.resolve(__dirname, "..");
 if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox");
   app.commandLine.appendSwitch("disable-gpu-sandbox");
+  // Avoid blank/white window when viz/GPU process fails to init.
+  app.commandLine.appendSwitch("disable-gpu");
 }
 
 /** @type {import('node:child_process').ChildProcess | null} */
@@ -324,6 +326,11 @@ function createWindow() {
   });
   mainWindow.webContents.on("render-process-gone", (_e, details) => {
     console.error("[dwh] render-process-gone", details);
+  });
+  mainWindow.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.error(`[renderer] ${message} (${sourceId}:${line})`);
+    }
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;

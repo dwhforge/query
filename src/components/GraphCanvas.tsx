@@ -158,6 +158,7 @@ function sourceKind(q: QueryDef): string {
   if (s.type === "LoadCsv") return "CSV";
   if (s.type === "LoadParquet") return "Parquet";
   if (s.type === "LoadPostgres") return "Postgres";
+  if (s.type === "LoadDuckdb") return "DuckDB";
   if (s.type === "FromQuery") return "REF";
   if (s.type === "SqlModel") return "SQL";
   return s.type;
@@ -171,6 +172,8 @@ function shortStepLabel(step: TransformationStep, index: number): string {
       return `s${index} LoadParquet`;
     case "LoadPostgres":
       return `s${index} LoadPostgres`;
+    case "LoadDuckdb":
+      return `s${index} LoadDuckdb`;
     case "FromQuery":
       return `s${index} FromQuery`;
     case "SqlModel":

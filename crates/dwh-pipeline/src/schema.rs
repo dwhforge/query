@@ -74,7 +74,8 @@ pub fn apply_step_schema(
     match step {
         TransformationStep::LoadCsv { .. }
         | TransformationStep::LoadParquet { .. }
-        | TransformationStep::LoadPostgres { .. } => {
+        | TransformationStep::LoadPostgres { .. }
+        | TransformationStep::LoadDuckdb { .. } => {
             if step_idx != 0 {
                 return Err(format!(
                     "query '{query_id}': Load* must be the first step (got index {step_idx})"

@@ -25,8 +25,9 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Add Connections (Postgres, S3) and Sources / Queries in the Explorer.",
       "Build steps on the canvas (Join, Append, Filter, GroupBy, …).",
       "Preview the focus query (up to 50 rows) in DuckDB.",
-      "Export dbt → project folder with staging / intermediate / marts.",
-      "Run `dbt run` yourself (or in CI) with the generated profiles — Export only runs offline `dbt parse`.",
+      "Export dbt → project folder with staging / intermediate / marts (progress: write → parse).",
+      "File → Build export runs `dbt build` (seeds + models); DSN comes from destination Postgres connection when needed.",
+      "Publish to destination (inspector) marks marts; see docs/GETTING_STARTED.md.",
     ],
   },
   {
@@ -117,8 +118,8 @@ export const HELP_SECTIONS: HelpSection[] = [
     title: "Naming",
     bullets: [
       "In the UI, query names stay plain (e.g. sales, fact_sales) — no stg_/int_/mart_ prefixes.",
-      "On Export, models get stg_ (load-only), mart_ (focus query), or int_ (everything else).",
-      "Focus query decides which model is the mart.",
+      "On Export: stg_ (load-only), mart_ (Publish to destination), int_ (rest).",
+      "Inspector → Publish to destination marks queries as marts (Postgres when duckdb→postgres). Empty publish list falls back to focus ★ only.",
     ],
   },
   {
@@ -126,10 +127,10 @@ export const HELP_SECTIONS: HelpSection[] = [
     title: "Export & Git",
     bullets: [
       "Export is manual (not Save map). Pick a folder → dbt_project.yml, profiles, sources.yml, model SQL, and KeyMap seeds when present.",
-      "Offline `dbt parse` runs after Export in the UI (no warehouse). Green parse ≠ correct data.",
+      "Offline `dbt parse` after Export is an author gate only. Green parse ≠ correct data — use Build for materialization.",
       "Re-export uses a content-hash manifest: hand-edited generator-owned files (including seeds/map_*.csv) → refuse before overwrite. Revert, sync into the app, or export to a new folder.",
-      "After Export, seed-backed KeyMap Save pushes CSV into that same folder; run dbt seed in CI/local to load tables.",
-      "Secrets live in ~/.dwhforge-query/, not inside the project file.",
+      "After Export, seed-backed KeyMap Save pushes CSV into that same folder; Build runs dbt seed as part of dbt build.",
+      "Secrets live in ~/.dwhforge-query/, not inside the project file. Full setup: docs/GETTING_STARTED.md.",
     ],
   },
   {

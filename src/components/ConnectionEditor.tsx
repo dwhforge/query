@@ -34,6 +34,7 @@ function ConnectionEditorImpl({
     "postgresql://user:pass@localhost:5432/db",
   );
   const [s3, setS3] = useState<S3Params>(emptyS3Params());
+  const [duckPath, setDuckPath] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -42,11 +43,19 @@ function ConnectionEditorImpl({
       setName(initial.name);
       setPgDsn(initial.postgres?.connection_string ?? "");
       setS3(initial.s3 ? { ...emptyS3Params(), ...initial.s3 } : emptyS3Params());
+      setDuckPath(initial.duckdb?.path ?? "");
     } else {
       setKind(defaultKind);
-      setName(defaultKind === "s3" ? "s3" : "postgres");
+      setName(
+        defaultKind === "s3"
+          ? "s3"
+          : defaultKind === "duckdb"
+            ? "duckdb"
+            : "postgres",
+      );
       setPgDsn("postgresql://user:pass@localhost:5432/db");
       setS3(emptyS3Params());
+      setDuckPath("");
     }
   }, [open, initial, defaultKind]);
 
@@ -60,7 +69,9 @@ function ConnectionEditorImpl({
   }, [open, onClose]);
 
   function save() {
-    const trimmed = name.trim() || (kind === "s3" ? "s3" : "postgres");
+    const trimmed =
+      name.trim() ||
+      (kind === "s3" ? "s3" : kind === "duckdb" ? "duckdb" : "postgres");
     const id = initial?.id ?? newConnectionId(trimmed, existingIds);
     if (kind === "postgres") {
       const dsn = pgDsn.trim();
@@ -70,6 +81,15 @@ function ConnectionEditorImpl({
         name: trimmed,
         kind: "postgres",
         postgres: { connection_string: dsn },
+      });
+    } else if (kind === "duckdb") {
+      const path = duckPath.trim();
+      if (!path) return;
+      onSave({
+        id,
+        name: trimmed,
+        kind: "duckdb",
+        duckdb: { path, read_only: true },
       });
     } else {
       onSave({ id, name: trimmed, kind: "s3", s3: { ...s3 } });
@@ -100,7 +120,7 @@ function ConnectionEditorImpl({
 
         <div className="min-h-0 flex-1 space-y-3 overflow-auto px-5 py-4">
           <div className="flex gap-2">
-            {(["postgres", "s3"] as ConnectionKind[]).map((k) => (
+            {(["postgres", "s3", "duckdb"] as ConnectionKind[]).map((k) => (
               <button
                 key={k}
                 type="button"
@@ -133,6 +153,19 @@ function ConnectionEditorImpl({
                 spellCheck={false}
                 className={`${inputClass} font-mono text-xs`}
               />
+            </Labeled>
+          ) : kind === "duckdb" ? (
+            <Labeled label="DuckDB file path (.duckdb)">
+              <input
+                value={duckPath}
+                onChange={(e) => setDuckPath(e.target.value)}
+                spellCheck={false}
+                placeholder="/path/to/source.duckdb"
+                className={`${inputClass} font-mono text-xs`}
+              />
+              <p className="mt-1 text-[10px] text-slate-500">
+                Attached read-only for preview/export; working DB stays separate.
+              </p>
             </Labeled>
           ) : (
             <>

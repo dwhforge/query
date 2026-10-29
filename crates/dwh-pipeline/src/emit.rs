@@ -74,10 +74,22 @@ pub fn emit_transform_step_ex(
             }
             sql_rename_column(dialect, prev, from, to, left_dbt_relation)
         }
-        TransformationStep::DeriveColumn { name, expression } => {
+        TransformationStep::DeriveColumn {
+            name,
+            expression,
+            mode,
+            op,
+            sql_dialect: _,
+        } => {
             require_prev(prev, "DeriveColumn")?;
+            let expr = crate::derive_ops::resolve_derive_expression(
+                *mode,
+                op.as_ref(),
+                expression,
+                dialect,
+            )?;
             Ok(format!(
-                "SELECT *, ({expression}) AS {} FROM {prev}",
+                "SELECT *, ({expr}) AS {} FROM {prev}",
                 quote_ident(name)
             ))
         }
@@ -136,7 +148,12 @@ pub fn emit_transform_step_ex(
                     .join(", ");
                 if let Some(model) = parse_dbt_ref_model(right) {
                     let skip = jinja_lower_name_list(left_on);
-                    let select = dbt_join_select_jinja(&model, &skip, left_dbt_relation);
+                    let select = dbt_join_select_jinja(
+                        &model,
+                        &skip,
+                        left_dbt_relation,
+                        opts.prev_columns,
+                    );
                     Ok(format!(
                         "{select}\n  FROM {prev} AS l {join_kw} {{{{ _jrel }}}} AS r USING ({using})"
                     ))
@@ -154,6 +171,7 @@ pub fn emit_transform_step_ex(
                     left_on,
                     right_on,
                     left_dbt_relation,
+                    opts.prev_columns,
                 )
             }
         }
@@ -269,6 +287,7 @@ pub fn emit_transform_step_ex(
         TransformationStep::LoadCsv { .. }
         | TransformationStep::LoadParquet { .. }
         | TransformationStep::LoadPostgres { .. }
+        | TransformationStep::LoadDuckdb { .. }
         | TransformationStep::FromQuery { .. }
         | TransformationStep::SqlModel { .. } => Err(
             "emit_transform_step: Load/FromQuery/SqlModel must use mode-specific adapters".into(),
@@ -602,10 +621,12 @@ fn emit_join_unequal_keys(
     left_on: &[String],
     right_on: &[String],
     left_dbt_relation: Option<&str>,
+    prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
     if let Some(model) = parse_dbt_ref_model(right) {
         let skip = jinja_lower_name_list(right_on);
-        let select = dbt_join_select_jinja(&model, &skip, left_dbt_relation);
+        let select =
+            dbt_join_select_jinja(&model, &skip, left_dbt_relation, prev_columns);
         let ons: Vec<String> = left_on
             .iter()
             .zip(right_on.iter())
@@ -879,20 +900,28 @@ fn dbt_append_union_by_name(prev: &str, left_dbt: &str, right_models: &[String])
 }
 
 /// dbt join projection: left wins on name clashes; right-only columns keep their names.
-/// If left relation is unknown, right cols are prefixed `{model}__` (safe, stable).
+/// Prefer live left relation, else known `prev_columns` (CTE after Rename/KeyMap), else
+/// prefix right cols `{model}__` (safe when schema unknown).
 fn dbt_join_select_jinja(
     model: &str,
     skip_lower_list: &str,
     left_dbt_relation: Option<&str>,
+    prev_columns: Option<&[String]>,
 ) -> String {
-    match left_dbt_relation {
-        Some(left) => format!(
+    if let Some(left) = left_dbt_relation {
+        return format!(
             "{{% set _jrel = ref('{model}') %}}\n  {{% set _lrel = {left} %}}\n  {{% set _left_names = adapter.get_columns_in_relation(_lrel) | map(attribute='name') | map('lower') | list %}}\n  SELECT\n    l.*{{% for _c in adapter.get_columns_in_relation(_jrel) if (_c.name | lower) not in [{skip_lower_list}] and (_c.name | lower) not in _left_names %}}, r.{{{{ adapter.quote(_c.name) }}}}{{% endfor %}}"
-        ),
-        None => format!(
-            "{{% set _jrel = ref('{model}') %}}\n  SELECT\n    l.*{{% for _c in adapter.get_columns_in_relation(_jrel) if (_c.name | lower) not in [{skip_lower_list}] %}}, r.{{{{ adapter.quote(_c.name) }}}} AS {{{{ adapter.quote('{model}__' ~ _c.name) }}}}{{% endfor %}}"
-        ),
+        );
     }
+    if let Some(cols) = prev_columns.filter(|c| !c.is_empty()) {
+        let left_list = jinja_lower_name_list(cols);
+        return format!(
+            "{{% set _jrel = ref('{model}') %}}\n  {{% set _left_names = [{left_list}] %}}\n  SELECT\n    l.*{{% for _c in adapter.get_columns_in_relation(_jrel) if (_c.name | lower) not in [{skip_lower_list}] and (_c.name | lower) not in _left_names %}}, r.{{{{ adapter.quote(_c.name) }}}}{{% endfor %}}"
+        );
+    }
+    format!(
+        "{{% set _jrel = ref('{model}') %}}\n  SELECT\n    l.*{{% for _c in adapter.get_columns_in_relation(_jrel) if (_c.name | lower) not in [{skip_lower_list}] %}}, r.{{{{ adapter.quote(_c.name) }}}} AS {{{{ adapter.quote('{model}__' ~ _c.name) }}}}{{% endfor %}}"
+    )
 }
 
 fn jinja_lower_name_list(names: &[String]) -> String {
@@ -1013,6 +1042,41 @@ mod tests {
         let sql = emit_transform_step(&join, "s0", &rel, WarehouseDialect::Duckdb).unwrap();
         assert!(sql.contains("stg_sys_data_source_items__' ~ _c.name"));
         assert!(!sql.contains("EXCLUDE"));
+    }
+
+    #[test]
+    fn join_equal_keys_uses_prev_columns_without_prefix() {
+        let mut rel = HashMap::new();
+        rel.insert("dim".into(), "{{ ref('stg_dim_company') }}".into());
+        let join = TransformationStep::Join {
+            right_query_id: "dim".into(),
+            join_type: JoinType::Left,
+            left_on: vec!["company_id".into()],
+            right_on: vec!["company_id".into()],
+        };
+        let prev_cols = vec![
+            "day".into(),
+            "company_id".into(),
+            "units".into(),
+            "revenue".into(),
+        ];
+        let sql = emit_transform_step_ex(
+            &join,
+            "s2",
+            &rel,
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                prev_columns: Some(&prev_cols),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(sql.contains("_left_names = ['day', 'company_id', 'units', 'revenue']"));
+        assert!(
+            !sql.contains("__' ~ _c.name"),
+            "must not prefix when schema known: {sql}"
+        );
+        assert!(sql.contains("not in _left_names"));
     }
 
     #[test]

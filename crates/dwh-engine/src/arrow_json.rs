@@ -11,15 +11,6 @@ use duckdb::arrow::datatypes::DataType;
 use duckdb::arrow::record_batch::RecordBatch;
 use serde_json::{Number, Value as JsonValue};
 
-fn decimal_string_to_json(s: String) -> JsonValue {
-    if let Ok(f) = s.parse::<f64>() {
-        if let Some(n) = Number::from_f64(f) {
-            return JsonValue::Number(n);
-        }
-    }
-    JsonValue::String(s)
-}
-
 fn date32_to_iso(days: i32) -> String {
     // Arrow Date32 = days since Unix epoch.
     chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
@@ -73,13 +64,13 @@ pub fn map_arrow_type(dt: &DataType) -> String {
         | DataType::UInt16
         | DataType::UInt32
         | DataType::UInt64 => "INTEGER".into(),
-        DataType::Float16
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::Decimal128(_, _)
-        | DataType::Decimal256(_, _) => "FLOAT".into(),
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => "FLOAT".into(),
+        DataType::Decimal128(p, s) => format!("DECIMAL({p},{s})"),
+        DataType::Decimal256(p, s) => format!("DECIMAL({p},{s})"),
         DataType::Date32 | DataType::Date64 => "DATE".into(),
-        DataType::Timestamp(_, _) => "TIMESTAMP".into(),
+        // Arrow timestamps from DuckDB are UTC instants; label honestly.
+        DataType::Timestamp(_, Some(tz)) => format!("TIMESTAMPTZ ({tz})"),
+        DataType::Timestamp(_, None) => "TIMESTAMP".into(),
         DataType::Utf8 | DataType::LargeUtf8 => "VARCHAR".into(),
         _ => "VARCHAR".into(),
     }
@@ -126,11 +117,12 @@ pub fn array_value_to_json(array: &dyn Array, row: usize) -> JsonValue {
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null);
     }
+    // Keep exact decimal text (no f64 round-trip) so UI / e2e stay precise.
     if let Some(a) = array.as_any().downcast_ref::<Decimal128Array>() {
-        return decimal_string_to_json(a.value_as_string(row));
+        return JsonValue::String(a.value_as_string(row));
     }
     if let Some(a) = array.as_any().downcast_ref::<Decimal256Array>() {
-        return decimal_string_to_json(a.value_as_string(row));
+        return JsonValue::String(a.value_as_string(row));
     }
     if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
         return JsonValue::String(a.value(row).to_string());

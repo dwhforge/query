@@ -142,11 +142,20 @@ mod tests {
             .iter()
             .position(|c| c.name == "amount")
             .expect("amount col");
+        let looks_numeric = |v: &serde_json::Value| -> bool {
+            if v.is_number() {
+                return true;
+            }
+            v.as_str()
+                .map(|s| s.parse::<f64>().is_ok())
+                .unwrap_or(false)
+        };
         for row in &result.rows {
             let q = &row[qty_i];
             let a = &row[amount_i];
-            assert!(q.is_number(), "qty should be JSON number, got {q:?}");
-            assert!(a.is_number(), "amount should be JSON number, got {a:?}");
+            // DECIMAL may be an exact string (preferred) or a JSON number — never Arrow Debug.
+            assert!(looks_numeric(q), "qty should be numeric, got {q:?}");
+            assert!(looks_numeric(a), "amount should be numeric, got {a:?}");
             let qs = q.to_string();
             assert!(!qs.contains("PrimitiveArray"), "qty Debug leak: {qs}");
         }

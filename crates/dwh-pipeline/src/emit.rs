@@ -26,6 +26,8 @@ pub struct EmitSchemaOpts<'a> {
     pub query_columns: Option<&'a HashMap<String, Vec<String>>>,
     /// ApplyKeyMap: map_id → SQL relation (e.g. `{{ ref('map_x') }}`) for seed join on export.
     pub key_map_relations: Option<&'a HashMap<String, String>>,
+    /// ApplyKeyMap: map_id → (from_column, to_column) on the map relation.
+    pub key_map_columns: Option<&'a HashMap<String, (String, String)>>,
 }
 
 /// Emit a mid-chain / transform step. `relations` maps query_id → SQL relation
@@ -248,12 +250,19 @@ pub fn emit_transform_step_ex(
             let seed_rel = opts
                 .key_map_relations
                 .and_then(|m| m.get(map_id).map(|s| s.as_str()));
+            let (from_col, to_col) = opts
+                .key_map_columns
+                .and_then(|m| m.get(map_id))
+                .map(|(f, t)| (f.as_str(), t.as_str()))
+                .unwrap_or(("from", "to"));
             emit_apply_key_map(
                 dialect,
                 prev,
                 column,
                 entries,
                 seed_rel,
+                from_col,
+                to_col,
                 opts.prev_columns,
             )
         }
@@ -369,9 +378,13 @@ fn emit_apply_key_map(
     column: &str,
     entries: &[KeyMapEntry],
     seed_relation: Option<&str>,
+    from_col: &str,
+    to_col: &str,
     prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
     let qcol = quote_ident(column);
+    let q_from = quote_ident(from_col);
+    let q_to = quote_ident(to_col);
     let map_sql = if let Some(rel) = seed_relation {
         format!("{rel} AS m")
     } else if entries.is_empty() {
@@ -398,12 +411,12 @@ fn emit_apply_key_map(
     };
 
     let join_on = if seed_relation.is_some() {
-        format!("CAST(t.{qcol} AS VARCHAR) = CAST(m.\"from\" AS VARCHAR)")
+        format!("CAST(t.{qcol} AS VARCHAR) = CAST(m.{q_from} AS VARCHAR)")
     } else {
         format!("CAST(t.{qcol} AS VARCHAR) = m.from_val")
     };
     let coalesce = if seed_relation.is_some() {
-        format!("COALESCE(m.\"to\", CAST(t.{qcol} AS VARCHAR))")
+        format!("COALESCE(m.{q_to}, CAST(t.{qcol} AS VARCHAR))")
     } else {
         format!("COALESCE(m.to_val, CAST(t.{qcol} AS VARCHAR))")
     };
@@ -445,90 +458,104 @@ pub fn key_map_seed_name(map_id: &str) -> String {
     }
 }
 
-/// CSV body for `seeds/map_*.csv` (`from,to` header).
+/// CSV body for `seeds/map_*.csv` with configurable header names (default `from`,`to`).
 pub fn key_map_seed_csv(entries: &[KeyMapEntry]) -> String {
-    let mut out = String::from("from,to\n");
-    for e in entries {
-        out.push_str(&csv_escape_field(e.from.trim()));
-        out.push(',');
-        out.push_str(&csv_escape_field(&e.to));
-        out.push('\n');
-    }
-    out
+    key_map_seed_csv_named(entries, "from", "to")
 }
 
-/// Parse `from,to` seed CSV (header optional). Skips blank lines.
+pub fn key_map_seed_csv_named(
+    entries: &[KeyMapEntry],
+    from_col: &str,
+    to_col: &str,
+) -> String {
+    let mut wtr = csv::WriterBuilder::new()
+        .flexible(true)
+        .from_writer(vec![]);
+    wtr.write_record([from_col, to_col])
+        .expect("csv header write");
+    for e in entries {
+        wtr.write_record([e.from.trim(), e.to.as_str()])
+            .expect("csv row write");
+    }
+    let bytes = wtr.into_inner().expect("csv flush");
+    String::from_utf8(bytes).expect("csv utf8")
+}
+
+/// Parse KeyMap seed CSV via the `csv` crate (handles quoted newlines).
+/// Header optional; when present, uses columns named like `from`/`to` (case-insensitive)
+/// or the first two fields.
 pub fn parse_key_map_seed_csv(body: &str) -> Result<Vec<KeyMapEntry>, String> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .has_headers(false)
+        .from_reader(body.as_bytes());
+    let mut records = rdr.records();
+    let first = match records.next() {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => return Err(format!("key map seed CSV: {e}")),
+        None => return Ok(vec![]),
+    };
+
+    let (from_i, to_i, start_is_header) = {
+        let f0 = first.get(0).unwrap_or("").trim();
+        let f1 = first.get(1).unwrap_or("").trim();
+        if first.len() >= 2
+            && (f0.eq_ignore_ascii_case("from") || f0.eq_ignore_ascii_case("src"))
+            && (f1.eq_ignore_ascii_case("to") || f1.eq_ignore_ascii_case("dst"))
+        {
+            (0usize, 1usize, true)
+        } else if first.len() >= 2 {
+            // Custom header names — treat row 0 as header; data starts at row 1.
+            // If values look like data (not header-ish), use as first data row.
+            let looks_header = !f0.is_empty()
+                && !f1.is_empty()
+                && f0.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && f1.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            (0usize, 1usize, looks_header)
+        } else {
+            return Err("key map seed CSV: need at least two columns".into());
+        }
+    };
+
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (lineno, raw) in body.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
+    let mut push_row = |rec: &csv::StringRecord, lineno: usize| -> Result<(), String> {
+        let from = rec
+            .get(from_i)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let to = rec.get(to_i).unwrap_or("").to_string();
+        if from.is_empty() && to.trim().is_empty() {
+            return Ok(());
         }
-        if lineno == 0 && line.eq_ignore_ascii_case("from,to") {
-            continue;
-        }
-        let (from, to) = split_csv_two(line).ok_or_else(|| {
-            format!("key map seed line {}: expected from,to (got '{line}')", lineno + 1)
-        })?;
-        let from = from.trim().to_string();
         if from.is_empty() {
-            return Err(format!("key map seed line {}: empty from", lineno + 1));
+            return Err(format!("key map seed line {lineno}: empty from"));
         }
         if to.is_empty() {
             return Err(format!(
-                "key map seed line {}: empty to for from '{from}'",
-                lineno + 1
+                "key map seed line {lineno}: empty to for from '{from}'"
             ));
         }
         if !seen.insert(from.clone()) {
             return Err(format!(
-                "key map seed: duplicate from '{from}' (line {})",
-                lineno + 1
+                "key map seed: duplicate from '{from}' (line {lineno})"
             ));
         }
         entries.push(KeyMapEntry { from, to });
+        Ok(())
+    };
+
+    let mut lineno = 1usize;
+    if !start_is_header {
+        push_row(&first, lineno)?;
+    }
+    for rec in records {
+        lineno += 1;
+        let rec = rec.map_err(|e| format!("key map seed line {lineno}: {e}"))?;
+        push_row(&rec, lineno)?;
     }
     Ok(entries)
-}
-
-fn split_csv_two(line: &str) -> Option<(String, String)> {
-    let mut fields = Vec::new();
-    let mut cur = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => {
-                if in_quotes && chars.peek() == Some(&'"') {
-                    cur.push('"');
-                    chars.next();
-                } else {
-                    in_quotes = !in_quotes;
-                }
-            }
-            ',' if !in_quotes => {
-                fields.push(std::mem::take(&mut cur));
-            }
-            _ => cur.push(c),
-        }
-    }
-    fields.push(cur);
-    if fields.len() < 2 {
-        return None;
-    }
-    let from = fields[0].trim().to_string();
-    let to = fields[1..].join(",").trim().to_string();
-    Some((from, to))
-}
-
-fn csv_escape_field(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
 }
 
 /// Resolve `{{query:id}}` placeholders using `relations`.

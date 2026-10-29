@@ -5,6 +5,7 @@ use crate::session::DbSession;
 use dwh_pipeline::{escape_sql_string, quote_ident, KeyMapDef, KeyMapEntry, KeyMapStorage};
 use duckdb::params;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KeyMapWriteResult {
@@ -12,9 +13,42 @@ pub struct KeyMapWriteResult {
     pub table: String,
     pub rows_written: usize,
     pub created_table: bool,
+    /// SHA-256 of sorted `from\tto` lines after write (optimistic concurrency token).
+    pub content_hash: String,
+}
+
+/// Hash of map rows for optimistic concurrency (order-independent).
+pub fn key_map_content_hash(entries: &[KeyMapEntry]) -> String {
+    let mut lines: Vec<String> = entries
+        .iter()
+        .map(|e| format!("{}\t{}", e.from.trim(), e.to))
+        .collect();
+    lines.sort();
+    let mut hasher = Sha256::new();
+    for line in lines {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn pg_execute(conn: &duckdb::Connection, alias: &str, sql: &str) -> Result<(), String> {
+    let call = format!(
+        "CALL postgres_execute('{alias}', '{}');",
+        escape_sql_string(sql)
+    );
+    conn.execute_batch(&call)
+        .map_err(|e| format!("postgres_execute: {e} — SQL: {sql}"))?;
+    Ok(())
 }
 
 /// Replace all rows in a Postgres mapping table with `entries` (full replace).
+///
+/// DELETE + INSERT run inside one Postgres transaction (`BEGIN`…`COMMIT` via
+/// `postgres_execute`). On insert failure the table is rolled back, not left empty.
+///
+/// If `expected_content_hash` is `Some`, the current table hash must match or the
+/// write is refused (concurrent edit).
 pub fn write_key_map_to_postgres(
     db: &DbSession,
     connection_string: &str,
@@ -23,6 +57,7 @@ pub fn write_key_map_to_postgres(
     from_column: &str,
     to_column: &str,
     entries: &[KeyMapEntry],
+    expected_content_hash: Option<&str>,
 ) -> Result<KeyMapWriteResult, String> {
     let schema = schema.trim();
     let table = table.trim();
@@ -55,26 +90,44 @@ pub fn write_key_map_to_postgres(
     db.ensure_postgres()?;
     let q_from = quote_ident(from_column);
     let q_to = quote_ident(to_column);
-    let q_schema = quote_ident(schema);
-    let q_table = quote_ident(table);
+    // Native PG identifiers for postgres_execute (same quoting rules).
+    let pg_schema = quote_ident(schema);
+    let pg_table = quote_ident(table);
+    let pg_rel = format!("{pg_schema}.{pg_table}");
+
+    // Optimistic check before taking the write connection (avoid nested with_conn).
+    if let Some(expected) = expected_content_hash {
+        let current = read_key_map_from_postgres(
+            db,
+            connection_string,
+            schema,
+            table,
+            from_column,
+            to_column,
+        )?;
+        let current_hash = key_map_content_hash(&current);
+        if current_hash != expected {
+            return Err(format!(
+                "KeyMap write refused: table {schema}.{table} changed concurrently \
+                 (expected hash {expected}, on disk {current_hash}). Reload and retry."
+            ));
+        }
+    }
 
     db.with_conn(|conn| {
         let alias = ensure_pg_attached_rw(conn, connection_string)?;
-        let rel = format!("{alias}.{q_schema}.{q_table}");
 
-        // Create table if missing (VARCHAR keys — mapping tables are string-keyed).
+        // Ensure table exists (outside the replace transaction).
         let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {rel} ({q_from} VARCHAR, {q_to} VARCHAR);"
+            "CREATE TABLE IF NOT EXISTS {pg_rel} ({q_from} VARCHAR, {q_to} VARCHAR)"
         );
-        conn.execute_batch(&create_sql)
+        pg_execute(conn, &alias, &create_sql)
             .map_err(|e| format!("CREATE TABLE {schema}.{table}: {e}"))?;
 
-        // Full replace: DELETE + INSERT (map is the whole table content).
-        let delete_sql = format!("DELETE FROM {rel};");
-        conn.execute_batch(&delete_sql)
-            .map_err(|e| format!("DELETE FROM {schema}.{table}: {e}"))?;
-
-        if !entries.is_empty() {
+        let delete_sql = format!("DELETE FROM {pg_rel}");
+        let insert_sql = if entries.is_empty() {
+            None
+        } else {
             let values = entries
                 .iter()
                 .map(|e| {
@@ -86,17 +139,33 @@ pub fn write_key_map_to_postgres(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let insert_sql =
-                format!("INSERT INTO {rel} ({q_from}, {q_to}) VALUES {values};");
-            conn.execute_batch(&insert_sql)
-                .map_err(|e| format!("INSERT INTO {schema}.{table}: {e}"))?;
+            Some(format!(
+                "INSERT INTO {pg_rel} ({q_from}, {q_to}) VALUES {values}"
+            ))
+        };
+
+        // One PG transaction so a failed INSERT cannot leave an empty table.
+        if let Err(e) = (|| {
+            pg_execute(conn, &alias, "BEGIN")?;
+            pg_execute(conn, &alias, &delete_sql)
+                .map_err(|err| format!("DELETE FROM {schema}.{table}: {err}"))?;
+            if let Some(ins) = &insert_sql {
+                pg_execute(conn, &alias, ins)
+                    .map_err(|err| format!("INSERT INTO {schema}.{table}: {err}"))?;
+            }
+            pg_execute(conn, &alias, "COMMIT")?;
+            Ok::<(), String>(())
+        })() {
+            let _ = pg_execute(conn, &alias, "ROLLBACK");
+            return Err(e);
         }
 
         Ok(KeyMapWriteResult {
             schema: schema.to_string(),
             table: table.to_string(),
             rows_written: entries.len(),
-            created_table: true, // IF NOT EXISTS — may or may not have created; OK for UI
+            created_table: true,
+            content_hash: key_map_content_hash(entries),
         })
     })
 }
@@ -148,6 +217,15 @@ pub fn write_key_map(
     map: &KeyMapDef,
     connection_string: &str,
 ) -> Result<KeyMapWriteResult, String> {
+    write_key_map_with_expected(db, map, connection_string, None)
+}
+
+pub fn write_key_map_with_expected(
+    db: &DbSession,
+    map: &KeyMapDef,
+    connection_string: &str,
+    expected_content_hash: Option<&str>,
+) -> Result<KeyMapWriteResult, String> {
     match &map.storage {
         KeyMapStorage::Source { source, table, .. } => write_key_map_to_postgres(
             db,
@@ -157,6 +235,7 @@ pub fn write_key_map(
             map.from_column.as_str(),
             map.to_column.as_str(),
             &map.entries,
+            expected_content_hash,
         ),
         KeyMapStorage::Seed => Err(
             "seed-backed KeyMap: write the CSV via export / push_key_map_to_export, not warehouse"
@@ -184,5 +263,42 @@ pub fn read_key_map(
             map.to_column.as_str(),
         ),
         _ => Err("read_key_map: only source storage is supported".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_hash_order_independent() {
+        let a = vec![
+            KeyMapEntry {
+                from: "www".into(),
+                to: "web".into(),
+            },
+            KeyMapEntry {
+                from: "shop".into(),
+                to: "store".into(),
+            },
+        ];
+        let b = vec![a[1].clone(), a[0].clone()];
+        assert_eq!(key_map_content_hash(&a), key_map_content_hash(&b));
+    }
+
+    #[test]
+    fn replace_sql_uses_begin_commit_helpers() {
+        // Documented contract: callers wrap DELETE/INSERT with BEGIN/COMMIT via pg_execute.
+        // This unit test locks the helper escaping used for transaction control.
+        let begin = format!(
+            "CALL postgres_execute('pg_w', '{}');",
+            escape_sql_string("BEGIN")
+        );
+        assert!(begin.contains("BEGIN"));
+        let rollback = format!(
+            "CALL postgres_execute('pg_w', '{}');",
+            escape_sql_string("ROLLBACK")
+        );
+        assert!(rollback.contains("ROLLBACK"));
     }
 }

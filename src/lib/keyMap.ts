@@ -219,20 +219,58 @@ function pgDsn(c: ConnectionDef | undefined): string | null {
   return dsn || null;
 }
 
-/** Resolve Postgres DSN for a source-backed KeyMap (explicit conn → source → target → any PG). */
-export function resolveKeyMapConnectionString(
+export type KeyMapConnResolve =
+  | { ok: true; dsn: string; connectionId: string }
+  | { ok: false; error: string };
+
+/**
+ * Resolve Postgres DSN for a source-backed KeyMap.
+ *
+ * Write path (`forWrite=true`): requires an explicit `storage.connection_id`
+ * with a usable DSN — never falls back to target / “any PG” (silent wrong DB).
+ *
+ * Read path: may fall back to a matching Explorer source’s connection only.
+ * A *set* but missing/invalid `connection_id` is always an error (no silent hop).
+ */
+export function resolveKeyMapConnection(
   project: Project,
   map: KeyMapDef,
   connections: ConnectionDef[] = project.connections,
-): string | null {
-  if (map.storage?.kind !== "source") return null;
+  forWrite = false,
+): KeyMapConnResolve {
+  if (map.storage?.kind !== "source") {
+    return { ok: false, error: "KeyMap storage is not source" };
+  }
   const { source, table, connection_id } = map.storage;
+  const cid = connection_id?.trim() ?? "";
 
-  if (connection_id) {
-    const dsn = pgDsn(connections.find((x) => x.id === connection_id));
-    if (dsn) return dsn;
+  if (cid) {
+    const conn = connections.find((x) => x.id === cid);
+    if (!conn) {
+      return {
+        ok: false,
+        error: `KeyMap connection_id “${cid}” not found — pick a Connection in the editor (no fallback).`,
+      };
+    }
+    const dsn = pgDsn(conn);
+    if (!dsn) {
+      return {
+        ok: false,
+        error: `Connection “${cid}” has no Postgres DSN — open Connections and save it.`,
+      };
+    }
+    return { ok: true, dsn, connectionId: cid };
   }
 
+  if (forWrite) {
+    return {
+      ok: false,
+      error:
+        "KeyMap write requires an explicit Connection on the map (Storage → Connection). No silent fallback to target / other PG.",
+    };
+  }
+
+  // Read-only convenience: Explorer source with same schema.table.
   const match = project.sources.find(
     (s: SourceDef) =>
       s.kind === "postgres" &&
@@ -240,24 +278,35 @@ export function resolveKeyMapConnectionString(
       (s.table_name ?? "").toLowerCase() === table.toLowerCase(),
   );
   if (match?.connection_id) {
-    const dsn = pgDsn(connections.find((x) => x.id === match.connection_id));
-    if (dsn) return dsn;
+    const conn = connections.find((x) => x.id === match.connection_id);
+    const dsn = pgDsn(conn);
+    if (dsn && conn) {
+      return { ok: true, dsn, connectionId: conn.id };
+    }
   }
-  if (match?.connection_string?.trim()) return match.connection_string.trim();
+  if (match?.connection_string?.trim()) {
+    return {
+      ok: true,
+      dsn: match.connection_string.trim(),
+      connectionId: match.connection_id ?? "",
+    };
+  }
 
-  if (project.target_connection_id) {
-    const dsn = pgDsn(
-      connections.find((x) => x.id === project.target_connection_id),
-    );
-    if (dsn) return dsn;
-  }
-  // Prefer any Postgres connection that already has a DSN (Explorer Sources optional).
-  for (const c of connections) {
-    if (c.kind !== "postgres") continue;
-    const dsn = pgDsn(c);
-    if (dsn) return dsn;
-  }
-  return null;
+  return {
+    ok: false,
+    error: `No connection for KeyMap source ${source}.${table} — set Storage → Connection.`,
+  };
+}
+
+/** @deprecated Prefer resolveKeyMapConnection — kept for call sites that only need DSN. */
+export function resolveKeyMapConnectionString(
+  project: Project,
+  map: KeyMapDef,
+  connections: ConnectionDef[] = project.connections,
+  forWrite = false,
+): string | null {
+  const r = resolveKeyMapConnection(project, map, connections, forWrite);
+  return r.ok ? r.dsn : null;
 }
 
 /** Remove KeyMap resource and all ApplyKeyMap steps that reference it. */

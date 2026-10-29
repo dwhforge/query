@@ -277,6 +277,7 @@ export type KeyMapWriteResult = {
   table: string;
   rows_written: number;
   created_table: boolean;
+  content_hash?: string;
 };
 
 export function writeKeyMap(

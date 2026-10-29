@@ -1110,7 +1110,7 @@ function JoinLensImpl({
             <div className="text-[9px] font-semibold uppercase tracking-wide text-teal-400/80">
               Near-miss
               {nearMiss && nearMiss.hypotheses.length > 0
-                ? ` (+${nearMiss.hypotheses.reduce((s, h) => s + h.delta_matches, 0)} keys)`
+                ? ` · best Δ+${nearMiss.hypotheses[0]!.delta_matches}`
                 : nearMissLoading
                   ? "…"
                   : ""}

@@ -1,6 +1,6 @@
 //! Seed ↔ KeyMap sync (ADR-0020): after first export, `seeds/map_*.csv` is SoT.
 
-use crate::emit::{key_map_seed_csv, key_map_seed_name, parse_key_map_seed_csv};
+use crate::emit::{key_map_seed_csv_named, key_map_seed_name, parse_key_map_seed_csv};
 use crate::export_manifest::{hash_content, load_manifest, manifest_path, ExportManifest};
 use crate::model::{KeyMapDef, KeyMapEntry, TransformationStep, Workspace};
 use std::fs;
@@ -45,6 +45,10 @@ pub fn sync_key_maps_from_export(
             .unwrap_or("")
             .to_string();
         if !stem.starts_with("map_") {
+            continue;
+        }
+        // Ignore conflict sidecars written by push_key_map_to_export.
+        if stem.contains(".conflict") {
             continue;
         }
         let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -99,6 +103,9 @@ fn patch_apply_snapshots(workspace: &mut Workspace, map_id: &str, entries: &[Key
 
 /// Write one KeyMap to `seeds/map_*.csv` and refresh that path’s hash in the
 /// export manifest so the next re-export does not treat it as a foreign edit.
+///
+/// If the seed was hand-edited (on-disk hash ≠ manifest), refuse and keep both
+/// versions: leave the edited file, write incoming to `*.conflict-incoming.csv`.
 pub fn push_key_map_to_export(
     export_root: &Path,
     map: &KeyMapDef,
@@ -107,24 +114,74 @@ pub fn push_key_map_to_export(
     let rel = format!("seeds/{seed}.csv");
     let seeds_dir = export_root.join("seeds");
     fs::create_dir_all(&seeds_dir).map_err(|e| format!("mkdir seeds: {e}"))?;
-    let body = key_map_seed_csv(&map.entries);
+    let from_col = if map.from_column.trim().is_empty() {
+        "from"
+    } else {
+        map.from_column.trim()
+    };
+    let to_col = if map.to_column.trim().is_empty() {
+        "to"
+    } else {
+        map.to_column.trim()
+    };
+    let body = key_map_seed_csv_named(&map.entries, from_col, to_col);
     let path = export_root.join(&rel);
+
+    let previous = if path.is_file() {
+        Some(fs::read_to_string(&path).map_err(|e| format!("read {rel}: {e}"))?)
+    } else {
+        None
+    };
+
+    if let (Some(manifest), Some(on_disk)) = (load_manifest(export_root)?, previous.as_ref()) {
+        if let Some(expected) = manifest.owned.get(&rel) {
+            let actual = hash_content(on_disk);
+            if actual != *expected {
+                let conflict_rel = format!("seeds/{seed}.conflict-incoming.csv");
+                fs::write(export_root.join(&conflict_rel), &body).map_err(|e| {
+                    format!("write {conflict_rel}: {e}")
+                })?;
+                return Err(format!(
+                    "seed push refused: {rel} was edited outside the app (hash mismatch). \
+                     Incoming rows saved as {conflict_rel}. Reopen/sync to pull disk into the \
+                     editor, or restore the seed and Save again."
+                ));
+            }
+        }
+    }
+
     fs::write(&path, &body).map_err(|e| format!("write {rel}: {e}"))?;
 
-    if let Some(mut manifest) = load_manifest(export_root)? {
-        manifest.owned.insert(rel.clone(), hash_content(&body));
-        write_manifest(export_root, &manifest)?;
-    } else {
-        let mut owned = std::collections::BTreeMap::new();
-        owned.insert(rel.clone(), hash_content(&body));
-        let manifest = ExportManifest {
-            version: 1,
-            pipeline_name: String::new(),
-            dialect: String::new(),
-            owned,
-        };
-        write_manifest(export_root, &manifest)?;
+    let new_hash = hash_content(&body);
+    let manifest_update = (|| -> Result<(), String> {
+        if let Some(mut manifest) = load_manifest(export_root)? {
+            manifest.owned.insert(rel.clone(), new_hash.clone());
+            write_manifest(export_root, &manifest)
+        } else {
+            let mut owned = std::collections::BTreeMap::new();
+            owned.insert(rel.clone(), new_hash.clone());
+            write_manifest(
+                export_root,
+                &ExportManifest {
+                    version: 1,
+                    pipeline_name: String::new(),
+                    dialect: String::new(),
+                    owned,
+                },
+            )
+        }
+    })();
+
+    if let Err(e) = manifest_update {
+        // Keep seed + manifest consistent: restore previous body if we had one.
+        if let Some(prev) = previous {
+            let _ = fs::write(&path, prev);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+        return Err(format!("seed written but manifest update failed (restored prior seed): {e}"));
     }
+
     Ok(rel)
 }
 
@@ -178,6 +235,62 @@ mod tests {
             }
             _ => panic!("expected ApplyKeyMap"),
         }
+    }
+
+    #[test]
+    fn push_refuses_when_seed_hash_diverged_keeps_both() {
+        let dir = tempfile_dir();
+        fs::create_dir_all(dir.join("seeds")).unwrap();
+        let original = "from,to\nwww,web\n";
+        fs::write(dir.join("seeds/map_channel.csv"), original).unwrap();
+        let mut owned = std::collections::BTreeMap::new();
+        owned.insert(
+            "seeds/map_channel.csv".into(),
+            hash_content(original),
+        );
+        write_manifest(
+            &dir,
+            &ExportManifest {
+                version: 1,
+                pipeline_name: "t".into(),
+                dialect: "duckdb".into(),
+                owned,
+            },
+        )
+        .unwrap();
+
+        // External edit
+        fs::write(
+            dir.join("seeds/map_channel.csv"),
+            "from,to\nwww,web\nshop,store\n",
+        )
+        .unwrap();
+
+        let mut map = KeyMapDef::new("map_channel", "channel");
+        map.entries = vec![KeyMapEntry {
+            from: "www".into(),
+            to: "online".into(),
+        }];
+        let err = push_key_map_to_export(&dir, &map).unwrap_err();
+        assert!(err.contains("refused"), "{err}");
+        assert!(dir.join("seeds/map_channel.conflict-incoming.csv").is_file());
+        // Original (hand-edited) file preserved
+        let kept = fs::read_to_string(dir.join("seeds/map_channel.csv")).unwrap();
+        assert!(kept.contains("shop"));
+    }
+
+    #[test]
+    fn csv_roundtrip_preserves_newline_in_field() {
+        use crate::emit::{key_map_seed_csv, parse_key_map_seed_csv};
+        let entries = vec![KeyMapEntry {
+            from: "a\nb".into(),
+            to: "x".into(),
+        }];
+        let body = key_map_seed_csv(&entries);
+        let back = parse_key_map_seed_csv(&body).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].from, "a\nb");
+        assert_eq!(back[0].to, "x");
     }
 
     fn tempfile_dir() -> PathBuf {

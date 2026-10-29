@@ -25,7 +25,8 @@ pub use dialect::{
 };
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
-    key_map_seed_name, normalize_column_expr, parse_key_map_seed_csv, rename_select_list,
+    key_map_seed_csv_named, key_map_seed_name, normalize_column_expr, parse_key_map_seed_csv,
+    rename_select_list,
     resolve_source_column, select_list_aligned, sql_union_all_aligned,
     substitute_query_placeholders, union_column_names, validate_unambiguous_ascii_names,
     EmitSchemaOpts,

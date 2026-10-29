@@ -13,7 +13,7 @@ mod tests {
     };
     use duckdb::params;
     use serde_json::Value as JsonValue;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::env::temp_dir;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -92,17 +92,22 @@ mod tests {
         }
     }
 
-    fn row_multiset(columns: &[String], rows: &[Vec<JsonValue>]) -> BTreeSet<String> {
-        rows.iter()
-            .map(|r| {
-                columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("{c}={}", cell_key(r.get(i).unwrap_or(&JsonValue::Null))))
-                    .collect::<Vec<_>>()
-                    .join("|")
-            })
-            .collect()
+    /// row fingerprint → multiplicity (preserves duplicate distribution).
+    fn row_multiset(
+        columns: &[String],
+        rows: &[Vec<JsonValue>],
+    ) -> BTreeMap<String, usize> {
+        let mut m = BTreeMap::new();
+        for r in rows {
+            let key = columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{c}={}", cell_key(r.get(i).unwrap_or(&JsonValue::Null))))
+                .collect::<Vec<_>>()
+                .join("|");
+            *m.entry(key).or_insert(0) += 1;
+        }
+        m
     }
 
     fn read_mart_table(

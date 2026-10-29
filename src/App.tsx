@@ -26,6 +26,7 @@ import {
   applyNormalizeToWorkspace,
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
+  resolveKeyMapConnection,
   resolveKeyMapConnectionString,
   syncApplyKeyMapEntries,
   upsertKeyMapList,
@@ -1796,45 +1797,49 @@ function App() {
     if (sourceStorage) {
       void (async () => {
         let conns = project.connections;
-        let dsn = resolveKeyMapConnectionString(project, normalized, conns);
-        if (!dsn) {
-          try {
-            conns = await getGlobalConnections();
-            if (conns.length) {
-              setProject((p) => ({ ...p, connections: conns }));
-            }
-            dsn = resolveKeyMapConnectionString(project, normalized, conns);
-          } catch {
-            /* ignore */
+        try {
+          const global = await getGlobalConnections();
+          if (global.length) {
+            conns = global;
+            setProject((p) => ({ ...p, connections: global }));
           }
+        } catch {
+          /* keep project.connections */
         }
-        if (
-          !sourceStorage.connection_id &&
-          conns.some((c) => c.kind === "postgres")
-        ) {
+        // Bind an explicit connection_id once so later Save cannot silently hop DBs.
+        let mapForRead = normalized;
+        if (!sourceStorage.connection_id?.trim()) {
           const pick =
             conns.find((c) => c.id === project.target_connection_id) ??
             conns.find((c) => c.kind === "postgres");
           if (pick) {
-            patchKeyMapTab(normalized.id, (s) =>
-              s.map.storage?.kind === "source"
-                ? {
-                    ...s,
-                    map: {
-                      ...s.map,
-                      storage: {
-                        ...s.map.storage,
-                        connection_id: pick.id,
-                      },
-                    },
-                  }
-                : s,
-            );
+            mapForRead = {
+              ...normalized,
+              storage: {
+                kind: "source",
+                source: sourceStorage.source,
+                table: sourceStorage.table,
+                connection_id: pick.id,
+              },
+            };
+            patchKeyMapTab(normalized.id, (s) => ({
+              ...s,
+              map: { ...s.map, storage: mapForRead.storage },
+            }));
           }
         }
-        if (!dsn) return;
+        const resolved = resolveKeyMapConnection(
+          project,
+          mapForRead,
+          conns,
+          false,
+        );
+        if (!resolved.ok) {
+          setError(resolved.error);
+          return;
+        }
         try {
-          const r = await readKeyMap(normalized, dsn);
+          const r = await readKeyMap(mapForRead, resolved.dsn);
           patchKeyMapTab(normalized.id, (s) => ({
             ...s,
             map: { ...s.map, entries: r.entries },
@@ -1851,6 +1856,7 @@ function App() {
   }
 
   async function saveKeyMapToProject(map: KeyMapDef): Promise<void> {
+    // Persist to project AST first (local). External sync reports separately.
     setProject((p) => {
       const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], map);
       const queries = syncApplyKeyMapEntries(p.workspace.queries, map);
@@ -1863,48 +1869,56 @@ function App() {
     const kind = map.storage?.kind ?? "seed";
     if (kind === "seed") {
       const exportPath = project.last_dbt_export_path;
-      if (exportPath) {
-        try {
-          await pushKeyMapToExport(exportPath, map);
-          setExportMsg(`KeyMap saved → seeds (export tree)`);
-        } catch {
-          /* export tree missing */
-        }
+      if (!exportPath) {
+        setExportMsg("KeyMap saved in project (not exported yet — no seed CSV)");
+        return;
+      }
+      try {
+        await pushKeyMapToExport(exportPath, map);
+        setExportMsg(`KeyMap saved in project · synced → seeds (export tree)`);
+        setError(null);
+      } catch (e) {
+        setError(
+          typeof e === "string"
+            ? e
+            : `KeyMap saved in project, but seed sync failed: ${String(e)}`,
+        );
+        setExportMsg("KeyMap saved in project · seed sync FAILED");
       }
       return;
     }
     if (kind === "source") {
       let conns = project.connections;
-      let dsn = resolveKeyMapConnectionString(project, map, conns);
-      if (!dsn) {
+      let resolved = resolveKeyMapConnection(project, map, conns, true);
+      if (!resolved.ok) {
         try {
           conns = await getGlobalConnections();
           if (conns.length) {
             setProject((p) => ({ ...p, connections: conns }));
           }
-          dsn = resolveKeyMapConnectionString(project, map, conns);
+          resolved = resolveKeyMapConnection(project, map, conns, true);
         } catch {
           /* ignore */
         }
       }
-      if (!dsn) {
-        setError(
-          "No Postgres connection string — open Connections and save a Postgres DSN.",
-        );
+      if (!resolved.ok) {
+        setError(resolved.error);
+        setExportMsg("KeyMap saved in project · warehouse write skipped");
         return;
       }
       try {
-        const r = await writeKeyMap(map, dsn);
+        const r = await writeKeyMap(map, resolved.dsn);
         setExportMsg(
-          `KeyMap write-back → ${r.schema}.${r.table} (${r.rows_written} rows)`,
+          `KeyMap saved in project · write-back → ${r.schema}.${r.table} (${r.rows_written} rows)`,
         );
         setError(null);
       } catch (e) {
         setError(
           typeof e === "string"
             ? e
-            : `KeyMap write-back failed: ${String(e)}`,
+            : `KeyMap saved in project, but warehouse write-back failed: ${String(e)}`,
         );
+        setExportMsg("KeyMap saved in project · warehouse write FAILED");
       }
       return;
     }

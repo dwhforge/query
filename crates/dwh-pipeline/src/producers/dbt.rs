@@ -183,9 +183,11 @@ pub fn build_export_plan(
         "seed-paths: [\"seeds\"]\n".into()
     };
     // Force VARCHAR so codes like "001" stay strings (dbt otherwise infers INTEGER).
+    // Nesting must be seeds → project_name → seed_name (dbt 1.x config).
     let mut seeds_cfg = String::new();
     if !key_maps.is_empty() {
         seeds_cfg.push_str("seeds:\n");
+        seeds_cfg.push_str(&format!("  {pipeline_name}:\n"));
         for map_id in key_maps.keys() {
             let seed = key_map_seed_name(map_id);
             let (from_col, to_col) = workspace
@@ -206,7 +208,7 @@ pub fn build_export_plan(
                 })
                 .unwrap_or_else(|| ("from".into(), "to".into()));
             seeds_cfg.push_str(&format!(
-                "  {seed}:\n    +column_types:\n      {from_col}: varchar\n      {to_col}: varchar\n"
+                "    {seed}:\n      +column_types:\n        {from_col}: varchar\n        {to_col}: varchar\n"
             ));
         }
     }
@@ -1008,6 +1010,11 @@ mod tests {
         assert!(
             plan["dbt_project.yml"].contains("+column_types"),
             "seeds must force varchar column_types so codes like 001 stay strings"
+        );
+        assert!(
+            plan["dbt_project.yml"].contains("seeds:\n  keymap_demo:\n    map_"),
+            "column_types must nest under project name, got:\n{}",
+            plan["dbt_project.yml"]
         );
         assert!(plan["dbt_project.yml"].contains("from: varchar"));
         let seed = &plan["seeds/map_channel_alias.csv"];

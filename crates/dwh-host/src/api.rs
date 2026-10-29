@@ -10,11 +10,12 @@ use dwh_engine::{
     join_diagnostics as run_join_diagnostics, join_key_near_miss as run_join_key_near_miss,
     list_postgres_objects as run_list_postgres_objects,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
-    read_key_map as run_read_key_map, set_extensions_dir,
-    test_postgres_connection as run_test_postgres_connection, write_key_map as run_write_key_map,
-    BlameUnmatchedKeyResult, DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult,
-    JoinDiagnostics, JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, KeyMapWriteResult, PostgresColumn,
-    PostgresObject, PreviewResult,
+    read_key_map_with_hash as run_read_key_map_with_hash, set_extensions_dir,
+    test_postgres_connection as run_test_postgres_connection,
+    write_key_map_with_expected as run_write_key_map_with_expected, BlameUnmatchedKeyResult,
+    DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyNearMiss,
+    JoinKeySide, JoinKeyTuple, KeyMapReadResult, KeyMapWriteResult, PostgresColumn, PostgresObject,
+    PreviewResult,
 };
 use dwh_pipeline::{
     dbt_parse, list_export_tree as walk_export_tree, preview_dbt_model_sql,
@@ -810,6 +811,8 @@ struct PushKeyMapArgs {
 struct KeyMapWhArgs {
     key_map: KeyMapDef,
     connection_string: String,
+    /// Optimistic concurrency token from the prior read (checked under lock in TX).
+    expected_content_hash: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1128,15 +1131,19 @@ impl HostState {
             }
             "write_key_map" => {
                 let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let out: KeyMapWriteResult =
-                    run_write_key_map(&db, &a.key_map, &a.connection_string)?;
+                let out: KeyMapWriteResult = run_write_key_map_with_expected(
+                    &db,
+                    &a.key_map,
+                    &a.connection_string,
+                    a.expected_content_hash.as_deref(),
+                )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "read_key_map" => {
                 let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let entries = run_read_key_map(&db, &a.key_map, &a.connection_string)?;
-                serde_json::to_value(serde_json::json!({ "entries": entries }))
-                    .map_err(|e| e.to_string())
+                let out: KeyMapReadResult =
+                    run_read_key_map_with_hash(&db, &a.key_map, &a.connection_string)?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "preview_dbt_model" => {
                 let a: PreviewDbtArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;

@@ -277,20 +277,38 @@ export type KeyMapWriteResult = {
   table: string;
   rows_written: number;
   created_table: boolean;
-  content_hash?: string;
+  content_hash: string;
+};
+
+export type KeyMapReadResult = {
+  entries: import("../types/pipeline").KeyMapEntry[];
+  content_hash: string;
+};
+
+/** Structured outcome of Save (local AST always written; external sync varies). */
+export type KeyMapSaveResult = {
+  local: "saved";
+  external: "synced" | "skipped" | "conflict" | "error" | "none";
+  message: string;
+  contentHash?: string;
 };
 
 export function writeKeyMap(
   keyMap: import("../types/pipeline").KeyMapDef,
   connectionString: string,
+  expectedContentHash?: string | null,
 ): Promise<KeyMapWriteResult> {
-  return invoke("write_key_map", { keyMap, connectionString });
+  return invoke("write_key_map", {
+    keyMap,
+    connectionString,
+    expectedContentHash: expectedContentHash ?? null,
+  });
 }
 
 export function readKeyMap(
   keyMap: import("../types/pipeline").KeyMapDef,
   connectionString: string,
-): Promise<{ entries: import("../types/pipeline").KeyMapEntry[] }> {
+): Promise<KeyMapReadResult> {
   return invoke("read_key_map", { keyMap, connectionString });
 }
 

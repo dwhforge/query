@@ -29,8 +29,9 @@ pub use join_near_miss::{
     join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,
 };
 pub use key_map_write::{
-    key_map_content_hash, read_key_map, read_key_map_from_postgres, write_key_map,
-    write_key_map_to_postgres, write_key_map_with_expected, KeyMapWriteResult,
+    key_map_content_hash, read_key_map, read_key_map_from_postgres, read_key_map_with_hash,
+    write_key_map, write_key_map_to_postgres, write_key_map_with_expected, KeyMapReadResult,
+    KeyMapWriteResult,
 };
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{

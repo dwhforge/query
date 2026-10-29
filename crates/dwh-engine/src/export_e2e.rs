@@ -66,30 +66,40 @@ mod tests {
         }
     }
 
+    /// Type-tagged cell fingerprint. Numbers may normalize 1200 vs 1200.0;
+    /// strings are never coerced to numbers (so "001" ≠ "1").
     fn cell_key(v: &JsonValue) -> String {
         match v {
             JsonValue::Null => "∅".into(),
-            JsonValue::Bool(b) => b.to_string(),
+            JsonValue::Bool(b) => format!("b:{b}"),
             JsonValue::Number(n) => {
-                // Normalize 1200 vs 1200.0 for preview vs warehouse.
                 if let Some(f) = n.as_f64() {
                     if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) {
-                        return format!("{}", f as i64);
+                        return format!("n:{}", f as i64);
                     }
-                    return format!("{f}");
+                    return format!("n:{f}");
                 }
-                n.to_string()
+                format!("n:{n}")
             }
-            JsonValue::String(s) => {
-                if let Ok(f) = s.parse::<f64>() {
-                    if f.fract() == 0.0 && f.abs() < (i64::MAX as f64) {
-                        return format!("{}", f as i64);
-                    }
-                }
-                s.clone()
-            }
-            other => other.to_string(),
+            JsonValue::String(s) => format!("s:{s}"),
+            other => format!("o:{other}"),
         }
+    }
+
+    #[test]
+    fn cell_key_keeps_leading_zeros_as_strings() {
+        assert_ne!(
+            cell_key(&JsonValue::String("001".into())),
+            cell_key(&JsonValue::String("1".into()))
+        );
+        assert_ne!(
+            cell_key(&JsonValue::String("001".into())),
+            cell_key(&JsonValue::Number(1.into()))
+        );
+        assert_eq!(
+            cell_key(&JsonValue::Number(serde_json::Number::from_f64(1200.0).unwrap())),
+            cell_key(&JsonValue::Number(1200.into()))
+        );
     }
 
     /// row fingerprint → multiplicity (preserves duplicate distribution).

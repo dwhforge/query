@@ -481,10 +481,34 @@ pub fn key_map_seed_csv_named(
     String::from_utf8(bytes).expect("csv utf8")
 }
 
+/// How to treat the first CSV row when parsing a KeyMap seed.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyMapCsvMode<'a> {
+    /// First row is a header only when it matches `from_col`/`to_col`
+    /// (case-insensitive). Otherwise every row is data — no content guessing.
+    Header { from_col: &'a str, to_col: &'a str },
+    /// No header row; columns are positional 0, 1.
+    Headerless,
+}
+
 /// Parse KeyMap seed CSV via the `csv` crate (handles quoted newlines).
-/// Header optional; when present, uses columns named like `from`/`to` (case-insensitive)
-/// or the first two fields.
+/// Default mode expects a `from`/`to` header when present; never guesses headers
+/// from alphanumeric content (so `www,web` stays a data row).
 pub fn parse_key_map_seed_csv(body: &str) -> Result<Vec<KeyMapEntry>, String> {
+    parse_key_map_seed_csv_mode(
+        body,
+        KeyMapCsvMode::Header {
+            from_col: "from",
+            to_col: "to",
+        },
+    )
+}
+
+/// Parse with an explicit header mode and expected column names.
+pub fn parse_key_map_seed_csv_mode(
+    body: &str,
+    mode: KeyMapCsvMode<'_>,
+) -> Result<Vec<KeyMapEntry>, String> {
     let mut rdr = csv::ReaderBuilder::new()
         .flexible(true)
         .has_headers(false)
@@ -496,24 +520,23 @@ pub fn parse_key_map_seed_csv(body: &str) -> Result<Vec<KeyMapEntry>, String> {
         None => return Ok(vec![]),
     };
 
-    let (from_i, to_i, start_is_header) = {
-        let f0 = first.get(0).unwrap_or("").trim();
-        let f1 = first.get(1).unwrap_or("").trim();
-        if first.len() >= 2
-            && (f0.eq_ignore_ascii_case("from") || f0.eq_ignore_ascii_case("src"))
-            && (f1.eq_ignore_ascii_case("to") || f1.eq_ignore_ascii_case("dst"))
-        {
-            (0usize, 1usize, true)
-        } else if first.len() >= 2 {
-            // Custom header names — treat row 0 as header; data starts at row 1.
-            // If values look like data (not header-ish), use as first data row.
-            let looks_header = !f0.is_empty()
-                && !f1.is_empty()
-                && f0.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && f1.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            (0usize, 1usize, looks_header)
-        } else {
-            return Err("key map seed CSV: need at least two columns".into());
+    if first.len() < 2 {
+        return Err("key map seed CSV: need at least two columns".into());
+    }
+
+    let (from_i, to_i, start_is_header) = match mode {
+        KeyMapCsvMode::Headerless => (0usize, 1usize, false),
+        KeyMapCsvMode::Header { from_col, to_col } => {
+            let f0 = first.get(0).unwrap_or("").trim();
+            let f1 = first.get(1).unwrap_or("").trim();
+            let matches_expected = f0.eq_ignore_ascii_case(from_col)
+                && f1.eq_ignore_ascii_case(to_col);
+            // Common aliases only when expecting the default from/to names.
+            let matches_alias = from_col.eq_ignore_ascii_case("from")
+                && to_col.eq_ignore_ascii_case("to")
+                && (f0.eq_ignore_ascii_case("from") || f0.eq_ignore_ascii_case("src"))
+                && (f1.eq_ignore_ascii_case("to") || f1.eq_ignore_ascii_case("dst"));
+            (0usize, 1usize, matches_expected || matches_alias)
         }
     };
 
@@ -1268,5 +1291,50 @@ mod tests {
         assert!(sql.contains("COALESCE"));
         assert!(sql.contains("web"));
         assert!(sql.contains("online"));
+    }
+
+    #[test]
+    fn headerless_csv_keeps_all_rows() {
+        use crate::model::KeyMapEntry;
+        let body = "www,web\nshop,store\n";
+        let rows = parse_key_map_seed_csv(body).unwrap();
+        assert_eq!(rows.len(), 2, "must not treat www,web as a header");
+        assert_eq!(
+            rows,
+            vec![
+                KeyMapEntry {
+                    from: "www".into(),
+                    to: "web".into(),
+                },
+                KeyMapEntry {
+                    from: "shop".into(),
+                    to: "store".into(),
+                },
+            ]
+        );
+        let explicit = parse_key_map_seed_csv_mode(body, KeyMapCsvMode::Headerless).unwrap();
+        assert_eq!(explicit.len(), 2);
+    }
+
+    #[test]
+    fn header_csv_skips_from_to_row() {
+        let rows = parse_key_map_seed_csv("from,to\n001,online\n").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].from, "001");
+        assert_eq!(rows[0].to, "online");
+    }
+
+    #[test]
+    fn custom_header_names_only_when_matching() {
+        let rows = parse_key_map_seed_csv_mode(
+            "src_code,dst_code\n001,online\n",
+            KeyMapCsvMode::Header {
+                from_col: "src_code",
+                to_col: "dst_code",
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].from, "001");
     }
 }

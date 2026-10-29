@@ -26,13 +26,12 @@ pub use dialect::{
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
     key_map_seed_csv_named, key_map_seed_name, normalize_column_expr, parse_key_map_seed_csv,
-    rename_select_list,
-    resolve_source_column, select_list_aligned, sql_union_all_aligned,
-    substitute_query_placeholders, union_column_names, validate_unambiguous_ascii_names,
-    EmitSchemaOpts,
+    parse_key_map_seed_csv_mode, rename_select_list, resolve_source_column, select_list_aligned,
+    sql_union_all_aligned, substitute_query_placeholders, union_column_names,
+    validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,
 };
 pub use key_map_sync::{
-    push_key_map_to_export, sync_key_maps_from_export, KeyMapSyncResult,
+    push_key_map_to_export, sync_key_maps_from_export, KeyMapSyncResult, KEYMAP_CONFLICT_DIR,
 };
 pub use schema::{apply_step_schema, infer_workspace_schemas, StepSchema, WorkspaceSchemas};
 pub use postgres_attach::{duckdb_postgres_relation, postgres_attach_alias};

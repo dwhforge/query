@@ -27,7 +27,6 @@ import {
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
   resolveKeyMapConnection,
-  resolveKeyMapConnectionString,
   syncApplyKeyMapEntries,
   upsertKeyMapList,
   type ApplySide,
@@ -78,6 +77,7 @@ import {
   type AppSettings,
   type JoinDiagSample,
   type JoinDiagnostics,
+  type KeyMapSaveResult,
   type NearMissHypothesis,
   type PreviewDbtModel,
   type PostgresColumn,
@@ -108,6 +108,8 @@ import {
 
 type KeyMapTabSession = {
   map: KeyMapDef;
+  /** Optimistic concurrency token from last warehouse read (source storage). */
+  contentHash?: string;
   pickTo?: string[];
   suggestedFrom?: string[];
   joinCtx?: {
@@ -1806,31 +1808,11 @@ function App() {
         } catch {
           /* keep project.connections */
         }
-        // Bind an explicit connection_id once so later Save cannot silently hop DBs.
-        let mapForRead = normalized;
-        if (!sourceStorage.connection_id?.trim()) {
-          const pick =
-            conns.find((c) => c.id === project.target_connection_id) ??
-            conns.find((c) => c.kind === "postgres");
-          if (pick) {
-            mapForRead = {
-              ...normalized,
-              storage: {
-                kind: "source",
-                source: sourceStorage.source,
-                table: sourceStorage.table,
-                connection_id: pick.id,
-              },
-            };
-            patchKeyMapTab(normalized.id, (s) => ({
-              ...s,
-              map: { ...s.map, storage: mapForRead.storage },
-            }));
-          }
-        }
+        // Read may resolve a DSN via Explorer source match, but never write that
+        // into storage.connection_id — assignment must be an explicit user choice.
         const resolved = resolveKeyMapConnection(
           project,
-          mapForRead,
+          normalized,
           conns,
           false,
         );
@@ -1839,10 +1821,11 @@ function App() {
           return;
         }
         try {
-          const r = await readKeyMap(mapForRead, resolved.dsn);
+          const r = await readKeyMap(normalized, resolved.dsn);
           patchKeyMapTab(normalized.id, (s) => ({
             ...s,
             map: { ...s.map, entries: r.entries },
+            contentHash: r.content_hash,
           }));
         } catch (e) {
           setError(
@@ -1855,7 +1838,7 @@ function App() {
     }
   }
 
-  async function saveKeyMapToProject(map: KeyMapDef): Promise<void> {
+  async function saveKeyMapToProject(map: KeyMapDef): Promise<KeyMapSaveResult> {
     // Persist to project AST first (local). External sync reports separately.
     setProject((p) => {
       const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], map);
@@ -1870,22 +1853,44 @@ function App() {
     if (kind === "seed") {
       const exportPath = project.last_dbt_export_path;
       if (!exportPath) {
-        setExportMsg("KeyMap saved in project (not exported yet — no seed CSV)");
-        return;
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message: "KeyMap saved in project (not exported yet — no seed CSV)",
+        };
+        setExportMsg(result.message);
+        return result;
       }
       try {
         await pushKeyMapToExport(exportPath, map);
-        setExportMsg(`KeyMap saved in project · synced → seeds (export tree)`);
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "synced",
+          message: "KeyMap saved in project · synced → seeds (export tree)",
+        };
+        setExportMsg(result.message);
         setError(null);
+        return result;
       } catch (e) {
+        const msg = typeof e === "string" ? e : String(e);
+        const isConflict = /refused|hash mismatch|conflict/i.test(msg);
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: isConflict ? "conflict" : "error",
+          message: msg,
+        };
         setError(
-          typeof e === "string"
-            ? e
-            : `KeyMap saved in project, but seed sync failed: ${String(e)}`,
+          isConflict
+            ? msg
+            : `KeyMap saved in project, but seed sync failed: ${msg}`,
         );
-        setExportMsg("KeyMap saved in project · seed sync FAILED");
+        setExportMsg(
+          isConflict
+            ? "KeyMap saved in project · seed CONFLICT"
+            : "KeyMap saved in project · seed sync FAILED",
+        );
+        return result;
       }
-      return;
     }
     if (kind === "source") {
       let conns = project.connections;
@@ -1902,30 +1907,60 @@ function App() {
         }
       }
       if (!resolved.ok) {
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message: resolved.error,
+        };
         setError(resolved.error);
         setExportMsg("KeyMap saved in project · warehouse write skipped");
-        return;
+        return result;
       }
+      const expectedHash = keyMapTabs.find((t) => t.map.id === map.id)?.contentHash;
       try {
-        const r = await writeKeyMap(map, resolved.dsn);
-        setExportMsg(
-          `KeyMap saved in project · write-back → ${r.schema}.${r.table} (${r.rows_written} rows)`,
-        );
+        const r = await writeKeyMap(map, resolved.dsn, expectedHash);
+        patchKeyMapTab(map.id, (s) => ({
+          ...s,
+          contentHash: r.content_hash,
+        }));
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "synced",
+          message: `KeyMap saved in project · write-back → ${r.schema}.${r.table} (${r.rows_written} rows)`,
+          contentHash: r.content_hash,
+        };
+        setExportMsg(result.message);
         setError(null);
+        return result;
       } catch (e) {
+        const msg = typeof e === "string" ? e : String(e);
+        const isConflict = /refused|concurrently|hash/i.test(msg);
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: isConflict ? "conflict" : "error",
+          message: msg,
+        };
         setError(
-          typeof e === "string"
-            ? e
-            : `KeyMap saved in project, but warehouse write-back failed: ${String(e)}`,
+          isConflict
+            ? msg
+            : `KeyMap saved in project, but warehouse write-back failed: ${msg}`,
         );
-        setExportMsg("KeyMap saved in project · warehouse write FAILED");
+        setExportMsg(
+          isConflict
+            ? "KeyMap saved in project · warehouse CONFLICT"
+            : "KeyMap saved in project · warehouse write FAILED",
+        );
+        return result;
       }
-      return;
     }
     // ref: project cache only
-    setExportMsg(
-      "KeyMap saved in project (ref storage — no warehouse write-back)",
-    );
+    const result: KeyMapSaveResult = {
+      local: "saved",
+      external: "none",
+      message: "KeyMap saved in project (ref storage — no warehouse write-back)",
+    };
+    setExportMsg(result.message);
+    return result;
   }
 
   function handleAddKeyMap() {
@@ -2964,6 +2999,12 @@ function App() {
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({
                       ...s,
                       map: { ...map, id: keyMapEditor.map.id },
+                    }))
+                  }
+                  onWarehouseRead={(contentHash) =>
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
+                      ...s,
+                      contentHash,
                     }))
                   }
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}

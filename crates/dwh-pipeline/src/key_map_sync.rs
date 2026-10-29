@@ -1,10 +1,15 @@
 //! Seed ↔ KeyMap sync (ADR-0020): after first export, `seeds/map_*.csv` is SoT.
 
-use crate::emit::{key_map_seed_csv_named, key_map_seed_name, parse_key_map_seed_csv};
+use crate::emit::{
+    key_map_seed_csv_named, key_map_seed_name, parse_key_map_seed_csv_mode, KeyMapCsvMode,
+};
 use crate::export_manifest::{hash_content, load_manifest, manifest_path, ExportManifest};
 use crate::model::{KeyMapDef, KeyMapEntry, TransformationStep, Workspace};
 use std::fs;
 use std::path::Path;
+
+/// Conflict copies live outside dbt resource dirs so `dbt seed` never loads them.
+pub const KEYMAP_CONFLICT_DIR: &str = ".dwhforge/keymap-conflicts";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KeyMapSyncResult {
@@ -47,12 +52,33 @@ pub fn sync_key_maps_from_export(
         if !stem.starts_with("map_") {
             continue;
         }
-        // Ignore conflict sidecars written by push_key_map_to_export.
-        if stem.contains(".conflict") {
-            continue;
-        }
         let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let entries = parse_key_map_seed_csv(&body)?;
+        let (from_col, to_col) = workspace
+            .key_maps
+            .iter()
+            .find(|m| key_map_seed_name(&m.id) == stem || m.id == stem)
+            .map(|m| {
+                (
+                    if m.from_column.trim().is_empty() {
+                        "from".to_string()
+                    } else {
+                        m.from_column.clone()
+                    },
+                    if m.to_column.trim().is_empty() {
+                        "to".to_string()
+                    } else {
+                        m.to_column.clone()
+                    },
+                )
+            })
+            .unwrap_or_else(|| ("from".into(), "to".into()));
+        let entries = parse_key_map_seed_csv_mode(
+            &body,
+            KeyMapCsvMode::Header {
+                from_col: &from_col,
+                to_col: &to_col,
+            },
+        )?;
         seed_files.push(format!("seeds/{stem}.csv"));
 
         let existing = workspace
@@ -137,14 +163,17 @@ pub fn push_key_map_to_export(
         if let Some(expected) = manifest.owned.get(&rel) {
             let actual = hash_content(on_disk);
             if actual != *expected {
-                let conflict_rel = format!("seeds/{seed}.conflict-incoming.csv");
+                let conflict_dir = export_root.join(KEYMAP_CONFLICT_DIR);
+                fs::create_dir_all(&conflict_dir)
+                    .map_err(|e| format!("mkdir {KEYMAP_CONFLICT_DIR}: {e}"))?;
+                let conflict_rel = format!("{KEYMAP_CONFLICT_DIR}/{seed}.incoming.csv");
                 fs::write(export_root.join(&conflict_rel), &body).map_err(|e| {
                     format!("write {conflict_rel}: {e}")
                 })?;
                 return Err(format!(
                     "seed push refused: {rel} was edited outside the app (hash mismatch). \
-                     Incoming rows saved as {conflict_rel}. Reopen/sync to pull disk into the \
-                     editor, or restore the seed and Save again."
+                     Incoming rows saved as {conflict_rel} (outside seeds/). Reopen/sync to \
+                     pull disk into the editor, or restore the seed and Save again."
                 ));
             }
         }
@@ -273,10 +302,33 @@ mod tests {
         }];
         let err = push_key_map_to_export(&dir, &map).unwrap_err();
         assert!(err.contains("refused"), "{err}");
-        assert!(dir.join("seeds/map_channel.conflict-incoming.csv").is_file());
+        assert!(
+            dir.join(".dwhforge/keymap-conflicts/map_channel.incoming.csv")
+                .is_file(),
+            "conflict must live outside seeds/"
+        );
+        assert!(
+            !dir.join("seeds/map_channel.conflict-incoming.csv").exists(),
+            "must not drop conflict CSV into seeds/ (dbt would load it)"
+        );
         // Original (hand-edited) file preserved
         let kept = fs::read_to_string(dir.join("seeds/map_channel.csv")).unwrap();
         assert!(kept.contains("shop"));
+    }
+
+    #[test]
+    fn leading_zero_seed_roundtrip() {
+        use crate::emit::parse_key_map_seed_csv;
+        let body = key_map_seed_csv_named(
+            &[KeyMapEntry {
+                from: "001".into(),
+                to: "online".into(),
+            }],
+            "from",
+            "to",
+        );
+        let back = parse_key_map_seed_csv(&body).unwrap();
+        assert_eq!(back[0].from, "001");
     }
 
     #[test]

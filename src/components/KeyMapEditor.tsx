@@ -38,6 +38,8 @@ export type KeyMapEditorProps = {
   /** Candidate dbt model names for storage=ref combo. */
   refOptions?: string[];
   onChange: (map: KeyMapDef) => void;
+  /** Fired after a successful warehouse read (optimistic concurrency token). */
+  onWarehouseRead?: (contentHash: string) => void;
   onApply?: (side: ApplySide) => void;
   onClose?: () => void;
   onSave?: () => void;
@@ -64,6 +66,7 @@ export function KeyMapEditor({
   postgresConnections = [],
   refOptions = [],
   onChange,
+  onWarehouseRead,
   onApply,
   onClose,
   onSave,
@@ -86,10 +89,9 @@ export function KeyMapEditor({
   const [reloadNonce, setReloadNonce] = useState(0);
   const loadedTableKey = useRef<string>("");
 
+  // Never invent a connection_id — empty means "not assigned for write".
   const activeConnectionId =
-    map.storage?.kind === "source"
-      ? map.storage.connection_id ?? postgresConnections[0]?.id ?? ""
-      : "";
+    map.storage?.kind === "source" ? map.storage.connection_id?.trim() ?? "" : "";
 
   useEffect(() => {
     if (map.storage?.kind !== "source") {
@@ -166,6 +168,7 @@ export function KeyMapEditor({
       .then((r) => {
         if (cancelled) return;
         onChange({ ...map, entries: r.entries });
+        onWarehouseRead?.(r.content_hash);
         setRowsStatus(
           r.entries.length === 0
             ? "Table empty — add rows below, then Save to warehouse"
@@ -380,7 +383,6 @@ export function KeyMapEditor({
                       kind: "source",
                       source: "",
                       table: "",
-                      connection_id: postgresConnections[0]?.id,
                     };
             onChange({ ...map, storage });
           }}
@@ -434,9 +436,11 @@ export function KeyMapEditor({
               }
               className={fieldClass}
             >
-              {postgresConnections.length === 0 && (
-                <option value="">No Postgres connection</option>
-              )}
+              <option value="">
+                {postgresConnections.length === 0
+                  ? "No Postgres connection"
+                  : "Select connection…"}
+              </option>
               {postgresConnections.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name || c.id}

@@ -6,7 +6,7 @@
   "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && DWH_ELECTRON_BUILD=1 vite build",
+    "build": "tsc && node scripts/vite-build-electron.mjs",
     "preview": "vite preview",
     "host:build": "cargo build -p dwh-host --release",
     "electron:dev": "npm run host:build && node scripts/electron-dev.mjs",

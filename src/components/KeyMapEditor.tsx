@@ -307,6 +307,9 @@ export function KeyMapEditor({
   const labelClass = "block text-[11px] font-medium text-slate-400";
 
   const seedName = keyMapSeedName(map.id);
+  const sourceStorage =
+    map.storage?.kind === "source" ? map.storage : null;
+  const refStorage = map.storage?.kind === "ref" ? map.storage : null;
   const settingsPanel = !compact && (
     <div className="flex w-full shrink-0 flex-col gap-3 overflow-y-auto border-slate-800 p-4 md:w-72 md:border-r lg:w-80">
       <label className={labelClass}>
@@ -351,12 +354,12 @@ export function KeyMapEditor({
           <option value="source">Warehouse source table</option>
         </select>
       </label>
-      {map.storage?.kind === "ref" && (
+      {refStorage && (
         <label className={labelClass}>
           Model
           <input
             list="keymap-ref-models"
-            value={map.storage.model}
+            value={refStorage.model}
             onChange={(e) =>
               onChange({
                 ...map,
@@ -375,7 +378,7 @@ export function KeyMapEditor({
           )}
         </label>
       )}
-      {map.storage?.kind === "source" && (
+      {sourceStorage && (
         <div className="space-y-3">
           <label className={labelClass}>
             Connection
@@ -386,8 +389,8 @@ export function KeyMapEditor({
                   ...map,
                   storage: {
                     kind: "source",
-                    source: map.storage!.source,
-                    table: map.storage!.table,
+                    source: sourceStorage.source,
+                    table: sourceStorage.table,
                     connection_id: e.target.value || undefined,
                   },
                 })
@@ -408,9 +411,9 @@ export function KeyMapEditor({
             Schema
             <select
               value={
-                schemaOptions.includes(map.storage.source)
-                  ? map.storage.source
-                  : map.storage.source
+                schemaOptions.includes(sourceStorage.source)
+                  ? sourceStorage.source
+                  : sourceStorage.source
                     ? "__custom__"
                     : ""
               }
@@ -448,10 +451,10 @@ export function KeyMapEditor({
                   {s}
                 </option>
               ))}
-              {map.storage.source &&
-                !schemaOptions.includes(map.storage.source) && (
+              {sourceStorage.source &&
+                !schemaOptions.includes(sourceStorage.source) && (
                   <option value="__custom__">
-                    {map.storage.source} (custom)
+                    {sourceStorage.source} (custom)
                   </option>
                 )}
             </select>
@@ -460,13 +463,13 @@ export function KeyMapEditor({
             Table
             <select
               value={
-                tablesInSchema.includes(map.storage.table)
-                  ? map.storage.table
-                  : map.storage.table
+                tablesInSchema.includes(sourceStorage.table)
+                  ? sourceStorage.table
+                  : sourceStorage.table
                     ? "__custom__"
                     : ""
               }
-              disabled={!map.storage.source}
+              disabled={!sourceStorage.source}
               onChange={(e) => {
                 const v = e.target.value;
                 if (!v || v === "__custom__") {
@@ -475,7 +478,7 @@ export function KeyMapEditor({
                     ...map,
                     storage: {
                       kind: "source",
-                      source: map.storage.source,
+                      source: sourceStorage.source,
                       table: "",
                       connection_id: activeConnectionId || undefined,
                     },
@@ -486,7 +489,7 @@ export function KeyMapEditor({
                   ...map,
                   storage: {
                     kind: "source",
-                    source: map.storage.source,
+                    source: sourceStorage.source,
                     table: v,
                     connection_id: activeConnectionId || undefined,
                   },
@@ -495,17 +498,19 @@ export function KeyMapEditor({
               className={`${fieldClass} font-mono disabled:opacity-40`}
             >
               <option value="">
-                {map.storage.source ? "Pick table…" : "Select schema first"}
+                {sourceStorage.source
+                  ? "Pick table…"
+                  : "Select schema first"}
               </option>
               {tablesInSchema.map((t) => (
                 <option key={t} value={t}>
                   {t}
                 </option>
               ))}
-              {map.storage.table &&
-                !tablesInSchema.includes(map.storage.table) && (
+              {sourceStorage.table &&
+                !tablesInSchema.includes(sourceStorage.table) && (
                   <option value="__custom__">
-                    {map.storage.table} (custom)
+                    {sourceStorage.table} (custom)
                   </option>
                 )}
             </select>
@@ -516,13 +521,13 @@ export function KeyMapEditor({
           <p className="text-[11px] leading-snug text-teal-400/85">
             Edit the grid, then save — full replace write-back to{" "}
             <span className="font-mono">
-              {map.storage.source || "?"}.{map.storage.table || "?"}
+              {sourceStorage.source || "?"}.{sourceStorage.table || "?"}
             </span>
             .
           </p>
         </div>
       )}
-      {map.storage?.kind === "ref" && (
+      {refStorage && (
         <p className="text-[11px] leading-snug text-slate-500">
           ref storage: rows are project cache only (no warehouse write-back).
         </p>

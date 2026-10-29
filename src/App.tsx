@@ -1772,7 +1772,9 @@ function App() {
     });
     setCenterTab(normalized.id);
     // Source-backed: load live rows from WH into the editor.
-    if (normalized.storage?.kind === "source") {
+    const sourceStorage =
+      normalized.storage?.kind === "source" ? normalized.storage : null;
+    if (sourceStorage) {
       void (async () => {
         let conns = project.connections;
         let dsn = resolveKeyMapConnectionString(project, normalized, conns);
@@ -1788,7 +1790,7 @@ function App() {
           }
         }
         if (
-          !normalized.storage.connection_id &&
+          !sourceStorage.connection_id &&
           conns.some((c) => c.kind === "postgres")
         ) {
           const pick =

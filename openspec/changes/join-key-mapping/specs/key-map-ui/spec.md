@@ -31,3 +31,30 @@ Apply SHALL insert or update `ApplyKeyMap` on the owning query for Left, Right, 
 - **GIVEN** an ApplyKeyMap already on the left for `(column, map_id)`
 - **WHEN** the user Applies the same map again with updated entries
 - **THEN** the existing step’s entries are updated (no second ApplyKeyMap for that triple)
+
+### Requirement: Dictionary fuzzy reuses the KeyMap workflow
+
+The editor SHALL accept two query/key/optional-label selections and configurable score/ambiguity thresholds. Suggestions SHALL contain original From/To keys, be read-only until accepted, and use the shared matching core. Product defaults SHALL NOT refer to stress fixture queries or columns.
+
+#### Scenario: Different system codes, matching names
+- **GIVEN** two dictionary queries whose codes differ but names are similar
+- **WHEN** the user requests and accepts unambiguous suggestions
+- **THEN** proposals contain the original codes and update only the KeyMap draft
+- **AND** filled mappings remain unchanged and persistence uses the existing Save action
+
+#### Scenario: Source or options change during a request
+- **WHEN** query selections, matching options, workspace or connections change
+- **THEN** a response for the previous inputs cannot be accepted
+
+### Requirement: Full dictionary limits are explicit
+
+The host SHALL reject duplicate/untrimmed/blank keys, NULL/empty labels, fields longer than 512 characters, invalid thresholds and inputs exceeding 250000 rows per side. Bounded candidate search SHALL be disclosed; lack of a proposal SHALL NOT be described as proof that no match exists.
+
+#### Scenario: Input exceeds the limit
+- **WHEN** a dictionary has 250001 rows
+- **THEN** the request fails without accepting or returning a truncated successful map
+
+#### Scenario: Equally good target codes
+- **GIVEN** two eligible retrieved targets with equal scores
+- **THEN** the proposal is ambiguous even when configured ambiguity gap is zero
+- **AND** bulk acceptance leaves it unaccepted

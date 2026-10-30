@@ -12,6 +12,10 @@ import type {
   KeyMapStorage,
 } from "../types/pipeline";
 import { listPostgresObjects, readKeyMap } from "../lib/bridge";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
+import { mergeKeyMapProposals } from "../lib/keyMap";
+import type { Workspace } from "../types/pipeline";
 import {
   keyMapSeedName,
   parseFromToPaste,
@@ -27,6 +31,8 @@ export type KeyMapSourceOption = {
 
 export type KeyMapEditorProps = {
   map: KeyMapDef;
+  workspace?: Workspace;
+  connections?: ConnectionDef[];
   /** Distinct partner keys for Pick To (optional). */
   pickToOptions?: string[];
   /** Prefill From rows (e.g. unmatched keys). */
@@ -74,6 +80,8 @@ function storageKind(s: KeyMapStorage | undefined): "seed" | "ref" | "source" {
 
 export function KeyMapEditor({
   map,
+  workspace,
+  connections = [],
   pickToOptions = [],
   suggestedFrom = [],
   sourceOptions = [],
@@ -105,6 +113,7 @@ export function KeyMapEditor({
   const [rowsStatus, setRowsStatus] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const loadedTableKey = useRef<string>("");
+  const gridRef = useRef<HTMLDivElement>(null);
 
   // Never invent a connection_id — empty means "not assigned for write".
   const activeConnectionId =
@@ -246,6 +255,15 @@ export function KeyMapEditor({
           e.from.toLowerCase().includes(q) || e.to.toLowerCase().includes(q),
       );
   }, [map.entries, filter]);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getItemKey: (index) => rows[index]!.i,
+    getScrollElement: () => gridRef.current,
+    estimateSize: () => compact ? 38 : 42,
+    overscan: 12,
+  });
+  const virtualRows = virtualizer.getVirtualItems();
 
   function setEntries(entries: KeyMapEntry[]) {
     const v = validateKeyMapEntries(entries);
@@ -689,7 +707,7 @@ export function KeyMapEditor({
   );
 
   const grid = (
-    <div className="min-h-0 flex-1 overflow-auto">
+    <div ref={gridRef} className="min-h-0 flex-1 overflow-auto">
       <table
         className={`w-full border-collapse text-left ${
           compact ? "text-[11px]" : "text-[13px]"
@@ -718,9 +736,11 @@ export function KeyMapEditor({
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ e, i }) => (
+          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={4} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
+          {virtualRows.map((v) => { const {e,i}=rows[v.index]!; return (
             <tr
               key={i}
+              style={{height: compact ? 38 : 42}}
               className="border-t border-slate-800/60 hover:bg-slate-900/40"
             >
               <td className="px-3 py-1 font-mono text-[11px] text-slate-600">
@@ -762,12 +782,13 @@ export function KeyMapEditor({
                 </button>
               </td>
             </tr>
-          ))}
+          ); })}
+          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={4} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
         </tbody>
       </table>
       {pickToOptions.length > 0 && (
         <datalist id={`keymap-to-${map.id}`}>
-          {pickToOptions.map((o) => (
+          {pickToOptions.slice(0,1000).map((o) => (
             <option key={o} value={o} />
           ))}
         </datalist>
@@ -866,6 +887,12 @@ export function KeyMapEditor({
         {settingsPanel}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {toolbar}
+          {!compact && workspace && <KeyMapFuzzyPanel
+            key={map.id}
+            workspace={workspace}
+            connections={connections}
+            onAccept={(suggestions) => setEntries(mergeKeyMapProposals(map.entries, suggestions))}
+          />}
           {pasteOpen && (
             <div className="shrink-0 space-y-2 border-b border-slate-800 px-4 py-3">
               <textarea

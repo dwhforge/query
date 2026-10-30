@@ -3410,6 +3410,8 @@ function App() {
               >
                 <KeyMapEditor
                   map={keyMapEditor.map}
+                  workspace={project.workspace}
+                  connections={project.connections}
                   pickToOptions={keyMapEditor.pickTo}
                   suggestedFrom={keyMapEditor.suggestedFrom}
                   exportPath={project.last_dbt_export_path}

@@ -763,6 +763,19 @@ struct PreviewArgs {
     connections: Option<Vec<ConnectionDef>>,
 }
 
+/// Read-only matching inputs; accepting proposals uses existing KeyMap editing.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyMapFuzzyArgs {
+    workspace: Workspace,
+    #[serde(default)]
+    connections: Vec<ConnectionDef>,
+    left: dwh_engine::KeyMapMatchSource,
+    right: dwh_engine::KeyMapMatchSource,
+    #[serde(default)]
+    options: dwh_engine::KeyMatchOptions,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JoinDiagArgs {
@@ -1193,6 +1206,13 @@ impl HostState {
                     &conns,
                     &a.host_query_id,
                     a.join_step_index,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "key_map_fuzzy_suggest" => {
+                let a: KeyMapFuzzyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = dwh_engine::key_map_fuzzy_suggest(
+                    &db, &a.workspace, &a.connections, &a.left, &a.right, a.options,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }

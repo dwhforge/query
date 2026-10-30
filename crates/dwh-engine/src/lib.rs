@@ -5,7 +5,11 @@ mod join_diagnostics;
 mod join_fuzzy;
 mod join_lens;
 mod join_near_miss;
+mod key_map_fuzzy;
 mod key_map_write;
+mod key_match;
+#[cfg(test)]
+mod key_match_bench;
 mod load_seeds;
 mod postgres_catalog;
 mod preview;
@@ -28,11 +32,13 @@ pub use join_lens::{
 };
 pub use join_fuzzy::{
     join_key_fuzzy_suggest, FuzzyAliasExample, FuzzyChatContext, FuzzyFieldSample, FuzzyKeySample,
-    FuzzyPair, JoinKeyFuzzySuggest,
+    JoinKeyFuzzySuggest,
 };
 pub use join_near_miss::{
     join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,
 };
+pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
+pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use key_map_write::{
     key_map_content_hash, read_key_map, read_key_map_from_postgres, read_key_map_with_hash,
     write_key_map, write_key_map_to_postgres, write_key_map_with_expected, KeyMapReadResult,

@@ -194,12 +194,13 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
             }
         };
         let id = rpc.id;
-        if rpc.cmd == "llm_chat" {
+        if rpc.cmd == "llm_chat" || rpc.cmd == "key_map_fuzzy_suggest" {
             let st = Arc::clone(&state);
             let w = Arc::clone(&writer);
             let args = rpc.args;
+            let cmd = rpc.cmd;
             thread::spawn(move || {
-                let reply = match st.dispatch("llm_chat", args) {
+                let reply = match st.dispatch(&cmd, args) {
                     Ok(result) => json!({ "id": id, "ok": true, "result": result }),
                     Err(error) => json!({ "id": id, "ok": false, "error": error }),
                 };

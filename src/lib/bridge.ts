@@ -654,3 +654,36 @@ export function windowAction(action: WindowAction): Promise<void> {
   if (!dwh?.windowAction) return Promise.resolve();
   return dwh.windowAction(action).then(() => undefined);
 }
+
+export type KeyMapMatchSource = {
+  query_id: string;
+  key_column: string;
+  label_column?: string | null;
+};
+
+export type KeyMatchOptions = { score_cutoff: number; ambiguity_gap: number };
+export type KeyMapFuzzySuggest = {
+  left_rows: number;
+  right_rows: number;
+  unmatched: number;
+  ambiguous: number;
+  seconds: number;
+  options: KeyMatchOptions;
+  candidate_limited: boolean;
+  suggestions: FuzzyPair[];
+};
+
+export function keyMapFuzzySuggest(
+  workspace: Workspace,
+  connections: ConnectionDef[],
+  left: KeyMapMatchSource,
+  right: KeyMapMatchSource,
+  options: KeyMatchOptions,
+): Promise<KeyMapFuzzySuggest> {
+  const source = (value: KeyMapMatchSource) => ({
+    ...value, label_column: value.label_column?.trim() || null,
+  });
+  return invoke<KeyMapFuzzySuggest>("key_map_fuzzy_suggest", {
+    workspace, connections, left: source(left), right: source(right), options,
+  });
+}

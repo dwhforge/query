@@ -13,6 +13,65 @@ import { slugify } from "../types/pipeline";
 
 export type ApplySide = "left" | "right" | "both";
 
+/**
+ * Prefer the KeyMap already wired via ApplyKeyMap on this Join
+ * (host before Join for left; right query for right).
+ */
+export function findApplyKeyMapIdForJoin(
+  workspace: Workspace,
+  ctx: {
+    hostQueryId: string;
+    joinStepIndex: number;
+    rightQueryId: string;
+    leftOn: string[];
+    rightOn: string[];
+    probeSide?: "left" | "right";
+  },
+): string | null {
+  const fold = (s: string) => s.toLowerCase();
+  const matchCol = (stepCol: string, want: string | undefined) => {
+    if (!want) return true;
+    return fold(stepCol) === fold(want);
+  };
+
+  const preferRight = ctx.probeSide === "right";
+  const leftCol = ctx.leftOn[0];
+  const rightCol = ctx.rightOn[0];
+
+  const scan = (
+    steps: TransformationStep[],
+    upto: number | null,
+    column: string | undefined,
+  ): string | null => {
+    const end = upto == null ? steps.length : Math.min(upto, steps.length);
+    for (let i = end - 1; i >= 0; i--) {
+      const s = steps[i];
+      if (s?.type !== "ApplyKeyMap") continue;
+      if (!matchCol(s.payload.column, column)) continue;
+      return s.payload.map_id;
+    }
+    return null;
+  };
+
+  const host = workspace.queries.find((q) => q.id === ctx.hostQueryId);
+  const right = workspace.queries.find((q) => q.id === ctx.rightQueryId);
+
+  if (preferRight) {
+    return (
+      (right ? scan(right.steps, null, rightCol) : null) ??
+      (right ? scan(right.steps, null, undefined) : null) ??
+      (host ? scan(host.steps, ctx.joinStepIndex, leftCol) : null) ??
+      (host ? scan(host.steps, ctx.joinStepIndex, undefined) : null)
+    );
+  }
+  return (
+    (host ? scan(host.steps, ctx.joinStepIndex, leftCol) : null) ??
+    (host ? scan(host.steps, ctx.joinStepIndex, undefined) : null) ??
+    (right ? scan(right.steps, null, rightCol) : null) ??
+    (right ? scan(right.steps, null, undefined) : null)
+  );
+}
+
 export function emptyKeyMap(name = "Key map"): KeyMapDef {
   const id = `map_${slugify(name)}_${Date.now().toString(36)}`;
   return {

@@ -49,6 +49,20 @@ export type KeyMapEditorProps = {
   exportPath?: string | null;
   /** Opened from Join Lens — show Apply guidance. */
   joinApplyHint?: string | null;
+  /** Concrete Join Lens session — which query/keys Apply will touch. */
+  joinApplyContext?: {
+    hostQueryName: string;
+    rightQueryName: string;
+    leftOn: string;
+    rightOn: string;
+    /** Unmatched side that opened Add to map… */
+    probeSide?: "left" | "right";
+  } | null;
+  /**
+   * Opened via existing ApplyKeyMap preference — quiet escape hatch
+   * to pick a different KeyMap / create new.
+   */
+  onChooseOtherMap?: () => void;
   /** Compact for Hero playground. */
   compact?: boolean;
   title?: string;
@@ -74,6 +88,8 @@ export function KeyMapEditor({
   saveLabel = "Save map",
   exportPath = null,
   joinApplyHint = null,
+  joinApplyContext = null,
+  onChooseOtherMap,
   compact = false,
   title,
 }: KeyMapEditorProps) {
@@ -81,6 +97,7 @@ export function KeyMapEditor({
   const [error, setError] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const [showOtherApplySides, setShowOtherApplySides] = useState(false);
   const [pgTableOptions, setPgTableOptions] = useState<KeyMapSourceOption[]>(
     [],
   );
@@ -593,6 +610,16 @@ export function KeyMapEditor({
           />
         </label>
       </div>
+      <p className="text-[11px] leading-snug text-slate-500">
+        Names of the alias / canon columns in the seed or warehouse table.
+        Leave as{" "}
+        <span className="font-mono text-slate-400">from</span> /{" "}
+        <span className="font-mono text-slate-400">to</span> for the default
+        seed. Change only when storage is an existing table or model with
+        different names (e.g.{" "}
+        <span className="font-mono text-slate-400">alias</span> →{" "}
+        <span className="font-mono text-slate-400">company_id</span>).
+      </p>
     </div>
   );
 
@@ -798,13 +825,22 @@ export function KeyMapEditor({
 
       {!compact && joinApplyHint && onApply && (
         <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-[12px] leading-snug text-amber-100/90">
-          <span className="font-semibold text-amber-200">From Join Lens</span>
-          {" — "}
-          {joinApplyHint}{" "}
-          <span className="text-amber-200/80">
-            Buttons <span className="font-semibold">Apply left / right / both</span>{" "}
-            are in the toolbar above the From→To grid (not in the picker dialog).
-          </span>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <p className="min-w-0 flex-1">
+              <span className="font-semibold text-amber-200">From Join Lens</span>
+              {" — "}
+              {joinApplyHint}
+            </p>
+            {onChooseOtherMap && (
+              <button
+                type="button"
+                onClick={onChooseOtherMap}
+                className="shrink-0 text-[11px] text-slate-500 underline-offset-2 hover:text-slate-300 hover:underline"
+              >
+                Use a different KeyMap…
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -857,61 +893,171 @@ export function KeyMapEditor({
         </div>
       </div>
 
-      {!compact && (onSave || onDelete || onApply) && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-800 px-4 py-3">
-          {onApply && (
-            <>
-              <span className="mr-1 text-[11px] text-slate-500">
-                Insert ApplyKeyMap before Join:
-              </span>
-              {(["left", "right", "both"] as ApplySide[]).map((side) => (
+      {!compact && (onSave || onDelete || onApply) && (() => {
+        const probeSide = joinApplyContext?.probeSide;
+        const primarySide: ApplySide | null = probeSide ?? null;
+        const otherSides: ApplySide[] = primarySide
+          ? (["left", "right", "both"] as ApplySide[]).filter(
+              (s) => s !== primarySide,
+            )
+          : ["left", "right", "both"];
+
+        const runApply = (side: ApplySide) => {
+          const v = validateKeyMapEntries(map.entries);
+          if (!v.ok) {
+            setError(v.error);
+            return;
+          }
+          onApply!(side);
+        };
+
+        const primaryTarget =
+          primarySide === "left" && joinApplyContext
+            ? `${joinApplyContext.hostQueryName}.${joinApplyContext.leftOn}`
+            : primarySide === "right" && joinApplyContext
+              ? `${joinApplyContext.rightQueryName}.${joinApplyContext.rightOn}`
+              : null;
+
+        return (
+          <div className="flex shrink-0 flex-wrap items-start gap-3 border-t border-slate-800 px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {onApply && primarySide && primaryTarget ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => runApply(primarySide)}
+                    className="rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                  >
+                    Apply to {primarySide}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowOtherApplySides((v) => !v)}
+                    className="rounded-lg border border-slate-700 px-2.5 py-2 text-[11px] text-slate-400 hover:border-slate-500 hover:text-slate-200"
+                  >
+                    {showOtherApplySides ? "Hide other…" : "Other side…"}
+                  </button>
+                  {showOtherApplySides &&
+                    otherSides.map((side) => (
+                      <button
+                        key={side}
+                        type="button"
+                        onClick={() => runApply(side)}
+                        className="rounded-lg border border-slate-700 px-3 py-2 text-[12px] text-slate-300 hover:border-teal-800 hover:text-teal-200"
+                      >
+                        Apply {side}
+                      </button>
+                    ))}
+                </>
+              ) : onApply ? (
+                <>
+                  <span className="mr-1 text-[11px] text-slate-500">
+                    Insert ApplyKeyMap:
+                  </span>
+                  {otherSides.map((side) => (
+                    <button
+                      key={side}
+                      type="button"
+                      onClick={() => runApply(side)}
+                      className="rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                    >
+                      Apply {side}
+                    </button>
+                  ))}
+                </>
+              ) : null}
+              {onSave && (
                 <button
-                  key={side}
                   type="button"
-                  onClick={() => {
-                    const v = validateKeyMapEntries(map.entries);
-                    if (!v.ok) {
-                      setError(v.error);
-                      return;
-                    }
-                    onApply(side);
-                  }}
-                  className="rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                  onClick={onSave}
+                  className={
+                    onApply
+                      ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700"
+                      : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                  }
                 >
-                  Apply {side}
+                  {saveLabel}
                 </button>
-              ))}
-            </>
-          )}
-          {onSave && (
-            <button
-              type="button"
-              onClick={onSave}
-              className={
-                onApply
-                  ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700"
-                  : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
-              }
-            >
-              {saveLabel}
-            </button>
-          )}
-          {onDelete && (
-            <button
-              type="button"
-              onClick={onDelete}
-              className="rounded-lg border border-rose-900/60 px-3 py-2.5 text-sm text-rose-300 hover:bg-rose-950/40"
-            >
-              Delete
-            </button>
-          )}
-          <span className="ml-auto text-[11px] text-slate-600">
-            {onApply
-              ? "Apply left = remap the left join key on this query"
-              : "Enter moves cells · Enter on last To adds a row"}
-          </span>
-        </div>
-      )}
+              )}
+              {onDelete && (
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  className="rounded-lg border border-rose-900/60 px-3 py-2.5 text-sm text-rose-300 hover:bg-rose-950/40"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+            {onApply && joinApplyContext && primarySide && primaryTarget ? (
+              <div className="min-w-[16rem] flex-1 space-y-1 text-[11px] leading-snug text-slate-500">
+                <p>
+                  <span className="font-semibold text-slate-400">
+                    Context (this Join only)
+                  </span>
+                  {" — "}
+                  host{" "}
+                  <span className="font-mono text-teal-300/90">
+                    {joinApplyContext.hostQueryName}
+                  </span>
+                  {" · right "}
+                  <span className="font-mono text-teal-300/90">
+                    {joinApplyContext.rightQueryName}
+                  </span>
+                  {" · on "}
+                  <span className="font-mono text-slate-300">
+                    {joinApplyContext.leftOn}
+                  </span>
+                  {" = "}
+                  <span className="font-mono text-slate-300">
+                    {joinApplyContext.rightOn}
+                  </span>
+                  . Opened from{" "}
+                  <span className="font-semibold text-amber-100">
+                    {primarySide} unmatched
+                  </span>
+                  , so one Apply is enough. Map stays reusable; only the step
+                  is bound to this usage.
+                </p>
+                <p>
+                  <span className="font-semibold text-teal-200">
+                    Apply to {primarySide}
+                  </span>
+                  {" → inserts "}
+                  <span className="font-mono text-slate-400">ApplyKeyMap</span>
+                  {" on "}
+                  <span className="font-mono text-slate-300">{primaryTarget}</span>
+                  {primarySide === "left" ? " before Join" : ""}.{" "}
+                  <span className="text-slate-600">
+                    Other side… is rare (aliases on the other input, or both).
+                  </span>
+                </p>
+              </div>
+            ) : onApply && joinApplyContext ? (
+              <div className="min-w-[16rem] flex-1 space-y-1 text-[11px] leading-snug text-slate-500">
+                <p>
+                  Remap the side with dirty aliases. Map stays reusable; only
+                  the step is bound to this Join.
+                </p>
+              </div>
+            ) : onApply ? (
+              <p className="min-w-[14rem] flex-1 text-[11px] leading-snug text-slate-500">
+                <span className="font-semibold text-slate-400">
+                  Join Lens context only
+                </span>
+                {" — inserts "}
+                <span className="font-mono text-slate-400">ApplyKeyMap</span>
+                {" for this Join; map stays unbound."}
+                {joinApplyHint ? ` ${joinApplyHint}` : ""}
+              </p>
+            ) : (
+              <p className="ml-auto text-[11px] text-slate-600">
+                Enter moves cells · Enter on last To adds a row
+              </p>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

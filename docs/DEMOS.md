@@ -126,14 +126,16 @@ Food & beverage brands: POS/sales vs cost feed spell names differently. Fixtures
 | Query (UI) | dbt model (export) | Steps |
 |------------|-------------------|--------|
 | `dim_company` | `stg_dim_company` | LoadCsv (canonical id + name + category) |
-| `sales_daily` | `stg_sales_daily` | LoadCsv — e.g. `Starbucks Coffee` |
-| `res_consumption` | `stg_res_consumption` | LoadCsv — e.g. `STARBUCKS CORP` |
+| `sales_daily` | `stg_sales_daily` | LoadCsv — e.g. `SBUX`, `DEO`, `The South African Breweries` |
+| `res_consumption` | `stg_res_consumption` | LoadCsv — e.g. `STARBUCKS CORP`, `DIAGEO PLC` |
 | `dirty_join` | `int_dirty_join` | From(sales_daily) → LEFT Join(dim) **no map** — Lens |
 | `sales_canon` | `int_sales_canon` | From(sales_daily) → ApplyKeyMap → rename → Join dim |
 | `spend_canon` | `int_spend_canon` | From(res_consumption) → ApplyKeyMap → rename |
-| `daily_pnl` ★focus | `mart_daily_pnl` | Join sales⋈spend on id+day → net_revenue |
+| `daily_pnl` | `mart_daily_pnl` | Join sales⋈spend on id+day → net_revenue |
 | `monthly_pnl` | `int_monthly_pnl` | GroupBy company × category × month |
 
-`Workspace.key_maps`: `map_company_alias` (30 From→To rows). Export → `seeds/map_company_alias.csv`.
+★focus: `dirty_join` (Probe / Auto: sales keys unmatched vs `company_id`).
+
+`Workspace.key_maps`: `map_company_alias` (spelling aliases filled; **non-lexical blanks** `DEO`→`UBL`, `The South African Breweries`→`ABEV`; also `SBUX` / McDonalds / Costa / RedBull). Export → `seeds/map_company_alias.csv`.
 
 Categories: A1, A3, A5, A8, A15–A19.

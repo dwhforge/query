@@ -25,20 +25,20 @@ const DEMOS: { id: DemoId; label: string; hint: string }[] = [
   {
     id: "keymap",
     label: "Key mapping",
-    hint: "F&B aliases · 900×2 rows",
+    hint: "ticker · old name · Probe",
   },
 ];
 
 /** Virtual sample — sales vs spend brand spellings → company_id (Hero only). */
 const HERO_UNMATCHED = [
-  "Starbucks Coffee",
-  "Coca Cola Co",
+  "DEO",
+  "The South African Breweries",
+  "SBUX",
   "McDonalds",
   "STARBUCKS CORP",
-  "THE COCA-COLA COMPANY",
-  "MCDONALD'S CORP",
+  "DIAGEO PLC",
 ];
-const HERO_PARTNERS = ["STBUX", "KO", "MCD"];
+const HERO_PARTNERS = ["UBL", "ABEV", "STBUX", "MCD"];
 const HERO_QUERIES = [
   { id: "dirty_join", role: "probe", note: "sales ⋈ dim · no map" },
   { id: "daily_pnl", role: "day", note: "units · revenue · spend · net" },
@@ -49,9 +49,9 @@ function initialHeroMap(): KeyMapDef {
   const map = emptyKeyMap("F&B company aliases");
   map.id = "map_company_alias";
   map.entries = [
-    { from: "Starbucks Coffee", to: "STBUX" },
-    { from: "Coca Cola Co", to: "KO" },
     { from: "STARBUCKS CORP", to: "STBUX" },
+    { from: "Coca Cola Co", to: "KO" },
+    { from: "DIAGEO PLC", to: "UBL" },
   ];
   return map;
 }
@@ -82,8 +82,8 @@ export function EmptyHero({
             DWHForge Query
           </h2>
           <p className="anim-rise-delay-2 mt-4 max-w-md text-base leading-relaxed text-slate-400 lg:mx-0 mx-auto">
-            F&B brands spelled differently in sales vs cost feeds — map to a
-            canonical id, ship as a dbt seed. No fuzzy merge.
+            F&B brands as tickers, old legal names, and feed spellings — map to a
+            canonical id, ship as a dbt seed. Accept aliases; never silent fuzzy ON.
           </p>
           <div className="anim-rise-delay-2 mt-8 w-full">
             <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">

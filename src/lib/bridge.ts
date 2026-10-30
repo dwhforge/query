@@ -252,6 +252,112 @@ export function joinKeyNearMiss(
   });
 }
 
+export type FuzzyPair = {
+  from_key: string;
+  to_key: string;
+  score: number;
+  edits: number;
+  ambiguous: boolean;
+};
+
+export type FuzzyFieldSample = {
+  name: string;
+  value: string;
+};
+
+export type FuzzyKeySample = {
+  key: string;
+  fields: FuzzyFieldSample[];
+};
+
+export type FuzzyAliasExample = {
+  map_id: string;
+  map_name: string;
+  from: string;
+  to: string;
+};
+
+export type FuzzyChatContext = {
+  left_query_id: string;
+  left_query_name: string;
+  right_query_id: string;
+  right_query_name: string;
+  left_lineage: string;
+  right_lineage: string;
+  left_columns: { name: string; type: string }[];
+  right_columns: { name: string; type: string }[];
+  leftover_left_samples: FuzzyKeySample[];
+  leftover_right_samples: FuzzyKeySample[];
+  existing_aliases: FuzzyAliasExample[];
+};
+
+export type JoinKeyFuzzySuggest = {
+  host_query_id: string;
+  join_step_index: number;
+  left_on: string[];
+  right_on: string[];
+  metric: string;
+  score_cutoff: number;
+  suggestions: FuzzyPair[];
+  leftover_left: string[];
+  leftover_right: string[];
+  scanned_left: number;
+  scanned_right: number;
+  unmatched_left_total: number;
+  unmatched_right_total: number;
+  truncated: boolean;
+  chat_context: FuzzyChatContext;
+};
+
+export function joinKeyFuzzySuggest(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  connections: ConnectionDef[] = [],
+): Promise<JoinKeyFuzzySuggest> {
+  return invoke<JoinKeyFuzzySuggest>("join_key_fuzzy_suggest", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+  });
+}
+
+export type LlmConfig = {
+  base_url: string;
+  model: string;
+  api_key_set: boolean;
+};
+
+export type LlmChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+export function getLlmConfig(): Promise<LlmConfig> {
+  return invoke<LlmConfig>("get_llm_config");
+}
+
+export function setLlmConfig(input: {
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  clearApiKey?: boolean;
+}): Promise<LlmConfig> {
+  return invoke<LlmConfig>("set_llm_config", {
+    baseUrl: input.baseUrl,
+    model: input.model,
+    apiKey: input.apiKey,
+    clearApiKey: input.clearApiKey ?? false,
+  });
+}
+
+export function llmChat(
+  messages: LlmChatMessage[],
+): Promise<{ content: string }> {
+  return invoke<{ content: string }>("llm_chat", { messages });
+}
+
 export type KeyMapSyncResult = {
   updated_maps: number;
   created_maps: number;
@@ -468,11 +574,19 @@ export function getLastProjectPath(): Promise<string | null> {
   return invoke<string | null>("get_last_project_path");
 }
 
+export interface LlmSettings {
+  base_url: string;
+  model: string;
+  /** Always empty from get_app_settings. The key stays in settings.json. */
+  api_key?: string;
+}
+
 export interface AppSettings {
   default_target_dialect: WarehouseDialect;
   default_dbt_target: DbtTarget;
   explorer_width_px?: number;
   inspector_width_px?: number;
+  llm?: LlmSettings;
 }
 
 export function getAppSettings(): Promise<AppSettings> {

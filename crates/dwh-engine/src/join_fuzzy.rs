@@ -1,0 +1,813 @@
+//! Fuzzy join-key suggestions for Join Lens Auto.
+//!
+//! DuckDB core `jaro_winkler_similarity` (v2 text functions) scores unmatched
+//! left keys against unmatched right keys. Suggestions are explicit From→To
+//! candidates for a KeyMap — Join ON is never rewritten.
+//!
+//! Keys that fail the cutoff stay in `leftover_*` so the user can discuss them
+//! with an LLM. Case/trim-only differences are excluded (that is NormalizeKey).
+
+use crate::arrow_json::{array_value_to_json, map_arrow_type};
+use crate::preview::ColumnMetadata;
+use crate::session::DbSession;
+use dwh_pipeline::{
+    cte_name, escape_sql_string, quote_ident, CompiledCtes, ConnectionDef, GraphCompiler,
+    TransformationStep, Workspace,
+};
+use duckdb::params;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use std::collections::{HashMap, HashSet};
+
+const SCORE_CUTOFF: f64 = 0.88;
+const KEY_SCAN_CAP: usize = 200;
+const MAX_SUGGESTIONS: usize = 40;
+const MAX_KEY_CHARS: usize = 200;
+const CONTEXT_SAMPLE_KEYS: usize = 25;
+const CONTEXT_SIDE_COLS: usize = 6;
+const CONTEXT_MAP_ENTRIES: usize = 40;
+const CONTEXT_VALUE_CHARS: usize = 80;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FuzzyPair {
+    pub from_key: String,
+    pub to_key: String,
+    pub score: f64,
+    pub edits: u32,
+    /// Another leftover on the same side scored within 0.03 — do not pre-accept.
+    pub ambiguous: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FuzzyFieldSample {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FuzzyKeySample {
+    pub key: String,
+    pub fields: Vec<FuzzyFieldSample>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FuzzyAliasExample {
+    pub map_id: String,
+    pub map_name: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Domain context packed for the leftover LLM chat (not used by fuzzy scoring).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FuzzyChatContext {
+    pub left_query_id: String,
+    pub left_query_name: String,
+    pub right_query_id: String,
+    pub right_query_name: String,
+    /// Short step summary of the left join input (loads / filters / …).
+    pub left_lineage: String,
+    pub right_lineage: String,
+    pub left_columns: Vec<ColumnMetadata>,
+    pub right_columns: Vec<ColumnMetadata>,
+    /// One sample row (key + neighbor cols) per leftover key, capped.
+    pub leftover_left_samples: Vec<FuzzyKeySample>,
+    pub leftover_right_samples: Vec<FuzzyKeySample>,
+    /// Existing KeyMap From→To rows the model may treat as domain examples.
+    pub existing_aliases: Vec<FuzzyAliasExample>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JoinKeyFuzzySuggest {
+    pub host_query_id: String,
+    pub join_step_index: usize,
+    pub left_on: Vec<String>,
+    pub right_on: Vec<String>,
+    /// DuckDB function used. Core in DuckDB 2, no extension.
+    pub metric: String,
+    pub score_cutoff: f64,
+    pub suggestions: Vec<FuzzyPair>,
+    /// Unmatched left keys with no accepted suggestion (chat input).
+    pub leftover_left: Vec<String>,
+    pub leftover_right: Vec<String>,
+    pub scanned_left: u64,
+    pub scanned_right: u64,
+    pub unmatched_left_total: u64,
+    pub unmatched_right_total: u64,
+    /// Distinct unmatched keys exceeded the scan cap.
+    pub truncated: bool,
+    pub chat_context: FuzzyChatContext,
+}
+
+#[derive(Debug, Clone)]
+struct Scored {
+    from_key: String,
+    to_key: String,
+    score: f64,
+    edits: u32,
+}
+
+/// Suggest left→right alias pairs for keys that do not already match exactly.
+pub fn join_key_fuzzy_suggest(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    host_query_id: &str,
+    join_step_index: usize,
+) -> Result<JoinKeyFuzzySuggest, String> {
+    let resolved = db.prepare_workspace(workspace, connections)?;
+    let host = resolved
+        .query(host_query_id)
+        .ok_or_else(|| format!("missing host query '{host_query_id}'"))?;
+    if join_step_index >= host.steps.len() {
+        return Err(format!(
+            "join_step_index {join_step_index} out of range for query '{host_query_id}'"
+        ));
+    }
+    let TransformationStep::Join {
+        right_query_id,
+        left_on,
+        right_on,
+        ..
+    } = &host.steps[join_step_index]
+    else {
+        return Err(format!(
+            "step {join_step_index} of '{host_query_id}' is not a Join"
+        ));
+    };
+    if left_on.is_empty() || left_on.len() != right_on.len() {
+        return Err("Join: left_on/right_on must be non-empty and same length".into());
+    }
+    if join_step_index == 0 {
+        return Err("Join cannot be the first step (no left input)".into());
+    }
+    let rq = resolved
+        .query(right_query_id)
+        .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
+    if rq.steps.is_empty() {
+        return Err(format!("right query '{right_query_id}' has no steps"));
+    }
+    let left_cte = cte_name(host_query_id, join_step_index - 1);
+    let right_cte = cte_name(right_query_id, rq.steps.len() - 1);
+    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    let lkey = key_expr("l", left_on);
+    let rkey = key_expr("r", right_on);
+
+    let left_keys_sql = format!(
+        "SELECT DISTINCT {lkey} AS k FROM {left_cte} l\n\
+         WHERE {lkey} IS NOT NULL AND length(trim({lkey})) > 0"
+    );
+    let right_keys_sql = format!(
+        "SELECT DISTINCT {rkey} AS k FROM {right_cte} r\n\
+         WHERE {rkey} IS NOT NULL AND length(trim({rkey})) > 0"
+    );
+    let counts_sql = compiled.wrap_select(&format!(
+        "SELECT\n\
+           (SELECT count(*) FROM ({left_keys_sql}) lk ANTI JOIN ({right_keys_sql}) rk USING (k))::BIGINT,\n\
+           (SELECT count(*) FROM ({right_keys_sql}) rk ANTI JOIN ({left_keys_sql}) lk USING (k))::BIGINT"
+    ));
+    let (unmatched_left_total, unmatched_right_total) = query_pair_counts(db, &counts_sql)?;
+
+    let keys_sql = compiled.wrap_select(&format!(
+        "SELECT side, k FROM (\n\
+           SELECT 'left' AS side, k FROM ({left_keys_sql}) lk\n\
+           ANTI JOIN ({right_keys_sql}) rk USING (k)\n\
+           ORDER BY k LIMIT {cap}\n\
+         ) only_left\n\
+         UNION ALL\n\
+         SELECT side, k FROM (\n\
+           SELECT 'right' AS side, k FROM ({right_keys_sql}) rk\n\
+           ANTI JOIN ({left_keys_sql}) lk USING (k)\n\
+           ORDER BY k LIMIT {cap}\n\
+         ) only_right",
+        cap = KEY_SCAN_CAP
+    ));
+    let (mut left_keys, mut right_keys) = query_side_keys(db, &keys_sql)?;
+    let truncated =
+        unmatched_left_total > left_keys.len() as u64 || unmatched_right_total > right_keys.len() as u64;
+
+    // Too short or too long for a responsible automatic alias.
+    let mut leftover_left = Vec::new();
+    let mut leftover_right = Vec::new();
+    left_keys.retain(|k| {
+        let n = k.trim().chars().count();
+        if (3..MAX_KEY_CHARS).contains(&n) {
+            true
+        } else {
+            leftover_left.push(k.clone());
+            false
+        }
+    });
+    right_keys.retain(|k| {
+        let n = k.trim().chars().count();
+        if (3..MAX_KEY_CHARS).contains(&n) {
+            true
+        } else {
+            leftover_right.push(k.clone());
+            false
+        }
+    });
+
+    let scanned_left = left_keys.len() as u64;
+    let scanned_right = right_keys.len() as u64;
+    let scored = if left_keys.is_empty() || right_keys.is_empty() {
+        Vec::new()
+    } else {
+        score_pairs(db, &left_keys, &right_keys)?
+    };
+    let suggestions = assign_pairs(scored);
+    let used_from: HashSet<&str> = suggestions.iter().map(|p| p.from_key.as_str()).collect();
+    let used_to: HashSet<&str> = suggestions.iter().map(|p| p.to_key.as_str()).collect();
+    for k in left_keys {
+        if !used_from.contains(k.as_str()) {
+            leftover_left.push(k);
+        }
+    }
+    for k in right_keys {
+        if !used_to.contains(k.as_str()) {
+            leftover_right.push(k);
+        }
+    }
+    leftover_left.sort();
+    leftover_right.sort();
+    leftover_left.dedup();
+    leftover_right.dedup();
+
+    let left_query_name = host.name.clone();
+    let right_query_name = rq.name.clone();
+    let right_query_id = right_query_id.clone();
+    let left_on = left_on.clone();
+    let right_on = right_on.clone();
+    let left_lineage = summarize_lineage(&host.steps[..join_step_index]);
+    let right_lineage = summarize_lineage(&rq.steps);
+    let left_columns = describe_cte(db, &compiled, &left_cte).unwrap_or_default();
+    let right_columns = describe_cte(db, &compiled, &right_cte).unwrap_or_default();
+    let leftover_left_samples = sample_key_rows(
+        db,
+        &compiled,
+        &left_cte,
+        &left_on,
+        &leftover_left,
+        &left_columns,
+    )
+    .unwrap_or_default();
+    let leftover_right_samples = sample_key_rows(
+        db,
+        &compiled,
+        &right_cte,
+        &right_on,
+        &leftover_right,
+        &right_columns,
+    )
+    .unwrap_or_default();
+    let existing_aliases = collect_alias_examples(workspace);
+
+    Ok(JoinKeyFuzzySuggest {
+        host_query_id: host_query_id.to_string(),
+        join_step_index,
+        left_on,
+        right_on,
+        metric: "jaro_winkler_similarity".into(),
+        score_cutoff: SCORE_CUTOFF,
+        suggestions,
+        leftover_left,
+        leftover_right,
+        scanned_left,
+        scanned_right,
+        unmatched_left_total,
+        unmatched_right_total,
+        truncated,
+        chat_context: FuzzyChatContext {
+            left_query_id: host_query_id.to_string(),
+            left_query_name,
+            right_query_id,
+            right_query_name,
+            left_lineage,
+            right_lineage,
+            left_columns,
+            right_columns,
+            leftover_left_samples,
+            leftover_right_samples,
+            existing_aliases,
+        },
+    })
+}
+
+fn key_expr(alias: &str, cols: &[String]) -> String {
+    let parts: Vec<String> = cols
+        .iter()
+        .map(|c| format!("CAST({alias}.{} AS VARCHAR)", quote_ident(c)))
+        .collect();
+    if parts.len() == 1 {
+        return parts[0].clone();
+    }
+    let null_guard = cols
+        .iter()
+        .map(|c| format!("{alias}.{} IS NULL", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("CASE WHEN {null_guard} THEN NULL ELSE {} END", parts.join(" || ' · ' || "))
+}
+
+fn summarize_lineage(steps: &[TransformationStep]) -> String {
+    if steps.is_empty() {
+        return "(empty)".into();
+    }
+    let parts: Vec<String> = steps
+        .iter()
+        .map(|s| match s {
+            TransformationStep::LoadCsv { path } => {
+                format!("LoadCsv({})", short_path(path))
+            }
+            TransformationStep::LoadParquet { path, .. } => {
+                format!("LoadParquet({})", short_path(path))
+            }
+            TransformationStep::LoadPostgres {
+                schema, table_name, ..
+            } => format!("LoadPostgres({schema}.{table_name})"),
+            TransformationStep::LoadDuckdb {
+                schema, table_name, ..
+            } => format!("LoadDuckdb({schema}.{table_name})"),
+            TransformationStep::FromQuery { query_id } => format!("FromQuery({query_id})"),
+            TransformationStep::SqlModel { .. } => "SqlModel".into(),
+            TransformationStep::Filter { condition } => {
+                format!("Filter({})", truncate_chars(condition, 48))
+            }
+            TransformationStep::SelectColumns { columns } => {
+                format!("SelectColumns({})", columns.join(","))
+            }
+            TransformationStep::RenameColumn { from, to } => format!("Rename({from}→{to})"),
+            TransformationStep::DeriveColumn { name, .. } => format!("Derive({name})"),
+            TransformationStep::GroupBy { dimensions, .. } => {
+                format!("GroupBy({})", dimensions.join(","))
+            }
+            TransformationStep::SortBy { column, .. } => format!("SortBy({column})"),
+            TransformationStep::Limit { n } => format!("Limit({n})"),
+            TransformationStep::Join {
+                right_query_id,
+                left_on,
+                right_on,
+                ..
+            } => format!(
+                "Join({right_query_id} on {}={})",
+                left_on.join("+"),
+                right_on.join("+")
+            ),
+            TransformationStep::Append { other_query_ids } => {
+                format!("Append({})", other_query_ids.join(","))
+            }
+            TransformationStep::CustomSql { .. } => "CustomSql".into(),
+            TransformationStep::NormalizeKey { columns, ops } => {
+                format!("NormalizeKey({} {:?})", columns.join(","), ops)
+            }
+            TransformationStep::ApplyKeyMap { column, map_id, .. } => {
+                format!("ApplyKeyMap({column}←{map_id})")
+            }
+        })
+        .collect();
+    parts.join(" → ")
+}
+
+fn short_path(path: &str) -> String {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+    truncate_chars(name, 64)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn describe_cte(
+    db: &DbSession,
+    compiled: &CompiledCtes,
+    cte: &str,
+) -> Result<Vec<ColumnMetadata>, String> {
+    let sql = compiled.wrap_select(&format!("SELECT * FROM {cte} LIMIT 0"));
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+        let schema = arrow.get_schema();
+        let _batches: Vec<_> = arrow.collect();
+        Ok(schema
+            .fields()
+            .iter()
+            .map(|f| ColumnMetadata {
+                name: f.name().clone(),
+                col_type: map_arrow_type(f.data_type()),
+            })
+            .collect())
+    })
+}
+
+fn pick_context_columns(all: &[ColumnMetadata], key_cols: &[String]) -> Vec<String> {
+    let key_fold: HashSet<String> = key_cols.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let mut out: Vec<String> = key_cols.to_vec();
+    for col in all {
+        if out.len() >= CONTEXT_SIDE_COLS {
+            break;
+        }
+        if key_fold.contains(&col.name.to_ascii_lowercase()) {
+            continue;
+        }
+        out.push(col.name.clone());
+    }
+    if out.is_empty() {
+        out.extend(all.iter().take(CONTEXT_SIDE_COLS).map(|c| c.name.clone()));
+    }
+    out
+}
+
+fn sample_key_rows(
+    db: &DbSession,
+    compiled: &CompiledCtes,
+    cte: &str,
+    key_cols: &[String],
+    leftovers: &[String],
+    columns: &[ColumnMetadata],
+) -> Result<Vec<FuzzyKeySample>, String> {
+    let keys: Vec<&String> = leftovers.iter().take(CONTEXT_SAMPLE_KEYS).collect();
+    if keys.is_empty() || key_cols.is_empty() {
+        return Ok(Vec::new());
+    }
+    let proj = pick_context_columns(columns, key_cols);
+    if proj.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key = key_expr("t", key_cols);
+    let vals = values_list(&keys.iter().map(|s| (*s).clone()).collect::<Vec<_>>());
+    let inner_proj = proj
+        .iter()
+        .map(|c| format!("t.{} AS {}", quote_ident(c), quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let outer_proj = proj
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = compiled.wrap_select(&format!(
+        "SELECT __join_key, {outer_proj}\n\
+         FROM (\n\
+           SELECT {key} AS __join_key, {inner_proj},\n\
+             row_number() OVER (PARTITION BY {key} ORDER BY 1) AS __rn\n\
+           FROM {cte} t\n\
+           WHERE {key} IN (SELECT * FROM (VALUES {vals}) v(k))\n\
+         ) s\n\
+         WHERE s.__rn = 1\n\
+         LIMIT {CONTEXT_SAMPLE_KEYS}"
+    ));
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+        let schema = arrow.get_schema();
+        let batches: Vec<_> = arrow.collect();
+        let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+        let mut out = Vec::new();
+        for batch in &batches {
+            for row_i in 0..batch.num_rows() {
+                let mut key_s = String::new();
+                let mut fields = Vec::new();
+                for (col_i, name) in names.iter().enumerate() {
+                    let cell = array_value_to_json(batch.column(col_i).as_ref(), row_i);
+                    let text = json_cell_str(&cell);
+                    if name == "__join_key" {
+                        key_s = text;
+                    } else {
+                        fields.push(FuzzyFieldSample {
+                            name: name.clone(),
+                            value: truncate_chars(&text, CONTEXT_VALUE_CHARS),
+                        });
+                    }
+                }
+                if !key_s.is_empty() {
+                    out.push(FuzzyKeySample {
+                        key: key_s,
+                        fields,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
+fn json_cell_str(v: &JsonValue) -> String {
+    match v {
+        JsonValue::Null => "∅".into(),
+        JsonValue::String(s) => s.clone(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn collect_alias_examples(workspace: &Workspace) -> Vec<FuzzyAliasExample> {
+    let mut out = Vec::new();
+    for map in &workspace.key_maps {
+        for entry in &map.entries {
+            let from = entry.from.trim();
+            let to = entry.to.trim();
+            if from.is_empty() || to.is_empty() {
+                continue;
+            }
+            out.push(FuzzyAliasExample {
+                map_id: map.id.clone(),
+                map_name: map.name.clone(),
+                from: truncate_chars(from, CONTEXT_VALUE_CHARS),
+                to: truncate_chars(to, CONTEXT_VALUE_CHARS),
+            });
+            if out.len() >= CONTEXT_MAP_ENTRIES {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn score_pairs(db: &DbSession, left: &[String], right: &[String]) -> Result<Vec<Scored>, String> {
+    let lvals = values_list(left);
+    let rvals = values_list(right);
+    let cutoff = format!("{SCORE_CUTOFF}");
+    let sql = format!(
+        "WITH l(k) AS (SELECT * FROM (VALUES {lvals}) t(k)),\n\
+         r(k) AS (SELECT * FROM (VALUES {rvals}) t(k))\n\
+         SELECT l.k, r.k,\n\
+           jaro_winkler_similarity(lower(trim(l.k)), lower(trim(r.k)), {cutoff}) AS score,\n\
+           levenshtein(lower(trim(l.k)), lower(trim(r.k))) AS edits\n\
+         FROM l CROSS JOIN r\n\
+         WHERE lower(trim(l.k)) <> lower(trim(r.k))\n\
+           AND jaro_winkler_similarity(lower(trim(l.k)), lower(trim(r.k)), {cutoff}) >= {cutoff}"
+    );
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let from_key: String = row.get(0).map_err(|e| e.to_string())?;
+            let to_key: String = row.get(1).map_err(|e| e.to_string())?;
+            let score: f64 = row.get(2).map_err(|e| e.to_string())?;
+            let edits: i64 = row.get(3).map_err(|e| e.to_string())?;
+            out.push(Scored {
+                from_key,
+                to_key,
+                score,
+                edits: edits.max(0) as u32,
+            });
+        }
+        Ok(out)
+    })
+}
+
+fn values_list(keys: &[String]) -> String {
+    keys.iter()
+        .map(|k| format!("('{}')", escape_sql_string(k)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn passes(s: &Scored) -> bool {
+    let fl = s.from_key.trim().chars().count();
+    let tl = s.to_key.trim().chars().count();
+    let min_l = fl.min(tl);
+    let max_l = fl.max(tl);
+    if min_l < 3 || max_l >= MAX_KEY_CHARS {
+        return false;
+    }
+    if s.score < SCORE_CUTOFF {
+        return false;
+    }
+    // Short codes collide easily; require a tighter edit budget.
+    if min_l <= 5 && (s.score < 0.92 || s.edits > 2) {
+        return false;
+    }
+    // A tiny token inside a long name is an abbreviation, not a typo.
+    if min_l <= 8 && max_l > min_l * 22 / 10 && s.score < 0.96 {
+        return false;
+    }
+    let a = s.from_key.trim().to_lowercase();
+    let b = s.to_key.trim().to_lowercase();
+    a != b
+}
+
+fn assign_pairs(mut rows: Vec<Scored>) -> Vec<FuzzyPair> {
+    rows.retain(passes);
+    rows.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.edits.cmp(&b.edits))
+            .then_with(|| a.from_key.cmp(&b.from_key))
+            .then_with(|| a.to_key.cmp(&b.to_key))
+    });
+    let mut by_from: HashMap<String, Vec<f64>> = HashMap::new();
+    for s in &rows {
+        by_from.entry(s.from_key.clone()).or_default().push(s.score);
+    }
+    let ambiguous_from: HashSet<String> = by_from
+        .into_iter()
+        .filter_map(|(k, scores)| {
+            if scores.len() >= 2 && scores[0] - scores[1] < 0.03 {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut used_from = HashSet::new();
+    let mut used_to = HashSet::new();
+    let mut out = Vec::new();
+    for s in rows {
+        if used_from.contains(&s.from_key) || used_to.contains(&s.to_key) {
+            continue;
+        }
+        used_from.insert(s.from_key.clone());
+        used_to.insert(s.to_key.clone());
+        out.push(FuzzyPair {
+            ambiguous: ambiguous_from.contains(&s.from_key),
+            from_key: s.from_key,
+            to_key: s.to_key,
+            score: s.score,
+            edits: s.edits,
+        });
+        if out.len() == MAX_SUGGESTIONS {
+            break;
+        }
+    }
+    out
+}
+
+fn query_pair_counts(db: &DbSession, sql: &str) -> Result<(u64, u64), String> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        let row = rows
+            .next()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "fuzzy key counts: empty".to_string())?;
+        let l: i64 = row.get(0).map_err(|e| e.to_string())?;
+        let r: i64 = row.get(1).map_err(|e| e.to_string())?;
+        Ok((l.max(0) as u64, r.max(0) as u64))
+    })
+}
+
+fn query_side_keys(db: &DbSession, sql: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let side: String = row.get(0).map_err(|e| e.to_string())?;
+            let k: String = row.get(1).map_err(|e| e.to_string())?;
+            if side == "left" {
+                left.push(k);
+            } else {
+                right.push(k);
+            }
+        }
+        Ok((left, right))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dwh_pipeline::{JoinType, QueryDef, TransformationStep, Workspace};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn passes_score(from: &str, to: &str, score: f64, edits: u32) -> bool {
+        passes(&Scored {
+            from_key: from.into(),
+            to_key: to.into(),
+            score,
+            edits,
+        })
+    }
+
+    #[test]
+    fn rejects_case_only_and_short_abbreviations() {
+        assert!(!passes_score("Widget", "widget", 1.0, 0));
+        assert!(!passes_score("acme", "acme corp", 0.93, 5));
+        assert!(passes_score("Acme Corporation", "Acme Corp", 0.91, 6));
+    }
+
+    #[test]
+    fn ambiguous_pair_is_flagged_and_one_to_one() {
+        let rows = vec![
+            Scored {
+                from_key: "Alpha Co".into(),
+                to_key: "Alpha Company".into(),
+                score: 0.94,
+                edits: 3,
+            },
+            Scored {
+                from_key: "Alpha Co".into(),
+                to_key: "Alpha Corp".into(),
+                score: 0.93,
+                edits: 3,
+            },
+            Scored {
+                from_key: "Beta LLC".into(),
+                to_key: "Beta Limited".into(),
+                score: 0.90,
+                edits: 5,
+            },
+        ];
+        let out = assign_pairs(rows);
+        assert_eq!(out.len(), 2);
+        let alpha = out.iter().find(|p| p.from_key == "Alpha Co").unwrap();
+        assert!(alpha.ambiguous);
+        assert_eq!(alpha.to_key, "Alpha Company");
+        assert!(!out.iter().any(|p| p.from_key == "Beta LLC" && p.ambiguous));
+    }
+
+    #[test]
+    fn fuzzy_suggests_typos_and_leaves_the_rest() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("dwh-fuzzy-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        let left_path = dir.join("left.csv");
+        let right_path = dir.join("right.csv");
+        fs::write(
+            &left_path,
+            "name\nAcme Corporation\nGlobex Inc\nWidget\nOnlyLeftZZZ\n",
+        )
+        .unwrap();
+        fs::write(
+            &right_path,
+            "name\nAcme Corp\nGlobex Incorporated\nwidget\nOnlyRightQQQ\n",
+        )
+        .unwrap();
+        let db = DbSession::new().unwrap();
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: left_path.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Left,
+                            left_on: vec!["name".into()],
+                            right_on: vec!["name".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: right_path.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+            key_maps: vec![],
+        };
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], "fact", 1).unwrap();
+        let froms: Vec<_> = out.suggestions.iter().map(|p| p.from_key.as_str()).collect();
+        assert!(
+            froms.contains(&"Acme Corporation"),
+            "suggestions: {froms:?} leftovers L {:?} R {:?}",
+            out.leftover_left,
+            out.leftover_right
+        );
+        assert!(froms.contains(&"Globex Inc"), "suggestions: {froms:?}");
+        assert!(!froms.contains(&"Widget"));
+        assert!(out.leftover_left.iter().any(|k| k == "OnlyLeftZZZ"));
+        assert!(out.leftover_right.iter().any(|k| k == "OnlyRightQQQ"));
+        assert!(out.leftover_left.iter().any(|k| k == "Widget"));
+        assert!(out.leftover_right.iter().any(|k| k == "widget"));
+        assert!(out.chat_context.left_lineage.contains("LoadCsv"));
+        assert!(out.chat_context.right_lineage.contains("LoadCsv"));
+        assert!(!out.chat_context.left_columns.is_empty());
+        assert!(
+            out.chat_context
+                .leftover_left_samples
+                .iter()
+                .any(|s| s.key == "OnlyLeftZZZ" || s.key == "Widget"),
+            "expected leftover samples: {:?}",
+            out.chat_context.leftover_left_samples
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

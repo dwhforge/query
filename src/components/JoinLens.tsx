@@ -20,8 +20,36 @@ import {
 import {
   classifyJoinColumnOrigins,
   pinSideIndicesToResult,
+  type JoinColumnOrigin,
 } from "../lib/joinColumnOrigin";
 import { PreviewTable } from "./PreviewTable";
+
+/** Fill result right-origin columns from a Probe right row (hypothetical map pair). */
+function overlayRightOntoResultRows(
+  baseRows: unknown[][],
+  resultColumns: ColumnMetadata[],
+  origins: JoinColumnOrigin[],
+  rightRow: unknown[],
+  rightColumns: ColumnMetadata[],
+): unknown[][] {
+  const rightByFold = new Map(
+    rightColumns.map((c, i) => [fold(c.name), i] as const),
+  );
+  return baseRows.map((row) => {
+    const next = row.slice();
+    for (let ci = 0; ci < origins.length; ci++) {
+      if (origins[ci] !== "right") continue;
+      const name = resultColumns[ci]?.name;
+      if (!name) continue;
+      const f = fold(name);
+      const bare = f.includes("__") ? f.slice(f.lastIndexOf("__") + 2) : f;
+      const ri = rightByFold.get(f) ?? rightByFold.get(bare);
+      if (ri === undefined) continue;
+      next[ci] = rightRow[ri] ?? null;
+    }
+    return next;
+  });
+}
 
 function fold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
@@ -527,28 +555,32 @@ function JoinLensImpl({
   const pairMode = leftSel != null && rightSel != null;
   const sideProbe = leftSel != null || rightSel != null;
 
-  // Full-input explain + blame for a single-side selection (not pair).
+  // Full-input explain for the probe focus. Prefer left when both selected so
+  // pair preview keeps the same left sample (right only fills right cols).
+  const explainFocus = useMemo(() => {
+    if (leftSel != null) {
+      return { side: "left" as const, index: leftSel };
+    }
+    if (rightSel != null) {
+      return { side: "right" as const, index: rightSel };
+    }
+    return null;
+  }, [leftSel, rightSel]);
+
   useEffect(() => {
-    if (!enabled || !sideProbe || pairMode) {
+    if (!enabled || !explainFocus) {
       setKeyExplain(null);
       setKeyBlame(null);
       setKeyExplainError(null);
       setKeyExplainLoading(false);
       return;
     }
-    let side: JoinKeySide;
-    let keys: unknown[];
-    if (leftSel != null) {
-      const row = leftRows[leftSel];
-      if (!row) return;
-      side = "left";
-      keys = keyValuesFromRow(row, leftCols, leftOn);
-    } else {
-      const row = rightRows[rightSel!];
-      if (!row) return;
-      side = "right";
-      keys = keyValuesFromRow(row, rightCols, rightOn);
-    }
+    const { side, index } = explainFocus;
+    const row = side === "left" ? leftRows[index] : rightRows[index];
+    const cols = side === "left" ? leftCols : rightCols;
+    const keysOn = side === "left" ? leftOn : rightOn;
+    if (!row) return;
+    const keys = keyValuesFromRow(row, cols, keysOn);
     if (keys.length === 0 || keys.every((v) => v == null)) {
       setKeyExplain(null);
       setKeyBlame(null);
@@ -569,8 +601,8 @@ function JoinLensImpl({
       .then(async (ex) => {
         if (cancelled) return;
         setKeyExplain(ex);
+        setMatchesOnly(true);
         if (ex.result_match_count === 0) {
-          setMatchesOnly(true);
           try {
             const blame = await blameUnmatchedKey(
               workspace,
@@ -589,7 +621,6 @@ function JoinLensImpl({
           }
         } else {
           setKeyBlame(null);
-          setMatchesOnly(true);
         }
         setKeyExplainLoading(false);
       })
@@ -605,10 +636,7 @@ function JoinLensImpl({
     };
   }, [
     enabled,
-    sideProbe,
-    pairMode,
-    leftSel,
-    rightSel,
+    explainFocus,
     leftRows,
     rightRows,
     leftCols,
@@ -621,18 +649,26 @@ function JoinLensImpl({
     connections,
   ]);
 
+  // Pair preview is not a blame context — drop blame when both sides selected.
+  useEffect(() => {
+    if (pairMode) setKeyBlame(null);
+  }, [pairMode]);
+
   /** Result rows matching current side selection (one side or both). */
   const matchedIndices = useMemo(() => {
     if (!sideProbe) return [] as number[];
 
     if (pairMode) {
       const lRow = leftRows[leftSel!];
-      const rRow = rightRows[rightSel!];
-      if (!lRow || !rRow) return [];
-      const lKeys = keyValuesFromRow(lRow, leftCols, leftOn);
-      const rKeys = keyValuesFromRow(rRow, rightCols, rightOn);
-      if (!keysEqual(lKeys, rKeys)) return [];
-      return findResultMatches(rows, columns, leftOn, lKeys);
+      if (!lRow) return [];
+      // Base preview on left key. When keys ≠ right (map pair), right cols are
+      // overlaid hypothetically in displayRows; when equal, these are real hits.
+      return findResultMatches(
+        rows,
+        columns,
+        leftOn,
+        keyValuesFromRow(lRow, leftCols, leftOn),
+      );
     }
 
     if (leftSel != null) {
@@ -667,6 +703,33 @@ function JoinLensImpl({
     rows,
     columns,
   ]);
+
+  /** Pair selected but keys differ → preview as if left mapped to right. */
+  const pairHypothetical = useMemo(() => {
+    if (!pairMode || leftSel == null || rightSel == null) return false;
+    const lRow = leftRows[leftSel];
+    const rRow = rightRows[rightSel];
+    if (!lRow || !rRow) return false;
+    return !keysEqual(
+      keyValuesFromRow(lRow, leftCols, leftOn),
+      keyValuesFromRow(rRow, rightCols, rightOn),
+    );
+  }, [
+    pairMode,
+    leftSel,
+    rightSel,
+    leftRows,
+    rightRows,
+    leftCols,
+    rightCols,
+    leftOn,
+    rightOn,
+  ]);
+
+  // Keep Matches-only on when forming a map pair so the center stays focused.
+  useEffect(() => {
+    if (pairMode) setMatchesOnly(true);
+  }, [pairMode]);
 
   const columnOrigins = useMemo(
     () =>
@@ -760,64 +823,26 @@ function JoinLensImpl({
   /** Prefer full-input explain sample when showing matches for a key. */
   const showingExplainSample =
     !!keyExplain &&
-    !pairMode &&
+    !pairHypothetical &&
     sideProbe &&
     (matchesOnly || keyExplain.result_match_count === 0);
 
+  /** Pair map preview: same left explain sample, right cols overlaid. */
+  const pairExplainPreview =
+    pairHypothetical && !!keyExplain && leftSel != null && rightSel != null;
+
   const displayColumns = useMemo(() => {
-    if (showingExplainSample && keyExplain) {
+    if ((showingExplainSample || pairExplainPreview) && keyExplain) {
       return keyExplain.result_columns.map((c) => ({
         name: c.name,
         type: c.type,
       })) as ColumnMetadata[];
     }
     return columns;
-  }, [showingExplainSample, keyExplain, columns]);
-
-  const displayRows = useMemo(() => {
-    if (showingExplainSample && keyExplain) {
-      return keyExplain.result_rows;
-    }
-    if (!matchesOnly || !sideProbe || matchedIndices.length === 0) return rows;
-    return matchedIndices.map((i) => rows[i]!);
-  }, [
-    showingExplainSample,
-    keyExplain,
-    matchesOnly,
-    sideProbe,
-    matchedIndices,
-    rows,
-  ]);
-
-  const displayMatched = useMemo(() => {
-    if (!sideProbe) return undefined;
-    if (showingExplainSample && keyExplain) {
-      return keyExplain.result_rows.map((_, i) => i);
-    }
-    if (matchesOnly && matchedIndices.length > 0) {
-      return displayRows.map((_, i) => i);
-    }
-    return matchedIndices;
-  }, [
-    sideProbe,
-    showingExplainSample,
-    keyExplain,
-    matchesOnly,
-    matchedIndices,
-    displayRows,
-  ]);
-
-  const displayActive = useMemo(() => {
-    if (showingExplainSample) return 0;
-    if (matchesOnly && matchedIndices.length > 0) {
-      const pos = matchedIndices.indexOf(activeIndex);
-      return pos >= 0 ? pos : 0;
-    }
-    return activeIndex;
-  }, [showingExplainSample, matchesOnly, matchedIndices, activeIndex]);
+  }, [showingExplainSample, pairExplainPreview, keyExplain, columns]);
 
   const displayOrigins = useMemo(() => {
-    if (showingExplainSample && keyExplain) {
+    if ((showingExplainSample || pairExplainPreview) && keyExplain) {
       return classifyJoinColumnOrigins(
         keyExplain.result_columns.map((c) => c.name),
         leftOn,
@@ -828,11 +853,97 @@ function JoinLensImpl({
     return columnOrigins;
   }, [
     showingExplainSample,
+    pairExplainPreview,
     keyExplain,
     leftOn,
     parentLeftCols,
     parentRightCols,
     columnOrigins,
+  ]);
+
+  const displayRows = useMemo(() => {
+    if (pairExplainPreview && keyExplain && rightSel != null) {
+      const explainCols = keyExplain.result_columns.map((c) => ({
+        name: c.name,
+        type: c.type,
+      })) as ColumnMetadata[];
+      return overlayRightOntoResultRows(
+        keyExplain.result_rows,
+        explainCols,
+        displayOrigins,
+        rightRows[rightSel]!,
+        rightCols,
+      );
+    }
+    if (showingExplainSample && keyExplain) {
+      return keyExplain.result_rows;
+    }
+    if (!matchesOnly || !sideProbe || matchedIndices.length === 0) return rows;
+    const base = matchedIndices.map((i) => rows[i]!);
+    if (
+      pairHypothetical &&
+      rightSel != null &&
+      rightRows[rightSel] &&
+      columnOrigins.some((o) => o === "right")
+    ) {
+      return overlayRightOntoResultRows(
+        base,
+        columns,
+        columnOrigins,
+        rightRows[rightSel]!,
+        rightCols,
+      );
+    }
+    return base;
+  }, [
+    pairExplainPreview,
+    showingExplainSample,
+    keyExplain,
+    matchesOnly,
+    sideProbe,
+    matchedIndices,
+    rows,
+    pairHypothetical,
+    rightSel,
+    rightRows,
+    rightCols,
+    columns,
+    columnOrigins,
+    displayOrigins,
+  ]);
+
+  const displayMatched = useMemo(() => {
+    if (!sideProbe) return undefined;
+    if ((showingExplainSample || pairExplainPreview) && keyExplain) {
+      return keyExplain.result_rows.map((_, i) => i);
+    }
+    if (matchesOnly && matchedIndices.length > 0) {
+      return displayRows.map((_, i) => i);
+    }
+    return matchedIndices;
+  }, [
+    sideProbe,
+    showingExplainSample,
+    pairExplainPreview,
+    keyExplain,
+    matchesOnly,
+    matchedIndices,
+    displayRows,
+  ]);
+
+  const displayActive = useMemo(() => {
+    if (showingExplainSample || pairExplainPreview) return 0;
+    if (matchesOnly && matchedIndices.length > 0) {
+      const pos = matchedIndices.indexOf(activeIndex);
+      return pos >= 0 ? pos : 0;
+    }
+    return activeIndex;
+  }, [
+    showingExplainSample,
+    pairExplainPreview,
+    matchesOnly,
+    matchedIndices,
+    activeIndex,
   ]);
 
   const scrollToken = `${sideMode}|${activeIndex}|${linkedLeft.join(",")}|${linkedRight.join(",")}`;
@@ -871,9 +982,11 @@ function JoinLensImpl({
   const leftStatus = useMemo(() => {
     if (!sideProbe) return null;
     if (pairMode) {
-      return matchedIndices.length > 0
-        ? `Pair → ${matchedIndices.length} in result`
-        : "Pair not in result";
+      return pairHypothetical
+        ? `Pair preview · ${matchedIndices.length} left row(s)`
+        : matchedIndices.length > 0
+          ? `Pair → ${matchedIndices.length} in result`
+          : "Pair not in result";
     }
     if (leftSel != null && keyExplain) {
       return `Full join · ${keyExplain.result_match_count} result · L${keyExplain.left_match_count}/R${keyExplain.right_match_count}`;
@@ -885,6 +998,7 @@ function JoinLensImpl({
   }, [
     sideProbe,
     pairMode,
+    pairHypothetical,
     leftSel,
     matchedIndices,
     keyExplain,
@@ -894,9 +1008,11 @@ function JoinLensImpl({
   const rightStatus = useMemo(() => {
     if (!sideProbe) return null;
     if (pairMode) {
-      return matchedIndices.length > 0
-        ? `Pair → ${matchedIndices.length} in result`
-        : "Pair not in result";
+      return pairHypothetical
+        ? `Pair preview · right → center`
+        : matchedIndices.length > 0
+          ? `Pair → ${matchedIndices.length} in result`
+          : "Pair not in result";
     }
     if (rightSel != null && leftSel == null && keyExplain) {
       return `Full join · ${keyExplain.result_match_count} result · L${keyExplain.left_match_count}/R${keyExplain.right_match_count}`;
@@ -908,6 +1024,7 @@ function JoinLensImpl({
   }, [
     sideProbe,
     pairMode,
+    pairHypothetical,
     rightSel,
     leftSel,
     matchedIndices,
@@ -1024,11 +1141,16 @@ function JoinLensImpl({
         : "No unmatched keys in the current sample";
     }
     if (pairMode && pairFromLabel && pairToLabel) {
+      if (pairHypothetical) {
+        const n =
+          keyExplain?.result_rows.length ?? matchedIndices.length;
+        return `Pair preview “${pairFromLabel}” → “${pairToLabel}” · ${n} left row(s), right cols filled as if mapped · Map this pair to apply`;
+      }
       const inResult =
         matchedIndices.length > 0
-          ? `${matchedIndices.length} result row(s)`
-          : "not in result yet";
-      return `Pair “${pairFromLabel}” → “${pairToLabel}” · ${inResult} · Map this pair to join them`;
+          ? `${matchedIndices.length} result row(s) (keys already equal)`
+          : "not in result";
+      return `Pair “${pairFromLabel}” → “${pairToLabel}” · ${inResult}`;
     }
     if (keyBlame) return blameLabel(keyBlame);
     if (keyExplainError) return keyExplainError;

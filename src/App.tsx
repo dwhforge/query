@@ -164,6 +164,11 @@ function App() {
     default_dbt_target: "v1",
     explorer_width_px: 240,
     inspector_width_px: 300,
+    llm: {
+      base_url: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+      api_key: "",
+    },
   });
   const [explorerWidth, setExplorerWidth] = useState(240);
   const [bottomDockHeight, setBottomDockHeight] = useState(loadBottomDockHeight);
@@ -2287,6 +2292,11 @@ function App() {
         default_dbt_target: "v1",
         explorer_width_px: 240,
         inspector_width_px: 300,
+        llm: {
+          base_url: "https://api.openai.com/v1",
+          model: "gpt-4o-mini",
+          api_key: "",
+        },
       };
       try {
         settings = await getAppSettings();

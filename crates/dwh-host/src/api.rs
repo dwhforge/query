@@ -7,13 +7,15 @@ use dwh_engine::{
     blame_unmatched_key as run_blame_unmatched_key, collect_load_seeds,
     describe_postgres_object as run_describe_postgres_object,
     explain_join_key as run_explain_join_key, explain_join_rows as run_explain_join_rows,
-    join_diagnostics as run_join_diagnostics, join_key_near_miss as run_join_key_near_miss,
+    join_diagnostics as run_join_diagnostics, join_key_fuzzy_suggest as run_join_key_fuzzy_suggest,
+    join_key_near_miss as run_join_key_near_miss,
     list_postgres_objects as run_list_postgres_objects,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
     read_key_map_with_hash as run_read_key_map_with_hash, set_extensions_dir,
     test_postgres_connection as run_test_postgres_connection,
     write_key_map_with_expected as run_write_key_map_with_expected, BlameUnmatchedKeyResult,
-    DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyNearMiss,
+    DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyFuzzySuggest,
+    JoinKeyNearMiss,
     JoinKeySide, JoinKeyTuple, KeyMapReadResult, KeyMapWriteResult, PostgresColumn, PostgresObject,
     PreviewResult,
 };
@@ -469,6 +471,7 @@ fn demo_right_joins(fixtures: &Path) -> Result<Workspace, String> {
 /// F&B company-name mapping lab (ADR-0020).
 /// 15 brands × 60 days: `sales_daily` vs `res_consumption` spell names differently;
 /// `dim_company` is canonical; KeyMap aliases → company_id; daily PnL → monthly.
+/// Non-lexical sales leftovers (Auto / LLM): `DEO`→UBL (NYSE), SAB→ABEV (old name).
 fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
     use dwh_pipeline::{KeyMapDef, KeyMapEntry};
     let sales = fixture_csv(fixtures, "sales_daily.csv")?;
@@ -477,11 +480,13 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
 
     let mut company_map = KeyMapDef::new("map_company_alias", "F&B company aliases");
     // sales_daily `company` + res_consumption `org_name` → dim_company.company_id
+    //
+    // Intentionally LEFT UNMAPPED for Join Lens Auto / LLM (not fuzzy-resolvable):
+    //   DEO                         → UBL   (NYSE ticker for Diageo; dim id is UBL)
+    //   The South African Breweries → ABEV  (historical predecessor of AB InBev)
+    // Near-lexical leftovers (Probe / fuzzy / Add to map…):
+    //   SBUX, McDonalds, Costa, RedBull GmbH
     company_map.entries = vec![
-        KeyMapEntry {
-            from: "Starbucks Coffee".into(),
-            to: "STBUX".into(),
-        },
         KeyMapEntry {
             from: "STARBUCKS CORP".into(),
             to: "STBUX".into(),
@@ -518,10 +523,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
             from: "DANONE SA".into(),
             to: "DANO".into(),
         },
-        KeyMapEntry {
-            from: "Diageo plc".into(),
-            to: "UBL".into(),
-        },
+        // spend-side legal name only — sales uses ticker DEO (unmapped, LLM lab)
         KeyMapEntry {
             from: "DIAGEO PLC".into(),
             to: "UBL".into(),
@@ -534,15 +536,11 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
             from: "HEINEKEN N.V.".into(),
             to: "HEIN".into(),
         },
-        KeyMapEntry {
-            from: "Anheuser-Busch".into(),
-            to: "ABEV".into(),
-        },
+        // spend-side only — sales uses old name "The South African Breweries" (unmapped)
         KeyMapEntry {
             from: "AB INBEV".into(),
             to: "ABEV".into(),
         },
-        // Intentionally unmapped (Probe / Add to map…): McDonalds, Costa, RedBull
         KeyMapEntry {
             from: "Yum Brands".into(),
             to: "YUM".into(),
@@ -929,8 +927,27 @@ struct SaveProjectArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SettingsArgs {
-    settings: AppSettings,
+struct SetLlmArgs {
+    base_url: String,
+    model: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    clear_api_key: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmChatArgs {
+    messages: Vec<Value>,
+}
+
+fn llm_public(settings: &AppSettings) -> Value {
+    serde_json::json!({
+        "base_url": settings.llm.base_url,
+        "model": settings.llm.model,
+        "api_key_set": !settings.llm.api_key.trim().is_empty(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -1053,6 +1070,36 @@ impl HostState {
                 }
                 Ok(val)
             }
+            "get_llm_config" => {
+                let settings = settings_io::load_settings()?;
+                Ok(llm_public(&settings))
+            }
+            "set_llm_config" => {
+                let a: SetLlmArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let mut settings = settings_io::load_settings()?;
+                let base = a.base_url.trim().trim_end_matches('/').to_string();
+                if !(base.starts_with("https://") || base.starts_with("http://")) {
+                    return Err("llm.base_url must start with http:// or https://".into());
+                }
+                settings.llm.base_url = base;
+                settings.llm.model = a.model.trim().to_string();
+                if a.clear_api_key {
+                    settings.llm.api_key.clear();
+                } else if let Some(key) = a.api_key {
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        settings.llm.api_key = key.to_string();
+                    }
+                }
+                settings_io::save_settings(&settings)?;
+                Ok(llm_public(&settings))
+            }
+            "llm_chat" => {
+                let a: LlmChatArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let settings = settings_io::load_settings()?;
+                let content = crate::llm::complete_chat(&settings.llm, &a.messages)?;
+                Ok(serde_json::json!({ "content": content }))
+            }
             _ => self.dispatch_locked(cmd, args),
         }
     }
@@ -1121,6 +1168,18 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let out: JoinKeyNearMiss = run_join_key_near_miss(
+                    &db,
+                    &a.workspace,
+                    &conns,
+                    &a.host_query_id,
+                    a.join_step_index,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "join_key_fuzzy_suggest" => {
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let conns = a.connections.unwrap_or_default();
+                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest(
                     &db,
                     &a.workspace,
                     &conns,
@@ -1315,13 +1374,21 @@ impl HostState {
             }
             "get_app_settings" => {
                 drop(db);
-                let s = settings_io::load_settings()?;
+                let mut s = settings_io::load_settings()?;
+                // Panel-width saves round-trip this object. Never send the key out.
+                s.llm.api_key.clear();
                 serde_json::to_value(s).map_err(|e| e.to_string())
             }
             "set_app_settings" => {
                 drop(db);
-                let a: SettingsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                settings_io::save_settings(&a.settings)?;
+                let settings_val = args.get("settings").cloned().unwrap_or(Value::Null);
+                let mut settings: AppSettings =
+                    serde_json::from_value(settings_val).map_err(|e| e.to_string())?;
+                // Panel-width saves must not clobber llm (base URL, model, key).
+                if let Ok(prev) = settings_io::load_settings() {
+                    settings.llm = prev.llm;
+                }
+                settings_io::save_settings(&settings)?;
                 Ok(Value::Null)
             }
             "get_global_connections" => {

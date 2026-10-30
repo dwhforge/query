@@ -87,6 +87,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Explain key: full-input result count + sample rows (not only preview LIMIT 50)",
       "Blame: absent at source 0vs filtered upstream (which step) vs no partner at Join",
       "Near-miss strip: Apply NormalizeKey when trim/case/zeros would add matches",
+      "Auto: Jaro-Winkler suggestions (DuckDB jaro_winkler_similarity) → Accept into KeyMap. Probe stays manual. Leftovers open an LLM chat with join lineage, column schemas, neighbor-field samples, and existing KeyMap aliases; connection is llm.base_url / llm.model / llm.api_key in ~/.dwhforge-query/settings.json",
       "Add to map…: Inspector unmatched banner; or Join Lens Probe → Left/Right Add to map…. Several KeyMaps → dialog (show key, radio target, OK); one map → opens it",
       "Data preview while a Join is selected is truncated through that Join",
       "Inspector: unmatched / fan-out samples still available",
@@ -110,7 +111,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Save map after Export (seed storage): updates project key_maps and pushes the same rows into that export’s seeds/map_<id>.csv.",
       "If you hand-edit the CSV in Git: reopen/sync to pull rows into the editor. Re-Export refuses when the CSV hash diverged (safe re-export) so DE edits are not clobbered — sync first, or export to a new folder.",
       "CI/CD: commit the export tree; run dbt seed (CSV → warehouse table) then dbt run. Models join {{ ref('map_…') }}, not a file path.",
-      "Demo: Help → Load demo → Key mapping (F&B: dirty_join / daily_pnl / monthly_pnl, ~900 rows×2). Walkthrough: docs/keymap-workflows.md.",
+      "Demo: Help → Load demo → Key mapping (F&B: dirty_join / daily_pnl / monthly_pnl, ~900 rows×2). Non-lexical leftovers for Auto/LLM: DEO→UBL (NYSE ticker), The South African Breweries→ABEV (old name). Walkthrough: docs/keymap-workflows.md.",
     ],
   },
   {

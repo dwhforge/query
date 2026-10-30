@@ -2,6 +2,7 @@ mod arrow_json;
 mod export_e2e;
 mod extensions;
 mod join_diagnostics;
+mod join_fuzzy;
 mod join_lens;
 mod join_near_miss;
 mod key_map_write;
@@ -24,6 +25,10 @@ pub use join_lens::{
     BlameUnmatchedKeyResult, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinKeySide,
     JoinKeyTuple, JoinRowExplanation, JOIN_LENS_KEY_SAMPLE_LIMIT, JOIN_LENS_MAX_KEYS,
     JOIN_LENS_MAX_MATCHES,
+};
+pub use join_fuzzy::{
+    join_key_fuzzy_suggest, FuzzyAliasExample, FuzzyChatContext, FuzzyFieldSample, FuzzyKeySample,
+    FuzzyPair, JoinKeyFuzzySuggest,
 };
 pub use join_near_miss::{
     join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,

@@ -22,6 +22,7 @@ import {
   pinSideIndicesToResult,
   type JoinColumnOrigin,
 } from "../lib/joinColumnOrigin";
+import { JoinLensAuto } from "./JoinLensAuto";
 import { PreviewTable } from "./PreviewTable";
 
 /** Fill result right-origin columns from a Probe right row (hypothetical map pair). */
@@ -175,7 +176,7 @@ function blameLabel(b: BlameUnmatchedKeyResult): string {
   }
 }
 
-type SideMode = "linked" | "probe";
+type SideMode = "linked" | "probe" | "auto";
 
 type SidePanelProps = {
   title: "Left" | "Right";
@@ -260,7 +261,7 @@ function SidePanel({
         >
           {title} · {mode === "linked" ? "parents" : "unmatched"}
         </div>
-        {mode === "probe" && (
+        {mode !== "linked" && (
           <input
             type="search"
             value={search}
@@ -803,7 +804,7 @@ function JoinLensImpl({
    * Probe: unmatched diag sample, substring filter on cell values (L/R same).
    */
   const visibleLeft = useMemo(() => {
-    if (sideMode === "probe") {
+    if (sideMode !== "linked") {
       return probeLeftRows
         .map((_, i) => i)
         .filter((i) => rowMatchesSearch(probeLeftRows[i]!, searchLeft));
@@ -812,7 +813,7 @@ function JoinLensImpl({
   }, [sideMode, probeLeftRows, searchLeft, linkedLeft]);
 
   const visibleRight = useMemo(() => {
-    if (sideMode === "probe") {
+    if (sideMode !== "linked") {
       return probeRightRows
         .map((_, i) => i)
         .filter((i) => rowMatchesSearch(probeRightRows[i]!, searchRight));
@@ -951,11 +952,15 @@ function JoinLensImpl({
   const leftListMode =
     sideMode === "linked"
       ? linkedListLabel(leftPin)
-      : probeListLabel("left", unmatchedLeft, visibleLeft.length);
+      : sideMode === "auto"
+        ? `Unmatched sample · ${visibleLeft.length}`
+        : probeListLabel("left", unmatchedLeft, visibleLeft.length);
   const rightListMode =
     sideMode === "linked"
       ? linkedListLabel(rightPin)
-      : probeListLabel("right", unmatchedRight, visibleRight.length);
+      : sideMode === "auto"
+        ? `Unmatched sample · ${visibleRight.length}`
+        : probeListLabel("right", unmatchedRight, visibleRight.length);
 
   const leftEmpty =
     sideMode === "linked"
@@ -1199,6 +1204,7 @@ function JoinLensImpl({
           leftSel != null ? keyLabelFor("left", leftSel) : null
         }
         onSelect={(index) => {
+          if (sideMode === "auto") return;
           setLeftSel((prev) => (prev === index ? null : index));
         }}
         mapButtonLabel={pairMode ? "Map this pair…" : "Add to map…"}
@@ -1250,18 +1256,34 @@ function JoinLensImpl({
                 </span>
               )}
             </button>
+            <button
+              type="button"
+              onClick={() => switchMode("auto")}
+              title="Suggest From→To with Jaro-Winkler. Accept writes a KeyMap. Probe stays manual."
+              className={`px-1.5 py-0.5 text-[9px] ${
+                sideMode === "auto"
+                  ? "bg-teal-500/20 text-teal-200"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              Auto
+            </button>
           </div>
           <span
             className="min-w-0 flex-1 truncate text-[10px] text-slate-500"
             title={
               sideMode === "linked"
                 ? "Parents of the selected result row"
-                : "Keys that did not join — pick one to map or blame"
+                : sideMode === "auto"
+                  ? "Fuzzy suggestions — accept into a KeyMap"
+                  : "Keys that did not join — pick one to map or blame"
             }
           >
             {sideMode === "linked"
               ? "Parents of the selected result row"
-              : "Keys that did not join — pick one to map or blame"}
+              : sideMode === "auto"
+                ? "Fuzzy suggestions — accept into a KeyMap"
+                : "Keys that did not join — pick one to map or blame"}
           </span>
         </div>
 
@@ -1283,6 +1305,11 @@ function JoinLensImpl({
                     Map this pair…
                   </span>
                 </li>
+                <li>
+                  <span className="font-semibold text-teal-200">Auto</span> —
+                  Jaro-Winkler suggestions, then Accept. Leftovers can go to the
+                  LLM chat.
+                </li>
               </ol>
               <button
                 type="button"
@@ -1295,6 +1322,33 @@ function JoinLensImpl({
           </div>
         )}
 
+        {mapToast && (
+          <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-100/90">
+            {mapToast}
+          </div>
+        )}
+
+        {sideMode === "auto" ? (
+          <JoinLensAuto
+            workspace={workspace}
+            hostQueryId={hostQueryId}
+            joinStepIndex={joinStepIndex}
+            connections={connections}
+            onAccept={
+              onMapKey
+                ? (fromValues, toValues) => {
+                    onMapKey("left", fromValues, { toValues });
+                    const toast = `Opened KeyMap · ${fromValues.length} auto pair${fromValues.length === 1 ? "" : "s"}`;
+                    setMapToast(toast);
+                    window.setTimeout(() => {
+                      setMapToast((cur) => (cur === toast ? null : cur));
+                    }, 3500);
+                  }
+                : undefined
+            }
+          />
+        ) : (
+          <>
         {/* Layer 2: status */}
         <div className="shrink-0 border-b border-slate-800/60 bg-slate-950/50 px-2 py-1 text-[10px] leading-snug text-slate-400">
           {statusLine}
@@ -1375,12 +1429,6 @@ function JoinLensImpl({
             {!nearMissLoading && nearMissCount === 0 && (
               <div className="text-[10px] text-slate-500">No hypotheses yet</div>
             )}
-          </div>
-        )}
-
-        {mapToast && (
-          <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-100/90">
-            {mapToast}
           </div>
         )}
 
@@ -1471,6 +1519,8 @@ function JoinLensImpl({
             matchedRowIndices={displayMatched}
           />
         </div>
+          </>
+        )}
       </div>
 
       <SidePanel
@@ -1493,6 +1543,7 @@ function JoinLensImpl({
           rightSel != null ? keyLabelFor("right", rightSel) : null
         }
         onSelect={(index) => {
+          if (sideMode === "auto") return;
           setRightSel((prev) => (prev === index ? null : index));
         }}
         mapButtonLabel={pairMode ? "Map this pair…" : "Add to map…"}

@@ -6,7 +6,7 @@
 
 A local desktop workbench for turning files and PostgreSQL data into reusable transformations and runnable dbt projects.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-14b8a6)](LICENSE)
+[![License: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-14b8a6)](LICENSE)
 [![dbt Core 1.x](https://img.shields.io/badge/dbt_Core-1.x-ff694b)](docs/export-and-run.md)
 [![Powered by DuckDB](https://img.shields.io/badge/powered_by-DuckDB-fff000)](docs/ARCHITECTURE.md)
 [![Early development](https://img.shields.io/badge/status-early_development-64748b)](#project-status)
@@ -21,19 +21,17 @@ A local desktop workbench for turning files and PostgreSQL data into reusable tr
 
 ## From messy inputs to a pipeline you can keep
 
-Two feeds spell the same company differently. A join drops records. A ticker or old legal name will never look like the dimension id. A business rule changes a week after the first export.
+Two feeds spell the same company differently. A join drops records. A business rule changes a week after the first export.
 
 DWHForge Query gives you a visual place to investigate and edit those transformations—with SQL you can inspect and a dbt project you can run in your own infrastructure.
 
 - **See the data behind the graph.** Select a query or an applied step to inspect its intermediate result.
-- **Investigate joins where you build them.** Join Lens shows matched and unmatched keys; turn corrections into reusable mappings.
-- **Suggest aliases, then accept.** Auto scores near-miss spellings with DuckDB `jaro_winkler_similarity`. You accept into a KeyMap — Join ON is never rewritten silently.
-- **Discuss what fuzzy cannot see.** Leftover keys open an optional LLM chat with join lineage, schemas, and neighbor-field samples. Domain aliases still land in the same KeyMap.
+- **Investigate joins where you build them.** Explore matched and unmatched keys, then turn corrections into reusable mappings.
 - **Compute where it makes sense.** Use DuckDB to transform files and publish the result to PostgreSQL, or keep both data and execution in PostgreSQL.
 - **Keep the result as code.** Export SQL models, dependencies, sources, and mapping seeds. Run them with dbt outside the app.
 - **Come back and change it.** Edit the workspace and re-export; hash checks detect hand-edits to generator-owned files before overwriting them.
 
-Built for small data teams, solo engineers, and consultants working with PostgreSQL, file deliveries, and dbt. MIT licensed. No DWHForge account or hosted service required.
+Built for small data teams, solo engineers, and consultants working with PostgreSQL, file deliveries, and dbt. Licensed under Business Source License 1.1 (converts to Apache-2.0 after four years). No DWHForge account or hosted service required.
 
 ## One workspace, from investigation to build
 
@@ -42,9 +40,7 @@ Built for small data teams, solo engineers, and consultants working with Postgre
 | Bring inputs together | PostgreSQL tables, CSV, Parquet, S3-compatible storage, and DuckDB files |
 | Build reusable transformations | Connected queries, applied steps, joins, append, filters, grouping, sorting, and calculated columns |
 | Handle everyday calculations | Ready-made operations for common calculations, with an SQL mode for custom expressions |
-| Understand a failed match | Join Lens: Linked parents, Probe unmatched keys, blame / explain |
-| Suggest spelling-near aliases | Join Lens **Auto** — DuckDB Jaro–Winkler suggestions; Accept → KeyMap |
-| Resolve domain aliases | Optional LLM chat over leftovers (lineage, schemas, samples); Accept → KeyMap |
+| Understand a failed match | Join Lens with key investigation and unmatched-row samples |
 | Fix inconsistent identifiers | Editable From → To KeyMaps, reusable across queries and exported as dbt seeds |
 | Choose what to deliver | Mark output queries **Publish to destination** |
 | Execute the exported project | **Export → Parse → Build**, with build progress and logs |
@@ -68,16 +64,15 @@ Custom SQL follows the **execution engine’s dialect**. See [export routes and 
 
 ## Try it: company aliases to PostgreSQL
 
-The bundled **Key mapping** demo follows two feeds across **15 companies and 60 days**: sales and spending use different names for the same businesses — including cases fuzzy alone cannot solve (NYSE ticker `DEO` → dim id `UBL`, old legal name *The South African Breweries* → `ABEV`).
+The bundled **Key mapping** demo follows two feeds across **15 companies and 60 days**: sales and spending use different names for the same businesses.
 
-1. **Open the problem.** Load **Help → Load demo → Key mapping** and inspect `dirty_join` — sales keys that do not match `dim_company.company_id`.
-2. **Probe or Auto.** In Join Lens, **Probe** unmatched keys by hand, or open **Auto** for Jaro–Winkler suggestions. Accept pairs into the KeyMap; Join ON stays explicit.
-3. **Discuss leftovers.** For ticker / historical names Auto cannot score, open the LLM chat (optional). The model sees join lineage, column schemas, and neighbor-field samples — accepted pairs still go through the KeyMap.
-4. **Inspect the result.** Follow the daily combined data into the monthly rollup; inspect intermediate rows and generated model SQL.
-5. **Choose the outputs.** Set execution to **DuckDB**, destination to **PostgreSQL**, select your connection, and mark the daily and monthly queries **Publish to destination**.
-6. **Build the tables.** Choose **File → Export dbt…**, then **File → Build export…**. Inspect the published tables in PostgreSQL.
+1. **Open the problem.** Load **Help → Load demo → Key mapping** and inspect `dirty_join` to see names that do not match the company dimension.
+2. **Investigate and map.** Use Join Lens and the KeyMap editor to connect source aliases to canonical company IDs. Reuse the mapping across both feeds.
+3. **Inspect the result.** Follow the daily combined data into the monthly rollup; inspect intermediate rows and generated model SQL.
+4. **Choose the outputs.** Set execution to **DuckDB**, destination to **PostgreSQL**, select your connection, and mark the daily and monthly queries **Publish to destination**.
+5. **Build the tables.** Choose **File → Export dbt…**, then **File → Build export…**. Inspect the published tables in PostgreSQL.
 
-To explore without a PostgreSQL connection, keep the destination set to **DuckDB**. LLM chat is optional: set `llm` in `~/.dwhforge-query/settings.json` (or **Connect LLM** in Auto). Fuzzy suggestions work offline with no API key.
+To explore without a PostgreSQL connection, keep the destination set to **DuckDB**.
 
 [Walk through the mapping workflow →](docs/keymap-workflows.md) · [Explore the other demos →](docs/DEMOS.md)
 
@@ -145,15 +140,15 @@ Linux packages target **glibc ≥ 2.28**. Preview engine extensions are bundled 
 
 ### Local by design
 
-The desktop app connects directly to the files, databases, and storage you configure. Connection secrets live in `~/.dwhforge-query/secrets.json`; app preferences (including optional `llm.base_url` / `model` / `api_key`) in `settings.json`. No DWHForge-hosted service is required to edit, preview, export, or build. Fuzzy Auto scoring runs entirely in local DuckDB. LLM chat calls only the OpenAI-compatible endpoint you configure — when you use it.
+The desktop app connects directly to the files, databases, and storage you configure. Connection secrets are stored separately from project files, in `~/.dwhforge-query/secrets.json`. No DWHForge-hosted service is required to edit, preview, export, or build.
 
 ## Project status
 
 **Early development.** The current focus is the complete edit → preview → export → build loop on DuckDB and PostgreSQL.
 
-- **Available:** visual multi-query authoring, step previews, Join Lens (Linked / Probe / Auto), DuckDB fuzzy alias suggestions, optional LLM leftover chat, KeyMaps, ready-made calculated operations, dbt export, publish controls, and build execution.
+- **Available:** visual multi-query authoring, step previews, Join Lens, KeyMaps, ready-made calculated operations, dbt export, publish controls, and build execution.
 - **Current dbt runtime:** Core **1.x**. dbt **2.0 compatibility is planned**, not yet supported.
-- **Current boundary:** the workspace generates its dbt project. Importing and round-tripping arbitrary existing dbt repositories is not supported. Automatic fuzzy Join ON remains out of scope — aliases are always explicit KeyMap rows.
+- **Current boundary:** the workspace generates its dbt project. Importing and round-tripping arbitrary existing dbt repositories is not supported.
 - **Later:** incremental and snapshot configuration, broader testing/profiling surfaces, and richer dbt project integration.
 
 ## Under the hood
@@ -163,11 +158,10 @@ The desktop app connects directly to the files, databases, and storage you confi
 | Desktop | Electron + Rust `dwh-host` sidecar |
 | Interface | React, TypeScript, React Flow |
 | Workspace and SQL generation | Rust `dwh-pipeline` |
-| Local preview and investigation | DuckDB / `dwh-engine` (incl. core `jaro_winkler_similarity`) |
-| Optional alias chat | OpenAI-compatible `/chat/completions` via `dwh-host` |
+| Local preview and investigation | DuckDB / `dwh-engine` |
 | Pipeline execution | dbt Core with DuckDB or PostgreSQL adapters |
 
-The workspace is the editable source for visual transformations. Generated SQL remains inspectable. Execution and destination are explicit choices. Fuzzy and LLM only **propose** From → To rows; you accept them into a KeyMap before they affect the join.
+The workspace is the editable source for visual transformations. Generated SQL remains inspectable. Execution and destination are explicit choices.
 
 ## Documentation & contributing
 
@@ -188,4 +182,4 @@ For engine integration checks and PostgreSQL prerequisites, see [getting started
 
 ## License
 
-[MIT](LICENSE). Use it, modify it, and build on it.
+[Business Source License 1.1](LICENSE). Source is available; production use is allowed except competing hosted/SaaS offerings. Each version becomes [Apache License 2.0](LICENSE) four years after it is published.

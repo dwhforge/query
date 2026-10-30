@@ -14,7 +14,7 @@ Positioning: [ADR-0001](adr/0001-product-positioning.md).
 
 **Promise:** *Assemble and verify transforms on real data. Keep the result as SQL/dbt in your own infrastructure.*
 
-**Licensing:** **MIT** ([LICENSE](../LICENSE)). Docs stay English / OSS-friendly.
+**Licensing:** **Business Source License 1.1** ([LICENSE](../LICENSE)); Change License Apache-2.0 after four years. Docs stay English.
 
 ## 2. Horizons
 

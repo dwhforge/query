@@ -88,6 +88,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Blame: absent at source 0vs filtered upstream (which step) vs no partner at Join",
       "Near-miss strip: Apply NormalizeKey when trim/case/zeros would add matches",
       "Auto: Jaro-Winkler suggestions (DuckDB jaro_winkler_similarity) → Accept into KeyMap. Probe stays manual. Leftovers open an LLM chat with join lineage, column schemas, neighbor-field samples, and existing KeyMap aliases; connection is llm.base_url / llm.model / llm.api_key in ~/.dwhforge-query/settings.json",
+      "Collapse the graph for Join Lens: drag the horizontal splitter up (canvas shrinks to a thin strip) or double-click the splitter to maximize the dock / restore",
       "Add to map…: Inspector unmatched banner; or Join Lens Probe → Left/Right Add to map…. Several KeyMaps → dialog (show key, radio target, OK); one map → opens it",
       "Data preview while a Join is selected is truncated through that Join",
       "Inspector: unmatched / fan-out samples still available",
@@ -101,7 +102,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "A KeyMap is a small alias table: unique From → To. Use it when join keys need business remapping (channel codes, region synonyms). ApplyKeyMap remaps a column via that table. Open maps from Explorer → KeyMaps — they open as tabs next to Pipeline canvas.",
     ],
     bullets: [
-      "Storage = seed (default): portable CSV in the dbt export. Display Name is for you; the internal id (shown under the title) becomes seeds/map_<id>.csv and {{ ref('map_<id>') }}.",
+      "Storage = seed (default): portable CSV in the dbt export. Display Name is for you; the internal id (shown under the title) becomes seeds/map_<id>.csv and {{ ref('map_<id>') }}. Delete removes the KeyMap from the project and, after Export, also deletes that seed CSV — otherwise reopen/sync would recreate the map from the file.",
       "Storage = source: pick Connection + schema + table. Save does a full replace write-back to Postgres; Reload / open loads live rows.",
       "Storage = ref: existing dbt model. Rows stay in the project only — no warehouse write-back (dbt run owns the model).",
       "SoT strip on the KeyMap tab: project (pre-export) → export seed (after Export) → warehouse / ref depending on Storage.",

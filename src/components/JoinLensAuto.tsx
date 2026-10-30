@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ConnectionDef, Workspace } from "../types/pipeline";
 import {
   getLlmConfig,
@@ -36,75 +36,142 @@ function parseSuggestedPairs(text: string): SuggestedPair[] {
   }
 }
 
-function fmtCols(cols: { name: string; type: string }[]): string {
-  if (!cols.length) return "(schema unavailable)";
-  return cols.map((c) => `${c.name}:${c.type}`).join(", ");
+/** Soft budget under host llm_chat per-message limit (12_000). */
+const PROMPT_BUDGET = 10_500;
+
+function takeLines(lines: string[], maxChars: number): { text: string; omitted: number } {
+  const out: string[] = [];
+  let used = 0;
+  let omitted = 0;
+  for (const line of lines) {
+    const add = (out.length ? 1 : 0) + line.length;
+    if (used + add > maxChars) {
+      omitted += 1;
+      continue;
+    }
+    out.push(line);
+    used += add;
+  }
+  return { text: out.join("\n"), omitted };
 }
 
-function fmtSamples(samples: JoinKeyFuzzySuggest["chat_context"]["leftover_left_samples"]): string {
-  if (!samples.length) return "(no row samples)";
-  return samples
-    .map((s) => {
-      const fields = s.fields.map((f) => `${f.name}=${JSON.stringify(f.value)}`).join("; ");
-      return `- key=${JSON.stringify(s.key)} | ${fields || "(key only)"}`;
-    })
-    .join("\n");
+function fmtCols(cols: { name: string; type: string }[], max = 24): string {
+  if (!cols.length) return "(schema unavailable)";
+  const shown = cols.slice(0, max);
+  const extra = cols.length - shown.length;
+  return (
+    shown.map((c) => `${c.name}:${c.type}`).join(", ") +
+    (extra > 0 ? ` …+${extra} cols` : "")
+  );
+}
+
+function fmtSamples(
+  samples: JoinKeyFuzzySuggest["chat_context"]["leftover_left_samples"],
+  max = 12,
+): string[] {
+  return samples.slice(0, max).map((s) => {
+    const fields = s.fields
+      .slice(0, 4)
+      .map((f) => `${f.name}=${JSON.stringify(f.value)}`)
+      .join("; ");
+    return `- key=${JSON.stringify(s.key)} | ${fields || "(key only)"}`;
+  });
 }
 
 function systemPrompt(report: JoinKeyFuzzySuggest): string {
   const ctx = report.chat_context;
-  const cap = 80;
-  const left = report.leftover_left.slice(0, cap);
-  const right = report.leftover_right.slice(0, cap);
-  const moreLeft = report.leftover_left.length - left.length;
-  const moreRight = report.leftover_right.length - right.length;
-  const fuzzyExamples = report.suggestions.slice(0, 12).map(
-    (p) =>
-      `- ${JSON.stringify(p.from_key)} → ${JSON.stringify(p.to_key)} (jaro=${p.score.toFixed(3)}, edits=${p.edits}${p.ambiguous ? ", ambiguous" : ""})`,
-  );
-  const aliasExamples = ctx.existing_aliases.slice(0, 20).map(
-    (a) =>
-      `- [${a.map_name || a.map_id}] ${JSON.stringify(a.from)} → ${JSON.stringify(a.to)}`,
-  );
-  return [
+  const truncNotes: string[] = [];
+  if (ctx.context_truncated || report.truncated) {
+    truncNotes.push("Context lists were capped for size; prefer listed keys only.");
+  }
+
+  const head = [
     "You help map join keys inside DWHForge Query.",
-    "Two tables/queries are joined on the key columns below. Fuzzy Jaro-Winkler already proposed close spellings; you only discuss leftover keys that still have no partner.",
-    "Use the join lineage, column schemas, neighbor-field samples, existing KeyMap aliases, and fuzzy examples to infer the business domain (channels, companies, SKUs, regions, etc.).",
-    "Never invent a key that is not in the leftover lists. Never suggest changing Join ON to a fuzzy predicate.",
-    "Propose From (left leftover) → To (right leftover) only when they are the same business entity under different spellings/codes/aliases.",
-    "If neighbor fields conflict (different cities, brands, amounts that clearly belong to different entities), refuse the pair.",
-    "Explain briefly using domain evidence from the samples. If you propose pairs, end with a json fence:",
-    '{"pairs":[{"from":"<exact leftover left>","to":"<exact leftover right>","why":"<short evidence>"}]}',
-    'If none are safe, end with {"pairs":[]}.',
+    "Fuzzy Jaro-Winkler already proposed close spellings; discuss leftover left keys that still need a To.",
+    "Use join lineage, schemas, neighbor-field samples, KeyMap aliases, and fuzzy examples for domain (tickers, old names, codes).",
+    "From must be an exact leftover left key. To must be an exact value from the right-key universe (may already match other left rows — many-to-one is OK).",
+    "Never invent keys. Never suggest a fuzzy Join ON.",
+    "If neighbor fields conflict, refuse the pair.",
+    "Response format (required):",
+    "1) First write a short prose rationale (2–6 sentences): for each proposed pair say what evidence you used (ticker/old name/neighbor fields/lineage). If none are safe, say why.",
+    "2) Then end with a json fence. Every pair MUST include a non-empty why with the same evidence in one line:",
+    '{"pairs":[{"from":"<exact leftover left>","to":"<exact right universe value>","why":"<short evidence>"}]}',
+    'or {"pairs":[]}.',
+    "Do not output only JSON — the prose rationale comes first.",
     "",
     "## Join",
-    `Host query: ${ctx.left_query_name} (${ctx.left_query_id}) step ${report.join_step_index}`,
-    `Right query: ${ctx.right_query_name} (${ctx.right_query_id})`,
-    `Left ON: ${report.left_on.join(", ") || "(none)"}`,
-    `Right ON: ${report.right_on.join(", ") || "(none)"}`,
+    `Host: ${ctx.left_query_name} (${ctx.left_query_id}) step ${report.join_step_index}`,
+    `Right: ${ctx.right_query_name} (${ctx.right_query_id})`,
+    `Left ON: ${report.left_on.join(", ") || "(none)"} · Right ON: ${report.right_on.join(", ") || "(none)"}`,
     `Left lineage: ${ctx.left_lineage || "(unknown)"}`,
     `Right lineage: ${ctx.right_lineage || "(unknown)"}`,
     `Left columns: ${fmtCols(ctx.left_columns)}`,
     `Right columns: ${fmtCols(ctx.right_columns)}`,
-    "",
-    "## Fuzzy suggestions already offered (spelling-near; do not repeat unless rejecting)",
-    fuzzyExamples.join("\n") || "(none)",
-    "",
-    "## Existing KeyMap aliases in this project (domain examples)",
-    aliasExamples.join("\n") || "(none yet)",
-    "",
-    `## Leftover left keys (From), ${report.leftover_left.length}`,
-    left.map((k) => `- ${k}`).join("\n") || "(none)",
-    moreLeft > 0 ? `… and ${moreLeft} more left keys not listed` : "",
-    "Sample left rows for leftovers (key + neighbor fields):",
-    fmtSamples(ctx.leftover_left_samples),
-    "",
-    `## Leftover right keys (To), ${report.leftover_right.length}`,
-    right.map((k) => `- ${k}`).join("\n") || "(none)",
-    moreRight > 0 ? `… and ${moreRight} more right keys not listed` : "",
-    "Sample right rows for leftovers (key + neighbor fields):",
-    fmtSamples(ctx.leftover_right_samples),
   ].join("\n");
+
+  let budget = PROMPT_BUDGET - head.length - 80;
+  const sections: string[] = [head];
+
+  const pushSection = (title: string, lines: string[], softCap: number) => {
+    const room = Math.max(200, Math.min(softCap, budget));
+    const { text, omitted } = takeLines(lines, room);
+    if (!text && omitted === 0) {
+      sections.push(`\n## ${title}\n(none)`);
+      return;
+    }
+    const note = omitted > 0 ? `\n… omitted ${omitted} more lines` : "";
+    if (omitted > 0) truncNotes.push(`${title}: omitted ${omitted}`);
+    const block = `\n## ${title}\n${text || "(none)"}${note}`;
+    sections.push(block);
+    budget -= block.length;
+  };
+
+  pushSection(
+    "Fuzzy suggestions already offered",
+    report.suggestions.slice(0, 10).map(
+      (p) =>
+        `- ${JSON.stringify(p.from_key)} → ${JSON.stringify(p.to_key)} (jaro=${p.score.toFixed(3)}${p.ambiguous && p.alt_to_key ? `; alt ${JSON.stringify(p.alt_to_key)}` : ""})`,
+    ),
+    1200,
+  );
+  pushSection(
+    "Existing KeyMap aliases",
+    ctx.existing_aliases
+      .slice(0, 12)
+      .map(
+        (a) =>
+          `- [${a.map_name || a.map_id}] ${JSON.stringify(a.from)} → ${JSON.stringify(a.to)}`,
+      ),
+    1000,
+  );
+  const leftKeys = report.leftover_left.slice(0, 40).map((k) => `- ${k}`);
+  pushSection(
+    `Leftover left (From), ${report.leftover_left.length}`,
+    leftKeys,
+    2000,
+  );
+  pushSection("Left leftover samples", fmtSamples(ctx.leftover_left_samples, 10), 2200);
+  const universe = (ctx.right_to_universe ?? []).slice(0, 40).map((k) => `- ${k}`);
+  pushSection(
+    `Right key universe (allowed To), ${(ctx.right_to_universe ?? []).length}`,
+    universe,
+    1800,
+  );
+  pushSection(
+    `Unmatched right (still open), ${report.leftover_right.length}`,
+    report.leftover_right.slice(0, 30).map((k) => `- ${k}`),
+    1200,
+  );
+  pushSection("Right leftover samples", fmtSamples(ctx.leftover_right_samples, 8), 1800);
+
+  if (truncNotes.length) {
+    sections.push(`\n## Truncation\n- ${truncNotes.join("\n- ")}`);
+  }
+  let out = sections.join("\n");
+  if (out.length > PROMPT_BUDGET) {
+    out = `${out.slice(0, PROMPT_BUDGET - 40)}\n…[prompt truncated]`;
+  }
+  return out;
 }
 
 export function JoinLensAuto({
@@ -135,6 +202,8 @@ export function JoinLensAuto({
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  /** Bumps when Join target changes — ignore late LLM replies. */
+  const chatGen = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,11 +224,13 @@ export function JoinLensAuto({
 
   useEffect(() => {
     let cancelled = false;
+    chatGen.current += 1;
     setLoading(true);
     setError(null);
     setReport(null);
     setChat([]);
     setChatError(null);
+    setChatBusy(false);
     void joinKeyFuzzySuggest(workspace, hostQueryId, joinStepIndex, connections)
       .then((r) => {
         if (cancelled) return;
@@ -169,7 +240,11 @@ export function JoinLensAuto({
           next[i] = !p.ambiguous;
         });
         setPicked(next);
-        setChatOpen(r.suggestions.length === 0 && (r.leftover_left.length > 0 || r.leftover_right.length > 0));
+        const openChat =
+          !r.disabled_reason &&
+          r.suggestions.length === 0 &&
+          (r.leftover_left.length > 0 || r.leftover_right.length > 0);
+        setChatOpen(openChat);
       })
       .catch((e) => {
         if (!cancelled) setError(typeof e === "string" ? e : String(e));
@@ -179,6 +254,7 @@ export function JoinLensAuto({
       });
     return () => {
       cancelled = true;
+      chatGen.current += 1;
     };
   }, [workspace, hostQueryId, joinStepIndex, connections]);
 
@@ -191,7 +267,10 @@ export function JoinLensAuto({
   const chatPairs = useMemo(() => {
     if (!lastAssistant || !report) return [];
     const allowedL = new Set(report.leftover_left);
-    const allowedR = new Set(report.leftover_right);
+    const allowedR = new Set([
+      ...(report.chat_context.right_to_universe ?? []),
+      ...report.leftover_right,
+    ]);
     return parseSuggestedPairs(lastAssistant.content).filter(
       (p) => allowedL.has(p.from) && allowedR.has(p.to),
     );
@@ -217,12 +296,9 @@ export function JoinLensAuto({
 
   async function sendChat(text: string) {
     const content = text.trim();
-    if (!content || !report || chatBusy) return;
-    if (!llm?.api_key_set) {
-      setShowConn(true);
-      setChatError("Set llm.api_key in ~/.dwhforge-query/settings.json");
-      return;
-    }
+    if (!content || !report || chatBusy || report.disabled_reason) return;
+    const gen = chatGen.current;
+    const joinSnap = `${hostQueryId}:${joinStepIndex}`;
     const next: ChatMsg[] = [...chat, { role: "user", content }];
     setChat(next);
     setDraft("");
@@ -233,11 +309,18 @@ export function JoinLensAuto({
         { role: "system", content: systemPrompt(report) },
         ...next,
       ]);
+      if (
+        chatGen.current !== gen ||
+        `${hostQueryId}:${joinStepIndex}` !== joinSnap
+      ) {
+        return;
+      }
       setChat([...next, { role: "assistant", content: res.content }]);
     } catch (e) {
+      if (chatGen.current !== gen) return;
       setChatError(typeof e === "string" ? e : String(e));
     } finally {
-      setChatBusy(false);
+      if (chatGen.current === gen) setChatBusy(false);
     }
   }
 
@@ -250,11 +333,13 @@ export function JoinLensAuto({
         <span className="text-[10px] text-slate-400">
           {loading
             ? "Scoring unmatched keys…"
-            : report
-              ? `${report.suggestions.length} fuzzy pair${report.suggestions.length === 1 ? "" : "s"} · ${report.metric} ≥ ${report.score_cutoff}`
-              : "Auto map"}
+            : report?.disabled_reason
+              ? "Auto unavailable for this Join"
+              : report
+                ? `${report.suggestions.length} fuzzy pair${report.suggestions.length === 1 ? "" : "s"} · ${report.metric} ≥ ${report.score_cutoff}`
+                : "Auto map"}
         </span>
-        {report?.truncated && (
+        {report?.truncated && !report.disabled_reason && (
           <span className="text-[10px] text-amber-300/90">
             scan capped at {report.scanned_left}+{report.scanned_right}
           </span>
@@ -264,15 +349,22 @@ export function JoinLensAuto({
           onClick={() => setShowConn((v) => !v)}
           className="ml-auto rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
         >
-          {llm?.api_key_set ? `LLM · ${llm.model}` : "Connect LLM"}
+          {llm ? `LLM · ${llm.model}` : "Connect LLM"}
         </button>
       </div>
+
+      {report?.disabled_reason && (
+        <div className="shrink-0 border-b border-amber-900/50 bg-amber-950/25 px-2 py-2 text-[10px] leading-relaxed text-amber-100/90">
+          {report.disabled_reason}
+        </div>
+      )}
 
       {showConn && (
         <div className="shrink-0 space-y-1 border-b border-slate-800 bg-slate-950/80 px-2 py-2 text-[10px]">
           <div className="text-slate-500">
             Writes <span className="font-mono">llm</span> in ~/.dwhforge-query/settings.json
-            (OpenAI-compatible <span className="font-mono">/chat/completions</span>, Bearer token).
+            (OpenAI-compatible <span className="font-mono">/chat/completions</span>).
+            API key optional for local endpoints without auth.
           </div>
           <label className="block text-slate-400">
             base_url
@@ -291,12 +383,16 @@ export function JoinLensAuto({
             />
           </label>
           <label className="block text-slate-400">
-            api_key {llm?.api_key_set ? "(saved — leave blank to keep)" : ""}
+            api_key{" "}
+            {llm?.api_key_set
+              ? "(saved — leave blank to keep)"
+              : "(optional for local / no-auth servers)"}
             <input
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               autoComplete="off"
+              placeholder="sk-… or empty"
               className="mt-0.5 w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-slate-200 outline-none"
             />
           </label>
@@ -328,7 +424,11 @@ export function JoinLensAuto({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div
+        className={`min-h-0 overflow-auto ${
+          chatOpen ? "max-h-[30%] shrink-0" : "flex-1"
+        }`}
+      >
         {report && report.suggestions.length === 0 && !loading && (
           <div className="border-b border-slate-800 px-2 py-2 text-[10px] text-slate-400">
             No fuzzy pairs above the cutoff. Leftovers can be discussed in the LLM chat, then
@@ -353,7 +453,9 @@ export function JoinLensAuto({
               <span className="block truncate font-mono text-teal-100/90">→ {p.to_key}</span>
               <span className="text-[10px] text-slate-500">
                 {p.score.toFixed(3)} · edits {p.edits}
-                {p.ambiguous ? " · close second, confirm" : ""}
+                {p.ambiguous
+                  ? ` · close second${p.alt_to_key ? ` (${p.alt_to_key})` : ""}, confirm`
+                  : ""}
               </span>
             </span>
           </label>
@@ -384,7 +486,7 @@ export function JoinLensAuto({
       </div>
 
       {chatOpen && report && (
-        <div className="flex max-h-[46%] min-h-[9rem] shrink-0 flex-col border-t border-teal-950/70 bg-[#071018]">
+        <div className="flex min-h-0 flex-1 flex-col border-t border-teal-950/70 bg-[#071018]">
           <div className="min-h-0 flex-1 space-y-1.5 overflow-auto px-2 py-1.5">
             {chat.length === 0 && (
               <div className="text-[10px] leading-relaxed text-slate-500">
@@ -412,8 +514,15 @@ export function JoinLensAuto({
                   Model pairs on the leftover lists
                 </div>
                 {chatPairs.map((p) => (
-                  <div key={`${p.from}→${p.to}`} className="truncate font-mono text-[10px] text-amber-50">
-                    {p.from} → {p.to}
+                  <div key={`${p.from}→${p.to}`} className="mb-1 last:mb-0">
+                    <div className="truncate font-mono text-[10px] text-amber-50">
+                      {p.from} → {p.to}
+                    </div>
+                    {p.why && (
+                      <div className="text-[10px] leading-snug text-slate-400">
+                        {p.why}
+                      </div>
+                    )}
                   </div>
                 ))}
                 <button
@@ -453,7 +562,7 @@ export function JoinLensAuto({
               }
               onClick={() =>
                 void sendChat(
-                  "Which leftover left keys are safe aliases of leftover right keys? Only use keys from the lists.",
+                  "Which leftover left keys are safe aliases of values in the right-key universe? Only use keys from the lists. For each pair, explain the evidence (ticker, old legal name, neighbor fields, or lineage) in prose, then end with the JSON pairs including a non-empty why.",
                 )
               }
               className="rounded border border-slate-700 px-1.5 py-1 text-[10px] text-slate-300 disabled:opacity-40"

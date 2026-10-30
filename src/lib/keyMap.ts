@@ -14,8 +14,11 @@ import { slugify } from "../types/pipeline";
 export type ApplySide = "left" | "right" | "both";
 
 /**
- * Prefer the KeyMap already wired via ApplyKeyMap on this Join
+ * Prefer the KeyMap already wired via ApplyKeyMap on this Join's key column
  * (host before Join for left; right query for right).
+ *
+ * Traces RenameColumn backward so ApplyKeyMap on a pre-rename name still matches.
+ * Does NOT fall back to an unrelated ApplyKeyMap (e.g. channel before a company Join).
  */
 export function findApplyKeyMapIdForJoin(
   workspace: Workspace,
@@ -29,46 +32,52 @@ export function findApplyKeyMapIdForJoin(
   },
 ): string | null {
   const fold = (s: string) => s.toLowerCase();
-  const matchCol = (stepCol: string, want: string | undefined) => {
-    if (!want) return true;
-    return fold(stepCol) === fold(want);
+
+  /** Names that refer to `joinCol` at each step, walking renames backward. */
+  const scanMapForJoinCol = (
+    steps: TransformationStep[],
+    upto: number | null,
+    joinCol: string | undefined,
+  ): string | null => {
+    if (!joinCol?.trim()) return null;
+    const end = upto == null ? steps.length : Math.min(upto, steps.length);
+    const names = new Set<string>([fold(joinCol)]);
+    for (let i = end - 1; i >= 0; i--) {
+      const s = steps[i];
+      if (!s) continue;
+      if (s.type === "RenameColumn") {
+        const from = fold(s.payload.from);
+        const to = fold(s.payload.to);
+        if (names.has(to)) {
+          names.delete(to);
+          names.add(from);
+        }
+        continue;
+      }
+      if (s.type === "ApplyKeyMap") {
+        if (names.has(fold(s.payload.column))) {
+          return s.payload.map_id;
+        }
+      }
+    }
+    return null;
   };
 
   const preferRight = ctx.probeSide === "right";
   const leftCol = ctx.leftOn[0];
   const rightCol = ctx.rightOn[0];
-
-  const scan = (
-    steps: TransformationStep[],
-    upto: number | null,
-    column: string | undefined,
-  ): string | null => {
-    const end = upto == null ? steps.length : Math.min(upto, steps.length);
-    for (let i = end - 1; i >= 0; i--) {
-      const s = steps[i];
-      if (s?.type !== "ApplyKeyMap") continue;
-      if (!matchCol(s.payload.column, column)) continue;
-      return s.payload.map_id;
-    }
-    return null;
-  };
-
   const host = workspace.queries.find((q) => q.id === ctx.hostQueryId);
   const right = workspace.queries.find((q) => q.id === ctx.rightQueryId);
 
   if (preferRight) {
     return (
-      (right ? scan(right.steps, null, rightCol) : null) ??
-      (right ? scan(right.steps, null, undefined) : null) ??
-      (host ? scan(host.steps, ctx.joinStepIndex, leftCol) : null) ??
-      (host ? scan(host.steps, ctx.joinStepIndex, undefined) : null)
+      (right ? scanMapForJoinCol(right.steps, null, rightCol) : null) ??
+      (host ? scanMapForJoinCol(host.steps, ctx.joinStepIndex, leftCol) : null)
     );
   }
   return (
-    (host ? scan(host.steps, ctx.joinStepIndex, leftCol) : null) ??
-    (host ? scan(host.steps, ctx.joinStepIndex, undefined) : null) ??
-    (right ? scan(right.steps, null, rightCol) : null) ??
-    (right ? scan(right.steps, null, undefined) : null)
+    (host ? scanMapForJoinCol(host.steps, ctx.joinStepIndex, leftCol) : null) ??
+    (right ? scanMapForJoinCol(right.steps, null, rightCol) : null)
   );
 }
 

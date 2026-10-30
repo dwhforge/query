@@ -5,18 +5,36 @@ function clampPanelWidth(px: number, min: number, max: number): number {
 }
 
 const BOTTOM_DOCK_HEIGHT_KEY = "dwh.bottomDockHeightPx";
+/**
+ * Minimum canvas strip when Join Lens / Data is maximized.
+ * Intentionally tiny — drag the splitter up to give almost all height to the dock.
+ */
+const MIN_CANVAS_ABOVE_DOCK = 28;
+const BOTTOM_DOCK_MIN = 160;
+const BOTTOM_DOCK_HANDLE = 8;
 
 function loadBottomDockHeight(): number {
   try {
     const raw = localStorage.getItem(BOTTOM_DOCK_HEIGHT_KEY);
     if (raw) {
       const n = Number(raw);
-      if (Number.isFinite(n)) return clampPanelWidth(n, 180, 720);
+      if (Number.isFinite(n) && n >= BOTTOM_DOCK_MIN) return Math.round(n);
     }
   } catch {
     /* ignore */
   }
-  return 280;
+  return 360;
+}
+
+function clampBottomDockHeight(px: number, stackHeight: number): number {
+  if (stackHeight <= 0) {
+    return Math.max(BOTTOM_DOCK_MIN, Math.round(px));
+  }
+  const maxForStack = Math.max(
+    BOTTOM_DOCK_MIN,
+    stackHeight - MIN_CANVAS_ABOVE_DOCK - BOTTOM_DOCK_HANDLE,
+  );
+  return clampPanelWidth(px, BOTTOM_DOCK_MIN, maxForStack);
 }
 import {
   openDialog as open,
@@ -90,6 +108,7 @@ import {
   previewWorkspace,
   pushKeyMapToExport,
   readKeyMap,
+  removeKeyMapFromExport,
   saveProject,
   setAppSettings,
   setGlobalConnections,
@@ -174,6 +193,10 @@ function App() {
   const [bottomDockHeight, setBottomDockHeight] = useState(loadBottomDockHeight);
   const bottomDockHeightRef = useRef(bottomDockHeight);
   bottomDockHeightRef.current = bottomDockHeight;
+  /** Canvas + dock stack (below workspace tabs) — used to keep the splitter on-screen. */
+  const canvasDockStackRef = useRef<HTMLDivElement>(null);
+  /** Height before last “maximize Join Lens / Data” double-click. */
+  const bottomDockRestoreRef = useRef<number | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(300);
   const explorerWidthRef = useRef(explorerWidth);
   const inspectorWidthRef = useRef(inspectorWidth);
@@ -240,6 +263,24 @@ function App() {
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
   /** Center workspace tab: canvas or open KeyMap id. */
   const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
+  useEffect(() => {
+    if (centerTab !== "canvas") return;
+    const el = canvasDockStackRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const clampToStack = () => {
+      const stackH = el.clientHeight;
+      setBottomDockHeight((h) => {
+        const next = clampBottomDockHeight(h, stackH);
+        if (next === h) return h;
+        bottomDockHeightRef.current = next;
+        return next;
+      });
+    };
+    clampToStack();
+    const ro = new ResizeObserver(clampToStack);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [centerTab]);
   /** FromQuery parent id (child / derived query root). */
   const [fromQueryId, setFromQueryId] = useState("");
   const [appendOtherId, setAppendOtherId] = useState("");
@@ -1874,13 +1915,31 @@ function App() {
     // After first export, seeds/map_*.csv is SoT (ADR-0020).
     const exportPath = withConnections.last_dbt_export_path;
     if (exportPath) {
+      const baselineMapIds = new Set(
+        (withConnections.workspace.key_maps ?? []).map((m) => m.id),
+      );
       void syncKeyMapsFromExport(withConnections.workspace, exportPath)
         .then((synced) => {
-          setProject((p) =>
-            p.last_dbt_export_path === exportPath
-              ? { ...p, workspace: synced.workspace }
-              : p,
-          );
+          setProject((p) => {
+            if (p.last_dbt_export_path !== exportPath) return p;
+            // Don't clobber maps the user deleted while sync was in flight.
+            const stillPresent = new Set(
+              (p.workspace.key_maps ?? []).map((m) => m.id),
+            );
+            const removedDuringSync = [...baselineMapIds].filter(
+              (id) => !stillPresent.has(id),
+            );
+            if (removedDuringSync.length === 0) {
+              return { ...p, workspace: synced.workspace };
+            }
+            const key_maps = (synced.workspace.key_maps ?? []).filter(
+              (m) => !removedDuringSync.includes(m.id),
+            );
+            return {
+              ...p,
+              workspace: { ...synced.workspace, key_maps },
+            };
+          });
         })
         .catch(() => {
           /* export tree missing — keep project maps */
@@ -2125,12 +2184,35 @@ function App() {
   }
 
   function handleDeleteKeyMap(mapId: string) {
+    const map = (project.workspace.key_maps ?? []).find((m) => m.id === mapId);
+    const exportPath = project.last_dbt_export_path;
+    const isSeed =
+      !map?.storage || map.storage.kind === "seed";
+
     setProject((p) => {
       const { workspace } = deleteKeyMapFromWorkspace(p.workspace, mapId);
       return { ...p, workspace };
     });
     if (selectedKeyMapId === mapId) setSelectedKeyMapId(null);
     closeKeyMapTab(mapId);
+
+    // Seed is SoT after export — remove CSV or sync/reopen recreates the map.
+    if (exportPath && isSeed) {
+      void removeKeyMapFromExport(exportPath, mapId)
+        .then((r) => {
+          if (r.path) {
+            setExportMsg(`Deleted KeyMap · removed ${r.path}`);
+            void refreshExportTree(exportPath);
+          }
+        })
+        .catch((e) => {
+          setError(
+            `KeyMap removed from project, but seed file could not be deleted: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        });
+    }
   }
 
   function handleApplyNearMiss(hyp: NearMissHypothesis) {
@@ -3291,6 +3373,31 @@ function App() {
               })}
             </div>
 
+            {(error || exportMsg) && (
+              <div className="shrink-0 space-y-1 px-3 pb-1 pt-2">
+                {error && (
+                  <ErrorBanner
+                    message={error}
+                    onDismiss={() => setError(null)}
+                  />
+                )}
+                {exportMsg && (
+                  <div className="flex items-start gap-2 rounded-lg border border-teal-900/50 bg-teal-950/30 px-3 py-2 text-sm text-teal-200">
+                    <p className="min-w-0 flex-1 leading-snug">{exportMsg}</p>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-teal-400/80 hover:bg-teal-500/10 hover:text-teal-100"
+                      onClick={() => setExportMsg(null)}
+                      title="Dismiss"
+                      aria-label="Dismiss message"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {keyMapTabs.map((keyMapEditor) => (
               <div
                 key={keyMapEditor.map.id}
@@ -3388,7 +3495,13 @@ function App() {
                       : () => {
                           if (
                             window.confirm(
-                              `Delete KeyMap “${keyMapEditor.map.name}”? ApplyKeyMap steps that use it will be removed.`,
+                              `Delete KeyMap “${keyMapEditor.map.name}”? ApplyKeyMap steps that use it will be removed.${
+                                project.last_dbt_export_path &&
+                                (!keyMapEditor.map.storage ||
+                                  keyMapEditor.map.storage.kind === "seed")
+                                  ? " The export seed CSV will be deleted too."
+                                  : ""
+                              }`,
                             )
                           ) {
                             handleDeleteKeyMap(keyMapEditor.map.id);
@@ -3409,7 +3522,17 @@ function App() {
                       ? (side) => {
                           const ctx = keyMapEditor.joinCtx!;
                           const map = keyMapEditor.map;
-                          void saveKeyMapToProject(map).then(() => {
+                          void saveKeyMapToProject(map).then((result) => {
+                            if (
+                              result.external === "conflict" ||
+                              result.external === "error"
+                            ) {
+                              setError(
+                                result.message ||
+                                  "KeyMap save failed — Apply cancelled. Fix the save, then Apply again.",
+                              );
+                              return;
+                            }
                             setProject((p) => ({
                               ...p,
                               workspace: applyKeyMapToWorkspace(
@@ -3440,8 +3563,11 @@ function App() {
             ))}
 
             {centerTab === "canvas" && (
-              <>
-            <div className="min-h-0 flex-1 px-3 pb-1 pt-2">
+              <div
+                ref={canvasDockStackRef}
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+            <div className="min-h-0 flex-1 overflow-hidden px-3 pb-1 pt-2">
               <GraphCanvas
                 queries={queries}
                 activeQueryId={activeQueryId}
@@ -3460,13 +3586,44 @@ function App() {
             <PanelResizeHandle
               orientation="horizontal"
               aria-label="Resize data panel"
+              title="Drag to resize · double-click to maximize Join Lens / Data (collapse graph)"
               onDelta={(dy) =>
                 setBottomDockHeight((h) => {
-                  const next = clampPanelWidth(h - dy, 180, 720);
+                  const stackH =
+                    canvasDockStackRef.current?.clientHeight ?? 0;
+                  const next = clampBottomDockHeight(h - dy, stackH);
                   bottomDockHeightRef.current = next;
+                  bottomDockRestoreRef.current = null;
                   return next;
                 })
               }
+              onDoubleClick={() => {
+                const stackH =
+                  canvasDockStackRef.current?.clientHeight ?? 0;
+                if (stackH <= 0) return;
+                const maxH = clampBottomDockHeight(stackH, stackH);
+                setBottomDockHeight((h) => {
+                  const nearMax = h >= maxH - 12;
+                  const next = nearMax
+                    ? clampBottomDockHeight(
+                        bottomDockRestoreRef.current ?? 360,
+                        stackH,
+                      )
+                    : maxH;
+                  if (!nearMax) bottomDockRestoreRef.current = h;
+                  else bottomDockRestoreRef.current = null;
+                  bottomDockHeightRef.current = next;
+                  try {
+                    localStorage.setItem(
+                      BOTTOM_DOCK_HEIGHT_KEY,
+                      String(next),
+                    );
+                  } catch {
+                    /* ignore */
+                  }
+                  return next;
+                });
+              }}
               onDragEnd={() => {
                 try {
                   localStorage.setItem(
@@ -3479,7 +3636,7 @@ function App() {
               }}
             />
             <div
-              className="flex shrink-0 flex-col border-t border-[var(--line)] bg-[#060d14]"
+              className="flex shrink-0 flex-col overflow-hidden border-t border-[var(--line)] bg-[#060d14]"
               style={{ height: bottomDockHeight }}
             >
               <div className="flex items-center justify-between gap-3 px-4 pt-2">
@@ -3552,57 +3709,44 @@ function App() {
                   </span>
                 </div>
               </div>
-              {(error || exportMsg || diagView) && (
+              {diagView && bottomTab === "data" && (
                 <div className="space-y-1 px-4 pb-2">
-                  {error && (
-                    <ErrorBanner
-                      message={error}
-                      onDismiss={() => setError(null)}
-                    />
-                  )}
-                  {exportMsg && (
-                    <div className="rounded-lg border border-teal-900/50 bg-teal-950/30 px-3 py-2 text-sm text-teal-200">
-                      {exportMsg}
-                    </div>
-                  )}
-                  {diagView && bottomTab === "data" && (
-                    <div className="flex items-start justify-between gap-2 rounded-lg border border-teal-900/40 bg-teal-950/20 px-3 py-2 text-[11px] text-teal-100/90">
-                      <span>
-                        <span className="font-semibold">{diagView.label}</span>
-                        {" · "}
-                        sample {diagView.rows.length}
-                        {diagView.totalCount > diagView.rows.length
-                          ? ` of ${diagView.totalCount}`
-                          : ""}
-                        {` (limit ${diagView.sampleLimit})`}
-                        {" · "}
-                        clean sample ≠ full-input proof
-                      </span>
-                      <div className="flex shrink-0 items-center gap-2">
-                        {diagView.mapSide && joinLensTarget && (
-                          <button
-                            type="button"
-                            className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:border-teal-800 hover:text-teal-200"
-                            title="Map unmatched keys in Join Lens Probe (primary path)"
-                            onClick={() => {
-                              setDiagView(null);
-                              setJoinLensOn(true);
-                              setForceProbeNonce((n) => n + 1);
-                            }}
-                          >
-                            Open in Probe
-                          </button>
-                        )}
+                  <div className="flex items-start justify-between gap-2 rounded-lg border border-teal-900/40 bg-teal-950/20 px-3 py-2 text-[11px] text-teal-100/90">
+                    <span>
+                      <span className="font-semibold">{diagView.label}</span>
+                      {" · "}
+                      sample {diagView.rows.length}
+                      {diagView.totalCount > diagView.rows.length
+                        ? ` of ${diagView.totalCount}`
+                        : ""}
+                      {` (limit ${diagView.sampleLimit})`}
+                      {" · "}
+                      clean sample ≠ full-input proof
+                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {diagView.mapSide && joinLensTarget && (
                         <button
                           type="button"
-                          className="text-teal-300/80 hover:text-teal-100"
-                          onClick={() => setDiagView(null)}
+                          className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:border-teal-800 hover:text-teal-200"
+                          title="Map unmatched keys in Join Lens Probe (primary path)"
+                          onClick={() => {
+                            setDiagView(null);
+                            setJoinLensOn(true);
+                            setForceProbeNonce((n) => n + 1);
+                          }}
                         >
-                          Back to preview
+                          Open in Probe
                         </button>
-                      </div>
+                      )}
+                      <button
+                        type="button"
+                        className="text-teal-300/80 hover:text-teal-100"
+                        onClick={() => setDiagView(null)}
+                      >
+                        Back to preview
+                      </button>
                     </div>
-                  )}
+                  </div>
                 </div>
               )}
               <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
@@ -3675,7 +3819,7 @@ function App() {
                 </div>
               </div>
             </div>
-              </>
+              </div>
             )}
           </section>
 

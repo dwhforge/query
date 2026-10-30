@@ -808,7 +808,7 @@ function GraphCanvasInner({
 
 function GraphCanvasImpl(props: GraphCanvasProps) {
   return (
-    <div className="relative h-full min-h-[260px] overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]">
+    <div className="relative h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]">
       <ReactFlowProvider>
         <GraphCanvasInner {...props} />
       </ReactFlowProvider>

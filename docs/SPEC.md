@@ -1,7 +1,7 @@
 # DWHForge Query — Engineering Spec (v1 baseline)
 
 Canon: product name **DWHForge Query** ([ADR-0016](adr/0016-product-rename-dwhforge-query.md)). Positioning — [ADR-0001](adr/0001-product-positioning.md).  
-Docs language: English. License: **MIT**.
+Docs language: English. License: **Business Source License 1.1** (Apache-2.0 after four years).
 
 **Active product DoD:** [DESIGN.md](DESIGN.md) §10 · decisions [ADR-0018](adr/0018-return-and-edit.md).  
 This SPEC remains the **engineering contract** and **v1 baseline** checklist (§5–§7).

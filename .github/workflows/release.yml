@@ -28,7 +28,7 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            Offline builds (DuckDB + `extensions/` bundled). MIT.
+            Offline builds (DuckDB + `extensions/` bundled). BSL 1.1.
 
             | Artifact | Notes |
             |----------|--------|

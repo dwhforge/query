@@ -14,7 +14,7 @@ Accepted (2026-10-24)
 
 Do not confuse with Power BI: the reference is **Power Query** (Get Data / Applied Steps / Merge), not PBI reports.
 
-Licensing: **MIT**; documentation stays in English.
+Licensing: **Business Source License 1.1** (Apache-2.0 after four years); documentation stays in English.
 
 ## Decision
 

@@ -2,6 +2,7 @@
 name = "dwh-pipeline"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "TransformationStep AST and CTE SQL compiler for DWH-RS-QUERY"
 
 [[bin]]

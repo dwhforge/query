@@ -542,14 +542,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
             from: "AB INBEV".into(),
             to: "ABEV".into(),
         },
-        KeyMapEntry {
-            from: "McDonalds".into(),
-            to: "MCD".into(),
-        },
-        KeyMapEntry {
-            from: "MCDONALD'S CORP".into(),
-            to: "MCD".into(),
-        },
+        // Intentionally unmapped (Probe / Add to map…): McDonalds, Costa, RedBull
         KeyMapEntry {
             from: "Yum Brands".into(),
             to: "YUM".into(),
@@ -557,22 +550,6 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
         KeyMapEntry {
             from: "YUM! BRANDS INC".into(),
             to: "YUM".into(),
-        },
-        KeyMapEntry {
-            from: "Costa".into(),
-            to: "COSTA".into(),
-        },
-        KeyMapEntry {
-            from: "COSTA COFFEE LTD".into(),
-            to: "COSTA".into(),
-        },
-        KeyMapEntry {
-            from: "RedBull GmbH".into(),
-            to: "REDD".into(),
-        },
-        KeyMapEntry {
-            from: "RED BULL GMBH".into(),
-            to: "REDD".into(),
         },
         KeyMapEntry {
             from: "Mondelez Int".into(),
@@ -759,7 +736,8 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                 execution: Default::default(),
             },
         ],
-        focus_query_id: "daily_pnl".into(),
+        // Land on dirty join so Probe shows unmatched names → Add to map…
+        focus_query_id: "dirty_join".into(),
         key_maps: vec![company_map],
     })
 }

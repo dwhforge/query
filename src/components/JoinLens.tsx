@@ -168,8 +168,10 @@ type SidePanelProps = {
   emptyHint: string;
   /** Scroll first parent into view when center parents change. */
   scrollToken: string;
-  /** Probe: open KeyMap with selected (or first visible) key. */
+  /** Probe + selected row: primary Map CTA. */
+  selectedKeyLabel?: string | null;
   onAddToMap?: () => void;
+  mapButtonLabel?: string;
 };
 
 function SidePanel({
@@ -189,11 +191,14 @@ function SidePanel({
   statusHint,
   emptyHint,
   scrollToken,
+  selectedKeyLabel,
   onAddToMap,
+  mapButtonLabel = "Add to map…",
 }: SidePanelProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const keyFold = new Set(keyNames.map(fold));
   const linked = useMemo(() => new Set(linkedIndices), [linkedIndices]);
+  const activeSide = selectedIndex != null;
 
   const displayCols = useMemo(() => {
     const keyed: { col: ColumnMetadata; idx: number }[] = [];
@@ -212,14 +217,20 @@ function SidePanel({
   }, [scrollToken, visibleIndices]);
 
   return (
-    <div className="flex h-full min-h-0 w-[13.5rem] shrink-0 flex-col overflow-hidden rounded-lg border border-teal-900/40 bg-[#071018] shadow-lg shadow-black/40">
+    <div
+      className={`flex h-full min-h-0 w-[13.5rem] shrink-0 flex-col overflow-hidden rounded-lg bg-[#071018] shadow-lg shadow-black/40 ${
+        activeSide && mode === "probe"
+          ? "border-2 border-amber-500/70"
+          : "border border-teal-900/40"
+      }`}
+    >
       <div className="shrink-0 space-y-1.5 border-b border-slate-800 px-2 py-1.5">
         <div
           className={`text-[10px] font-semibold uppercase tracking-wide ${
             title === "Left" ? "text-sky-300/90" : "text-amber-300/90"
           }`}
         >
-          {title} · {mode === "linked" ? "parents" : "probe"}
+          {title} · {mode === "linked" ? "parents" : "unmatched"}
         </div>
         {mode === "probe" && (
           <input
@@ -230,24 +241,12 @@ function SidePanel({
             className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[10px] text-slate-200 outline-none placeholder:text-slate-600 focus:ring-1 focus:ring-teal-700"
           />
         )}
-        <div className="flex items-start justify-between gap-1">
-          <div className="min-w-0 text-[10px] leading-snug text-slate-500">
-            {loading ? "loading…" : listModeLabel}
-            {statusHint && (
-              <span className="mt-0.5 block text-[10px] text-slate-400">
-                {statusHint}
-              </span>
-            )}
-          </div>
-          {onAddToMap && visibleIndices.length > 0 && (
-            <button
-              type="button"
-              title="Add selected (or first) key to KeyMap"
-              onClick={onAddToMap}
-              className="shrink-0 rounded border border-amber-800/60 px-1 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
-            >
-              Map…
-            </button>
+        <div className="min-w-0 text-[10px] leading-snug text-slate-500">
+          {loading ? "loading…" : listModeLabel}
+          {statusHint && (
+            <span className="mt-0.5 block text-[10px] text-slate-400">
+              {statusHint}
+            </span>
           )}
         </div>
       </div>
@@ -268,7 +267,9 @@ function SidePanel({
                 onClick={() => onSelect(index)}
                 className={`mb-1.5 w-full rounded border p-1.5 text-left last:mb-0 ${
                   selected
-                    ? "border-teal-500/70 bg-teal-500/15"
+                    ? mode === "probe"
+                      ? "border-amber-500/80 bg-amber-500/15 ring-1 ring-amber-500/40"
+                      : "border-teal-500/70 bg-teal-500/15"
                     : isLinked
                       ? "border-teal-800/50 bg-teal-500/5"
                       : "border-slate-800/80 bg-slate-950/80 hover:border-slate-700"
@@ -301,9 +302,32 @@ function SidePanel({
           })
         )}
       </div>
+      {mode === "probe" && onAddToMap && selectedIndex != null && (
+        <div className="shrink-0 space-y-1.5 border-t border-amber-900/50 bg-amber-950/35 px-2 py-2">
+          <div className="text-[9px] uppercase tracking-wide text-amber-200/80">
+            This key
+          </div>
+          <div
+            className="truncate font-mono text-[11px] text-amber-50"
+            title={selectedKeyLabel ?? undefined}
+          >
+            {selectedKeyLabel || "∅"}
+          </div>
+          <button
+            type="button"
+            title={mapButtonLabel}
+            onClick={onAddToMap}
+            className="w-full rounded border border-amber-600/70 bg-amber-500/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-500/30"
+          >
+            {mapButtonLabel}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
+
+const FIRST_USE_HINT_KEY = "dwh.joinLens.firstUseHint.v1";
 
 export type JoinLensProps = {
   enabled: boolean;
@@ -319,10 +343,19 @@ export type JoinLensProps = {
   /** Opposite-probe candidates (unmatched samples). */
   joinDiag: JoinDiagnostics | null;
   joinDiagLoading?: boolean;
+  /** Bump to force Probe mode (e.g. from Data-banner "Open in Probe"). */
+  forceProbeNonce?: number;
   /** Apply near-miss → insert NormalizeKey before Join. */
   onApplyNearMiss?: (hyp: NearMissHypothesis) => void;
-  /** Open KeyMap editor with From values from selected side key. */
-  onMapKey?: (side: JoinKeySide, fromValues: string[]) => void;
+  /**
+   * Open KeyMap with From values (and optional To when both sides selected).
+   * `side` = which join input gets ApplyKeyMap (usually left for dirty→id).
+   */
+  onMapKey?: (
+    side: JoinKeySide,
+    fromValues: string[],
+    opts?: { toValues?: string[] },
+  ) => void;
 };
 
 function JoinLensImpl({
@@ -338,6 +371,7 @@ function JoinLensImpl({
   rows,
   joinDiag,
   joinDiagLoading = false,
+  forceProbeNonce = 0,
   onApplyNearMiss,
   onMapKey,
 }: JoinLensProps) {
@@ -365,6 +399,28 @@ function JoinLensImpl({
   const [keyExplainError, setKeyExplainError] = useState<string | null>(null);
   const [nearMiss, setNearMiss] = useState<JoinKeyNearMiss | null>(null);
   const [nearMissLoading, setNearMissLoading] = useState(false);
+  const [nearMissOpen, setNearMissOpen] = useState(false);
+  const [mapToast, setMapToast] = useState<string | null>(null);
+  const [showFirstUseHint, setShowFirstUseHint] = useState(() => {
+    try {
+      return localStorage.getItem(FIRST_USE_HINT_KEY) !== "1";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    if (!forceProbeNonce) return;
+    setSideMode("probe");
+    setMatchesOnly(false);
+    setSearchLeft("");
+    setSearchRight("");
+    setKeyExplain(null);
+    setKeyBlame(null);
+    setKeyExplainError(null);
+    setLeftSel(null);
+    setRightSel(null);
+  }, [forceProbeNonce]);
 
   useEffect(() => {
     if (!enabled || !hostQueryId || joinStepIndex < 1 || !rightQueryId) return;
@@ -859,18 +915,56 @@ function JoinLensImpl({
     keyExplainLoading,
   ]);
 
-  function emitMapKey(side: JoinKeySide, rowIndex: number) {
-    if (!onMapKey) return;
+  function keyLabelFor(side: JoinKeySide, rowIndex: number): string {
     const row = side === "left" ? leftRows[rowIndex] : rightRows[rowIndex];
     const cols = side === "left" ? leftCols : rightCols;
     const keys = side === "left" ? leftOn : rightOn;
-    if (!row) return;
-    const vals = keyValuesFromRow(row, cols, keys)
+    if (!row) return "";
+    return keyValuesFromRow(row, cols, keys)
+      .map((v) => cellStr(v))
+      .join(" · ");
+  }
+
+  function keyValsFor(side: JoinKeySide, rowIndex: number): string[] {
+    const row = side === "left" ? leftRows[rowIndex] : rightRows[rowIndex];
+    const cols = side === "left" ? leftCols : rightCols;
+    const keys = side === "left" ? leftOn : rightOn;
+    if (!row) return [];
+    return keyValuesFromRow(row, cols, keys)
       .map((v) => cellStr(v))
       .filter((v) => v.trim());
+  }
+
+  function emitMapKey(side: JoinKeySide, rowIndex: number) {
+    if (!onMapKey) return;
+    const vals = keyValsFor(side, rowIndex);
     if (!vals.length) return;
     onMapKey(side, vals);
+    const toast = `Opened KeyMap · from=${vals.join(" · ")}`;
+    setMapToast(toast);
+    window.setTimeout(() => {
+      setMapToast((cur) => (cur === toast ? null : cur));
+    }, 3500);
   }
+
+  /** Left unmatched → From, right unmatched → To (dirty names → canon id). */
+  function emitMapPair() {
+    if (!onMapKey || leftSel == null || rightSel == null) return;
+    const fromVals = keyValsFor("left", leftSel);
+    const toVals = keyValsFor("right", rightSel);
+    if (!fromVals.length || !toVals.length) return;
+    onMapKey("left", fromVals, { toValues: toVals });
+    const toast = `Opened KeyMap · ${fromVals.join(" · ")} → ${toVals.join(" · ")}`;
+    setMapToast(toast);
+    window.setTimeout(() => {
+      setMapToast((cur) => (cur === toast ? null : cur));
+    }, 3500);
+  }
+
+  const pairFromLabel =
+    pairMode && leftSel != null ? keyLabelFor("left", leftSel) : null;
+  const pairToLabel =
+    pairMode && rightSel != null ? keyLabelFor("right", rightSel) : null;
 
   const switchMode = (next: SideMode) => {
     if (next === sideMode) return;
@@ -881,18 +975,72 @@ function JoinLensImpl({
     setKeyExplain(null);
     setKeyBlame(null);
     setKeyExplainError(null);
-    if (next === "probe") {
-      // Prefer first unmatched left (common case); else first right.
-      const leftIdx = probeLeftRows.length > 0 ? 0 : null;
-      const rightIdx =
-        leftIdx == null && probeRightRows.length > 0 ? 0 : null;
-      setLeftSel(leftIdx);
-      setRightSel(rightIdx);
-    } else {
-      setLeftSel(null);
-      setRightSel(null);
+    setLeftSel(null);
+    setRightSel(null);
+    setNearMissOpen(false);
+  };
+
+  const dismissFirstUseHint = () => {
+    setShowFirstUseHint(false);
+    try {
+      localStorage.setItem(FIRST_USE_HINT_KEY, "1");
+    } catch {
+      /* ignore */
     }
   };
+
+  const unmatchedTotal =
+    (joinDiag?.unmatched_left_count ?? 0) +
+    (joinDiag?.unmatched_right_count ?? 0);
+
+  const selectedProbeSide: JoinKeySide | null =
+    sideMode === "probe"
+      ? leftSel != null
+        ? "left"
+        : rightSel != null
+          ? "right"
+          : null
+      : null;
+
+  const selectedProbeIndex =
+    selectedProbeSide === "left"
+      ? leftSel
+      : selectedProbeSide === "right"
+        ? rightSel
+        : null;
+
+  const selectedKeyDisplay =
+    selectedProbeSide != null && selectedProbeIndex != null
+      ? keyLabelFor(selectedProbeSide, selectedProbeIndex)
+      : null;
+
+  const statusLine = (() => {
+    if (sideMode === "linked") {
+      return `Result row ${activeIndex + 1} of ${rows.length} · parents highlighted on Left/Right`;
+    }
+    if (!sideProbe) {
+      return unmatchedTotal > 0
+        ? `Pick an unmatched row on Left or Right to map or blame (${unmatchedTotal} unmatched)`
+        : "No unmatched keys in the current sample";
+    }
+    if (pairMode && pairFromLabel && pairToLabel) {
+      const inResult =
+        matchedIndices.length > 0
+          ? `${matchedIndices.length} result row(s)`
+          : "not in result yet";
+      return `Pair “${pairFromLabel}” → “${pairToLabel}” · ${inResult} · Map this pair to join them`;
+    }
+    if (keyBlame) return blameLabel(keyBlame);
+    if (keyExplainError) return keyExplainError;
+    if (keyExplainLoading) return "Explaining key…";
+    if (keyExplain && selectedKeyDisplay) {
+      return `Key “${selectedKeyDisplay}” · ${keyExplain.result_match_count} result · L${keyExplain.left_match_count}/R${keyExplain.right_match_count}`;
+    }
+    if (selectedKeyDisplay) {
+      return `Selected “${selectedKeyDisplay}” · pick a partner on the other side to Map the pair, or Add to map with empty To`;
+    }
+    return "Select an unmatched row (or both sides to Map a pair)";
+  })();
 
   if (!enabled) {
     return (
@@ -902,6 +1050,10 @@ function JoinLensImpl({
 
   const sideLoading =
     sideMode === "linked" ? sidesLoading : joinDiagLoading && !joinDiag;
+
+  const nearMissCount = nearMiss?.hypotheses.length ?? 0;
+  const showNearMissChrome =
+    nearMissLoading || nearMissCount > 0;
 
   return (
     <div className="relative flex h-full min-h-0 gap-2 p-1">
@@ -921,23 +1073,25 @@ function JoinLensImpl({
         statusHint={leftStatus}
         emptyHint={leftEmpty}
         scrollToken={`L:${scrollToken}`}
+        selectedKeyLabel={
+          leftSel != null ? keyLabelFor("left", leftSel) : null
+        }
         onSelect={(index) => {
           setLeftSel((prev) => (prev === index ? null : index));
         }}
+        mapButtonLabel={pairMode ? "Map this pair…" : "Add to map…"}
         onAddToMap={
-          onMapKey && sideMode === "probe" && visibleLeft.length > 0
-            ? () => {
-                const idx = leftSel ?? visibleLeft[0]!;
-                setLeftSel(idx);
-                setRightSel(null);
-                emitMapKey("left", idx);
-              }
+          onMapKey && sideMode === "probe" && leftSel != null
+            ? pairMode
+              ? () => emitMapPair()
+              : () => emitMapKey("left", leftSel)
             : undefined
         }
       />
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-800/80">
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/95 px-2 py-1">
+        {/* Layer 1: title + mode */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/95 px-2 py-1.5">
           <span className="text-[9px] font-semibold uppercase tracking-wide text-teal-300/90">
             Join Lens
           </span>
@@ -945,6 +1099,7 @@ function JoinLensImpl({
             <button
               type="button"
               onClick={() => switchMode("linked")}
+              title="Parents of the selected result row"
               className={`px-1.5 py-0.5 text-[9px] ${
                 sideMode === "linked"
                   ? "bg-teal-500/20 text-teal-200"
@@ -956,165 +1111,124 @@ function JoinLensImpl({
             <button
               type="button"
               onClick={() => switchMode("probe")}
+              title="Keys that did not join — pick one to map or blame"
               className={`px-1.5 py-0.5 text-[9px] ${
                 sideMode === "probe"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
               }`}
-              title="Unmatched diagnostics samples — click a side row → Add to map…"
             >
               Probe
-              {joinDiag &&
-                (joinDiag.unmatched_left_count > 0 ||
-                  joinDiag.unmatched_right_count > 0) && (
-                  <span className="ml-1 text-amber-300/90">
-                    ·{joinDiag.unmatched_left_count + joinDiag.unmatched_right_count}
-                  </span>
-                )}
+              {unmatchedTotal > 0 && (
+                <span className="ml-1 text-amber-300/90">·{unmatchedTotal}</span>
+              )}
+              {unmatchedTotal > 0 && (
+                <span className="ml-1 text-[8px] font-normal normal-case text-amber-200/70">
+                  needs map?
+                </span>
+              )}
             </button>
           </div>
-          <span className="text-[9px] text-slate-600">·</span>
+          <span
+            className="min-w-0 flex-1 truncate text-[10px] text-slate-500"
+            title={
+              sideMode === "linked"
+                ? "Parents of the selected result row"
+                : "Keys that did not join — pick one to map or blame"
+            }
+          >
+            {sideMode === "linked"
+              ? "Parents of the selected result row"
+              : "Keys that did not join — pick one to map or blame"}
+          </span>
+        </div>
+
+        {showFirstUseHint && (
+          <div className="shrink-0 border-b border-teal-950/50 bg-teal-950/25 px-2 py-1.5 text-[10px] leading-relaxed text-teal-100/90">
+            <div className="flex items-start justify-between gap-2">
+              <ol className="list-decimal space-y-0.5 pl-3.5">
+                <li>
+                  <span className="font-semibold text-teal-200">Linked</span> —
+                  understand fan-out of the result row
+                </li>
+                <li>
+                  <span className="font-semibold text-teal-200">Probe</span> —
+                  find holes (unmatched keys)
+                </li>
+                <li>
+                  Click unmatched (ideally left + right partner) →{" "}
+                  <span className="font-semibold text-amber-200">
+                    Map this pair…
+                  </span>
+                </li>
+              </ol>
+              <button
+                type="button"
+                onClick={dismissFirstUseHint}
+                className="shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Layer 2: status */}
+        <div className="shrink-0 border-b border-slate-800/60 bg-slate-950/50 px-2 py-1 text-[10px] leading-snug text-slate-400">
+          {statusLine}
+        </div>
+
+        {/* Layer 3: secondary controls */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/80 px-2 py-1">
           <span className="text-[9px] text-teal-300/80">join</span>
           <span className="text-[9px] text-sky-300/80">left</span>
           <span className="text-[9px] text-amber-300/80">right</span>
-          {sideProbe ? (
-            <>
-              <span className="text-[9px] text-slate-600">·</span>
-              <span
-                className={`text-[10px] ${
-                  keyExplain
-                    ? keyExplain.result_match_count > 0
-                      ? "text-teal-300/90"
-                      : "text-amber-400/90"
-                    : matchedIndices.length > 0
-                      ? "text-teal-300/90"
-                      : "text-amber-400/90"
-                }`}
-              >
-                {keyExplainLoading
-                  ? "Explaining key (full join)…"
-                  : pairMode
-                    ? matchedIndices.length > 0
-                      ? `Pair in preview (${matchedIndices.length})`
-                      : "This left+right pair is not in the preview"
-                    : keyExplain
-                      ? keyExplain.result_match_count > 0
-                        ? `${keyExplain.result_match_count} join result row(s) · ×${keyExplain.expansion.toFixed(2)}`
-                        : "0 join result rows (full input)"
-                      : matchedIndices.length > 0
-                        ? `${matchedIndices.length} in preview`
-                        : "Not in preview"}
-              </span>
-              {(keyExplain
-                ? keyExplain.result_match_count > 0
-                : matchedIndices.length > 0) && (
-                <button
-                  type="button"
-                  onClick={() => setMatchesOnly((v) => !v)}
-                  className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
-                >
-                  {matchesOnly || showingExplainSample
-                    ? "Show all preview"
-                    : "Matches only"}
-                </button>
-              )}
-              {onMapKey && !pairMode && (
-                <button
-                  type="button"
-                  title="Open KeyMap tab with this key as From"
-                  onClick={() => {
-                    const side: JoinKeySide =
-                      leftSel != null ? "left" : "right";
-                    const row =
-                      leftSel != null
-                        ? leftRows[leftSel!]
-                        : rightRows[rightSel!];
-                    const cols = leftSel != null ? leftCols : rightCols;
-                    const keys = leftSel != null ? leftOn : rightOn;
-                    if (!row) return;
-                    const vals = keyValuesFromRow(row, cols, keys).map((v) =>
-                      cellStr(v),
-                    );
-                    if (!vals.some((v) => v.trim())) return;
-                    onMapKey(side, vals);
-                  }}
-                  className="rounded border border-amber-800/60 px-1.5 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
-                >
-                  Add to map…
-                </button>
-              )}
+          {sideProbe &&
+            (keyExplain
+              ? keyExplain.result_match_count > 0
+              : matchedIndices.length > 0) && (
               <button
                 type="button"
-                onClick={() => {
-                  setLeftSel(null);
-                  setRightSel(null);
-                  setMatchesOnly(false);
-                  setKeyExplain(null);
-                  setKeyBlame(null);
-                  setKeyExplainError(null);
-                }}
-                className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-500 hover:text-slate-300"
+                onClick={() => setMatchesOnly((v) => !v)}
+                className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
               >
-                Clear
+                {matchesOnly || showingExplainSample
+                  ? "Show all preview"
+                  : "Matches only"}
               </button>
-            </>
-          ) : (
-            <span className="text-[10px] text-slate-600">
-              {sideMode === "linked"
-                ? "Parents of the center row · click a parent to explain the key"
-                : "Unmatched sample · click left/right → Add to map… / blame"}
-            </span>
+            )}
+          {sideProbe && (
+            <button
+              type="button"
+              onClick={() => {
+                setLeftSel(null);
+                setRightSel(null);
+                setMatchesOnly(false);
+                setKeyExplain(null);
+                setKeyBlame(null);
+                setKeyExplainError(null);
+              }}
+              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-500 hover:text-slate-300"
+            >
+              Clear
+            </button>
+          )}
+          {showNearMissChrome && (
+            <button
+              type="button"
+              onClick={() => setNearMissOpen((v) => !v)}
+              className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10"
+            >
+              {nearMissLoading
+                ? "Near-miss…"
+                : `${nearMissCount} near-miss hypothes${nearMissCount === 1 ? "is" : "es"}`}
+              {nearMissOpen ? " ▾" : " ▸"}
+            </button>
           )}
         </div>
-        {sideMode === "probe" &&
-          onMapKey &&
-          joinDiag &&
-          (joinDiag.unmatched_left_count > 0 ||
-            joinDiag.unmatched_right_count > 0) &&
-          !sideProbe && (
-            <div className="shrink-0 border-b border-amber-950/50 bg-amber-950/25 px-2 py-1.5 text-[10px] leading-snug text-amber-100/90">
-              <span className="font-semibold text-amber-200/95">Unmatched</span>
-              {" · "}
-              {joinDiag.unmatched_left_count > 0 && (
-                <span>
-                  L {joinDiag.unmatched_left_count}
-                  {unmatchedLeft &&
-                  unmatchedLeft.rows.length < joinDiag.unmatched_left_count
-                    ? ` (sample ${unmatchedLeft.rows.length})`
-                    : ""}
-                </span>
-              )}
-              {joinDiag.unmatched_left_count > 0 &&
-                joinDiag.unmatched_right_count > 0 &&
-                " · "}
-              {joinDiag.unmatched_right_count > 0 && (
-                <span>
-                  R {joinDiag.unmatched_right_count}
-                  {unmatchedRight &&
-                  unmatchedRight.rows.length < joinDiag.unmatched_right_count
-                    ? ` (sample ${unmatchedRight.rows.length})`
-                    : ""}
-                </span>
-              )}
-              <span className="text-amber-200/70">
-                {" "}
-                — click a Left/Right row, then{" "}
-                <span className="font-semibold">Add to map…</span>
-                {" "}(or Near-miss → NormalizeKey for trim/case)
-              </span>
-            </div>
-          )}
-        {(nearMissLoading ||
-          (nearMiss && nearMiss.hypotheses.length > 0)) && (
+
+        {showNearMissChrome && nearMissOpen && (
           <div className="shrink-0 space-y-1 border-b border-teal-950/60 bg-teal-950/20 px-2 py-1">
-            <div className="text-[9px] font-semibold uppercase tracking-wide text-teal-400/80">
-              Near-miss
-              {nearMiss && nearMiss.hypotheses.length > 0
-                ? ` · best Δ+${nearMiss.hypotheses[0]!.delta_matches}`
-                : nearMissLoading
-                  ? "…"
-                  : ""}
-            </div>
             {(nearMiss?.hypotheses ?? []).slice(0, 3).map((h, i) => (
               <div
                 key={i}
@@ -1124,9 +1238,7 @@ function JoinLensImpl({
                   {h.ops.join("→")}
                 </span>
                 <span className="text-slate-500">on {h.apply_on}</span>
-                <span className="text-slate-500">
-                  Δ+{h.delta_matches}
-                </span>
+                <span className="text-slate-500">Δ+{h.delta_matches}</span>
                 {onApplyNearMiss && (
                   <button
                     type="button"
@@ -1138,49 +1250,87 @@ function JoinLensImpl({
                 )}
               </div>
             ))}
+            {!nearMissLoading && nearMissCount === 0 && (
+              <div className="text-[10px] text-slate-500">No hypotheses yet</div>
+            )}
           </div>
         )}
-        {(keyBlame || keyExplainError) && (
-          <div
-            className={`shrink-0 border-b px-2 py-1 text-[10px] leading-snug ${
-              keyExplainError
-                ? "border-amber-900/50 bg-amber-950/40 text-amber-200/90"
-                : "border-slate-800 bg-slate-950/80 text-slate-300"
-            }`}
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span>
-                {keyExplainError ?? (keyBlame ? blameLabel(keyBlame) : null)}
-              </span>
-              {onMapKey &&
-                keyBlame?.verdict === "no_partner" &&
-                sideProbe &&
-                !pairMode && (
+
+        {mapToast && (
+          <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-100/90">
+            {mapToast}
+          </div>
+        )}
+
+        {/* Key card: single side or L→R pair → Map */}
+        {sideMode === "probe" && pairMode && pairFromLabel && pairToLabel && (
+          <div className="shrink-0 border-b border-amber-950/40 bg-gradient-to-r from-amber-950/35 via-slate-950/40 to-amber-950/20 px-2 py-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
+                  Map pair · left → right
+                </div>
+                <div className="truncate font-mono text-[12px] text-amber-50">
+                  From: {pairFromLabel}
+                </div>
+                <div className="truncate font-mono text-[12px] text-teal-100/90">
+                  To: {pairToLabel}
+                </div>
+              </div>
+              {onMapKey && (
+                <button
+                  type="button"
+                  onClick={() => emitMapPair()}
+                  className="shrink-0 rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35"
+                >
+                  Map this pair…
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {sideMode === "probe" &&
+          !pairMode &&
+          selectedProbeSide != null &&
+          selectedProbeIndex != null && (
+            <div className="shrink-0 border-b border-amber-950/40 bg-gradient-to-r from-amber-950/30 via-slate-950/40 to-slate-950/20 px-2 py-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
+                    Selected key · {selectedProbeSide}
+                  </div>
+                  <div className="truncate font-mono text-[12px] text-amber-50">
+                    From: {selectedKeyDisplay || "∅"}
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    To:{" "}
+                    <span className="italic text-slate-600">
+                      (pick unmatched on the other side, or set in KeyMap)
+                    </span>
+                  </div>
+                </div>
+                {onMapKey && (
                   <button
                     type="button"
-                    onClick={() => {
-                      const side: JoinKeySide =
-                        leftSel != null ? "left" : "right";
-                      const row =
-                        leftSel != null
-                          ? leftRows[leftSel!]
-                          : rightRows[rightSel!];
-                      const cols = leftSel != null ? leftCols : rightCols;
-                      const keys = leftSel != null ? leftOn : rightOn;
-                      if (!row) return;
-                      const vals = keyValuesFromRow(row, cols, keys).map(
-                        (v) => cellStr(v),
-                      );
-                      onMapKey(side, vals);
-                    }}
-                    className="rounded border border-amber-800/60 px-1.5 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
+                    onClick={() =>
+                      emitMapKey(selectedProbeSide, selectedProbeIndex)
+                    }
+                    className="shrink-0 rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35"
                   >
                     Add to map…
                   </button>
                 )}
+              </div>
             </div>
+          )}
+
+        {sideMode === "probe" && !sideProbe && unmatchedTotal > 0 && (
+          <div className="shrink-0 border-b border-amber-950/40 bg-amber-950/15 px-2 py-1.5 text-[10px] text-amber-100/80">
+            Select unmatched left + right partner → Map this pair… (or one side
+            → Add to map…)
           </div>
         )}
+
         <div className="min-h-0 flex-1">
           <PreviewTable
             columns={displayColumns}
@@ -1217,17 +1367,18 @@ function JoinLensImpl({
         statusHint={rightStatus}
         emptyHint={rightEmpty}
         scrollToken={`R:${scrollToken}`}
+        selectedKeyLabel={
+          rightSel != null ? keyLabelFor("right", rightSel) : null
+        }
         onSelect={(index) => {
           setRightSel((prev) => (prev === index ? null : index));
         }}
+        mapButtonLabel={pairMode ? "Map this pair…" : "Add to map…"}
         onAddToMap={
-          onMapKey && sideMode === "probe" && visibleRight.length > 0
-            ? () => {
-                const idx = rightSel ?? visibleRight[0]!;
-                setRightSel(idx);
-                setLeftSel(null);
-                emitMapKey("right", idx);
-              }
+          onMapKey && sideMode === "probe" && rightSel != null
+            ? pairMode
+              ? () => emitMapPair()
+              : () => emitMapKey("right", rightSel)
             : undefined
         }
       />

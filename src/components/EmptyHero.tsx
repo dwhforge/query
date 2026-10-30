@@ -25,7 +25,7 @@ const DEMOS: { id: DemoId; label: string; hint: string }[] = [
   {
     id: "keymap",
     label: "Key mapping",
-    hint: "F&B aliases · 900×2 rows",
+    hint: "dirty join · Probe unmatched",
   },
 ];
 

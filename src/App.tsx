@@ -3,6 +3,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
 }
+
+const BOTTOM_DOCK_HEIGHT_KEY = "dwh.bottomDockHeightPx";
+
+function loadBottomDockHeight(): number {
+  try {
+    const raw = localStorage.getItem(BOTTOM_DOCK_HEIGHT_KEY);
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isFinite(n)) return clampPanelWidth(n, 180, 720);
+    }
+  } catch {
+    /* ignore */
+  }
+  return 280;
+}
 import {
   openDialog as open,
   revealItemInDir,
@@ -31,6 +46,7 @@ import {
   applyNormalizeToWorkspace,
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
+  findApplyKeyMapIdForJoin,
   resolveKeyMapConnection,
   syncApplyKeyMapEntries,
   upsertKeyMapList,
@@ -136,6 +152,8 @@ type KeyMapTabSession = {
     rightQueryId: string;
     leftOn: string[];
     rightOn: string[];
+    /** Side whose unmatched key opened Add to map… */
+    probeSide?: "left" | "right";
   };
 };
 
@@ -148,6 +166,9 @@ function App() {
     inspector_width_px: 300,
   });
   const [explorerWidth, setExplorerWidth] = useState(240);
+  const [bottomDockHeight, setBottomDockHeight] = useState(loadBottomDockHeight);
+  const bottomDockHeightRef = useRef(bottomDockHeight);
+  bottomDockHeightRef.current = bottomDockHeight;
   const [inspectorWidth, setInspectorWidth] = useState(300);
   const explorerWidthRef = useRef(explorerWidth);
   const inspectorWidthRef = useRef(inspectorWidth);
@@ -208,6 +229,8 @@ function App() {
   } | null>(null);
   /** Join Lens mode on Data (where-provenance docks). Default on when Join selected. */
   const [joinLensOn, setJoinLensOn] = useState(true);
+  /** Bump to switch Join Lens into Probe (from Data diag banner). */
+  const [forceProbeNonce, setForceProbeNonce] = useState(0);
   /** Open KeyMap editor tabs (VS Code–style, beside Pipeline canvas). */
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
   /** Center workspace tab: canvas or open KeyMap id. */
@@ -242,10 +265,20 @@ function App() {
   /** Add to map… — choose which KeyMap when several exist. */
   const [mapPickPending, setMapPickPending] = useState<{
     fromValues: string[];
+    toValues?: string[];
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
+    /** Prefer this map (from existing ApplyKeyMap); still offer others. */
+    preferredMapId?: string | null;
   } | null>(null);
   /** Selected target in the picker: map id, or `"__new__"`. */
   const [mapPickChoice, setMapPickChoice] = useState<string | null>(null);
+  /** After auto-opening ApplyKeyMap target — allow switching map quietly. */
+  const [mapSwitchOffer, setMapSwitchOffer] = useState<{
+    fromValues: string[];
+    toValues?: string[];
+    joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
+    preferredMapId: string;
+  } | null>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [sourceColumns, setSourceColumns] = useState<PostgresColumn[] | null>(
     null,
@@ -1861,6 +1894,7 @@ function App() {
         rightQueryId: string;
         leftOn: string[];
         rightOn: string[];
+        probeSide?: "left" | "right";
       };
     },
   ) {
@@ -2117,45 +2151,79 @@ function App() {
     map: KeyMapDef,
     fromValues: string[],
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>,
+    toValues?: string[],
   ) {
-    const existingFrom = new Set(
-      map.entries.map((e) => e.from.trim()).filter(Boolean),
+    const entries = [...map.entries];
+    const indexByFrom = new Map(
+      entries.map((e, i) => [e.from.trim(), i] as const),
     );
-    const merged = {
-      ...map,
-      entries: [
-        ...map.entries,
-        ...fromValues
-          .filter((f) => f.trim() && !existingFrom.has(f.trim()))
-          .map((from) => ({ from, to: "" })),
-      ],
-    };
+    fromValues.forEach((rawFrom, i) => {
+      const from = rawFrom.trim();
+      if (!from) return;
+      const to = (toValues?.[i] ?? "").trim();
+      const existing = indexByFrom.get(from);
+      if (existing !== undefined) {
+        if (to && !entries[existing]!.to.trim()) {
+          entries[existing] = { ...entries[existing]!, to };
+        }
+        return;
+      }
+      indexByFrom.set(from, entries.length);
+      entries.push({ from, to });
+    });
+    const merged = { ...map, entries };
     openKeyMapEditor(merged, {
       suggestedFrom: fromValues,
       joinCtx,
     });
   }
 
-  function handleMapKeyFromLens(_side: "left" | "right", fromValues: string[]) {
+  function handleMapKeyFromLens(
+    side: "left" | "right",
+    fromValues: string[],
+    opts?: { toValues?: string[] },
+  ) {
     if (!joinLensTarget || fromValues.length === 0) return;
     const maps = project.workspace.key_maps ?? [];
-    const joinCtx = { ...joinLensTarget };
+    const toValues = opts?.toValues;
+    const joinCtx = { ...joinLensTarget, probeSide: side };
     if (maps.length === 0) {
       openMapWithFromValues(
         {
           ...emptyKeyMap("join aliases"),
-          entries: fromValues.map((from) => ({ from, to: "" })),
+          entries: fromValues.map((from, i) => ({
+            from,
+            to: toValues?.[i] ?? "",
+          })),
         },
         fromValues,
         joinCtx,
+        toValues,
       );
+      setMapSwitchOffer(null);
       return;
     }
-    if (maps.length === 1) {
-      openMapWithFromValues(maps[0]!, fromValues, joinCtx);
+
+    // Most common: Join already has ApplyKeyMap → open that map directly.
+    const preferredId = findApplyKeyMapIdForJoin(
+      project.workspace,
+      joinCtx,
+    );
+    const preferred = preferredId
+      ? maps.find((m) => m.id === preferredId)
+      : undefined;
+    if (preferred) {
+      openMapWithFromValues(preferred, fromValues, joinCtx, toValues);
+      setMapSwitchOffer({
+        fromValues,
+        toValues,
+        joinCtx,
+        preferredMapId: preferred.id,
+      });
       return;
     }
-    // Prefer a map whose name/id hints at the join column (channel → channel aliases).
+
+    // No ApplyKeyMap yet — pick target (create new still available).
     const colHint = (joinCtx.leftOn[0] ?? joinCtx.rightOn[0] ?? "")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "");
@@ -2167,7 +2235,20 @@ function App() {
           })
         : undefined) ?? maps[0]!;
     setMapPickChoice(suggested.id);
-    setMapPickPending({ fromValues, joinCtx });
+    setMapPickPending({ fromValues, toValues, joinCtx });
+    setMapSwitchOffer(null);
+  }
+
+  function openMapPickerFromSwitchOffer() {
+    if (!mapSwitchOffer) return;
+    const { fromValues, toValues, joinCtx, preferredMapId } = mapSwitchOffer;
+    setMapPickChoice(preferredMapId);
+    setMapPickPending({
+      fromValues,
+      toValues,
+      joinCtx,
+      preferredMapId,
+    });
   }
 
   async function refreshExportTree(exportPath: string | undefined) {
@@ -2861,16 +2942,20 @@ function App() {
             </p>
             <div className="mt-3 rounded-lg border border-amber-900/40 bg-amber-950/30 px-3 py-2">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-200/80">
-                Unmatched
+                {mapPickPending.toValues?.some((t) => t.trim())
+                  ? "Map pair"
+                  : "Unmatched"}
                 {mapPickPending.fromValues.length > 1
                   ? ` · ${mapPickPending.fromValues.length} keys`
                   : ""}
               </p>
               <p className="mt-0.5 font-mono text-[13px] text-amber-100">
-                {mapPickPending.fromValues
-                  .slice(0, 8)
-                  .map((v) => JSON.stringify(v))
-                  .join(", ")}
+                {mapPickPending.fromValues.slice(0, 8).map((from, i) => {
+                  const to = mapPickPending.toValues?.[i]?.trim();
+                  return to
+                    ? `${JSON.stringify(from)} → ${JSON.stringify(to)}`
+                    : JSON.stringify(from);
+                }).join(", ")}
                 {mapPickPending.fromValues.length > 8 ? "…" : ""}
               </p>
               {(mapPickPending.joinCtx.leftOn[0] ||
@@ -2887,16 +2972,25 @@ function App() {
               <legend className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                 Target KeyMap
               </legend>
+              {mapPickPending.preferredMapId && (
+                <p className="mt-1 text-[11px] text-teal-400/85">
+                  Suggested: map already used by ApplyKeyMap on this Join.
+                </p>
+              )}
               <ul className="mt-1.5 max-h-52 space-y-1 overflow-auto">
                 {(project.workspace.key_maps ?? []).map((m) => {
                   const selected = mapPickChoice === m.id;
+                  const preferred =
+                    mapPickPending.preferredMapId === m.id;
                   return (
                     <li key={m.id}>
                       <label
                         className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 ${
                           selected
                             ? "border-teal-600/70 bg-teal-500/10"
-                            : "border-slate-800 bg-slate-950/60 hover:border-slate-600"
+                            : preferred
+                              ? "border-teal-900/50 bg-teal-950/20 hover:border-teal-800"
+                              : "border-slate-800 bg-slate-950/60 hover:border-slate-600"
                         }`}
                       >
                         <input
@@ -2907,8 +3001,15 @@ function App() {
                           onChange={() => setMapPickChoice(m.id)}
                         />
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium text-slate-100">
-                            {m.name}
+                          <span className="flex items-center gap-2">
+                            <span className="block truncate text-sm font-medium text-slate-100">
+                              {m.name}
+                            </span>
+                            {preferred && (
+                              <span className="shrink-0 rounded border border-teal-800/60 px-1 py-0.5 text-[9px] uppercase tracking-wide text-teal-300/90">
+                                ApplyKeyMap
+                              </span>
+                            )}
                           </span>
                           <span className="block font-mono text-[10px] text-slate-500">
                             {m.id} · {m.entries.length} row
@@ -2967,17 +3068,19 @@ function App() {
                   if (!choice) return;
                   setMapPickPending(null);
                   setMapPickChoice(null);
+                  setMapSwitchOffer(null);
                   if (choice === "__new__") {
                     openMapWithFromValues(
                       {
                         ...emptyKeyMap("join aliases"),
-                        entries: pending.fromValues.map((from) => ({
+                        entries: pending.fromValues.map((from, i) => ({
                           from,
-                          to: "",
+                          to: pending.toValues?.[i] ?? "",
                         })),
                       },
                       pending.fromValues,
                       pending.joinCtx,
+                      pending.toValues,
                     );
                     return;
                   }
@@ -2989,6 +3092,7 @@ function App() {
                     map,
                     pending.fromValues,
                     pending.joinCtx,
+                    pending.toValues,
                   );
                 }}
               >
@@ -3194,16 +3298,37 @@ function App() {
                   exportPath={project.last_dbt_export_path}
                   joinApplyHint={
                     keyMapEditor.joinCtx
-                      ? `fill To for the unmatched From row(s), then Apply ${
-                          keyMapEditor.joinCtx.leftOn[0]
-                            ? "left"
-                            : "right"
-                        } to insert ApplyKeyMap before Join on ${
-                          keyMapEditor.joinCtx.leftOn[0] ??
-                          keyMapEditor.joinCtx.rightOn[0] ??
-                          "key"
-                        }.`
+                      ? `Fill To, then Apply left (typical) to remap ${
+                          keyMapEditor.joinCtx.leftOn[0] ?? "key"
+                        } before Join.`
                       : null
+                  }
+                  joinApplyContext={
+                    keyMapEditor.joinCtx
+                      ? {
+                          hostQueryName:
+                            project.workspace.queries.find(
+                              (q) =>
+                                q.id === keyMapEditor.joinCtx!.hostQueryId,
+                            )?.name ?? keyMapEditor.joinCtx.hostQueryId,
+                          rightQueryName:
+                            project.workspace.queries.find(
+                              (q) =>
+                                q.id === keyMapEditor.joinCtx!.rightQueryId,
+                            )?.name ?? keyMapEditor.joinCtx.rightQueryId,
+                          leftOn:
+                            keyMapEditor.joinCtx.leftOn[0] ?? "key",
+                          rightOn:
+                            keyMapEditor.joinCtx.rightOn[0] ?? "key",
+                          probeSide: keyMapEditor.joinCtx.probeSide,
+                        }
+                      : null
+                  }
+                  onChooseOtherMap={
+                    mapSwitchOffer &&
+                    mapSwitchOffer.preferredMapId === keyMapEditor.map.id
+                      ? () => openMapPickerFromSwitchOffer()
+                      : undefined
                   }
                   postgresConnections={project.connections.filter(
                     (c) => c.kind === "postgres",
@@ -3306,7 +3431,7 @@ function App() {
 
             {centerTab === "canvas" && (
               <>
-            <div className="min-h-0 flex-1 px-3 pb-2 pt-2">
+            <div className="min-h-0 flex-1 px-3 pb-1 pt-2">
               <GraphCanvas
                 queries={queries}
                 activeQueryId={activeQueryId}
@@ -3322,12 +3447,30 @@ function App() {
                 onDeriveQuery={deriveQueryFrom}
               />
             </div>
+            <PanelResizeHandle
+              orientation="horizontal"
+              aria-label="Resize data panel"
+              onDelta={(dy) =>
+                setBottomDockHeight((h) => {
+                  const next = clampPanelWidth(h - dy, 180, 720);
+                  bottomDockHeightRef.current = next;
+                  return next;
+                })
+              }
+              onDragEnd={() => {
+                try {
+                  localStorage.setItem(
+                    BOTTOM_DOCK_HEIGHT_KEY,
+                    String(bottomDockHeightRef.current),
+                  );
+                } catch {
+                  /* ignore */
+                }
+              }}
+            />
             <div
-              className={`flex flex-col border-t border-[var(--line)] bg-[#060d14] ${
-                joinLensOn && joinLensTarget && !diagView
-                  ? "min-h-[34vh]"
-                  : "min-h-[28vh]"
-              }`}
+              className="flex shrink-0 flex-col border-t border-[var(--line)] bg-[#060d14]"
+              style={{ height: bottomDockHeight }}
             >
               <div className="flex items-center justify-between gap-3 px-4 pt-2">
                 <div className="flex items-end gap-3">
@@ -3426,42 +3569,20 @@ function App() {
                         clean sample ≠ full-input proof
                       </span>
                       <div className="flex shrink-0 items-center gap-2">
-                        {diagView.mapSide &&
-                          diagView.rows.length > 0 &&
-                          joinLensTarget && (
-                            <button
-                              type="button"
-                              className="rounded border border-amber-800/60 px-2 py-0.5 text-[10px] text-amber-100 hover:bg-amber-500/10"
-                              onClick={() => {
-                                const fold = (s: string) => s.toLowerCase();
-                                const keyIdx = diagView.highlightKeys
-                                  .map((k) =>
-                                    diagView.columns.findIndex(
-                                      (c) => fold(c.name) === fold(k),
-                                    ),
-                                  )
-                                  .filter((i) => i >= 0);
-                                const seen = new Set<string>();
-                                const fromValues: string[] = [];
-                                for (const row of diagView.rows) {
-                                  for (const i of keyIdx) {
-                                    const v = String(row[i] ?? "").trim();
-                                    if (!v || seen.has(v)) continue;
-                                    seen.add(v);
-                                    fromValues.push(v);
-                                  }
-                                }
-                                if (!fromValues.length) return;
-                                handleMapKeyFromLens(
-                                  diagView.mapSide!,
-                                  fromValues,
-                                );
-                                setDiagView(null);
-                              }}
-                            >
-                              Add to map…
-                            </button>
-                          )}
+                        {diagView.mapSide && joinLensTarget && (
+                          <button
+                            type="button"
+                            className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:border-teal-800 hover:text-teal-200"
+                            title="Map unmatched keys in Join Lens Probe (primary path)"
+                            onClick={() => {
+                              setDiagView(null);
+                              setJoinLensOn(true);
+                              setForceProbeNonce((n) => n + 1);
+                            }}
+                          >
+                            Open in Probe
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="text-teal-300/80 hover:text-teal-100"
@@ -3475,13 +3596,7 @@ function App() {
                 </div>
               )}
               <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
-                <div
-                  className={`overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40 ${
-                    joinLensOn && joinLensTarget && !diagView
-                      ? "h-[28vh]"
-                      : "h-[22vh]"
-                  }`}
-                >
+                <div className="h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
                   {bottomTab === "data" ? (
                     diagView ? (
                       <PreviewTable
@@ -3505,6 +3620,7 @@ function App() {
                         rows={preview.rows}
                         joinDiag={joinDiag}
                         joinDiagLoading={joinDiagLoading}
+                        forceProbeNonce={forceProbeNonce}
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
                       />

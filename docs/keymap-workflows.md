@@ -13,10 +13,10 @@ Scale: **15 companies × 60 days ≈ 900 rows** per fact (preview still shows a 
 | Case | Query | What you see |
 |------|-------|--------------|
 | Sources | `sales_daily`, `res_consumption`, `dim_company` | e.g. `Starbucks Coffee` vs `STARBUCKS CORP` vs id `STBUX` |
-| A — Diagnose | `dirty_join` | From `sales_daily` ⋈ dim **without** map → Lens Probe → Add to map… |
-| B — Canon sales | `sales_canon` | From `sales_daily` → ApplyKeyMap → rename → join dim |
-| B′ — Canon spend | `spend_canon` | From `res_consumption` → same map on `org_name` |
-| C — Daily PnL ★ | `daily_pnl` | company · category · day · units · revenue · spend · **net_revenue** |
+| A — Diagnose ★focus | `dirty_join` | From `sales_daily` ⋈ dim **without** map → Lens Probe (15 unmatched) → Add to map… |
+| B — Canon sales | `sales_canon` | ApplyKeyMap (McDonalds / Costa / RedBull still blank) → join dim |
+| B′ — Canon spend | `spend_canon` | same map on `org_name` |
+| C — Daily PnL | `daily_pnl` | company · category · day · units · revenue · spend · **net_revenue** |
 | D — Monthly | `monthly_pnl` | company × category × month sums |
 
 ---

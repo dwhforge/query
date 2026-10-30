@@ -3562,11 +3562,17 @@ function App() {
               </div>
             ))}
 
-            {centerTab === "canvas" && (
-              <div
-                ref={canvasDockStackRef}
-                className="flex min-h-0 flex-1 flex-col overflow-hidden"
-              >
+            {/* Keep mounted while a KeyMap tab is active so Join Lens (mode, scroll,
+                selection, chat) survives open/close of the map editor. */}
+            <div
+              ref={canvasDockStackRef}
+              className={
+                centerTab === "canvas"
+                  ? "flex min-h-0 flex-1 flex-col overflow-hidden"
+                  : "hidden"
+              }
+              aria-hidden={centerTab !== "canvas"}
+            >
             <div className="min-h-0 flex-1 overflow-hidden px-3 pb-1 pt-2">
               <GraphCanvas
                 queries={queries}
@@ -3762,7 +3768,11 @@ function App() {
                       joinLensOn &&
                       joinLensTarget ? (
                       <JoinLens
-                        enabled={joinLensOn && !overlayOpen}
+                        enabled={
+                          joinLensOn &&
+                          !overlayOpen &&
+                          centerTab === "canvas"
+                        }
                         workspace={project.workspace}
                         hostQueryId={joinLensTarget.hostQueryId}
                         joinStepIndex={joinLensTarget.joinStepIndex}
@@ -3819,8 +3829,7 @@ function App() {
                 </div>
               </div>
             </div>
-              </div>
-            )}
+            </div>
           </section>
 
           <PanelResizeHandle

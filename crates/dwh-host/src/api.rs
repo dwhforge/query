@@ -23,7 +23,8 @@ use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
     list_export_tree as walk_export_tree, preview_dbt_model_sql,
     preview_dbt_model_sql_with_seeds, push_key_map_to_export, resolve_dbt_bin,
-    sync_key_maps_from_export, ConnectionDef, DbtProducer, DbtTarget, ExportResult, KeyMapDef,
+    remove_key_map_from_export, sync_key_maps_from_export, ConnectionDef, DbtProducer, DbtTarget,
+    ExportResult, KeyMapDef,
     KeyMapSyncResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
     Workspace,
 };
@@ -794,6 +795,13 @@ struct PushKeyMapArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RemoveKeyMapSeedArgs {
+    export_path: String,
+    map_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct KeyMapWhArgs {
     key_map: KeyMapDef,
     connection_string: String,
@@ -1205,6 +1213,14 @@ impl HostState {
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let rel = push_key_map_to_export(Path::new(&a.export_path), &a.key_map)?;
                 serde_json::to_value(serde_json::json!({ "path": rel })).map_err(|e| e.to_string())
+            }
+            "remove_key_map_from_export" => {
+                let a: RemoveKeyMapSeedArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let removed =
+                    remove_key_map_from_export(Path::new(&a.export_path), &a.map_id)?;
+                serde_json::to_value(serde_json::json!({ "path": removed }))
+                    .map_err(|e| e.to_string())
             }
             "write_key_map" => {
                 let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;

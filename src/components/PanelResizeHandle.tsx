@@ -10,7 +10,10 @@ type Props = {
   onDelta: (delta: number) => void;
   /** Fired once when drag ends (for persist). */
   onDragEnd?: () => void;
+  /** e.g. maximize / restore a stacked pane. */
+  onDoubleClick?: () => void;
   "aria-label"?: string;
+  title?: string;
 };
 
 /** Thin drag grip between flex panels. */
@@ -18,7 +21,9 @@ export function PanelResizeHandle({
   orientation = "vertical",
   onDelta,
   onDragEnd,
+  onDoubleClick,
   "aria-label": ariaLabel = "Resize panel",
+  title,
 }: Props) {
   const last = useRef(0);
   const dragging = useRef(false);
@@ -69,11 +74,13 @@ export function PanelResizeHandle({
       role="separator"
       aria-orientation={horizontal ? "horizontal" : "vertical"}
       aria-label={ariaLabel}
+      title={title}
       tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
+      onDoubleClick={onDoubleClick}
       className={
         horizontal
           ? "group relative z-[2] h-1.5 w-full shrink-0 cursor-row-resize bg-transparent hover:bg-teal-500/25 active:bg-teal-500/40"

@@ -41,7 +41,8 @@ pub use emit::{
     validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,
 };
 pub use key_map_sync::{
-    push_key_map_to_export, sync_key_maps_from_export, KeyMapSyncResult, KEYMAP_CONFLICT_DIR,
+    push_key_map_to_export, remove_key_map_from_export, sync_key_maps_from_export,
+    KeyMapSyncResult, KEYMAP_CONFLICT_DIR,
 };
 pub use schema::{apply_step_schema, infer_workspace_schemas, StepSchema, WorkspaceSchemas};
 pub use postgres_attach::{

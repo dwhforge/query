@@ -25,12 +25,7 @@ pub fn chat_completions_url(base_url: &str) -> Result<String, String> {
 
 pub fn complete_chat(settings: &LlmSettings, messages: &[Value]) -> Result<String, String> {
     let key = settings.api_key.trim();
-    if key.is_empty() {
-        return Err(
-            "LLM API key is not set. Add llm.api_key in ~/.dwhforge-query/settings.json."
-                .into(),
-        );
-    }
+    // Empty key is allowed for local OpenAI-compatible servers without auth.
     let model = settings.model.trim();
     if model.is_empty() {
         return Err("llm.model is empty. Set it in ~/.dwhforge-query/settings.json.".into());
@@ -74,23 +69,25 @@ pub fn complete_chat(settings: &LlmSettings, messages: &[Value]) -> Result<Strin
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(90))
         .build();
-    let response = agent
+    let mut req = agent
         .post(&url)
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .send_json(body)
-        .map_err(|e| match e {
-            ureq::Error::Status(code, resp) => {
-                let text = resp.into_string().unwrap_or_default();
-                let snippet: String = text.chars().take(400).collect();
-                if code == 401 || code == 403 {
-                    "LLM rejected the API key. Check llm.api_key in settings.".to_string()
-                } else {
-                    format!("LLM HTTP {code}: {snippet}")
-                }
+        .set("Content-Type", "application/json");
+    if !key.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    let response = req.send_json(body).map_err(|e| match e {
+        ureq::Error::Status(code, resp) => {
+            let text = resp.into_string().unwrap_or_default();
+            let snippet: String = text.chars().take(400).collect();
+            if code == 401 || code == 403 {
+                "LLM rejected credentials. Set llm.api_key or use a no-auth local endpoint."
+                    .to_string()
+            } else {
+                format!("LLM HTTP {code}: {snippet}")
             }
-            other => format!("LLM request failed: {other}"),
-        })?;
+        }
+        other => format!("LLM request failed: {other}"),
+    })?;
     let parsed: Value = response
         .into_json()
         .map_err(|e| format!("LLM response was not JSON: {e}"))?;

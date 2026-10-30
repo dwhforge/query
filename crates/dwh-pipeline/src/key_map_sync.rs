@@ -214,6 +214,32 @@ pub fn push_key_map_to_export(
     Ok(rel)
 }
 
+/// Delete `seeds/map_*.csv` for a KeyMap and drop it from the export manifest.
+/// No-op (Ok(None)) when the seed file is already absent.
+/// Call this on KeyMap delete after export — otherwise seed→KeyMap sync recreates the map.
+pub fn remove_key_map_from_export(
+    export_root: &Path,
+    map_id: &str,
+) -> Result<Option<String>, String> {
+    let seed = key_map_seed_name(map_id);
+    let rel = format!("seeds/{seed}.csv");
+    let path = export_root.join(&rel);
+    let removed_file = if path.is_file() {
+        fs::remove_file(&path).map_err(|e| format!("remove {rel}: {e}"))?;
+        true
+    } else {
+        false
+    };
+
+    if let Some(mut manifest) = load_manifest(export_root)? {
+        if manifest.owned.remove(&rel).is_some() {
+            write_manifest(export_root, &manifest)?;
+        }
+    }
+
+    Ok(if removed_file { Some(rel) } else { None })
+}
+
 fn write_manifest(export_root: &Path, manifest: &ExportManifest) -> Result<(), String> {
     let p = manifest_path(export_root);
     let raw = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
@@ -314,6 +340,47 @@ mod tests {
         // Original (hand-edited) file preserved
         let kept = fs::read_to_string(dir.join("seeds/map_channel.csv")).unwrap();
         assert!(kept.contains("shop"));
+    }
+
+    #[test]
+    fn remove_seed_stops_sync_recreate() {
+        let dir = tempfile_dir();
+        fs::create_dir_all(dir.join("seeds")).unwrap();
+        fs::write(
+            dir.join("seeds/map_channel.csv"),
+            "from,to\nweb,online\n",
+        )
+        .unwrap();
+        let mut owned = std::collections::BTreeMap::new();
+        owned.insert(
+            "seeds/map_channel.csv".into(),
+            hash_content("from,to\nweb,online\n"),
+        );
+        write_manifest(
+            &dir,
+            &ExportManifest {
+                version: 1,
+                pipeline_name: "t".into(),
+                dialect: "duckdb".into(),
+                owned,
+            },
+        )
+        .unwrap();
+
+        let removed = remove_key_map_from_export(&dir, "map_channel").unwrap();
+        assert_eq!(removed.as_deref(), Some("seeds/map_channel.csv"));
+        assert!(!dir.join("seeds/map_channel.csv").exists());
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        assert!(!manifest.owned.contains_key("seeds/map_channel.csv"));
+
+        let mut ws = Workspace {
+            queries: vec![],
+            focus_query_id: String::new(),
+            key_maps: vec![],
+        };
+        let r = sync_key_maps_from_export(&mut ws, &dir).unwrap();
+        assert_eq!(r.created_maps, 0);
+        assert!(ws.key_maps.is_empty());
     }
 
     #[test]

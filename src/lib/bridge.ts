@@ -258,6 +258,8 @@ export type FuzzyPair = {
   score: number;
   edits: number;
   ambiguous: boolean;
+  alt_to_key?: string | null;
+  alt_score?: number | null;
 };
 
 export type FuzzyFieldSample = {
@@ -289,6 +291,8 @@ export type FuzzyChatContext = {
   leftover_left_samples: FuzzyKeySample[];
   leftover_right_samples: FuzzyKeySample[];
   existing_aliases: FuzzyAliasExample[];
+  right_to_universe?: string[];
+  context_truncated?: boolean;
 };
 
 export type JoinKeyFuzzySuggest = {
@@ -306,6 +310,7 @@ export type JoinKeyFuzzySuggest = {
   unmatched_left_total: number;
   unmatched_right_total: number;
   truncated: boolean;
+  disabled_reason?: string | null;
   chat_context: FuzzyChatContext;
 };
 
@@ -376,6 +381,14 @@ export function pushKeyMapToExport(
   keyMap: import("../types/pipeline").KeyMapDef,
 ): Promise<{ path: string }> {
   return invoke("push_key_map_to_export", { exportPath, keyMap });
+}
+
+/** Delete seeds/map_*.csv (+ manifest entry) so seed→KeyMap sync does not recreate the map. */
+export function removeKeyMapFromExport(
+  exportPath: string,
+  mapId: string,
+): Promise<{ path: string | null }> {
+  return invoke("remove_key_map_from_export", { exportPath, mapId });
 }
 
 export type KeyMapWriteResult = {

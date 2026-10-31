@@ -194,10 +194,12 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
             }
         };
         let id = rpc.id;
-        // Heavy DuckDB jobs + LLM: keep the accept loop free. Heavy RPCs share a
-        // bounded queue inside HostState (1 pending; stale pending → superseded).
+        // Keep the accept loop free so Cancel can be read while other work runs.
+        // Heavy RPCs share a bounded queue (1 pending; stale → superseded).
+        // join_prepare_status is cheap but must not block the reader on `db`.
         let async_cmd = rpc.cmd == "llm_chat"
             || rpc.cmd == "key_map_fuzzy_suggest"
+            || rpc.cmd == "join_prepare_status"
             || HostState::is_heavy_rpc(&rpc.cmd);
         if async_cmd {
             let st = Arc::clone(&state);

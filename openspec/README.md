@@ -2,15 +2,21 @@
 
 Spec-driven changes for DWHForge Query. Product decisions remain in `docs/` (DESIGN, ADR). OpenSpec tracks **behavior deltas** for a change before/while implementing.
 
+**Agents:** required workflow is in [`AGENTS.md`](../AGENTS.md) and [`.cursor/rules/adr-openspec.mdc`](../.cursor/rules/adr-openspec.mdc) (`alwaysApply`).
+
 ```text
 openspec/
   changes/<id>/
     proposal.md    # why / scope
     design.md      # how (optional for small changes)
-    specs/...      # ADDED/MODIFIED requirements + scenarios
+    specs/...      # DELTA: ADDED/MODIFIED requirements + scenarios
     tasks.md       # implementation checklist
-  specs/           # (optional) archived source-of-truth after merge
+  specs/           # ARCHIVED SoT: merged capability specs after apply/archive
 ```
+
+- **While building:** edit `changes/<id>/specs/<capability>/spec.md`.
+- **When the change is finished:** merge those deltas into `specs/<capability>/spec.md` (create the tree if missing). **Completed changes must merge here** — not left only under `changes/`.
+- Do not confuse with [`docs/SPEC.md`](../docs/SPEC.md) (product IR overview).
 
 Active changes:
 

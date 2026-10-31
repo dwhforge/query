@@ -1378,6 +1378,38 @@ impl HostState {
                     .unwrap_or_default();
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
+            // Must not *wait* on `db` — a blocked status poll stalls the accept
+            // loop so Cancel never gets read. try_lock: if prepare holds db,
+            // report "not ready" (UI already polls join_prepare_progress).
+            "join_prepare_status" => {
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let sources = a.sources.unwrap_or_default();
+                let conns = a.connections.unwrap_or_default();
+                let out = match self.db.try_lock() {
+                    Ok(db) => run_join_prepare_status(
+                        &db,
+                        &a.workspace,
+                        &sources,
+                        &conns,
+                        &a.host_query_id,
+                        a.join_step_index,
+                    ),
+                    Err(_) => JoinPrepareStatus {
+                        prepared: false,
+                        fingerprint: None,
+                        host_query_id: None,
+                        join_step_index: None,
+                        left_rows: None,
+                        right_rows: None,
+                        left_expensive: None,
+                        right_expensive: None,
+                        left_materialized: None,
+                        right_materialized: None,
+                        stale: false,
+                    },
+                };
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
             "cancel_running_query" => {
                 self.interrupt_running_query();
                 Ok(Value::Bool(true))
@@ -1433,20 +1465,6 @@ impl HostState {
                     Some(&self.join_prep_progress),
                     a.force.unwrap_or(false),
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
-            }
-            "join_prepare_status" => {
-                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let sources = a.sources.unwrap_or_default();
-                let conns = a.connections.unwrap_or_default();
-                let out: JoinPrepareStatus = run_join_prepare_status(
-                    &db,
-                    &a.workspace,
-                    &sources,
-                    &conns,
-                    &a.host_query_id,
-                    a.join_step_index,
-                );
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "clear_join_prepare" => {

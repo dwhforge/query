@@ -72,7 +72,11 @@ export function JoinLensAuto({
   hostQueryId: string;
   joinStepIndex: number;
   connections: ConnectionDef[];
-  onAccept?: (fromValues: string[], toValues: string[]) => void;
+  onAccept?: (
+    fromValues: string[],
+    toValues: string[],
+    opts?: { fromParts?: string[][] },
+  ) => void;
 }) {
   const [report, setReport] = useState<JoinKeyFuzzySuggest | null>(null);
   const [loading, setLoading] = useState(false);
@@ -89,6 +93,11 @@ export function JoinLensAuto({
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  /** Per-column Suggest on composite Join (ADR-0024). */
+  const [keyIndex, setKeyIndex] = useState<number | null>(null);
+  /** Composite-map mode: use all Join keys as From tuple. */
+  const [compositeMode, setCompositeMode] = useState(false);
+  const [compositeFuzzySlot, setCompositeFuzzySlot] = useState(0);
   /** Bumps when Join target changes — ignore late LLM replies. */
   const chatGen = useRef(0);
 
@@ -110,6 +119,12 @@ export function JoinLensAuto({
   }, []);
 
   useEffect(() => {
+    setKeyIndex(null);
+    setCompositeMode(false);
+    setCompositeFuzzySlot(0);
+  }, [hostQueryId, joinStepIndex]);
+
+  useEffect(() => {
     let cancelled = false;
     chatGen.current += 1;
     setLoading(true);
@@ -118,32 +133,70 @@ export function JoinLensAuto({
     setChat([]);
     setChatError(null);
     setChatBusy(false);
-    void joinKeyFuzzySuggest(workspace, hostQueryId, joinStepIndex, connections)
-      .then((r) => {
+
+    async function run() {
+      try {
+        // Probe join arity when entering composite mode (need left_on length).
+        let result = await joinKeyFuzzySuggest(
+          workspace,
+          hostQueryId,
+          joinStepIndex,
+          connections,
+          [],
+          compositeMode ? null : keyIndex,
+          null,
+        );
         if (cancelled) return;
-        setReport(r);
+        if (compositeMode && result.left_on.length > 1) {
+          result = await joinKeyFuzzySuggest(
+            workspace,
+            hostQueryId,
+            joinStepIndex,
+            connections,
+            [],
+            null,
+            {
+              indices: result.left_on.map((_, i) => i),
+              fuzzySlot: Math.min(
+                compositeFuzzySlot,
+                Math.max(0, result.left_on.length - 1),
+              ),
+            },
+          );
+        }
+        if (cancelled) return;
+        setReport(result);
         const next: Record<number, boolean> = {};
-        r.suggestions.forEach((p, i) => {
+        result.suggestions.forEach((p, i) => {
           next[i] = !p.ambiguous;
         });
         setPicked(next);
         const openChat =
-          !r.disabled_reason &&
-          r.suggestions.length === 0 &&
-          (r.leftover_left.length > 0 || r.leftover_right.length > 0);
+          !result.disabled_reason &&
+          result.suggestions.length === 0 &&
+          (result.leftover_left.length > 0 || result.leftover_right.length > 0);
         setChatOpen(openChat);
-      })
-      .catch((e) => {
+      } catch (e) {
         if (!cancelled) setError(typeof e === "string" ? e : String(e));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    }
+
+    void run();
     return () => {
       cancelled = true;
       chatGen.current += 1;
     };
-  }, [workspace, hostQueryId, joinStepIndex, connections]);
+  }, [
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+    keyIndex,
+    compositeMode,
+    compositeFuzzySlot,
+  ]);
 
   const selected = useMemo(() => {
     if (!report) return [];
@@ -244,8 +297,45 @@ export function JoinLensAuto({
         </div>
 
         {report?.disabled_reason && (
-          <div className="shrink-0 border-b border-amber-900/50 bg-amber-950/25 px-2 py-2 text-[10px] leading-relaxed text-amber-100/90">
-            {report.disabled_reason}
+          <div className="shrink-0 space-y-2 border-b border-amber-900/50 bg-amber-950/25 px-2 py-2 text-[10px] leading-relaxed text-amber-100/90">
+            <p>{report.disabled_reason}</p>
+            {report.left_on.length > 1 && (
+              <div className="flex flex-wrap gap-1">
+                <span className="w-full text-[9px] text-amber-200/70">
+                  Per-column — remap which Join key:
+                </span>
+                {report.left_on.map((col, i) => (
+                  <button
+                    key={`${col}-${i}`}
+                    type="button"
+                    onClick={() => {
+                      setCompositeMode(false);
+                      setKeyIndex(i);
+                    }}
+                    className="rounded border border-amber-800/80 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[9px] text-amber-50 hover:border-teal-700"
+                  >
+                    {col} ↔ {report.right_on[i] ?? "?"}
+                  </button>
+                ))}
+                <span className="mt-1 w-full text-[9px] text-amber-200/70">
+                  Or composite map — From tuple (exact on other cols + fuzzy on):
+                </span>
+                {report.left_on.map((col, i) => (
+                  <button
+                    key={`comp-${col}-${i}`}
+                    type="button"
+                    onClick={() => {
+                      setKeyIndex(null);
+                      setCompositeFuzzySlot(i);
+                      setCompositeMode(true);
+                    }}
+                    className="rounded border border-teal-800/80 bg-teal-950/40 px-1.5 py-0.5 font-mono text-[9px] text-teal-50 hover:border-teal-500"
+                  >
+                    fuzzy {col}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -301,6 +391,11 @@ export function JoinLensAuto({
               onAccept?.(
                 selected.map((p) => p.from_key),
                 selected.map((p) => p.to_key),
+                {
+                  fromParts: selected.map((p) =>
+                    p.from_parts?.length ? p.from_parts : [p.from_key],
+                  ),
+                },
               )
             }
             className="rounded border border-amber-600/80 bg-amber-500/25 px-2 py-1 text-[10px] font-semibold text-amber-50 disabled:opacity-40"

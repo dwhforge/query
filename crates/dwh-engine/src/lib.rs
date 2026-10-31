@@ -33,7 +33,8 @@ pub use join_lens::{
     JOIN_LENS_MAX_MATCHES,
 };
 pub use join_fuzzy::{
-    join_key_fuzzy_suggest, FuzzyAliasExample, FuzzyChatContext, FuzzyFieldSample, FuzzyKeySample,
+    join_key_fuzzy_suggest, join_key_fuzzy_suggest_on, FuzzyAliasExample, FuzzyChatContext,
+    FuzzyFieldSample, FuzzyKeySample,
     JoinKeyFuzzySuggest,
 };
 pub use join_near_miss::{

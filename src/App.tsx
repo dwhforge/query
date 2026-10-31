@@ -184,6 +184,7 @@ type KeyMapTabSession = {
   totalCount?: number | null;
   pickTo?: string[];
   suggestedFrom?: string[];
+  suggestedFromParts?: string[][];
   joinCtx?: {
     hostQueryId: string;
     joinStepIndex: number;
@@ -343,6 +344,7 @@ function App() {
   const [mapPickPending, setMapPickPending] = useState<{
     fromValues: string[];
     toValues?: string[];
+    fromParts?: string[][];
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
     /** Prefer this map (from existing ApplyKeyMap); still offer others. */
     preferredMapId?: string | null;
@@ -353,6 +355,7 @@ function App() {
   const [mapSwitchOffer, setMapSwitchOffer] = useState<{
     fromValues: string[];
     toValues?: string[];
+    fromParts?: string[][];
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
     preferredMapId: string;
   } | null>(null);
@@ -2225,6 +2228,7 @@ function App() {
     opts?: {
       pickTo?: string[];
       suggestedFrom?: string[];
+      suggestedFromParts?: string[][];
       joinCtx?: {
         hostQueryId: string;
         joinStepIndex: number;
@@ -2238,6 +2242,9 @@ function App() {
     const normalized: KeyMapDef = {
       storage: { kind: "seed" },
       from_column: "from",
+      from_columns: map.from_columns?.length
+        ? map.from_columns
+        : [map.from_column ?? "from"],
       to_column: "to",
       ...map,
     };
@@ -2248,6 +2255,7 @@ function App() {
         map: normalized,
         pickTo: opts?.pickTo,
         suggestedFrom: opts?.suggestedFrom,
+        suggestedFromParts: opts?.suggestedFromParts,
         joinCtx: opts?.joinCtx,
       };
       if (i < 0) return [...tabs, session];
@@ -2547,26 +2555,56 @@ function App() {
     fromValues: string[],
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>,
     toValues?: string[],
+    fromParts?: string[][],
   ) {
     const entries = [...map.entries];
     const indexByFrom = new Map(
-      entries.map((e, i) => [e.from.trim(), i] as const),
+      entries.map((e, i) => {
+        const parts =
+          e.from_parts?.length ? e.from_parts : e.from.trim() ? [e.from] : [];
+        return [JSON.stringify(parts.map((p) => p.trim())), i] as const;
+      }),
     );
     fromValues.forEach((rawFrom, i) => {
-      const from = rawFrom.trim();
-      if (!from) return;
+      const parts = (
+        fromParts?.[i]?.length
+          ? fromParts[i]!
+          : rawFrom.trim()
+            ? [rawFrom]
+            : []
+      ).map((p) => p.trim());
+      if (!parts.length || parts.some((p) => !p)) return;
+      const key = JSON.stringify(parts);
       const to = (toValues?.[i] ?? "").trim();
-      const existing = indexByFrom.get(from);
+      const existing = indexByFrom.get(key);
       if (existing !== undefined) {
         if (to && !entries[existing]!.to.trim()) {
           entries[existing] = { ...entries[existing]!, to };
         }
         return;
       }
-      indexByFrom.set(from, entries.length);
-      entries.push({ from, to });
+      indexByFrom.set(key, entries.length);
+      entries.push({ from: parts[0]!, from_parts: parts, to });
     });
-    const merged = { ...map, entries };
+    const arity = Math.max(
+      map.from_columns?.length ?? 0,
+      fromParts?.find((p) => p.length)?.length ?? 1,
+      1,
+    );
+    const from_columns =
+      map.from_columns?.length === arity
+        ? map.from_columns
+        : arity > 1 && joinCtx.leftOn.length >= arity
+          ? joinCtx.leftOn.slice(0, arity)
+          : map.from_columns?.length
+            ? map.from_columns
+            : [map.from_column ?? "from"];
+    const merged = {
+      ...map,
+      from_columns,
+      from_column: from_columns[0],
+      entries,
+    };
     // Persist into the project so Join Lens can hide mapped unmatched keys immediately.
     setProject((p) => {
       const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], merged);
@@ -2578,6 +2616,7 @@ function App() {
     });
     openKeyMapEditor(merged, {
       suggestedFrom: fromValues,
+      suggestedFromParts: fromParts,
       joinCtx,
     });
   }
@@ -2585,24 +2624,37 @@ function App() {
   function handleMapKeyFromLens(
     side: "left" | "right",
     fromValues: string[],
-    opts?: { toValues?: string[] },
+    opts?: { toValues?: string[]; fromParts?: string[][] },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
     const maps = project.workspace.key_maps ?? [];
     const toValues = opts?.toValues;
+    const fromParts = opts?.fromParts;
     const joinCtx = { ...joinLensTarget, probeSide: side };
     if (maps.length === 0) {
+      const arity = fromParts?.find((p) => p.length)?.length ?? 1;
+      const from_columns =
+        arity > 1 && joinCtx.leftOn.length >= arity
+          ? joinCtx.leftOn.slice(0, arity)
+          : ["from"];
       openMapWithFromValues(
         {
           ...emptyKeyMap("join aliases"),
-          entries: fromValues.map((from, i) => ({
-            from,
-            to: toValues?.[i] ?? "",
-          })),
+          from_columns,
+          from_column: from_columns[0],
+          entries: fromValues.map((from, i) => {
+            const parts = fromParts?.[i] ?? [from];
+            return {
+              from: parts[0] ?? from,
+              from_parts: parts,
+              to: toValues?.[i] ?? "",
+            };
+          }),
         },
         fromValues,
         joinCtx,
         toValues,
+        fromParts,
       );
       setMapSwitchOffer(null);
       return;
@@ -2617,10 +2669,17 @@ function App() {
       ? maps.find((m) => m.id === preferredId)
       : undefined;
     if (preferred) {
-      openMapWithFromValues(preferred, fromValues, joinCtx, toValues);
+      openMapWithFromValues(
+        preferred,
+        fromValues,
+        joinCtx,
+        toValues,
+        fromParts,
+      );
       setMapSwitchOffer({
         fromValues,
         toValues,
+        fromParts,
         joinCtx,
         preferredMapId: preferred.id,
       });
@@ -2639,17 +2698,19 @@ function App() {
           })
         : undefined) ?? maps[0]!;
     setMapPickChoice(suggested.id);
-    setMapPickPending({ fromValues, toValues, joinCtx });
+    setMapPickPending({ fromValues, toValues, fromParts, joinCtx });
     setMapSwitchOffer(null);
   }
 
   function openMapPickerFromSwitchOffer() {
     if (!mapSwitchOffer) return;
-    const { fromValues, toValues, joinCtx, preferredMapId } = mapSwitchOffer;
+    const { fromValues, toValues, fromParts, joinCtx, preferredMapId } =
+      mapSwitchOffer;
     setMapPickChoice(preferredMapId);
     setMapPickPending({
       fromValues,
       toValues,
+      fromParts,
       joinCtx,
       preferredMapId,
     });
@@ -3537,17 +3598,30 @@ function App() {
                   setMapPickChoice(null);
                   setMapSwitchOffer(null);
                   if (choice === "__new__") {
+                    const arity =
+                      pending.fromParts?.find((p) => p.length)?.length ?? 1;
+                    const from_columns =
+                      arity > 1 && pending.joinCtx.leftOn.length >= arity
+                        ? pending.joinCtx.leftOn.slice(0, arity)
+                        : ["from"];
                     openMapWithFromValues(
                       {
                         ...emptyKeyMap("join aliases"),
-                        entries: pending.fromValues.map((from, i) => ({
-                          from,
-                          to: pending.toValues?.[i] ?? "",
-                        })),
+                        from_columns,
+                        from_column: from_columns[0],
+                        entries: pending.fromValues.map((from, i) => {
+                          const parts = pending.fromParts?.[i] ?? [from];
+                          return {
+                            from: parts[0] ?? from,
+                            from_parts: parts,
+                            to: pending.toValues?.[i] ?? "",
+                          };
+                        }),
                       },
                       pending.fromValues,
                       pending.joinCtx,
                       pending.toValues,
+                      pending.fromParts,
                     );
                     return;
                   }
@@ -3560,6 +3634,7 @@ function App() {
                     pending.fromValues,
                     pending.joinCtx,
                     pending.toValues,
+                    pending.fromParts,
                   );
                 }}
               >
@@ -3811,6 +3886,7 @@ function App() {
                   connections={project.connections}
                   pickToOptions={keyMapEditor.pickTo}
                   suggestedFrom={keyMapEditor.suggestedFrom}
+                  suggestedFromParts={keyMapEditor.suggestedFromParts}
                   dirtyResetSeq={keyMapEditor.dirtyResetSeq}
                   exportPath={project.last_dbt_export_path}
                   joinApplyHint={
@@ -3837,6 +3913,8 @@ function App() {
                             keyMapEditor.joinCtx.leftOn[0] ?? "key",
                           rightOn:
                             keyMapEditor.joinCtx.rightOn[0] ?? "key",
+                          leftOnCols: keyMapEditor.joinCtx.leftOn,
+                          rightOnCols: keyMapEditor.joinCtx.rightOn,
                           probeSide: keyMapEditor.joinCtx.probeSide,
                         }
                       : null
@@ -3940,6 +4018,18 @@ function App() {
                               );
                               return;
                             }
+                            const arity = Math.max(
+                              map.from_columns?.length ?? 0,
+                              1,
+                            );
+                            const leftCols =
+                              arity > 1 && ctx.leftOn.length >= arity
+                                ? ctx.leftOn.slice(0, arity)
+                                : [ctx.leftOn[0] ?? "key"];
+                            const rightCols =
+                              arity > 1 && ctx.rightOn.length >= arity
+                                ? ctx.rightOn.slice(0, arity)
+                                : [ctx.rightOn[0] ?? "key"];
                             setProject((p) => ({
                               ...p,
                               workspace: applyKeyMapToWorkspace(
@@ -3954,9 +4044,11 @@ function App() {
                                 ctx.joinStepIndex,
                                 ctx.rightQueryId,
                                 side,
-                                ctx.leftOn[0] ?? "key",
-                                ctx.rightOn[0] ?? "key",
+                                leftCols[0]!,
+                                rightCols[0]!,
                                 map,
+                                leftCols,
+                                rightCols,
                               ),
                             }));
                             closeKeyMapTab(map.id);

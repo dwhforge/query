@@ -38,6 +38,9 @@ TABLES = [
     ("hop/dim_region.csv", "dim_region"),
     ("hop/map_store_to_region.csv", "map_store_to_region"),
     ("hop/map_region_to_country.csv", "map_region_to_country"),
+    ("offer/offer_events.csv", "offer_events"),
+    ("offer/offer_dim.csv", "offer_dim"),
+    ("offer/map_offer_day.csv", "map_offer_day"),
 ]
 
 

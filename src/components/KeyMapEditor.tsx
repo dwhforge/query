@@ -17,8 +17,11 @@ import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
 import { mergeKeyMapProposals } from "../lib/keyMap";
 import type { Workspace } from "../types/pipeline";
 import {
+  fromColumnsEff,
+  fromPartsEff,
   keyMapSeedName,
   parseFromToPaste,
+  tupleKey,
   validateKeyMapEntries,
   type ApplySide,
 } from "../lib/keyMap";
@@ -47,6 +50,8 @@ export type KeyMapEditorProps = {
   pickToOptions?: string[];
   /** Prefill From rows (e.g. unmatched keys). */
   suggestedFrom?: string[];
+  /** Prefill composite From tuples (ADR-0024). */
+  suggestedFromParts?: string[][];
   /** Known dbt sources (Explorer / LoadPostgres) for storage=source datalist. */
   sourceOptions?: KeyMapSourceOption[];
   /** Postgres connections for source write-back / read. */
@@ -78,6 +83,8 @@ export type KeyMapEditorProps = {
     rightQueryName: string;
     leftOn: string;
     rightOn: string;
+    leftOnCols?: string[];
+    rightOnCols?: string[];
     /** Unmatched side that opened Add to map… */
     probeSide?: "left" | "right";
   } | null;
@@ -101,6 +108,7 @@ export function KeyMapEditor({
   connections = [],
   pickToOptions = [],
   suggestedFrom = [],
+  suggestedFromParts = [],
   sourceOptions = [],
   postgresConnections = [],
   refOptions = [],
@@ -142,6 +150,8 @@ export function KeyMapEditor({
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
   const editableCols = map.editable_columns ?? [];
+  const fromCols = fromColumnsEff(map);
+  const arity = fromCols.length;
 
   function bumpDirty() {
     onDirtyChange?.(dirtyRef.current.toDelta());
@@ -232,6 +242,7 @@ export function KeyMapEditor({
       source,
       table,
       map.from_column ?? "from",
+      (map.from_columns ?? []).join(","),
       map.to_column ?? "to",
       (map.editable_columns ?? []).join(","),
       pageOffset,
@@ -287,6 +298,7 @@ export function KeyMapEditor({
   }, [
     map.storage,
     map.from_column,
+    map.from_columns,
     map.to_column,
     map.editable_columns,
     activeConnectionId,
@@ -329,10 +341,13 @@ export function KeyMapEditor({
     if (!q) return map.entries.map((e, i) => ({ e, i }));
     return map.entries
       .map((e, i) => ({ e, i }))
-      .filter(
-        ({ e }) =>
-          e.from.toLowerCase().includes(q) || e.to.toLowerCase().includes(q),
-      );
+      .filter(({ e }) => {
+        const parts = fromPartsEff(e);
+        return (
+          parts.some((p) => p.toLowerCase().includes(q)) ||
+          e.to.toLowerCase().includes(q)
+        );
+      });
   }, [map.entries, filter, isSource]);
 
   const virtualizer = useVirtualizer({
@@ -345,7 +360,7 @@ export function KeyMapEditor({
   const virtualRows = virtualizer.getVirtualItems();
 
   function setEntries(entries: KeyMapEntry[], opts?: { trackAll?: boolean }) {
-    const v = validateKeyMapEntries(entries);
+    const v = validateKeyMapEntries(entries, arity);
     if (!v.ok) {
       setError(v.error);
       onChange({ ...map, entries });
@@ -374,7 +389,7 @@ export function KeyMapEditor({
       merged.attrs = { ...prev.attrs };
     }
     const next = map.entries.map((e, i) => (i === index ? merged : e));
-    const v = validateKeyMapEntries(next);
+    const v = validateKeyMapEntries(next, arity);
     if (!v.ok) {
       setError(v.error);
       onChange({ ...map, entries: next });
@@ -382,8 +397,10 @@ export function KeyMapEditor({
     }
     setError(null);
     if (isSource) {
-      if (patch.from !== undefined && patch.from.trim() !== prev.from.trim()) {
-        dirtyRef.current.noteRename(prev.from, merged);
+      const prevParts = fromPartsEff(prev);
+      const nextParts = fromPartsEff(merged);
+      if (tupleKey(prevParts) !== tupleKey(nextParts)) {
+        dirtyRef.current.noteRename(prevParts, merged);
       } else {
         dirtyRef.current.noteUpsert(merged);
       }
@@ -401,7 +418,17 @@ export function KeyMapEditor({
   }
 
   function addRow(from = "", to = "") {
-    const entry: KeyMapEntry = { from, to };
+    const parts =
+      arity > 1
+        ? Array.from({ length: arity }, (_, i) => (i === 0 ? from : ""))
+        : from
+          ? [from]
+          : Array.from({ length: arity }, () => "");
+    const entry: KeyMapEntry = {
+      from: parts[0] ?? "",
+      from_parts: parts,
+      to,
+    };
     if (editableCols.length) {
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
     }
@@ -415,33 +442,43 @@ export function KeyMapEditor({
   function deleteRow(index: number) {
     const prev = map.entries[index];
     if (isSource && prev) {
-      dirtyRef.current.noteDelete(prev.from);
+      dirtyRef.current.noteDelete(fromPartsEff(prev));
       bumpDirty();
     }
     setEntries(map.entries.filter((_, j) => j !== index));
   }
 
   function addSuggested() {
-    const have = new Set(map.entries.map((e) => e.from.trim()));
-    const extra = suggestedFrom
-      .map((s) => s.trim())
-      .filter((s) => s && !have.has(s))
-      .map((from) => ({ from, to: "" }));
+    const have = new Set(map.entries.map((e) => tupleKey(fromPartsEff(e))));
+    const fromTuples: string[][] =
+      suggestedFromParts.length > 0
+        ? suggestedFromParts
+        : suggestedFrom.map((s) => [s.trim()]);
+    const extra = fromTuples
+      .map((parts) => parts.map((p) => p.trim()))
+      .filter((parts) => parts.every(Boolean) && !have.has(tupleKey(parts)))
+      .map((parts) => ({
+        from: parts[0]!,
+        from_parts: parts,
+        to: "",
+      }));
     if (extra.length) setEntries([...map.entries, ...extra], { trackAll: true });
   }
 
   function applyPaste() {
-    const parsed = parseFromToPaste(pasteText);
+    const parsed = parseFromToPaste(pasteText, arity);
     if (!parsed.length) {
       setError("Paste TSV/CSV with from,to columns");
       return;
     }
     const merged = [...map.entries];
-    const byFrom = new Map(merged.map((e, i) => [e.from.trim(), i] as const));
+    const byFrom = new Map(
+      merged.map((e, i) => [tupleKey(fromPartsEff(e)), i] as const),
+    );
     for (const e of parsed) {
-      const i = byFrom.get(e.from.trim());
+      const i = byFrom.get(tupleKey(fromPartsEff(e)));
       if (i === undefined) {
-        byFrom.set(e.from.trim(), merged.length);
+        byFrom.set(tupleKey(fromPartsEff(e)), merged.length);
         merged.push(e);
       } else {
         merged[i] = e;
@@ -750,17 +787,78 @@ export function KeyMapEditor({
           ref storage: rows are project cache only (no warehouse write-back).
         </p>
       )}
-      <div className="grid grid-cols-2 gap-2">
-        <label className={labelClass}>
-          From column
-          <input
-            value={map.from_column ?? "from"}
-            onChange={(e) =>
-              onChange({ ...map, from_column: e.target.value })
-            }
-            className={`${fieldClass} font-mono`}
-          />
-        </label>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className={labelClass}>From columns</span>
+          <button
+            type="button"
+            onClick={() => {
+              const next = [...fromCols, `from_${fromCols.length + 1}`];
+              onChange({
+                ...map,
+                from_columns: next,
+                from_column: next[0],
+                entries: map.entries.map((e) => {
+                  const parts = fromPartsEff(e);
+                  while (parts.length < next.length) parts.push("");
+                  return {
+                    ...e,
+                    from: parts[0] ?? "",
+                    from_parts: parts,
+                  };
+                }),
+              });
+            }}
+            className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
+          >
+            + From
+          </button>
+        </div>
+        {fromCols.map((col, i) => (
+          <label key={`from-col-${i}`} className={labelClass}>
+            From[{i + 1}]
+            <div className="mt-1 flex gap-1">
+              <input
+                value={col}
+                onChange={(e) => {
+                  const next = [...fromCols];
+                  next[i] = e.target.value;
+                  onChange({
+                    ...map,
+                    from_columns: next,
+                    from_column: next[0],
+                  });
+                }}
+                className={`${fieldClass} mt-0 font-mono`}
+              />
+              {fromCols.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = fromCols.filter((_, j) => j !== i);
+                    onChange({
+                      ...map,
+                      from_columns: next,
+                      from_column: next[0],
+                      entries: map.entries.map((e) => {
+                        const parts = fromPartsEff(e).filter((_, j) => j !== i);
+                        return {
+                          ...e,
+                          from: parts[0] ?? "",
+                          from_parts: parts,
+                        };
+                      }),
+                    });
+                  }}
+                  className="rounded border border-slate-700 px-2 text-slate-500 hover:text-rose-300"
+                  aria-label="Remove From column"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </label>
+        ))}
         <label className={labelClass}>
           To column
           <input
@@ -771,14 +869,13 @@ export function KeyMapEditor({
         </label>
       </div>
       <p className="text-[11px] leading-snug text-slate-500">
-        Names of the alias / canon columns in the seed or warehouse table.
-        Leave as{" "}
-        <span className="font-mono text-slate-400">from</span> /{" "}
-        <span className="font-mono text-slate-400">to</span> for the default
-        seed. Change only when storage is an existing table or model with
-        different names (e.g.{" "}
-        <span className="font-mono text-slate-400">alias</span> →{" "}
-        <span className="font-mono text-slate-400">company_id</span>).
+        Map relation column names. Arity {arity}: uniqueness is the From{" "}
+        <span className="font-mono text-slate-400">tuple</span> (ADR-0024).
+        Default seed header is{" "}
+        <span className="font-mono text-slate-400">
+          {fromCols.join(",")},{map.to_column ?? "to"}
+        </span>
+        .
       </p>
     </div>
   );
@@ -822,13 +919,17 @@ export function KeyMapEditor({
             Reload
           </button>
         )}
-      {suggestedFrom.length > 0 && (
+      {(suggestedFromParts.length > 0 || suggestedFrom.length > 0) && (
         <button
           type="button"
           onClick={addSuggested}
           className="rounded-md border border-amber-900/50 px-2.5 py-1.5 text-[12px] text-amber-200/90 hover:border-amber-700"
         >
-          Add unmatched ({suggestedFrom.length})
+          Add unmatched (
+          {suggestedFromParts.length > 0
+            ? suggestedFromParts.length
+            : suggestedFrom.length}
+          )
         </button>
       )}
       <button
@@ -896,14 +997,14 @@ export function KeyMapEditor({
         <thead className="sticky top-0 z-10 bg-[#0a1520] text-[10px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="w-10 px-3 py-2 font-semibold">#</th>
-            <th className="px-3 py-2 font-semibold">
-              From
-              {map.from_column && map.from_column !== "from" ? (
+            {fromCols.map((col, fi) => (
+              <th key={`fh-${fi}`} className="px-3 py-2 font-semibold">
+                From
                 <span className="ml-1 font-mono normal-case text-slate-600">
-                  ({map.from_column})
+                  ({col})
                 </span>
-              ) : null}
-            </th>
+              </th>
+            ))}
             <th className="px-3 py-2 font-semibold">
               To
               {map.to_column && map.to_column !== "to" ? (
@@ -921,7 +1022,7 @@ export function KeyMapEditor({
           </tr>
         </thead>
         <tbody>
-          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={4 + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
+          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
           {virtualRows.map((v) => { const {e,i}=rows[v.index]!; return (
             <tr
               key={i}
@@ -931,15 +1032,32 @@ export function KeyMapEditor({
               <td className="px-3 py-1 font-mono text-[11px] text-slate-600">
                 {i + 1}
               </td>
-              <td className="px-2 py-1">
-                <input
-                  data-col="from"
-                  value={e.from}
-                  onChange={(ev) => updateRow(i, { from: ev.target.value })}
-                  onKeyDown={(ev) => onCellKeyDown(ev, i, "from")}
-                  className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-sky-200/90 focus:border-slate-600 focus:bg-slate-950"
-                />
-              </td>
+              {fromCols.map((_, fi) => {
+                const parts = fromPartsEff(e);
+                return (
+                  <td key={`fc-${fi}`} className="px-2 py-1">
+                    <input
+                      data-col={fi === 0 ? "from" : `from-${fi}`}
+                      value={parts[fi] ?? ""}
+                      onChange={(ev) => {
+                        const nextParts = [...fromPartsEff(e)];
+                        while (nextParts.length < arity) nextParts.push("");
+                        nextParts[fi] = ev.target.value;
+                        updateRow(i, {
+                          from: nextParts[0] ?? "",
+                          from_parts: nextParts,
+                        });
+                      }}
+                      onKeyDown={(ev) =>
+                        fi === 0
+                          ? onCellKeyDown(ev, i, "from")
+                          : undefined
+                      }
+                      className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-sky-200/90 focus:border-slate-600 focus:bg-slate-950"
+                    />
+                  </td>
+                );
+              })}
               <td className="px-2 py-1">
                 <input
                   data-col="to"
@@ -975,7 +1093,7 @@ export function KeyMapEditor({
               </td>
             </tr>
           ); })}
-          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={4 + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
+          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
         </tbody>
       </table>
       {pickToOptions.length > 0 && (
@@ -1091,7 +1209,11 @@ export function KeyMapEditor({
                 value={pasteText}
                 onChange={(e) => setPasteText(e.target.value)}
                 rows={compact ? 3 : 6}
-                placeholder={"from,to\nwww,web\nshop,store"}
+                placeholder={
+                  arity > 1
+                    ? `${fromCols.join(",")},${map.to_column ?? "to"}\nid,2024-06-01,sk1`
+                    : "from,to\nwww,web\nshop,store"
+                }
                 className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 font-mono text-[12px] text-slate-200"
               />
               <button
@@ -1122,7 +1244,7 @@ export function KeyMapEditor({
           : ["left", "right", "both"];
 
         const runApply = (side: ApplySide) => {
-          const v = validateKeyMapEntries(map.entries);
+          const v = validateKeyMapEntries(map.entries, arity);
           if (!v.ok) {
             setError(v.error);
             return;
@@ -1225,11 +1347,15 @@ export function KeyMapEditor({
                   </span>
                   {" · on "}
                   <span className="font-mono text-slate-300">
-                    {joinApplyContext.leftOn}
+                    {(joinApplyContext.leftOnCols ?? [joinApplyContext.leftOn]).join(
+                      ", ",
+                    )}
                   </span>
                   {" = "}
                   <span className="font-mono text-slate-300">
-                    {joinApplyContext.rightOn}
+                    {(
+                      joinApplyContext.rightOnCols ?? [joinApplyContext.rightOn]
+                    ).join(", ")}
                   </span>
                   . Opened from{" "}
                   <span className="font-semibold text-amber-100">
@@ -1284,6 +1410,7 @@ export function KeyMapEditor({
             storage:
               map.storage?.kind === "source" ? map.storage : undefined,
             from_column: map.from_column,
+            from_columns: fromCols,
             to_column: map.to_column,
             editable_columns: map.editable_columns,
           }}

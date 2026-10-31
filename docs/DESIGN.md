@@ -146,7 +146,7 @@ Unmatched / near-miss keys are fixed with explicit steps, not fuzzy Join ON ([AD
 
 - **Near-miss** → `NormalizeKey` (trim/case/spaces/zeros) on Left / Right / Both
 - **Aliases** → `KeyMap` From→To table + `ApplyKeyMap`; export as `seeds/map_*.csv` (table after `dbt seed`). After first export the seed is source of truth (sync back into the editor).
-- EmptyHero includes a virtual Key mapping playground; Help → KeyMap labs cover hub/crosswalk/dual/codes/hop, seed/source/ref, and PG routes (`scripts/examples/`, `dwh_tests`). Classic F&B: `dirty_join` / `daily_pnl` / `monthly_pnl`. Patterns: [keymap-workflows.md](keymap-workflows.md).
+- EmptyHero includes a virtual Key mapping playground; Help → KeyMap labs cover hub/crosswalk/dual/codes/hop, seed/source/ref, and PG routes (`scripts/examples/`, `dwh_tests`). Classic F&B: `dirty_join` / `daily_pnl` / `monthly_pnl`. Patterns: [keymap-workflows.md](keymap-workflows.md). Composite From + multi-key Join Auto: [ADR-0024](adr/0024-keymap-composite.md).
 
 ## 10. Next — Definition of Done (*Return and edit*)
 

@@ -4,8 +4,8 @@ use crate::destination::{
 use crate::dialect::{
     validate_engine_execution, workspace_needs_s3_landing, WarehouseDialect,
 };
-use crate::emit::{
-    emit_transform_step_ex, key_map_seed_csv_named, key_map_seed_name,
+    use crate::emit::{
+    emit_transform_step_ex, key_map_seed_csv_cols, key_map_seed_name,
     substitute_query_placeholders, EmitSchemaOpts,
 };
 use crate::export_manifest::commit_export_plan;
@@ -84,21 +84,17 @@ fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
     out
 }
 
-/// map_id → (from_column, to_column) for ApplyKeyMap join emit.
-fn key_map_columns(workspace: &Workspace) -> HashMap<String, (String, String)> {
+/// map_id → (from_columns, to_column) for ApplyKeyMap join emit.
+fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, String)> {
     let mut out = HashMap::new();
     for km in &workspace.key_maps {
-        let from = if km.from_column.trim().is_empty() {
-            "from".into()
-        } else {
-            km.from_column.clone()
-        };
+        let froms = km.from_columns_eff();
         let to = if km.to_column.trim().is_empty() {
             "to".into()
         } else {
             km.to_column.clone()
         };
-        out.insert(km.id.clone(), (from, to));
+        out.insert(km.id.clone(), (froms, to));
     }
     out
 }
@@ -427,26 +423,20 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
 
     for (map_id, entries) in &key_maps {
         let seed = key_map_seed_name(map_id);
-        let (from_col, to_col) = workspace
+        let (from_cols, to_col) = workspace
             .key_map(map_id)
             .map(|m| {
-                (
-                    if m.from_column.trim().is_empty() {
-                        "from".to_string()
-                    } else {
-                        m.from_column.clone()
-                    },
-                    if m.to_column.trim().is_empty() {
-                        "to".to_string()
-                    } else {
-                        m.to_column.clone()
-                    },
-                )
+                let to = if m.to_column.trim().is_empty() {
+                    "to".to_string()
+                } else {
+                    m.to_column.clone()
+                };
+                (m.from_columns_eff(), to)
             })
-            .unwrap_or_else(|| ("from".into(), "to".into()));
+            .unwrap_or_else(|| (vec!["from".into()], "to".into()));
         plan.insert(
             format!("seeds/{seed}.csv"),
-            key_map_seed_csv_named(entries, &from_col, &to_col),
+            key_map_seed_csv_cols(entries, &from_cols, &to_col),
         );
     }
 
@@ -1387,6 +1377,8 @@ mod tests {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries: map.entries.clone(),
                     },
@@ -1465,6 +1457,8 @@ mod tests {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries: map.entries.clone(),
                     },

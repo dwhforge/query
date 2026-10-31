@@ -152,7 +152,7 @@ fn preview_key_map_opts(
 ) -> Result<
     (
         HashMap<String, String>,
-        HashMap<String, (String, String)>,
+        HashMap<String, (Vec<String>, String)>,
     ),
     String,
 > {
@@ -160,17 +160,13 @@ fn preview_key_map_opts(
     let mut relations = HashMap::new();
     let mut columns = HashMap::new();
     for km in &workspace.key_maps {
-        let from = if km.from_column.trim().is_empty() {
-            "from".into()
-        } else {
-            km.from_column.clone()
-        };
+        let froms = km.from_columns_eff();
         let to = if km.to_column.trim().is_empty() {
             "to".into()
         } else {
             km.to_column.clone()
         };
-        columns.insert(km.id.clone(), (from, to));
+        columns.insert(km.id.clone(), (froms, to));
         if let KeyMapStorage::Source { source, table, .. } = &km.storage {
             if let Some(dsn) = dsns.get(&km.id) {
                 relations.insert(
@@ -189,7 +185,7 @@ fn compile_step(
     last_cte: &HashMap<String, String>,
     sources: &[SourceDef],
     key_map_relations: &HashMap<String, String>,
-    key_map_columns: &HashMap<String, (String, String)>,
+    key_map_columns: &HashMap<String, (Vec<String>, String)>,
 ) -> Result<String, String> {
     match step {
         TransformationStep::LoadCsv { path } => Ok(format!(
@@ -294,6 +290,8 @@ mod tests {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: "map_x".into(),
                         entries: vec![],
                     },

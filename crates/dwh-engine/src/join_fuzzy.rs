@@ -102,6 +102,10 @@ pub struct JoinKeyFuzzySuggest {
 }
 
 /// Suggest left→right alias pairs for keys that do not already match exactly.
+///
+/// `key_index`: which Join ON column to score when `left_on.len() > 1`
+/// ([ADR-0024](../../../docs/adr/0024-keymap-composite.md) per-column mode).
+/// `None` / `Some(0)` for single-key Joins. Out of range → error.
 pub fn join_key_fuzzy_suggest(
     db: &DbSession,
     workspace: &Workspace,
@@ -109,6 +113,31 @@ pub fn join_key_fuzzy_suggest(
     sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
+) -> Result<JoinKeyFuzzySuggest, String> {
+    join_key_fuzzy_suggest_on(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Like [`join_key_fuzzy_suggest`] with explicit Join key index (per-column) or composite-map mode.
+pub fn join_key_fuzzy_suggest_on(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
+    host_query_id: &str,
+    join_step_index: usize,
+    key_index: Option<usize>,
+    composite_indices: Option<Vec<usize>>,
+    composite_fuzzy_slot: Option<usize>,
 ) -> Result<JoinKeyFuzzySuggest, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
     let host = resolved
@@ -159,48 +188,90 @@ pub fn join_key_fuzzy_suggest(
     let right_columns = describe_cte(db, &compiled, &right_cte).unwrap_or_default();
     let existing_aliases = collect_alias_examples(workspace);
 
-    // Composite keys: ApplyKeyMap is single-column; glued " · " pairs would not apply.
-    if left_on.len() != 1 {
-        return Ok(JoinKeyFuzzySuggest {
-            host_query_id: host_query_id.to_string(),
-            join_step_index,
-            left_on: left_on.clone(),
-            right_on: right_on.clone(),
-            metric: "jaro_winkler_similarity".into(),
-            score_cutoff: SCORE_CUTOFF,
-            suggestions: vec![],
-            leftover_left: vec![],
-            leftover_right: vec![],
-            scanned_left: 0,
-            scanned_right: 0,
-            unmatched_left_total: 0,
-            unmatched_right_total: 0,
-            truncated: false,
-            disabled_reason: Some(format!(
-                "Auto supports a single join key for now (this Join has {} columns: {}). Use Probe, or map one column at a time later.",
-                left_on.len(),
-                left_on.join(", ")
-            )),
-            chat_context: FuzzyChatContext {
-                left_query_id: host_query_id.to_string(),
+    // Composite-map mode ([ADR-0024]): exact on non-fuzzy cols + fuzzy on primary slot.
+    if let Some(indices) = composite_indices.as_ref() {
+        if indices.len() >= 2 {
+            return join_key_fuzzy_suggest_composite(
+                db,
+                workspace,
+                host_query_id,
+                join_step_index,
+                &compiled,
+                &left_cte,
+                &right_cte,
+                &left_on,
+                &right_on,
                 left_query_name,
-                right_query_id,
                 right_query_name,
+                right_query_id,
                 left_lineage,
                 right_lineage,
                 left_columns,
                 right_columns,
-                leftover_left_samples: vec![],
-                leftover_right_samples: vec![],
                 existing_aliases,
-                right_to_universe: vec![],
-                context_truncated: false,
-            },
-        });
+                indices,
+                composite_fuzzy_slot.unwrap_or(0),
+            );
+        }
     }
 
-    let lkey = key_expr("l", &left_on);
-    let rkey = key_expr("r", &right_on);
+    // Per-column mode on composite Join ([ADR-0024]). No glued " · " From values.
+    let key_i = if left_on.len() == 1 {
+        0usize
+    } else {
+        match key_index {
+            Some(i) if i < left_on.len() => i,
+            Some(i) => {
+                return Err(format!(
+                    "key_index {i} out of range for Join with {} keys",
+                    left_on.len()
+                ));
+            }
+            None => {
+                return Ok(JoinKeyFuzzySuggest {
+                    host_query_id: host_query_id.to_string(),
+                    join_step_index,
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                    metric: "jaro_winkler_similarity".into(),
+                    score_cutoff: SCORE_CUTOFF,
+                    suggestions: vec![],
+                    leftover_left: vec![],
+                    leftover_right: vec![],
+                    scanned_left: 0,
+                    scanned_right: 0,
+                    unmatched_left_total: 0,
+                    unmatched_right_total: 0,
+                    truncated: false,
+                    disabled_reason: Some(format!(
+                        "This Join has {} keys ({}). Choose per-column Suggest (which key to remap) or composite-map mode — do not glue columns into one From.",
+                        left_on.len(),
+                        left_on.join(", ")
+                    )),
+                    chat_context: FuzzyChatContext {
+                        left_query_id: host_query_id.to_string(),
+                        left_query_name,
+                        right_query_id,
+                        right_query_name,
+                        left_lineage,
+                        right_lineage,
+                        left_columns,
+                        right_columns,
+                        leftover_left_samples: vec![],
+                        leftover_right_samples: vec![],
+                        existing_aliases,
+                        right_to_universe: vec![],
+                        context_truncated: false,
+                    },
+                });
+            }
+        }
+    };
+    let left_key_cols = vec![left_on[key_i].clone()];
+    let right_key_cols = vec![right_on[key_i].clone()];
+
+    let lkey = key_expr("l", &left_key_cols);
+    let rkey = key_expr("r", &right_key_cols);
 
     let left_keys_sql = format!(
         "SELECT DISTINCT {lkey} AS k FROM {left_cte} l\n\
@@ -647,6 +718,226 @@ fn query_three_side_keys(
     })
 }
 
+/// Composite-map Suggest: From = tuple of Join keys; To = right value of fuzzy column.
+/// Non-fuzzy parts must match exactly; fuzzy part uses the shared key matcher.
+fn join_key_fuzzy_suggest_composite(
+    db: &DbSession,
+    _workspace: &Workspace,
+    host_query_id: &str,
+    join_step_index: usize,
+    compiled: &CompiledCtes,
+    left_cte: &str,
+    right_cte: &str,
+    left_on: &[String],
+    right_on: &[String],
+    left_query_name: String,
+    right_query_name: String,
+    right_query_id: String,
+    left_lineage: String,
+    right_lineage: String,
+    left_columns: Vec<ColumnMetadata>,
+    right_columns: Vec<ColumnMetadata>,
+    existing_aliases: Vec<FuzzyAliasExample>,
+    indices: &[usize],
+    fuzzy_slot: usize,
+) -> Result<JoinKeyFuzzySuggest, String> {
+    for &i in indices {
+        if i >= left_on.len() {
+            return Err(format!(
+                "composite index {i} out of range for Join with {} keys",
+                left_on.len()
+            ));
+        }
+    }
+    if fuzzy_slot >= indices.len() {
+        return Err(format!(
+            "composite_fuzzy_slot {fuzzy_slot} out of range for {} composite keys",
+            indices.len()
+        ));
+    }
+    let sep = '\u{1f}';
+    let left_exprs: Vec<String> = indices
+        .iter()
+        .map(|&i| format!("CAST(l.{} AS VARCHAR)", quote_ident(&left_on[i])))
+        .collect();
+    let right_exprs: Vec<String> = indices
+        .iter()
+        .map(|&i| format!("CAST(r.{} AS VARCHAR)", quote_ident(&right_on[i])))
+        .collect();
+    let left_concat = left_exprs
+        .iter()
+        .map(|e| format!("coalesce({e}, '')"))
+        .collect::<Vec<_>>()
+        .join(&format!(" || chr({}) || ", sep as u32));
+    let right_concat = right_exprs
+        .iter()
+        .map(|e| format!("coalesce({e}, '')"))
+        .collect::<Vec<_>>()
+        .join(&format!(" || chr({}) || ", sep as u32));
+
+    let left_keys_sql = format!(
+        "SELECT DISTINCT {left_concat} AS k FROM {left_cte} l\n\
+         WHERE length(trim({})) > 0",
+        left_exprs[fuzzy_slot]
+    );
+    let right_keys_sql = format!(
+        "SELECT DISTINCT {right_concat} AS k FROM {right_cte} r\n\
+         WHERE length(trim({})) > 0",
+        right_exprs[fuzzy_slot]
+    );
+    let keys_sql = compiled.wrap_select(&format!(
+        "SELECT side, k FROM (\n\
+           SELECT 'left' AS side, k FROM ({left_keys_sql}) lk\n\
+           ANTI JOIN ({right_keys_sql}) rk USING (k)\n\
+           ORDER BY k LIMIT {cap}\n\
+         ) only_left\n\
+         UNION ALL\n\
+         SELECT side, k FROM (\n\
+           SELECT 'right' AS side, k FROM ({right_keys_sql}) rk\n\
+           ORDER BY k LIMIT {cap}\n\
+         ) all_right",
+        cap = KEY_SCAN_CAP
+    ));
+
+    let (left_tuples, right_tuples) = query_two_side_tuple_keys(db, &keys_sql, sep)?;
+    let scanned_left = left_tuples.len() as u64;
+    let scanned_right = right_tuples.len() as u64;
+
+    // Index right by exact non-fuzzy parts → candidates on fuzzy part.
+    let mut right_by_exact: std::collections::HashMap<String, Vec<(String, Vec<String>)>> =
+        std::collections::HashMap::new();
+    for parts in &right_tuples {
+        let exact_key: String = parts
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != fuzzy_slot)
+            .map(|(_, p)| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\0");
+        right_by_exact
+            .entry(exact_key)
+            .or_default()
+            .push((parts[fuzzy_slot].clone(), parts.clone()));
+    }
+
+    let mut suggestions = Vec::new();
+    let mut leftover_left = Vec::new();
+    for left_parts in &left_tuples {
+        let exact_key: String = left_parts
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != fuzzy_slot)
+            .map(|(_, p)| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\0");
+        let Some(cands) = right_by_exact.get(&exact_key) else {
+            leftover_left.push(left_parts.join(" · "));
+            continue;
+        };
+        let left_rec = [MatchRecord {
+            key: left_parts[fuzzy_slot].clone(),
+            label: left_parts[fuzzy_slot].clone(),
+        }];
+        let right_recs: Vec<MatchRecord> = cands
+            .iter()
+            .map(|(fk, _)| MatchRecord {
+                key: fk.clone(),
+                label: fk.clone(),
+            })
+            .collect();
+        let mut pairs = match_keys(
+            &left_rec,
+            &right_recs,
+            KeyMatchOptions::default(),
+            MatchPolicy::JoinKeyTypos,
+            CandidateSearch::Exhaustive,
+        );
+        if pairs.is_empty() {
+            leftover_left.push(left_parts.join(" · "));
+            continue;
+        }
+        pairs.sort_by(|a, b| b.score.total_cmp(&a.score));
+        let mut best = pairs.remove(0);
+        best.from_key = left_parts.join(" · ");
+        best.from_parts = left_parts.clone();
+        // To = right fuzzy-column value (canonical key for Apply overwrite).
+        suggestions.push(best);
+    }
+    suggestions.truncate(MAX_SUGGESTIONS);
+    suggestions.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.from_key.cmp(&b.from_key))
+    });
+
+    let leftover_right: Vec<String> = Vec::new();
+    let right_to_universe: Vec<String> = right_tuples
+        .iter()
+        .take(60)
+        .map(|p| p[fuzzy_slot].clone())
+        .collect();
+
+    Ok(JoinKeyFuzzySuggest {
+        host_query_id: host_query_id.to_string(),
+        join_step_index,
+        left_on: left_on.to_vec(),
+        right_on: right_on.to_vec(),
+        metric: "jaro_winkler_similarity".into(),
+        score_cutoff: SCORE_CUTOFF,
+        suggestions,
+        leftover_left,
+        leftover_right,
+        scanned_left,
+        scanned_right,
+        unmatched_left_total: scanned_left,
+        unmatched_right_total: 0,
+        truncated: false,
+        disabled_reason: None,
+        chat_context: FuzzyChatContext {
+            left_query_id: host_query_id.to_string(),
+            left_query_name,
+            right_query_id,
+            right_query_name,
+            left_lineage,
+            right_lineage,
+            left_columns,
+            right_columns,
+            leftover_left_samples: vec![],
+            leftover_right_samples: vec![],
+            existing_aliases,
+            right_to_universe,
+            context_truncated: false,
+        },
+    })
+}
+
+fn query_two_side_tuple_keys(
+    db: &DbSession,
+    sql: &str,
+    sep: char,
+) -> Result<(Vec<Vec<String>>, Vec<Vec<String>>), String> {
+    db.with_conn(|conn| {
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| format!("composite keys prepare: {e}"))?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let side: String = row.get(0).map_err(|e| e.to_string())?;
+            let k: String = row.get(1).map_err(|e| e.to_string())?;
+            let parts: Vec<String> = k.split(sep).map(|s| s.to_string()).collect();
+            if side == "left" {
+                left.push(parts);
+            } else {
+                right.push(parts);
+            }
+        }
+        Ok((left, right))
+    })
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,7 +1085,11 @@ mod tests {
             .disabled_reason
             .as_deref()
             .unwrap_or("")
-            .contains("single join key"));
+            .contains("per-column"));
+        let scored =
+            join_key_fuzzy_suggest_on(&db, &ws, &[], &[], "fact", 1, Some(0), None, None)
+                .unwrap();
+        assert!(scored.disabled_reason.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }

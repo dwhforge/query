@@ -26,8 +26,8 @@ pub struct EmitSchemaOpts<'a> {
     pub query_columns: Option<&'a HashMap<String, Vec<String>>>,
     /// ApplyKeyMap: map_id → SQL relation (e.g. `{{ ref('map_x') }}`) for seed join on export.
     pub key_map_relations: Option<&'a HashMap<String, String>>,
-    /// ApplyKeyMap: map_id → (from_column, to_column) on the map relation.
-    pub key_map_columns: Option<&'a HashMap<String, (String, String)>>,
+    /// ApplyKeyMap: map_id → (from_columns, to_column) on the map relation.
+    pub key_map_columns: Option<&'a HashMap<String, (Vec<String>, String)>>,
 }
 
 /// Emit a mid-chain / transform step. `relations` maps query_id → SQL relation
@@ -255,12 +255,15 @@ pub fn emit_transform_step_ex(
         }
         TransformationStep::ApplyKeyMap {
             column,
+            columns,
+            output_column,
             map_id,
             entries,
         } => {
             require_prev(prev, "ApplyKeyMap")?;
-            if column.trim().is_empty() {
-                return Err("ApplyKeyMap: column must be non-empty".into());
+            let fact_cols = crate::model::apply_keymap_columns(column, columns);
+            if fact_cols.is_empty() || fact_cols.iter().any(|c| c.trim().is_empty()) {
+                return Err("ApplyKeyMap: columns must be non-empty".into());
             }
             if map_id.trim().is_empty() {
                 return Err("ApplyKeyMap: map_id must be non-empty".into());
@@ -268,18 +271,31 @@ pub fn emit_transform_step_ex(
             let seed_rel = opts
                 .key_map_relations
                 .and_then(|m| m.get(map_id).map(|s| s.as_str()));
-            let (from_col, to_col) = opts
+            let (from_cols, to_col) = opts
                 .key_map_columns
                 .and_then(|m| m.get(map_id))
-                .map(|(f, t)| (f.as_str(), t.as_str()))
-                .unwrap_or(("from", "to"));
+                .map(|(fs, t)| (fs.clone(), t.as_str()))
+                .unwrap_or_else(|| (vec!["from".into()], "to"));
+            if from_cols.len() != fact_cols.len() {
+                return Err(format!(
+                    "ApplyKeyMap: fact columns ({}) vs map from_columns ({})",
+                    fact_cols.len(),
+                    from_cols.len()
+                ));
+            }
+            let out = output_column
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(fact_cols[0].as_str());
             emit_apply_key_map(
                 dialect,
                 prev,
-                column,
+                &fact_cols,
+                out,
                 entries,
                 seed_rel,
-                from_col,
+                &from_cols,
                 to_col,
                 opts.prev_columns,
             )
@@ -402,74 +418,147 @@ fn emit_normalize_key(
     emit_overwrite_columns(dialect, prev, &overwrites, prev_columns)
 }
 
+fn output_column_exists_on_prev(
+    output_column: &str,
+    fact_cols: &[String],
+    prev_columns: Option<&[String]>,
+) -> bool {
+    let fold = ascii_fold_name(output_column);
+    if let Some(cols) = prev_columns {
+        return cols.iter().any(|c| ascii_fold_name(c) == fold);
+    }
+    // Without schema: treat as overwrite only when output is one of the Apply fact cols.
+    fact_cols.iter().any(|c| ascii_fold_name(c) == fold)
+}
+
 fn emit_apply_key_map(
     dialect: WarehouseDialect,
     prev: &str,
-    column: &str,
+    fact_cols: &[String],
+    output_column: &str,
     entries: &[KeyMapEntry],
     seed_relation: Option<&str>,
-    from_col: &str,
+    from_cols: &[String],
     to_col: &str,
     prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
-    let qcol = quote_ident(column);
-    let q_from = quote_ident(from_col);
+    let q_out = quote_ident(output_column);
     let q_to = quote_ident(to_col);
+    let n = fact_cols.len();
+    debug_assert_eq!(n, from_cols.len());
+    let out_exists = output_column_exists_on_prev(output_column, fact_cols, prev_columns);
+
     let map_sql = if let Some(rel) = seed_relation {
         format!("{rel} AS m")
     } else if entries.is_empty() {
-        // No-op remap (identity) — still valid after empty map create.
-        return emit_overwrite_columns(
-            dialect,
-            prev,
-            &[(column.to_string(), format!("CAST({qcol} AS VARCHAR)"))],
-            prev_columns,
-        );
+        // No map rows: keep existing output, or add NULL for a new column (ADR-0024).
+        if out_exists {
+            return emit_overwrite_columns(
+                dialect,
+                prev,
+                &[(
+                    output_column.to_string(),
+                    format!("CAST({} AS VARCHAR)", quote_ident(output_column)),
+                )],
+                prev_columns,
+            );
+        }
+        return match dialect {
+            WarehouseDialect::Duckdb => Ok(format!(
+                "SELECT t.*, CAST(NULL AS VARCHAR) AS {q_out} FROM {prev} AS t"
+            )),
+            WarehouseDialect::Postgres => {
+                let Some(cols) = prev_columns else {
+                    return Err("ApplyKeyMap (postgres): prev_columns required".into());
+                };
+                let mut parts: Vec<String> = cols
+                    .iter()
+                    .map(|c| format!("t.{}", quote_ident(c)))
+                    .collect();
+                parts.push(format!("CAST(NULL AS TEXT) AS {q_out}"));
+                Ok(format!("SELECT {} FROM {prev} AS t", parts.join(", ")))
+            }
+        };
     } else {
+        let aliases: Vec<String> = (0..n).map(|i| format!("from_val_{i}")).collect();
         let values = entries
             .iter()
             .map(|e| {
-                format!(
-                    "('{}', '{}')",
-                    escape_sql_string(e.from.trim()),
-                    escape_sql_string(&e.to)
-                )
+                let parts = e.from_parts_eff();
+                let mut cells: Vec<String> = parts
+                    .iter()
+                    .take(n)
+                    .map(|p| format!("'{}'", escape_sql_string(p.trim())))
+                    .collect();
+                while cells.len() < n {
+                    cells.push("''".into());
+                }
+                cells.push(format!("'{}'", escape_sql_string(&e.to)));
+                format!("({})", cells.join(", "))
             })
             .collect::<Vec<_>>()
             .join(", ");
-        format!("(VALUES {values}) AS m(from_val, to_val)")
+        let mut alias_list = aliases.clone();
+        alias_list.push("to_val".into());
+        format!("(VALUES {values}) AS m({})", alias_list.join(", "))
     };
 
-    let join_on = if seed_relation.is_some() {
-        format!("CAST(t.{qcol} AS VARCHAR) = CAST(m.{q_from} AS VARCHAR)")
+    let join_on = (0..n)
+        .map(|i| {
+            let qf = quote_ident(&fact_cols[i]);
+            if seed_relation.is_some() {
+                let qm = quote_ident(&from_cols[i]);
+                format!("CAST(t.{qf} AS VARCHAR) = CAST(m.{qm} AS VARCHAR)")
+            } else {
+                format!("CAST(t.{qf} AS VARCHAR) = m.from_val_{i}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    // Overwrite existing col: COALESCE(map, original). New col (ADR-0024): map value only.
+    let out_expr = if out_exists {
+        if seed_relation.is_some() {
+            format!("COALESCE(m.{q_to}, CAST(t.{q_out} AS VARCHAR))")
+        } else {
+            format!("COALESCE(m.to_val, CAST(t.{q_out} AS VARCHAR))")
+        }
+    } else if seed_relation.is_some() {
+        format!("CAST(m.{q_to} AS VARCHAR)")
     } else {
-        format!("CAST(t.{qcol} AS VARCHAR) = m.from_val")
-    };
-    let coalesce = if seed_relation.is_some() {
-        format!("COALESCE(m.{q_to}, CAST(t.{qcol} AS VARCHAR))")
-    } else {
-        format!("COALESCE(m.to_val, CAST(t.{qcol} AS VARCHAR))")
+        "CAST(m.to_val AS VARCHAR)".to_string()
     };
 
     match dialect {
-        WarehouseDialect::Duckdb => Ok(format!(
-            "SELECT t.* EXCLUDE ({qcol}), {coalesce} AS {qcol}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}"
-        )),
+        WarehouseDialect::Duckdb => {
+            if out_exists {
+                Ok(format!(
+                    "SELECT t.* EXCLUDE ({q_out}), {out_expr} AS {q_out}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}"
+                ))
+            } else {
+                Ok(format!(
+                    "SELECT t.*, {out_expr} AS {q_out}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}"
+                ))
+            }
+        }
         WarehouseDialect::Postgres => {
             let Some(cols) = prev_columns else {
                 return Err("ApplyKeyMap (postgres): prev_columns required".into());
             };
-            let fold = ascii_fold_name(column);
-            let parts: Vec<String> = cols
+            let fold = ascii_fold_name(output_column);
+            let mut parts: Vec<String> = cols
                 .iter()
                 .map(|c| {
-                    if ascii_fold_name(c) == fold {
-                        format!("{coalesce} AS {qcol}")
+                    if out_exists && ascii_fold_name(c) == fold {
+                        format!("{out_expr} AS {q_out}")
                     } else {
                         format!("t.{}", quote_ident(c))
                     }
                 })
                 .collect();
+            if !out_exists {
+                parts.push(format!("{out_expr} AS {q_out}"));
+            }
             Ok(format!(
                 "SELECT {}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}",
                 parts.join(", ")
@@ -498,14 +587,34 @@ pub fn key_map_seed_csv_named(
     from_col: &str,
     to_col: &str,
 ) -> String {
+    key_map_seed_csv_cols(entries, &[from_col.to_string()], to_col)
+}
+
+/// Seed CSV with N From columns + To ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+pub fn key_map_seed_csv_cols(
+    entries: &[KeyMapEntry],
+    from_cols: &[String],
+    to_col: &str,
+) -> String {
     let mut wtr = csv::WriterBuilder::new()
         .flexible(true)
         .from_writer(vec![]);
-    wtr.write_record([from_col, to_col])
-        .expect("csv header write");
+    let mut header: Vec<&str> = from_cols.iter().map(|s| s.as_str()).collect();
+    header.push(to_col);
+    wtr.write_record(&header).expect("csv header write");
+    let n = from_cols.len().max(1);
     for e in entries {
-        wtr.write_record([e.from.trim(), e.to.as_str()])
-            .expect("csv row write");
+        let parts = e.from_parts_eff();
+        let mut row: Vec<String> = (0..n)
+            .map(|i| {
+                parts
+                    .get(i)
+                    .map(|p| p.trim().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        row.push(e.to.clone());
+        wtr.write_record(&row).expect("csv row write");
     }
     let bytes = wtr.into_inner().expect("csv flush");
     String::from_utf8(bytes).expect("csv utf8")
@@ -596,7 +705,8 @@ pub fn parse_key_map_seed_csv_mode(
             ));
         }
         entries.push(KeyMapEntry {
-            from,
+            from: from.clone(),
+            from_parts: vec![from],
             to,
             ..Default::default()
         });
@@ -605,6 +715,92 @@ pub fn parse_key_map_seed_csv_mode(
 
     let mut lineno = 1usize;
     if !start_is_header {
+        push_row(&first, lineno)?;
+    }
+    for rec in records {
+        lineno += 1;
+        let rec = rec.map_err(|e| format!("key map seed line {lineno}: {e}"))?;
+        push_row(&rec, lineno)?;
+    }
+    Ok(entries)
+}
+
+/// Parse composite seed: header = from_cols… + to_col ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+pub fn parse_key_map_seed_csv_cols(
+    body: &str,
+    from_cols: &[String],
+    to_col: &str,
+) -> Result<Vec<KeyMapEntry>, String> {
+    let n = from_cols.len();
+    if n == 0 {
+        return Err("parse_key_map_seed_csv_cols: from_cols empty".into());
+    }
+    if n == 1 {
+        return parse_key_map_seed_csv_mode(
+            body,
+            KeyMapCsvMode::Header {
+                from_col: from_cols[0].as_str(),
+                to_col,
+            },
+        );
+    }
+    let mut rdr = csv::ReaderBuilder::new()
+        .flexible(true)
+        .has_headers(false)
+        .from_reader(body.as_bytes());
+    let mut records = rdr.records();
+    let first = match records.next() {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => return Err(format!("key map seed CSV: {e}")),
+        None => return Ok(vec![]),
+    };
+    if first.len() < n + 1 {
+        return Err(format!(
+            "key map seed CSV: need {} columns (from×{n} + to)",
+            n + 1
+        ));
+    }
+    let header_ok = (0..n).all(|i| {
+        first
+            .get(i)
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case(from_cols[i].trim())
+    }) && first
+        .get(n)
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case(to_col);
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push_row = |rec: &csv::StringRecord, lineno: usize| -> Result<(), String> {
+        let parts: Vec<String> = (0..n)
+            .map(|i| rec.get(i).unwrap_or("").trim().to_string())
+            .collect();
+        let to = rec.get(n).unwrap_or("").to_string();
+        if parts.iter().all(|p| p.is_empty()) && to.trim().is_empty() {
+            return Ok(());
+        }
+        if parts.iter().any(|p| p.is_empty()) {
+            return Err(format!("key map seed line {lineno}: empty from part"));
+        }
+        if to.is_empty() {
+            return Err(format!(
+                "key map seed line {lineno}: empty to for from {:?}",
+                parts
+            ));
+        }
+        if !seen.insert(parts.clone()) {
+            return Err(format!(
+                "key map seed: duplicate from tuple {:?} (line {lineno})",
+                parts
+            ));
+        }
+        entries.push(KeyMapEntry::parts(parts, to));
+        Ok(())
+    };
+    let mut lineno = 1usize;
+    if !header_ok {
         push_row(&first, lineno)?;
     }
     for rec in records {
@@ -1363,9 +1559,12 @@ mod tests {
         use crate::model::KeyMapEntry;
         let step = TransformationStep::ApplyKeyMap {
             column: "channel".into(),
+            columns: vec![],
+            output_column: None,
             map_id: "ch".into(),
             entries: vec![KeyMapEntry {
                 from: "web".into(),
+                from_parts: vec!["web".into()],
                 to: "online".into(),
                 ..Default::default()
             }],
@@ -1379,6 +1578,83 @@ mod tests {
     }
 
     #[test]
+    fn apply_key_map_composite_values_join() {
+        use crate::model::KeyMapEntry;
+        let step = TransformationStep::ApplyKeyMap {
+            column: String::new(),
+            columns: vec!["ext_id".into(), "day".into()],
+            output_column: Some("ext_id".into()),
+            map_id: "offers".into(),
+            entries: vec![KeyMapEntry::parts(
+                vec!["OFF-42".into(), "2024-06-01".into()],
+                "OFF-COKE",
+            )],
+        };
+        let mut cols = HashMap::new();
+        cols.insert(
+            "offers".into(),
+            (vec!["ext_id".into(), "day".into()], "offer_sk".into()),
+        );
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_columns: Some(&cols),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(sql.contains("from_val_0") && sql.contains("from_val_1"), "{sql}");
+        assert!(sql.contains("AND"), "{sql}");
+        assert!(sql.contains("OFF-42") && sql.contains("2024-06-01"), "{sql}");
+        assert!(sql.contains("EXCLUDE"), "{sql}");
+    }
+
+    #[test]
+    fn apply_key_map_new_output_column_no_exclude() {
+        use crate::model::KeyMapEntry;
+        // ADR-0024: output_column not on the fact → add column, do not EXCLUDE.
+        let step = TransformationStep::ApplyKeyMap {
+            column: String::new(),
+            columns: vec!["ext_offer_id".into(), "day".into()],
+            output_column: Some("offer_sk".into()),
+            map_id: "offers".into(),
+            entries: vec![KeyMapEntry::parts(
+                vec!["OF-100".into(), "2024-06-01".into()],
+                "SK-SUMMER-A",
+            )],
+        };
+        let mut cols = HashMap::new();
+        cols.insert(
+            "offers".into(),
+            (
+                vec!["ext_offer_id".into(), "as_of_day".into()],
+                "offer_sk".into(),
+            ),
+        );
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_columns: Some(&cols),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !sql.contains("EXCLUDE"),
+            "new output must not EXCLUDE missing col: {sql}"
+        );
+        assert!(sql.contains("t.*"), "{sql}");
+        assert!(sql.contains("AS \"offer_sk\""), "{sql}");
+        assert!(sql.contains("SK-SUMMER-A"), "{sql}");
+    }
+
+    #[test]
     fn headerless_csv_keeps_all_rows() {
         use crate::model::KeyMapEntry;
         let body = "www,web\nshop,store\n";
@@ -1387,16 +1663,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                KeyMapEntry {
-                    from: "www".into(),
-                    to: "web".into(),
-                    ..Default::default()
-                },
-                KeyMapEntry {
-                    from: "shop".into(),
-                    to: "store".into(),
-                    ..Default::default()
-                },
+                KeyMapEntry::pair("www", "web"),
+                KeyMapEntry::pair("shop", "store"),
             ]
         );
         let explicit = parse_key_map_seed_csv_mode(body, KeyMapCsvMode::Headerless).unwrap();

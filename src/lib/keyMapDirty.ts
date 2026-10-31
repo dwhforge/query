@@ -1,7 +1,8 @@
 import type { KeyMapEntry } from "../types/pipeline";
 import type { KeyMapDirtyDelta } from "./bridge";
+import { fromPartsEff, tupleKey } from "./keyMap";
 
-/** Session dirty buffer for source KeyMap edits (ADR-0022). */
+/** Session dirty buffer for source KeyMap edits (ADR-0022 / ADR-0024). */
 export class KeyMapDirtyBuffer {
   private upserts = new Map<string, KeyMapEntry>();
   private deleted = new Set<string>();
@@ -12,11 +13,13 @@ export class KeyMapDirtyBuffer {
   }
 
   noteUpsert(entry: KeyMapEntry) {
-    const from = entry.from.trim();
-    if (!from) return;
-    this.deleted.delete(from);
-    this.upserts.set(from, {
-      from,
+    const parts = fromPartsEff(entry).map((p) => p.trim());
+    if (!parts.length || parts.some((p) => !p)) return;
+    const key = tupleKey(parts);
+    this.deleted.delete(key);
+    this.upserts.set(key, {
+      from: parts[0]!,
+      from_parts: parts,
       to: entry.to,
       ...(entry.attrs && Object.keys(entry.attrs).length
         ? { attrs: { ...entry.attrs } }
@@ -24,17 +27,25 @@ export class KeyMapDirtyBuffer {
     });
   }
 
-  noteDelete(fromRaw: string) {
-    const from = fromRaw.trim();
-    if (!from) return;
-    this.upserts.delete(from);
-    this.deleted.add(from);
+  noteDelete(partsOrFrom: string | string[]) {
+    const parts = (
+      Array.isArray(partsOrFrom) ? partsOrFrom : [partsOrFrom]
+    ).map((p) => p.trim());
+    if (!parts.length || parts.some((p) => !p)) return;
+    const key = tupleKey(parts);
+    this.upserts.delete(key);
+    this.deleted.add(key);
   }
 
-  /** From key renamed: treat old as delete, new as upsert. */
-  noteRename(oldFrom: string, entry: KeyMapEntry) {
-    const prev = oldFrom.trim();
-    if (prev && prev !== entry.from.trim()) {
+  /** From tuple renamed: treat old as delete, new as upsert. */
+  noteRename(oldParts: string[], entry: KeyMapEntry) {
+    const prev = oldParts.map((p) => p.trim());
+    const next = fromPartsEff(entry).map((p) => p.trim());
+    if (
+      prev.length &&
+      prev.every(Boolean) &&
+      tupleKey(prev) !== tupleKey(next)
+    ) {
       this.noteDelete(prev);
     }
     this.noteUpsert(entry);
@@ -46,9 +57,21 @@ export class KeyMapDirtyBuffer {
 
   toDelta(): KeyMapDirtyDelta | null {
     if (this.isEmpty()) return null;
+    const deletedFromParts = [...this.deleted].map((k) => {
+      try {
+        const parsed = JSON.parse(k) as unknown;
+        if (Array.isArray(parsed)) return parsed.map(String);
+      } catch {
+        /* legacy single-from keys */
+      }
+      return [k];
+    });
     return {
       upserts: [...this.upserts.values()],
-      deletedFroms: [...this.deleted],
+      deletedFroms: deletedFromParts
+        .filter((p) => p.length === 1)
+        .map((p) => p[0]!),
+      deletedFromParts,
     };
   }
 
@@ -69,16 +92,18 @@ export function applyDirtyToPage(
   const delta = dirty.toDelta();
   if (!delta) return page;
   const deleted = new Set(
-    delta.deletedFroms.map((f) => f.trim()).filter(Boolean),
+    (delta.deletedFromParts?.length
+      ? delta.deletedFromParts
+      : delta.deletedFroms.map((f) => [f])
+    ).map((parts) => tupleKey(parts)),
   );
   const upserts = new Map<string, KeyMapEntry>();
   for (const e of delta.upserts) {
-    const from = e.from.trim();
-    if (from) upserts.set(from, e);
+    upserts.set(tupleKey(fromPartsEff(e)), e);
   }
   return page
-    .filter((e) => !deleted.has(e.from.trim()))
-    .map((e) => upserts.get(e.from.trim()) ?? e);
+    .filter((e) => !deleted.has(tupleKey(fromPartsEff(e))))
+    .map((e) => upserts.get(tupleKey(fromPartsEff(e))) ?? e);
 }
 
 export const KEYMAP_PAGE_SIZE = 200;

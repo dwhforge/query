@@ -13,6 +13,7 @@ export type DemoId =
   | "keymap_dual"
   | "keymap_codes"
   | "keymap_hop"
+  | "keymap_offer"
   | "keymap_pg"
   | "keymap_pg_dual"
   | "keymap_pg_seed"

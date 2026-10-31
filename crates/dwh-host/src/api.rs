@@ -9,7 +9,7 @@ use dwh_engine::{
     collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
     describe_workspace as run_describe_workspace, explain_join_key as run_explain_join_key,
     explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
-    join_key_fuzzy_suggest as run_join_key_fuzzy_suggest,
+    join_key_fuzzy_suggest_on as run_join_key_fuzzy_suggest_on,
     join_key_near_miss as run_join_key_near_miss,
     join_prepare_status as run_join_prepare_status, list_postgres_objects as run_list_postgres_objects,
     ensure_join_sides_materialized as run_ensure_join_sides,
@@ -658,6 +658,8 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "company".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: company_map.id.clone(),
                         entries: company_map.entries.clone(),
                     },
@@ -684,6 +686,8 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "org_name".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: company_map.id.clone(),
                         entries: company_map.entries.clone(),
                     },
@@ -789,6 +793,7 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
         "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
         "keymap_hop" | "hop" => labs::demo_keymap_hop(&fixtures),
+        "keymap_offer" | "offer" | "composite" => labs::demo_keymap_offer(&fixtures),
         "keymap_pg" | "keymap_pg_crosswalk" | "pg_crosswalk" => {
             labs::demo_keymap_pg_crosswalk(&fixtures)
         }
@@ -842,6 +847,15 @@ struct JoinDiagArgs {
     /// When true, Prepare rebuilds even if fingerprint matches (Reload sides).
     #[serde(default)]
     force: Option<bool>,
+    /// Per-column Suggest on composite Join ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+    #[serde(default)]
+    key_index: Option<usize>,
+    /// Composite-map mode: Join key indices that form From ([ADR-0024]).
+    #[serde(default)]
+    composite_indices: Option<Vec<usize>>,
+    /// Which slot within `composite_indices` is fuzzy-scored (others exact).
+    #[serde(default)]
+    composite_fuzzy_slot: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1653,13 +1667,16 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest(
+                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest_on(
                     &db,
                     &a.workspace,
                     &conns,
                     &sources,
                     &a.host_query_id,
                     a.join_step_index,
+                    a.key_index,
+                    a.composite_indices,
+                    a.composite_fuzzy_slot,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }

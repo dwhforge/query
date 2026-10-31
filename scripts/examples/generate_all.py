@@ -529,6 +529,107 @@ def gen_hop(out: Path) -> None:
     print(f"hop: {len(sales)} store-day rows → {d}")
 
 
+# ===========================================================================
+# Composite From — recycled external offer id + day → offer_sk (ADR-0024)
+# ===========================================================================
+
+# Same external id reappears on different days with different meanings.
+OFFERS = [
+    # (ext_id, day_offset, offer_sk, name, dirty_left_alias)
+    ("OF-100", 0, "SK-SUMMER-A", "Summer splash A", "OF-100"),
+    ("OF-100", 7, "SK-SUMMER-B", "Summer splash B", "OF100"),  # recycled id
+    ("OF-100", 14, "SK-SUMMER-C", "Summer splash C", "of-100"),
+    ("OF-200", 0, "SK-LOYAL-1", "Loyalty tier 1", "OF-200"),
+    ("OF-200", 10, "SK-LOYAL-2", "Loyalty tier 2", "OF_200"),
+    ("OF-300", 1, "SK-FLASH-1", "Flash sale Mon", "OF-300"),
+    ("OF-300", 8, "SK-FLASH-2", "Flash sale Tue", "OF-30O"),  # typo O/0
+    ("OF-400", 2, "SK-BUNDLE-X", "Bundle X", "OF-400"),
+    ("OF-400", 9, "SK-BUNDLE-Y", "Bundle Y", "OF400"),
+    ("OF-500", 3, "SK-WELCOME", "Welcome pack", "OF-500"),
+    ("OF-500", 15, "SK-WINBACK", "Winback", "OF-50O"),
+    ("OF-600", 4, "SK-VIP-A", "VIP weekend A", "OF-600"),
+    ("OF-600", 11, "SK-VIP-B", "VIP weekend B", "OF-600"),
+    ("OF-700", 5, "SK-APP-ONLY", "App-only deal", "OF-700"),
+    ("OF-700", 12, "SK-APP-PLUS", "App+ deal", "of700"),
+    ("OF-800", 6, "SK-PARTNER", "Partner promo", "OF-800"),
+]
+
+
+def gen_offer(out: Path) -> None:
+    d = out / "offer"
+    events = []
+    dim = []
+    map_rows = []
+    for ext, day_off, sk, name, dirty in OFFERS:
+        day = (START + timedelta(days=day_off)).isoformat()
+        # Canon dim uses clean offer_code
+        dim.append(
+            {
+                "as_of_day": day,
+                "offer_code": ext,
+                "offer_sk": sk,
+                "offer_name": name,
+            }
+        )
+        # Left events use dirty / recycled aliases
+        events.append(
+            {
+                "day": day,
+                "ext_offer_id": dirty,
+                "campaign": name,
+                "clicks": 20 + (day_off * 3 + len(ext)) % 80,
+            }
+        )
+        # Seed map: dirty alias + day → offer_sk (leave a few unmatched for Lens)
+        if dirty not in {"OF-50O", "of700"}:
+            map_rows.append(
+                {
+                    "ext_offer_id": dirty,
+                    "as_of_day": day,
+                    "offer_sk": sk,
+                }
+            )
+
+    # Extra fact rows across calendar so ≥100 rows
+    for i, day in enumerate(days()):
+        for j, (ext, _off, sk, name, dirty) in enumerate(OFFERS):
+            if (i + j) % 2 != 0:
+                continue
+            events.append(
+                {
+                    "day": day.isoformat(),
+                    "ext_offer_id": dirty if i % 5 else ext,
+                    "campaign": name,
+                    "clicks": 5 + ((i * 5 + j) % 40),
+                }
+            )
+
+    write_csv(
+        d / "offer_events.csv",
+        ["day", "ext_offer_id", "campaign", "clicks"],
+        events,
+    )
+    write_csv(
+        d / "offer_dim.csv",
+        ["as_of_day", "offer_code", "offer_sk", "offer_name"],
+        dim,
+    )
+    write_csv(
+        d / "map_offer_day.csv",
+        ["ext_offer_id", "as_of_day", "offer_sk"],
+        map_rows,
+    )
+    # seed-style for sync tests
+    write_csv(
+        d / "map_offer_day_seed.csv",
+        ["ext_offer_id", "as_of_day", "offer_sk"],
+        map_rows,
+    )
+    try_write_parquet(d / "offer_events.csv")
+    try_write_parquet(d / "offer_dim.csv")
+    print(f"offer: {len(events)} events, {len(map_rows)} map rows → {d}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -543,11 +644,13 @@ def main() -> None:
     gen_dual(out)
     gen_codes(out)
     gen_hop(out)
+    gen_offer(out)
     (out / "README.md").write_text(
         "# Generated KeyMap example fixtures\n\n"
         "Regenerate: `python scripts/examples/generate_all.py`\n\n"
         "Load into Postgres: `python scripts/examples/load_postgres.py` "
-        "(DSN via `DWH_PG_DSN` or default local lab).\n",
+        "(DSN via `DWH_PG_DSN` or default local lab).\n\n"
+        "Composite From lab: `offer/` (ADR-0024 recycled ext_offer_id + day).\n",
         encoding="utf-8",
     )
     print(f"done → {out}")

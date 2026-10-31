@@ -417,7 +417,7 @@ export type JoinLensProps = {
   onMapKey?: (
     side: JoinKeySide,
     fromValues: string[],
-    opts?: { toValues?: string[] },
+    opts?: { toValues?: string[]; fromParts?: string[][] },
   ) => void;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
   onPrepareBusy?: (busy: boolean) => void;
@@ -1746,8 +1746,11 @@ function JoinLensImpl({
             connections={connections}
             onAccept={
               onMapKey
-                ? (fromValues, toValues) => {
-                    onMapKey("left", fromValues, { toValues });
+                ? (fromValues, toValues, opts) => {
+                    onMapKey("left", fromValues, {
+                      toValues,
+                      fromParts: opts?.fromParts,
+                    });
                     const toast = `Opened KeyMap · ${fromValues.length} auto pair${fromValues.length === 1 ? "" : "s"}`;
                     setMapToast(toast);
                     window.setTimeout(() => {

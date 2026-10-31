@@ -109,7 +109,13 @@ export type TransformationStep =
     }
   | {
       type: "ApplyKeyMap";
-      payload: { column: string; map_id: string; entries?: KeyMapEntry[] };
+      payload: {
+        column?: string;
+        columns?: string[];
+        output_column?: string;
+        map_id: string;
+        entries?: KeyMapEntry[];
+      };
     };
 
 /** Deterministic key cleanup ops (near-miss Apply). */
@@ -122,6 +128,8 @@ export type NormalizeOp =
 
 export interface KeyMapEntry {
   from: string;
+  /** Composite From tuple ([ADR-0024]); soft-migrate: omit → [from]. */
+  from_parts?: string[];
   to: string;
   /** Extra editable WH columns (ADR-0022); keys ⊆ KeyMapDef.editable_columns. */
   attrs?: Record<string, string>;
@@ -139,7 +147,7 @@ export type KeyMapStorage =
       connection_id?: string;
     };
 
-/** Named From→To join-key alias table (ADR-0020 / ADR-0022). */
+/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -147,6 +155,8 @@ export interface KeyMapDef {
   /** Default seed; or bind to existing dbt ref / source. */
   storage?: KeyMapStorage;
   from_column?: string;
+  /** Composite From columns on the map relation; soft-migrate: omit → [from_column]. */
+  from_columns?: string[];
   to_column?: string;
   /** Extra WH columns editable in the UI (not From/To). */
   editable_columns?: string[];

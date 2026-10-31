@@ -109,6 +109,8 @@ export function FindRightDialog({
   const [llmError, setLlmError] = useState<string | null>(null);
   const [llmNote, setLlmNote] = useState<string | null>(null);
   const [llmCandidates, setLlmCandidates] = useState<Candidate[]>([]);
+  /** Which Join ON column to score (ADR-0024 per-column mode). */
+  const [keyIndex, setKeyIndex] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -133,6 +135,11 @@ export function FindRightDialog({
   }, [open]);
 
   useEffect(() => {
+    if (!open) return;
+    setKeyIndex(null);
+  }, [open, fromKey, joinStepIndex]);
+
+  useEffect(() => {
     if (!open || !fromKey) return;
     let cancelled = false;
     setLoading(true);
@@ -153,6 +160,7 @@ export function FindRightDialog({
           joinStepIndex,
           connections,
           sources,
+          keyIndex,
         );
         if (cancelled) return;
         setReport(r);
@@ -186,7 +194,16 @@ export function FindRightDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, fromKey, workspace, hostQueryId, joinStepIndex, connections, sources]);
+  }, [
+    open,
+    fromKey,
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+    sources,
+    keyIndex,
+  ]);
 
   const fuzzyPairs: FuzzyPair[] = useMemo(() => {
     if (!report) return [];
@@ -303,9 +320,34 @@ export function FindRightDialog({
             <p className="text-[11px] text-rose-300/90">{error}</p>
           )}
           {report?.disabled_reason && (
-            <p className="rounded border border-amber-900/50 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-100/90">
-              {report.disabled_reason}
-            </p>
+            <div className="space-y-2 rounded border border-amber-900/50 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-100/90">
+              <p>{report.disabled_reason}</p>
+              {report.left_on.length > 1 && (
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  <span className="w-full text-[10px] text-amber-200/70">
+                    Remap which Join key (per-column):
+                  </span>
+                  {report.left_on.map((col, i) => (
+                    <button
+                      key={`${col}-${i}`}
+                      type="button"
+                      onClick={() => setKeyIndex(i)}
+                      className="rounded border border-amber-800/80 bg-amber-950/50 px-2 py-0.5 font-mono text-[10px] text-amber-50 hover:border-teal-700 hover:text-teal-100"
+                    >
+                      {col}
+                      <span className="text-slate-500">
+                        {" "}
+                        ↔ {report.right_on[i] ?? "?"}
+                      </span>
+                    </button>
+                  ))}
+                  <span className="mt-1 w-full text-[10px] text-amber-200/70">
+                    Or open Join Lens Auto → composite map for From tuples
+                    (ADR-0024).
+                  </span>
+                </div>
+              )}
+            </div>
           )}
 
           {!loading && report && !report.disabled_reason && (

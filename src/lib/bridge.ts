@@ -411,16 +411,6 @@ export function joinKeyNearMiss(
   });
 }
 
-export type FuzzyPair = {
-  from_key: string;
-  to_key: string;
-  score: number;
-  edits: number;
-  ambiguous: boolean;
-  alt_to_key?: string | null;
-  alt_score?: number | null;
-};
-
 export type FuzzyFieldSample = {
   name: string;
   value: string;
@@ -454,6 +444,18 @@ export type FuzzyChatContext = {
   context_truncated?: boolean;
 };
 
+export type FuzzyPair = {
+  from_key: string;
+  to_key: string;
+  score: number;
+  edits: number;
+  ambiguous: boolean;
+  alt_to_key?: string | null;
+  alt_score?: number | null;
+  /** Composite From tuple when Suggest ran in composite-map mode (ADR-0024). */
+  from_parts?: string[];
+};
+
 export type JoinKeyFuzzySuggest = {
   host_query_id: string;
   join_step_index: number;
@@ -479,6 +481,10 @@ export function joinKeyFuzzySuggest(
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  /** Per-column Suggest when Join has multiple ON keys (ADR-0024). */
+  keyIndex?: number | null,
+  /** Composite-map mode: Join key indices forming From + which slot is fuzzy. */
+  composite?: { indices: number[]; fuzzySlot: number } | null,
 ): Promise<JoinKeyFuzzySuggest> {
   return invoke<JoinKeyFuzzySuggest>("join_key_fuzzy_suggest", {
     workspace,
@@ -486,6 +492,13 @@ export function joinKeyFuzzySuggest(
     joinStepIndex,
     connections,
     sources,
+    ...(keyIndex != null ? { keyIndex } : {}),
+    ...(composite
+      ? {
+          compositeIndices: composite.indices,
+          compositeFuzzySlot: composite.fuzzySlot,
+        }
+      : {}),
   });
 }
 
@@ -562,7 +575,10 @@ export type KeyMapWriteResult = {
 
 export type KeyMapDirtyDelta = {
   upserts: import("../types/pipeline").KeyMapEntry[];
+  /** Arity-1 deletes (back-compat). Prefer `deletedFromParts`. */
   deletedFroms: string[];
+  /** From-tuple deletes (ADR-0024). */
+  deletedFromParts?: string[][];
 };
 
 export type KeyMapReadResult = {
@@ -593,6 +609,7 @@ export function writeKeyMap(
       ? {
           upserts: delta.upserts,
           deletedFroms: delta.deletedFroms,
+          deletedFromParts: delta.deletedFromParts ?? [],
         }
       : null,
   });
@@ -721,6 +738,7 @@ export type DemoWorkspaceName =
   | "keymap_dual"
   | "keymap_codes"
   | "keymap_hop"
+  | "keymap_offer"
   | "keymap_pg"
   | "keymap_pg_dual"
   | "keymap_pg_seed"

@@ -1,6 +1,6 @@
 # KeyMap workflows
 
-Canon: [ADR-0020](adr/0020-join-key-mapping.md) · [ADR-0022](adr/0022-keymap-postgres-live-bind.md) · fixtures: [`scripts/examples/`](../scripts/examples/)
+Canon: [ADR-0020](adr/0020-join-key-mapping.md) · [ADR-0022](adr/0022-keymap-postgres-live-bind.md) · [ADR-0024](adr/0024-keymap-composite.md) · fixtures: [`scripts/examples/`](../scripts/examples/)
 
 ---
 
@@ -21,7 +21,7 @@ Local preview always federates through DuckDB (+ ATTACH). That is the UI engine,
 | Kind | When | Write-back |
 |------|------|------------|
 | **seed** | Slow-changing aliases, git/PR review | Export CSV / push to export tree |
-| **source** | Live ops dictionary in **Postgres** | Save upserts by From ([ADR-0022](adr/0022-keymap-postgres-live-bind.md)) |
+| **source** | Live ops dictionary in **Postgres** | Save upserts by From **tuple** ([ADR-0022](adr/0022-keymap-postgres-live-bind.md), [ADR-0024](adr/0024-keymap-composite.md)) |
 | **ref** | Map produced by a dbt model | None from the app |
 
 `source` is unavailable on pure R3 (no Postgres). R1/R2 support all three.
@@ -51,6 +51,7 @@ Local preview always federates through DuckDB (+ ATTACH). That is the UI engine,
 | Dual maps parties | files | seed ×2 | B3 | no |
 | Channel codes | files | seed | B4 | no |
 | Multi-hop stores | files | seed ×2 | B5 | no |
+| Composite offer id+day | files | seed arity-2 | composite From | no |
 | Ref map | files | **ref** | B4 | no |
 | Parquet lab | R3 | seed | B2 | no |
 | PG crosswalk | R1 | **source** | B2 | **yes** |
@@ -64,6 +65,15 @@ Postgres lab: `postgresql://postgres:postgres@localhost:5432/dwh_tests`, schema 
 python scripts/examples/generate_all.py
 python scripts/examples/load_postgres.py
 ```
+
+### Multi-key Join Auto (ADR-0024)
+
+| Mode | Lab | When |
+|------|-----|------|
+| **Per-column** | Crosswalk POS↔WMS (`sku` + `day`) | Other ON cols already align; remap only the dirty key |
+| **Composite map** | Offer id+day (`keymap_offer`) | From uniqueness needs the **tuple** (recycled ext id) |
+
+Never invent a glued `" · "` From string — Accept uses `from_parts`.
 
 ---
 

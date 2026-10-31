@@ -158,6 +158,7 @@ Full pattern matrix: [keymap-workflows.md](keymap-workflows.md). Regenerate: `py
 | `keymap_dual` | Restaurant brands vs AP vendors → `dim_party` | seed ×2 | no |
 | `keymap_codes` | eCom channel synonyms | seed | no |
 | `keymap_hop` | Café store → region → country | seed ×2 | no |
+| `keymap_offer` | Recycled offer id + day → `offer_sk` (composite From) | seed arity-2 | no |
 | `keymap_ref` | Channel map as `ref('map_channel')` | ref | no |
 | `keymap_parquet` | Same crosswalk on Parquet, duckdb dest | seed | no |
 | `keymap_pg` | Crosswalk facts+map in Postgres | source | yes |

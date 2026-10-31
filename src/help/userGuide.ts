@@ -124,7 +124,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "If you hand-edit the CSV in Git: reopen/sync to pull rows into the editor. Re-Export refuses when the CSV hash diverged (safe re-export) so DE edits are not clobbered — sync first, or export to a new folder.",
       "CI/CD: commit the export tree; run dbt seed (CSV → warehouse table) then dbt run. Models join {{ ref('map_…') }}, not a file path.",
       "Patterns (routes R1–R3, storage seed/source/ref, topologies hub/crosswalk/dual/codes/hop): docs/keymap-workflows.md. Shared one-map hub risks From collisions across sources — prefer dual maps when code spaces overlap. Dual lab: edit dim_party (master) as well as the two alias maps.",
-      "Demos: Help → KeyMap labs — F&B hub (seed); crosswalk / dual / codes / hop / ref / parquet (offline); PG crosswalk, PG dual, PG+seed, mixed parquet+PG (need dwh_tests + scripts/examples/load_postgres.py, connection conn_postgres).",
+      "Demos: Help → KeyMap labs — F&B hub (seed); crosswalk / dual / codes / hop / composite offer id+day / ref / parquet (offline); PG crosswalk, PG dual, PG+seed, mixed parquet+PG (need dwh_tests + scripts/examples/load_postgres.py, connection conn_postgres). Multi-key Join Auto: per-column or composite-map (ADR-0024).",
       "Classic F&B: dirty_join / daily_pnl / monthly_pnl (~900 rows×2). Non-lexical Auto/LLM leftovers: DEO→UBL, The South African Breweries→ABEV.",
     ],
   },

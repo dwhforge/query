@@ -110,6 +110,8 @@ pub fn demo_keymap_crosswalk(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "sku_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries: entries.clone(),
                     },
@@ -177,6 +179,8 @@ pub fn demo_keymap_dual(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "brand".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map_sales.id.clone(),
                         entries: sales_e,
                     },
@@ -200,6 +204,8 @@ pub fn demo_keymap_dual(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "vendor_name".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map_spend.id.clone(),
                         entries: spend_e,
                     },
@@ -242,6 +248,8 @@ pub fn demo_keymap_codes(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries: ch,
                     },
@@ -277,6 +285,8 @@ pub fn demo_keymap_hop(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "store_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: m1.id.clone(),
                         entries: e1,
                     },
@@ -286,6 +296,8 @@ pub fn demo_keymap_hop(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "region_id".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: m2.id.clone(),
                         entries: e2,
                     },
@@ -298,6 +310,74 @@ pub fn demo_keymap_hop(fixtures: &Path) -> Result<Workspace, String> {
         ],
         focus_query_id: "with_country".into(),
         key_maps: vec![m1, m2],
+    })
+}
+
+/// Composite From — recycled ext_offer_id + day → offer_sk (ADR-0024).
+pub fn demo_keymap_offer(fixtures: &Path) -> Result<Workspace, String> {
+    let events = ex_csv(fixtures, "offer/offer_events.csv")?;
+    let dim = ex_csv(fixtures, "offer/offer_dim.csv")?;
+    let body = fs::read_to_string(examples(fixtures).join("offer/map_offer_day.csv"))
+        .map_err(|e| format!("read offer map: {e}"))?;
+    let entries = dwh_pipeline::parse_key_map_seed_csv_cols(
+        &body,
+        &["ext_offer_id".into(), "as_of_day".into()],
+        "offer_sk",
+    )?;
+    let mut map = KeyMapDef::new("map_offer_day", "Offer id + day → offer_sk");
+    map.from_column = "ext_offer_id".into();
+    map.from_columns = vec!["ext_offer_id".into(), "as_of_day".into()];
+    map.to_column = "offer_sk".into();
+    map.entries = entries.clone();
+
+    Ok(Workspace {
+        queries: vec![
+            q(
+                "offer_events",
+                vec![TransformationStep::LoadCsv { path: events }],
+            ),
+            q(
+                "offer_dim",
+                vec![TransformationStep::LoadCsv { path: dim }],
+            ),
+            q(
+                "events_with_sk",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "offer_events".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: "ext_offer_id".into(),
+                        columns: vec!["ext_offer_id".into(), "day".into()],
+                        output_column: Some("offer_sk".into()),
+                        map_id: map.id.clone(),
+                        entries: entries.clone(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "offer_dim".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["offer_sk".into()],
+                        right_on: vec!["offer_sk".into()],
+                    },
+                ],
+            ),
+            q(
+                "join_before_map",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "offer_events".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "offer_dim".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["ext_offer_id".into(), "day".into()],
+                        right_on: vec!["offer_code".into(), "as_of_day".into()],
+                    },
+                ],
+            ),
+        ],
+        focus_query_id: "join_before_map".into(),
+        key_maps: vec![map],
     })
 }
 
@@ -340,6 +420,8 @@ pub fn demo_keymap_pg_crosswalk(_fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "sku_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries: vec![],
                     },
@@ -430,6 +512,8 @@ pub fn demo_keymap_pg_dual(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "brand".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map_sales.id.clone(),
                         entries: vec![],
                     },
@@ -453,6 +537,8 @@ pub fn demo_keymap_pg_dual(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "vendor_name".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map_spend.id.clone(),
                         entries: vec![],
                     },
@@ -504,6 +590,8 @@ pub fn demo_keymap_ref(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries,
                     },
@@ -547,6 +635,8 @@ pub fn demo_keymap_mixed(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "sku_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries: vec![],
                     },
@@ -600,6 +690,8 @@ pub fn demo_keymap_parquet(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "sku_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries,
                     },
@@ -639,6 +731,8 @@ pub fn demo_keymap_pg_seed(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel_code".into(),
+                        columns: vec![],
+                        output_column: None,
                         map_id: map.id.clone(),
                         entries,
                     },
@@ -666,7 +760,22 @@ mod tests {
         demo_keymap_dual(&f).expect("dual");
         demo_keymap_codes(&f).expect("codes");
         demo_keymap_hop(&f).expect("hop");
+        demo_keymap_offer(&f).expect("offer");
         demo_keymap_ref(&f).expect("ref");
         demo_keymap_parquet(&f).expect("parquet");
+    }
+
+    #[test]
+    fn offer_lab_preview_events_with_sk() {
+        let f = fixtures();
+        let mut ws = demo_keymap_offer(&f).expect("offer");
+        ws.focus_query_id = "events_with_sk".into();
+        let db = dwh_engine::DbSession::new().expect("duckdb");
+        let out = dwh_engine::preview_workspace(&db, &ws, &[], &[]).expect("preview");
+        assert!(
+            out.columns.iter().any(|c| c.name == "offer_sk"),
+            "new output_column offer_sk must appear: {:?}",
+            out.columns
+        );
     }
 }

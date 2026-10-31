@@ -1,7 +1,7 @@
 //! Seed ↔ KeyMap sync (ADR-0020): after first export, `seeds/map_*.csv` is SoT.
 
 use crate::emit::{
-    key_map_seed_csv_named, key_map_seed_name, parse_key_map_seed_csv_mode, KeyMapCsvMode,
+    key_map_seed_csv_cols, key_map_seed_csv_named, key_map_seed_name, parse_key_map_seed_csv_cols,
 };
 use crate::export_manifest::{hash_content, load_manifest, manifest_path, ExportManifest};
 use crate::model::{KeyMapDef, KeyMapEntry, TransformationStep, Workspace};
@@ -53,32 +53,20 @@ pub fn sync_key_maps_from_export(
             continue;
         }
         let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let (from_col, to_col) = workspace
+        let (from_cols, to_col) = workspace
             .key_maps
             .iter()
             .find(|m| key_map_seed_name(&m.id) == stem || m.id == stem)
             .map(|m| {
-                (
-                    if m.from_column.trim().is_empty() {
-                        "from".to_string()
-                    } else {
-                        m.from_column.clone()
-                    },
-                    if m.to_column.trim().is_empty() {
-                        "to".to_string()
-                    } else {
-                        m.to_column.clone()
-                    },
-                )
+                let to = if m.to_column.trim().is_empty() {
+                    "to".to_string()
+                } else {
+                    m.to_column.clone()
+                };
+                (m.from_columns_eff(), to)
             })
-            .unwrap_or_else(|| ("from".into(), "to".into()));
-        let entries = parse_key_map_seed_csv_mode(
-            &body,
-            KeyMapCsvMode::Header {
-                from_col: &from_col,
-                to_col: &to_col,
-            },
-        )?;
+            .unwrap_or_else(|| (vec!["from".into()], "to".into()));
+        let entries = parse_key_map_seed_csv_cols(&body, &from_cols, &to_col)?;
         seed_files.push(format!("seeds/{stem}.csv"));
 
         let existing = workspace
@@ -140,17 +128,13 @@ pub fn push_key_map_to_export(
     let rel = format!("seeds/{seed}.csv");
     let seeds_dir = export_root.join("seeds");
     fs::create_dir_all(&seeds_dir).map_err(|e| format!("mkdir seeds: {e}"))?;
-    let from_col = if map.from_column.trim().is_empty() {
-        "from"
-    } else {
-        map.from_column.trim()
-    };
+    let from_cols = map.from_columns_eff();
     let to_col = if map.to_column.trim().is_empty() {
-        "to"
+        "to".to_string()
     } else {
-        map.to_column.trim()
+        map.to_column.trim().to_string()
     };
-    let body = key_map_seed_csv_named(&map.entries, from_col, to_col);
+    let body = key_map_seed_csv_cols(&map.entries, &from_cols, &to_col);
     let path = export_root.join(&rel);
 
     let previous = if path.is_file() {
@@ -268,6 +252,8 @@ mod tests {
                 name: "q".into(),
                 steps: vec![TransformationStep::ApplyKeyMap {
                     column: "channel".into(),
+                    columns: vec![],
+                    output_column: None,
                     map_id: "map_channel".into(),
                     entries: vec![KeyMapEntry {
                         from: "old".into(),

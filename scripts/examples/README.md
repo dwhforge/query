@@ -36,5 +36,8 @@ Uses DuckDB CLI on `PATH` (or `pip install duckdb`) with the postgres extension.
 | `dual/` | B3 | Restaurant brands vs AP vendors → `dim_party` (edit master + two maps) |
 | `codes/` | B4 | Channel / region synonyms |
 | `hop/` | B5 | Store → region → country |
+| `offer/` | Composite From (ADR-0024) | Recycled ext_offer_id + day → offer_sk |
+
+POS+day crosswalk teaches **per-column** Auto; offer lab teaches **composite** From.
 
 See [docs/keymap-workflows.md](../../docs/keymap-workflows.md) Patterns.

@@ -460,6 +460,10 @@ export function AppMenu({
             onClick={() => run(() => onLoadDemo("keymap_hop"))}
           />
           <Item
+            label="Composite From — offer id + day (ADR-0024)"
+            onClick={() => run(() => onLoadDemo("keymap_offer"))}
+          />
+          <Item
             label="Ref map — channel model ref"
             onClick={() => run(() => onLoadDemo("keymap_ref"))}
           />

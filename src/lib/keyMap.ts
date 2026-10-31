@@ -13,6 +13,34 @@ import { slugify } from "../types/pipeline";
 
 export type ApplySide = "left" | "right" | "both";
 
+
+/** Effective From column names on the map relation (ADR-0024). */
+export function fromColumnsEff(map: KeyMapDef): string[] {
+  if (map.from_columns?.length) return map.from_columns;
+  const one = (map.from_column ?? "from").trim() || "from";
+  return [one];
+}
+
+/** Effective From parts on an entry (ADR-0024). */
+export function fromPartsEff(e: KeyMapEntry): string[] {
+  if (e.from_parts?.length) return e.from_parts;
+  return e.from?.trim() ? [e.from] : [];
+}
+
+/** Stable key for dirty-buffer / uniqueness (JSON tuple). */
+export function tupleKey(parts: string[]): string {
+  return JSON.stringify(parts.map((p) => p.trim()));
+}
+
+export function applyKeymapColumns(
+  column: string | undefined,
+  columns: string[] | undefined,
+): string[] {
+  if (columns?.length) return columns;
+  if (column?.trim()) return [column.trim()];
+  return [];
+}
+
 /**
  * Prefer the KeyMap already wired via ApplyKeyMap on this Join's key column
  * (host before Join for left; right query for right).
@@ -55,7 +83,11 @@ export function findApplyKeyMapIdForJoin(
         continue;
       }
       if (s.type === "ApplyKeyMap") {
-        if (names.has(fold(s.payload.column))) {
+        const cols = applyKeymapColumns(
+          s.payload.column,
+          s.payload.columns,
+        ).map(fold);
+        if (cols.some((c) => names.has(c))) {
           return s.payload.map_id;
         }
       }
@@ -89,6 +121,7 @@ export function emptyKeyMap(name = "Key map"): KeyMapDef {
     entries: [],
     storage: { kind: "seed" },
     from_column: "from",
+    from_columns: ["from"],
     to_column: "to",
   };
 }
@@ -103,22 +136,50 @@ export function keyMapSeedName(mapId: string): string {
   return id.startsWith("map_") ? id : `map_${id}`;
 }
 
-/** Trim from; reject empty to / duplicate from. */
+/** Trim From parts; reject empty to / duplicate tuples (ADR-0024). */
 export function validateKeyMapEntries(
   entries: KeyMapEntry[],
+  arity = 1,
 ): { ok: true; entries: KeyMapEntry[] } | { ok: false; error: string } {
+  const n = Math.max(1, arity);
   const cleaned: KeyMapEntry[] = [];
   const seen = new Set<string>();
   for (const e of entries) {
-    const from = e.from.trim();
-    if (!from) return { ok: false, error: "Empty From is not allowed" };
-    if (!e.to) return { ok: false, error: `Empty To for From '${from}'` };
-    if (seen.has(from)) {
-      return { ok: false, error: `Duplicate From '${from}'` };
+    let parts = fromPartsEff(e).map((p) => p.trim());
+    if (parts.length === 1 && n > 1) {
+      while (parts.length < n) parts.push("");
     }
-    seen.add(from);
+    if (parts.length !== n && parts.every(Boolean)) {
+      return {
+        ok: false,
+        error: `From parts length ${parts.length} ≠ arity ${n}`,
+      };
+    }
+    // While editing mid-flight, allow incomplete arity (pad) but reject empties once filled.
+    if (parts.length < n) {
+      while (parts.length < n) parts.push("");
+    }
+    if (parts.length > n) parts = parts.slice(0, n);
+    if (parts.some((p) => !p)) {
+      return { ok: false, error: "Empty From part is not allowed" };
+    }
+    if (!e.to) {
+      return {
+        ok: false,
+        error: `Empty To for From ${JSON.stringify(parts)}`,
+      };
+    }
+    const key = tupleKey(parts);
+    if (seen.has(key)) {
+      return {
+        ok: false,
+        error: `Duplicate From ${JSON.stringify(parts)}`,
+      };
+    }
+    seen.add(key);
     cleaned.push({
-      from,
+      from: parts[0]!,
+      from_parts: parts,
       to: e.to,
       ...(e.attrs && Object.keys(e.attrs).length ? { attrs: e.attrs } : {}),
     });
@@ -126,23 +187,39 @@ export function validateKeyMapEntries(
   return { ok: true, entries: cleaned };
 }
 
-export function parseFromToPaste(text: string): KeyMapEntry[] {
+export function parseFromToPaste(
+  text: string,
+  arity = 1,
+): KeyMapEntry[] {
+  const n = Math.max(1, arity);
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
   const out: KeyMapEntry[] = [];
   for (const line of lines) {
-    if (/^from\s*[,|\t]\s*to$/i.test(line)) continue;
+    if (/^from\b/i.test(line) && /\bto\b/i.test(line)) continue;
     const parts = line.includes("\t")
       ? line.split("\t")
       : line.includes(",")
         ? line.split(",")
         : line.split(/\s+/);
-    if (parts.length < 2) continue;
-    const from = parts[0]!.trim().replace(/^"|"$/g, "");
-    const to = parts.slice(1).join(parts.length > 2 && line.includes(",") ? "," : "\t").trim().replace(/^"|"$/g, "");
-    if (from) out.push({ from, to });
+    if (parts.length < n + 1) continue;
+    const fromParts = parts
+      .slice(0, n)
+      .map((p) => p.trim().replace(/^"|"$/g, ""));
+    const to = parts
+      .slice(n)
+      .join(line.includes(",") ? "," : "\t")
+      .trim()
+      .replace(/^"|"$/g, "");
+    if (fromParts.every(Boolean)) {
+      out.push({
+        from: fromParts[0]!,
+        from_parts: fromParts,
+        to,
+      });
+    }
   }
   return out;
 }
@@ -150,22 +227,30 @@ export function parseFromToPaste(text: string): KeyMapEntry[] {
 function upsertApplyStep(
   steps: TransformationStep[],
   at: number,
-  column: string,
+  columns: string[],
   map: KeyMapDef,
+  outputColumn?: string,
 ): TransformationStep[] {
   const next = [...steps];
+  const cols = columns.filter((c) => c.trim());
+  if (!cols.length) return next;
   const payload = {
-    column,
+    column: cols[0]!,
+    columns: cols,
+    ...(outputColumn?.trim() ? { output_column: outputColumn.trim() } : {}),
     map_id: map.id,
     entries: map.entries,
   };
-  const existing = next.findIndex(
-    (s, i) =>
-      i <= at &&
-      s.type === "ApplyKeyMap" &&
-      s.payload.column === column &&
-      s.payload.map_id === map.id,
-  );
+  const key = cols.map((c) => c.toLowerCase()).join("\0");
+  const existing = next.findIndex((s, i) => {
+    if (i > at || s.type !== "ApplyKeyMap" || s.payload.map_id !== map.id) {
+      return false;
+    }
+    const sc = applyKeymapColumns(s.payload.column, s.payload.columns)
+      .map((c) => c.toLowerCase())
+      .join("\0");
+    return sc === key;
+  });
   if (existing >= 0) {
     next[existing] = { type: "ApplyKeyMap", payload };
     return next;
@@ -209,18 +294,35 @@ export function applyKeyMapToWorkspace(
   columnLeft: string,
   columnRight: string,
   map: KeyMapDef,
+  columnsLeft?: string[],
+  columnsRight?: string[],
+  outputColumn?: string,
 ): Workspace {
+  const leftCols = columnsLeft?.length ? columnsLeft : [columnLeft];
+  const rightCols = columnsRight?.length ? columnsRight : [columnRight];
   const queries = workspace.queries.map((q) => {
     if (side !== "right" && q.id === hostQueryId) {
       return {
         ...q,
-        steps: upsertApplyStep(q.steps, joinStepIndex, columnLeft, map),
+        steps: upsertApplyStep(
+          q.steps,
+          joinStepIndex,
+          leftCols,
+          map,
+          outputColumn,
+        ),
       };
     }
     if (side !== "left" && q.id === rightQueryId) {
       return {
         ...q,
-        steps: upsertApplyStep(q.steps, q.steps.length, columnRight, map),
+        steps: upsertApplyStep(
+          q.steps,
+          q.steps.length,
+          rightCols,
+          map,
+          outputColumn,
+        ),
       };
     }
     return q;
@@ -410,12 +512,32 @@ export function deleteKeyMapFromWorkspace(
 /** Accept into a draft only. Filled mappings and ambiguous proposals are untouched. */
 export function mergeKeyMapProposals(
   entries: KeyMapEntry[],
-  proposals: { from_key: string; to_key: string; ambiguous: boolean }[],
+  proposals: {
+    from_key: string;
+    to_key: string;
+    ambiguous: boolean;
+    from_parts?: string[];
+  }[],
 ): KeyMapEntry[] {
-  const merged = new Map(entries.map((entry) => [entry.from, entry]));
+  const merged = new Map(
+    entries.map((entry) => [tupleKey(fromPartsEff(entry)), entry] as const),
+  );
   for (const proposal of proposals) {
-    if (proposal.ambiguous || merged.get(proposal.from_key)?.to.trim()) continue;
-    merged.set(proposal.from_key, { from: proposal.from_key, to: proposal.to_key });
+    if (proposal.ambiguous) continue;
+    const parts =
+      proposal.from_parts?.length
+        ? proposal.from_parts
+        : proposal.from_key.trim()
+          ? [proposal.from_key]
+          : [];
+    if (!parts.length) continue;
+    const key = tupleKey(parts);
+    if (merged.get(key)?.to.trim()) continue;
+    merged.set(key, {
+      from: parts[0]!,
+      from_parts: parts,
+      to: proposal.to_key,
+    });
   }
   return [...merged.values()];
 }

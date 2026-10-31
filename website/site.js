@@ -238,9 +238,65 @@
     });
   }
 
-  /* —— Feature shots (any image size; optional data-full for the expanded file) —— */
-  const shotButtons = document.querySelectorAll(".feature-shot");
-  if (shotButtons.length && "HTMLDialogElement" in window) {
+  /* —— Feature shots: assets/features/<data-shot>.webp|png|jpg (optional -full) —— */
+  const SHOT_EXTS = ["webp", "png", "jpg", "jpeg"];
+
+  function probeImage(url) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(true);
+      img.onerror = () => resolve(false);
+      img.src = url;
+    });
+  }
+
+  async function findShot(name) {
+    for (const ext of SHOT_EXTS) {
+      const url = `assets/features/${name}.${ext}`;
+      if (await probeImage(url)) return url;
+    }
+    return null;
+  }
+
+  async function mountShot(btn) {
+    const name = btn.dataset.shot;
+    if (!name) return null;
+    const thumb = await findShot(name);
+    if (!thumb) {
+      btn.remove();
+      return null;
+    }
+    const full = (await findShot(`${name}-full`)) || thumb;
+    const img = document.createElement("img");
+    const title = btn.closest("li")?.querySelector("h3")?.textContent?.trim() || "";
+    img.alt = title;
+    img.decoding = "async";
+    img.dataset.full = full;
+    const place = () => {
+      const narrow = window.matchMedia("(max-width: 720px)").matches;
+      const maxW = narrow ? Math.min(320, btn.parentElement?.clientWidth || 320) : 280;
+      const maxH = narrow ? 240 : 200;
+      const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
+      img.style.width = `${Math.max(1, Math.round(img.naturalWidth * scale))}px`;
+      img.style.height = `${Math.max(1, Math.round(img.naturalHeight * scale))}px`;
+      if (!btn.contains(img)) btn.appendChild(img);
+      btn.hidden = false;
+    };
+    img.onload = place;
+    img.src = thumb;
+    if (img.complete && img.naturalWidth) place();
+    return btn;
+  }
+
+  const shotButtons = [...document.querySelectorAll(".feature-shot")];
+  Promise.all(shotButtons.map(mountShot)).then((mounted) => {
+    const liveShots = mounted.filter(Boolean);
+    if (!liveShots.length || !("HTMLDialogElement" in window)) return;
+    bindShotLightbox(liveShots);
+  });
+
+  function bindShotLightbox(shotButtons) {
+    if (!shotButtons.length || !("HTMLDialogElement" in window)) return;
     const dialog = document.createElement("dialog");
     dialog.className = "shot-lightbox";
     dialog.innerHTML = [

@@ -125,7 +125,15 @@ jobs:
 
       - name: npm install
         shell: bash
-        run: npm install --no-audit --no-fund
+        run: |
+          npm install --no-audit --no-fund
+          # npm optional-deps bug: Linux lockfile often omits win32 native
+          # bindings (npm/cli#4828). Force packages used by vite/tailwind build.
+          npm install --no-save --no-audit --no-fund \
+            @rollup/rollup-win32-x64-msvc@4.65.0 \
+            lightningcss-win32-x64-msvc@1.32.0 \
+            @tailwindcss/oxide-win32-x64-msvc@4.3.3 \
+            @esbuild/win32-x64@0.25.12
 
       - name: Fetch DuckDB extensions
         shell: bash
@@ -161,5 +169,6 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           DIR=$(ls -d dist-portable/dwhforge-query-*-electron-windows-x64 | head -1)
           OUT="${DIR}.zip"
-          (cd dist-portable && zip -r "$(basename "$OUT")" "$(basename "$DIR")")
+          # windows-latest has no zip(1); tar -a builds a .zip
+          tar.exe -a -c -f "$OUT" -C dist-portable "$(basename "$DIR")"
           gh release upload "$TAG" "$OUT" --clobber --repo "${{ github.repository }}"

@@ -16,12 +16,21 @@
     <meta property="og:image" content="assets/welcome.png" />
     <meta property="og:type" content="website" />
     <link rel="canonical" href="https://dwhforge.github.io/query/" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Orbitron:wght@700;800;900&family=Syne:wght@600;700;800&display=swap"
-      rel="stylesheet"
+      rel="preload"
+      href="fonts/orbitron-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
     />
+    <link
+      rel="preload"
+      href="fonts/syne-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="fonts.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -102,7 +111,7 @@
               where you build—then ship code you can run in your own infra.
             </p>
           </div>
-          <!-- Shots accept any image size. Replace the file or edit src. data-full on the img is optional and used only when the expanded file differs. -->
+          <!-- Shots: assets/features/<data-shot>.webp, .png, or .jpg. Optional <data-shot>-full.* opens on click. Replacing the file does not require an HTML edit. -->
           <ul class="feature-list">
             <li>
               <div class="feature-body">
@@ -112,14 +121,7 @@
                   result before you publish.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/preview.png"
-                  alt="Data preview of the rows behind the selected join key"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="preview" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -130,14 +132,7 @@
                   <a href="#mapping">See the mapping toolkit →</a>
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/edit-join.png"
-                  alt="Join editor with the right query, join type, keys, and diagnostics"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="edit-join" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -147,14 +142,7 @@
                   own execution. Engine and destination are separate choices.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/publish.png"
-                  alt="Publish to destination, with local or target preview and a DuckDB export engine"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="publish" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -165,14 +153,7 @@
                   automation.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/export.png"
-                  alt="dbt export in the project tree, including the seeds folder"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="export" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -182,14 +163,7 @@
                   to generator-owned files before overwrite.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/steps.png"
-                  alt="Applied steps on a query, with the join step selected"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="steps" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -201,14 +175,7 @@
                   <a href="#mapping">Mapping toolkit →</a>
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/suggest.png"
-                  alt="Suggest a mapping for the unmatched company Coca Cola Co"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="suggest" hidden></button>
             </li>
           </ul>
         </div>
@@ -237,14 +204,7 @@
                   leaving the canvas.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/join-lens.png"
-                  alt="Join Lens with unmatched keys on both sides and the rows for the selected key"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="join-lens" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -255,14 +215,7 @@
                   Suggestions require acceptance; automatic fuzzy merge stays off.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/cleanup.png"
-                  alt="Try cleanup on a join, the step before an explicit NormalizeKey"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="cleanup" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -273,14 +226,7 @@
                   one gesture; apply left, right, or both into the graph.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/add-to-map.png"
-                  alt="Unmatched company names in Join Lens, with Save mapping for the selected value"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="add-to-map" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -292,14 +238,7 @@
                   leading zeros survive <code>dbt seed</code>.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/apply-keymap.png"
-                  alt="ApplyKeyMap steps on sales and spending before the later queries"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="apply-keymap" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -310,14 +249,7 @@
                   wiping your aliases.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/export.png"
-                  alt="Exported dbt project with a seeds folder for KeyMap files"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="seed" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -328,14 +260,7 @@
                   Join ON.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/no-match.png"
-                  alt="Dimension keys with no match, including tickers such as MCD and KO"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="no-match" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -353,14 +278,7 @@
                   and suggests; it does not rewrite Join keys or invent counts.
                 </p>
               </div>
-              <button type="button" class="feature-shot">
-                <img
-                  src="assets/features/suggest.png"
-                  alt="Suggest and save a mapping for an unmatched company name"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              <button type="button" class="feature-shot" data-shot="suggest-all" hidden></button>
             </li>
           </ul>
           <div class="cta-row" style="margin-top: 2rem">

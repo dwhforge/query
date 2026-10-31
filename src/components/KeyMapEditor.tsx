@@ -368,7 +368,13 @@ export function KeyMapEditor({
     }
     setError(null);
     if (isSource && opts?.trackAll) {
-      for (const e of v.entries) dirtyRef.current.noteUpsert(e);
+      for (const e of v.entries) {
+        const key = tupleKey(fromPartsEff(e));
+        const old = map.entries.find(
+          (x) => tupleKey(fromPartsEff(x)) === key,
+        );
+        dirtyRef.current.noteUpsert(e, old ?? null);
+      }
       bumpDirty();
     }
     onChange({ ...map, entries: v.entries });
@@ -400,9 +406,9 @@ export function KeyMapEditor({
       const prevParts = fromPartsEff(prev);
       const nextParts = fromPartsEff(merged);
       if (tupleKey(prevParts) !== tupleKey(nextParts)) {
-        dirtyRef.current.noteRename(prevParts, merged);
+        dirtyRef.current.noteRename(prevParts, merged, prev);
       } else {
-        dirtyRef.current.noteUpsert(merged);
+        dirtyRef.current.noteUpsert(merged, prev);
       }
       bumpDirty();
     }
@@ -433,7 +439,7 @@ export function KeyMapEditor({
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
     }
     if (isSource) {
-      dirtyRef.current.noteUpsert(entry);
+      dirtyRef.current.noteUpsert(entry, null);
       bumpDirty();
     }
     setEntries([...map.entries, entry]);
@@ -442,7 +448,7 @@ export function KeyMapEditor({
   function deleteRow(index: number) {
     const prev = map.entries[index];
     if (isSource && prev) {
-      dirtyRef.current.noteDelete(fromPartsEff(prev));
+      dirtyRef.current.noteDelete(fromPartsEff(prev), prev);
       bumpDirty();
     }
     setEntries(map.entries.filter((_, j) => j !== index));

@@ -20,6 +20,20 @@ pub struct KeyMapWriteResult {
     pub content_hash: String,
 }
 
+/// Warehouse row snapshot at first local edit of a From key (row-level concurrency).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyMapDirtyBaseline {
+    pub from_parts: Vec<String>,
+    /// false → row must be absent (insert).
+    #[serde(default)]
+    pub existed: bool,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub attrs: BTreeMap<String, String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyMapDirtyDelta {
@@ -30,6 +44,9 @@ pub struct KeyMapDirtyDelta {
     /// From-tuple deletes ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
     #[serde(default)]
     pub deleted_from_parts: Vec<Vec<String>>,
+    /// Per-From baselines frozen for the dirty session (preferred over table content_hash).
+    #[serde(default)]
+    pub baselines: Vec<KeyMapDirtyBaseline>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -139,6 +156,144 @@ fn deleted_tuples(delta: &KeyMapDirtyDelta) -> Vec<Vec<String>> {
             .collect();
     }
     out
+}
+
+fn entry_to_matches(baseline: &KeyMapDirtyBaseline, row: &KeyMapEntry) -> bool {
+    if baseline.to != row.to {
+        return false;
+    }
+    for (k, v) in &baseline.attrs {
+        if row.attrs.get(k).map(String::as_str) != Some(v.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Point-read one From tuple (LIMIT 1) — used for row-level conflict checks.
+fn read_one_on_conn(
+    conn: &duckdb::Connection,
+    alias: &str,
+    schema: &str,
+    table: &str,
+    from_columns: &[String],
+    to_column: &str,
+    editable: &[String],
+    from_parts: &[String],
+) -> Result<Option<KeyMapEntry>, String> {
+    let q_froms: Vec<String> = from_columns.iter().map(|c| quote_ident(c)).collect();
+    let q_to = quote_ident(to_column);
+    let rel = format!(
+        "{alias}.{}.{}",
+        quote_ident(schema),
+        quote_ident(table)
+    );
+    let mut select_cols: Vec<String> = q_froms
+        .iter()
+        .map(|q| format!("CAST({q} AS VARCHAR)"))
+        .collect();
+    select_cols.push(format!("CAST({q_to} AS VARCHAR)"));
+    for c in editable {
+        select_cols.push(format!("CAST({} AS VARCHAR)", quote_ident(c)));
+    }
+    let pred: String = q_froms
+        .iter()
+        .enumerate()
+        .map(|(i, q)| {
+            format!(
+                "CAST({q} AS VARCHAR) = '{}'",
+                escape_sql_string(from_parts.get(i).map(|s| s.as_str()).unwrap_or(""))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = format!(
+        "SELECT {} FROM {rel} WHERE {pred} LIMIT 1",
+        select_cols.join(", ")
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("baseline read {schema}.{table}: {e}"))?;
+    let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+    let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let n_from = from_columns.len();
+    let mut parts = Vec::with_capacity(n_from);
+    for i in 0..n_from {
+        parts.push(row.get::<_, String>(i).map_err(|e| e.to_string())?);
+    }
+    let to: String = row.get(n_from).map_err(|e| e.to_string())?;
+    let mut attrs = BTreeMap::new();
+    for (i, c) in editable.iter().enumerate() {
+        if let Ok(val) = row.get::<_, String>(n_from + 1 + i) {
+            attrs.insert(c.clone(), val);
+        }
+    }
+    Ok(Some(KeyMapEntry {
+        from: parts.first().cloned().unwrap_or_default(),
+        from_parts: parts,
+        to,
+        attrs,
+    }))
+}
+
+fn verify_baselines_on_conn(
+    conn: &duckdb::Connection,
+    alias: &str,
+    schema: &str,
+    table: &str,
+    from_columns: &[String],
+    to_column: &str,
+    editable: &[String],
+    baselines: &[KeyMapDirtyBaseline],
+) -> Result<(), String> {
+    for b in baselines {
+        let parts: Vec<String> = b
+            .from_parts
+            .iter()
+            .map(|p| p.trim().to_string())
+            .collect();
+        if parts.len() != from_columns.len() || parts.iter().any(|p| p.is_empty()) {
+            return Err(format!(
+                "refused: invalid baseline from_parts {parts:?} (arity {})",
+                from_columns.len()
+            ));
+        }
+        let current = read_one_on_conn(
+            conn,
+            alias,
+            schema,
+            table,
+            from_columns,
+            to_column,
+            editable,
+            &parts,
+        )?;
+        match (b.existed, current.as_ref()) {
+            (false, Some(_)) => {
+                return Err(format!(
+                    "refused: KeyMap row {parts:?} was created concurrently"
+                ));
+            }
+            (false, None) => {}
+            (true, None) => {
+                return Err(format!(
+                    "refused: KeyMap row {parts:?} was deleted concurrently"
+                ));
+            }
+            (true, Some(row)) => {
+                if !entry_to_matches(b, row) {
+                    return Err(format!(
+                        "refused: KeyMap row {parts:?} changed concurrently \
+                         (expected to={:?}, got to={:?})",
+                        b.to, row.to
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_entries_on_conn(
@@ -418,7 +573,20 @@ pub fn write_key_map_delta_to_postgres(
                 &alias,
                 &format!("SELECT pg_advisory_xact_lock({lock_key})"),
             )?;
-            if let Some(expected) = expected_content_hash
+            // Prefer row-level baselines (scale-safe). Fall back to full-table hash only
+            // when baselines are absent and expected_content_hash is provided.
+            if !delta.baselines.is_empty() {
+                verify_baselines_on_conn(
+                    conn,
+                    &alias,
+                    schema,
+                    table,
+                    &from_columns,
+                    to_column,
+                    &editable,
+                    &delta.baselines,
+                )?;
+            } else if let Some(expected) = expected_content_hash
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
@@ -561,26 +729,13 @@ pub fn write_key_map_delta_to_postgres(
             Ok(rows_written) => {
                 conn.execute_batch("COMMIT")
                     .map_err(|e| format!("COMMIT: {e}"))?;
-                // Fresh full-table hash after commit (same token shape as read).
-                let content_hash = match read_entries_on_conn(
-                    conn,
-                    &alias,
-                    schema,
-                    table,
-                    &from_columns,
-                    to_column,
-                    &editable,
-                    &KeyMapReadQuery::default(),
-                ) {
-                    Ok((rows, _)) => key_map_content_hash(&rows),
-                    Err(_) => key_map_content_hash(&delta.upserts),
-                };
+                // Cheap token for UI; concurrency is row-baseline based.
                 Ok(KeyMapWriteResult {
                     schema: schema.to_string(),
                     table: table.to_string(),
                     rows_written,
                     created_table: false,
-                    content_hash,
+                    content_hash: key_map_content_hash(&delta.upserts),
                 })
             }
             Err(e) => {
@@ -653,6 +808,7 @@ pub fn write_key_map_to_postgres_ex(
         upserts: entries.to_vec(),
         deleted_froms: vec![],
         deleted_from_parts,
+        baselines: vec![],
     };
     write_key_map_delta_to_postgres(
         db,
@@ -708,8 +864,9 @@ pub fn read_key_map_from_postgres_ex(
 
     db.with_conn(|conn| {
         let alias = ensure_pg_attached(conn, connection_string)?;
-        // Concurrency token = full table (unfiltered), not the current page.
-        let (all_rows, _) = read_entries_on_conn(
+        // Page-only read (ADR-0022 scale). content_hash is informational for the page;
+        // Save concurrency uses per-From baselines in the dirty delta.
+        let (entries, total_count) = read_entries_on_conn(
             conn,
             &alias,
             schema,
@@ -717,32 +874,9 @@ pub fn read_key_map_from_postgres_ex(
             from_columns,
             to_column,
             editable,
-            &KeyMapReadQuery::default(),
+            query,
         )?;
-        let content_hash = key_map_content_hash(&all_rows);
-        let full_count = all_rows.len() as u64;
-        let (entries, total_count) = if query.limit.is_none()
-            && query.offset.is_none()
-            && query
-                .from_prefix
-                .as_ref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .is_none()
-        {
-            (all_rows, Some(full_count))
-        } else {
-            read_entries_on_conn(
-                conn,
-                &alias,
-                schema,
-                table,
-                from_columns,
-                to_column,
-                editable,
-                query,
-            )?
-        };
+        let content_hash = key_map_content_hash(&entries);
         Ok(KeyMapReadResult {
             entries,
             content_hash,
@@ -862,12 +996,28 @@ mod tests {
             upserts: vec![],
             deleted_froms: vec![],
             deleted_from_parts: vec![vec!["SKU123".into(), "2024-06-01".into()]],
+            baselines: vec![],
         };
         let dels = deleted_tuples(&delta);
         assert_eq!(
             dels,
             vec![vec!["SKU123".to_string(), "2024-06-01".to_string()]]
         );
+    }
+
+    #[test]
+    fn baseline_to_match_ignores_extra_row_attrs() {
+        let b = KeyMapDirtyBaseline {
+            from_parts: vec!["A".into()],
+            existed: true,
+            to: "X".into(),
+            attrs: BTreeMap::new(),
+        };
+        let mut row = KeyMapEntry::pair("A", "X");
+        row.attrs.insert("note".into(), "extra".into());
+        assert!(entry_to_matches(&b, &row));
+        row.to = "Z".into();
+        assert!(!entry_to_matches(&b, &row));
     }
 
     #[test]

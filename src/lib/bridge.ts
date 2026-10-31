@@ -573,12 +573,23 @@ export type KeyMapWriteResult = {
   content_hash: string;
 };
 
+/** Warehouse snapshot at first local edit of a From key (ADR-0022 row-level concurrency). */
+export type KeyMapDirtyBaseline = {
+  fromParts: string[];
+  /** false = row must be absent (insert). */
+  existed: boolean;
+  to: string;
+  attrs?: Record<string, string>;
+};
+
 export type KeyMapDirtyDelta = {
   upserts: import("../types/pipeline").KeyMapEntry[];
   /** Arity-1 deletes (back-compat). Prefer `deletedFromParts`. */
   deletedFroms: string[];
   /** From-tuple deletes (ADR-0024). */
   deletedFromParts?: string[][];
+  /** Per-From baselines frozen until Save (page navigation must not refresh). */
+  baselines?: KeyMapDirtyBaseline[];
 };
 
 export type KeyMapReadResult = {
@@ -610,6 +621,7 @@ export function writeKeyMap(
           upserts: delta.upserts,
           deletedFroms: delta.deletedFroms,
           deletedFromParts: delta.deletedFromParts ?? [],
+          baselines: delta.baselines ?? [],
         }
       : null,
   });

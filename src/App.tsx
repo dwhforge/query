@@ -3989,11 +3989,21 @@ function App() {
                     }))
                   }
                   onWarehouseRead={(contentHash, totalCount) =>
-                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
-                      ...s,
-                      contentHash,
-                      totalCount,
-                    }))
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => {
+                      // Freeze concurrency token while dirty — page changes must not
+                      // refresh hash over an outstanding row-level baseline delta.
+                      const dirty = s.dirtyDelta;
+                      const hasDirty =
+                        !!dirty &&
+                        (dirty.upserts.length > 0 ||
+                          dirty.deletedFroms.length > 0 ||
+                          (dirty.deletedFromParts?.length ?? 0) > 0);
+                      return {
+                        ...s,
+                        contentHash: hasDirty ? s.contentHash : contentHash,
+                        totalCount,
+                      };
+                    })
                   }
                   onDirtyChange={(dirtyDelta) =>
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({

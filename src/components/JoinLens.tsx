@@ -489,7 +489,8 @@ function JoinLensImpl({
   const [nearMissLoading, setNearMissLoading] = useState(false);
   const [nearMissOpen, setNearMissOpen] = useState(false);
   const [mapToast, setMapToast] = useState<string | null>(null);
-  const [findRightKey, setFindRightKey] = useState<string | null>(null);
+  /** Join key parts for Find Right (display label is join(" · "), not the From value). */
+  const [findRightParts, setFindRightParts] = useState<string[] | null>(null);
   const [showFirstUseHint, setShowFirstUseHint] = useState(() => {
     try {
       return localStorage.getItem(FIRST_USE_HINT_KEY) !== "1";
@@ -1423,25 +1424,36 @@ function JoinLensImpl({
     }, 3500);
   }
 
-  function openFindRight(fromDisplay: string | null | undefined) {
-    const from = (fromDisplay ?? "").trim();
-    if (!from) return;
-    setFindRightKey(from);
+  function openFindRight(parts: string[] | null | undefined) {
+    const clean = (parts ?? []).map((p) => p.trim()).filter(Boolean);
+    if (!clean.length) return;
+    setFindRightParts(clean);
   }
 
   function acceptFindRight(
     from: string,
     to: string,
-    opts?: { applyColumns?: string[]; outputColumn?: string },
+    opts?: {
+      applyColumns?: string[];
+      outputColumn?: string;
+      fromParts?: string[];
+    },
   ) {
     if (!onMapKey) return;
-    pinCenterToFromKey(from);
-    onMapKey("left", [from], {
+    // `from` / fromParts are already the selected field value(s), not the UI label.
+    const parts = (opts?.fromParts?.length ? opts.fromParts : [from]).filter(
+      (p) => p.trim(),
+    );
+    if (!parts.length) return;
+    const fromLabel = parts.join(" · ");
+    pinCenterToFromKey(fromLabel);
+    onMapKey("left", parts.length === 1 ? [parts[0]!] : [fromLabel], {
       toValues: [to],
+      fromParts: [parts],
       applyColumns: opts?.applyColumns,
       outputColumn: opts?.outputColumn,
     });
-    const toast = `Opened KeyMap · ${from} → ${to}`;
+    const toast = `Opened KeyMap · ${fromLabel} → ${to}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1535,16 +1547,16 @@ function JoinLensImpl({
       ? keyLabelFor(selectedProbeSide, selectedProbeIndex)
       : null;
 
-  /** Join key on the highlighted center result row (No match → Suggest). */
-  const centerFromKey = useMemo(() => {
+  /** Join key parts on the highlighted center result row (No match → Suggest). */
+  const centerFromParts = useMemo(() => {
     const row = rows[activeIndex];
     if (!row || leftOn.length === 0) return null;
     const vals = keyValuesFromRow(row, columns, leftOn)
       .map((v) => cellStr(v))
       .filter((v) => v.trim() && v !== "∅");
-    if (!vals.length) return null;
-    return vals.join(" · ");
+    return vals.length ? vals : null;
   }, [rows, activeIndex, columns, leftOn]);
+  const centerFromKey = centerFromParts?.join(" · ") ?? null;
 
   const statusLine = (() => {
     if (sideMode === "linked") {
@@ -1641,7 +1653,7 @@ function JoinLensImpl({
           sideMode === "probe" &&
           !pairMode &&
           leftSel != null
-            ? () => openFindRight(keyLabelFor("left", leftSel))
+            ? () => openFindRight(keyValsFor("left", leftSel))
             : undefined
         }
       />
@@ -2028,10 +2040,13 @@ function JoinLensImpl({
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-1.5">
                   {onMapKey &&
-                    selectedProbeSide === "left" && (
+                    selectedProbeSide === "left" &&
+                    selectedProbeIndex != null && (
                       <button
                         type="button"
-                        onClick={() => openFindRight(selectedKeyDisplay)}
+                        onClick={() =>
+                          openFindRight(keyValsFor("left", selectedProbeIndex))
+                        }
                         className="rounded border border-teal-700/80 bg-teal-500/20 px-3 py-1.5 text-[11px] font-semibold text-teal-50 hover:bg-teal-500/30"
                         title="Suggest a matching right value"
                       >
@@ -2072,7 +2087,7 @@ function JoinLensImpl({
                 <div className="flex shrink-0 flex-wrap gap-1.5">
                   <button
                     type="button"
-                    onClick={() => openFindRight(centerFromKey)}
+                    onClick={() => openFindRight(centerFromParts)}
                     className="rounded border border-teal-700/80 bg-teal-500/20 px-3 py-1.5 text-[11px] font-semibold text-teal-50 hover:bg-teal-500/30"
                     title="Propose a matching right value for this key"
                   >
@@ -2159,16 +2174,16 @@ function JoinLensImpl({
         }
       />
 
-      {findRightKey != null && hostQueryId && (
+      {findRightParts != null && hostQueryId && (
         <FindRightDialog
           open
-          fromKey={findRightKey}
+          fromParts={findRightParts}
           workspace={workspace}
           hostQueryId={hostQueryId}
           joinStepIndex={joinStepIndex}
           connections={connections}
           sources={sources}
-          onClose={() => setFindRightKey(null)}
+          onClose={() => setFindRightParts(null)}
           onAccept={acceptFindRight}
         />
       )}

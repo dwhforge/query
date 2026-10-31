@@ -22,6 +22,7 @@ pub use compiler::{CompiledCtes, GraphCompiler, PipelineCompiler};
 pub use graph::{
     cte_name, join_left_input_is_expensive, join_right_input_is_expensive,
     query_closure_is_expensive, step_is_derived_expensive, steps_are_derived_expensive,
+    topo_queries, topo_queries_from,
 };
 pub use parquet_scan::{read_parquet_call, read_parquet_call_opts};
 pub use sql_escape::{escape_sql_string, quote_ident};

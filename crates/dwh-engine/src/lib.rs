@@ -55,6 +55,7 @@ pub use key_map_write::{
     write_key_map_to_postgres, write_key_map_with_delta, write_key_map_with_expected,
     KeyMapDirtyDelta, KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
 };
+pub use compile::collect_sql_model_schemas;
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{
     describe_postgres_object, list_postgres_objects, test_postgres_connection,

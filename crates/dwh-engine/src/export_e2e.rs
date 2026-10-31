@@ -13,7 +13,7 @@ mod tests {
     };
     use duckdb::params;
     use serde_json::Value as JsonValue;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::env::temp_dir;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -240,6 +240,7 @@ mod tests {
                 DbtTarget::V1,
                 WarehouseDialect::Duckdb,
                 &seeds,
+                &HashMap::new(),
             )
             .expect("export");
 

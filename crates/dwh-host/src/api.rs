@@ -6,7 +6,8 @@ use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
     blame_unmatched_key as run_blame_unmatched_key, clear_join_prepare as run_clear_join_prepare,
-    collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
+    collect_load_seeds, collect_sql_model_schemas,
+    describe_postgres_object as run_describe_postgres_object,
     describe_workspace as run_describe_workspace, explain_join_key as run_explain_join_key,
     explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
     join_key_fuzzy_suggest_on as run_join_key_fuzzy_suggest_on,
@@ -1742,12 +1743,15 @@ impl HostState {
                 let sources = a.sources.unwrap_or_default();
                 let seeds =
                     collect_load_seeds(&db, &a.workspace, &conns, &sources).unwrap_or_default();
+                let sql_models =
+                    collect_sql_model_schemas(&db, &a.workspace, &conns, &sources);
                 let out: PreviewDbtModel = preview_dbt_model_sql_with_seeds_and_sources(
                     &a.workspace,
                     &a.query_id,
                     dialect,
                     &seeds,
                     &sources,
+                    &sql_models,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
@@ -1759,6 +1763,8 @@ impl HostState {
                 let sources = a.sources.unwrap_or_default();
                 let seeds =
                     collect_load_seeds(&db, &a.workspace, &conns, &sources).unwrap_or_default();
+                let sql_models =
+                    collect_sql_model_schemas(&db, &a.workspace, &conns, &sources);
                 let pg_schema = a
                     .destination_schema
                     .as_deref()
@@ -1785,6 +1791,7 @@ impl HostState {
                             &published,
                             &seeds,
                             &sources,
+                            &sql_models,
                         )?
                     }
                     _ => DbtProducer.produce_with_seeds(
@@ -1794,6 +1801,7 @@ impl HostState {
                         target,
                         dialect,
                         &seeds,
+                        &sql_models,
                     )?,
                 };
                 let files = walk_export_tree(&path)?;

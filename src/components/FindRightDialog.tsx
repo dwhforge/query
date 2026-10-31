@@ -80,7 +80,7 @@ async function runLlm(
 
 export function FindRightDialog({
   open,
-  fromKey,
+  fromParts,
   workspace,
   hostQueryId,
   joinStepIndex,
@@ -90,7 +90,8 @@ export function FindRightDialog({
   onAccept,
 }: {
   open: boolean;
-  fromKey: string;
+  /** Join key field values (not the " · "-joined display label). */
+  fromParts: string[];
   workspace: Workspace;
   hostQueryId: string;
   joinStepIndex: number;
@@ -100,9 +101,14 @@ export function FindRightDialog({
   onAccept: (
     from: string,
     to: string,
-    opts?: { applyColumns?: string[]; outputColumn?: string },
+    opts?: {
+      applyColumns?: string[];
+      outputColumn?: string;
+      fromParts?: string[];
+    },
   ) => void;
 }) {
+  const fromDisplay = fromParts.join(" · ");
   const [report, setReport] = useState<JoinKeyFuzzySuggest | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,10 +147,19 @@ export function FindRightDialog({
   useEffect(() => {
     if (!open) return;
     setKeyIndex(null);
-  }, [open, fromKey, joinStepIndex]);
+  }, [open, fromDisplay, joinStepIndex]);
+
+  /** Value used for fuzzy/LLM match = selected Join field, else sole part. */
+  const fromMatchValue = useMemo(() => {
+    if (keyIndex != null && fromParts[keyIndex] != null) {
+      return fromParts[keyIndex]!;
+    }
+    if (fromParts.length === 1) return fromParts[0]!;
+    return fromDisplay;
+  }, [keyIndex, fromParts, fromDisplay]);
 
   useEffect(() => {
-    if (!open || !fromKey) return;
+    if (!open || !fromParts.length) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -168,14 +183,20 @@ export function FindRightDialog({
         );
         if (cancelled) return;
         setReport(r);
-        const forKey = r.suggestions.filter((p) => p.from_key === fromKey);
+        const matchFrom =
+          keyIndex != null && fromParts[keyIndex] != null
+            ? fromParts[keyIndex]!
+            : fromParts.length === 1
+              ? fromParts[0]!
+              : fromDisplay;
+        const forKey = r.suggestions.filter((p) => p.from_key === matchFrom);
         const hit = forKey.find((p) => !p.ambiguous);
         if (hit) setPicked(hit.to_key);
         setLoading(false);
 
         // No fuzzy hit → fall through to LLM immediately.
         if (!r.disabled_reason && forKey.length === 0) {
-          await runLlm(r, fromKey, {
+          await runLlm(r, matchFrom, {
             cancelled: () => cancelled,
             setBusy: setLlmBusy,
             setError: setLlmError,
@@ -200,7 +221,8 @@ export function FindRightDialog({
     };
   }, [
     open,
-    fromKey,
+    fromParts,
+    fromDisplay,
     workspace,
     hostQueryId,
     joinStepIndex,
@@ -211,8 +233,8 @@ export function FindRightDialog({
 
   const fuzzyPairs: FuzzyPair[] = useMemo(() => {
     if (!report) return [];
-    return report.suggestions.filter((p) => p.from_key === fromKey);
-  }, [report, fromKey]);
+    return report.suggestions.filter((p) => p.from_key === fromMatchValue);
+  }, [report, fromMatchValue]);
 
   const fuzzyCandidates: Candidate[] = useMemo(() => {
     const out: Candidate[] = [];
@@ -264,7 +286,7 @@ export function FindRightDialog({
 
   async function askLlm() {
     if (!report || llmBusy || report.disabled_reason) return;
-    await runLlm(report, fromKey, {
+    await runLlm(report, fromMatchValue, {
       cancelled: () => false,
       setBusy: setLlmBusy,
       setError: setLlmError,
@@ -301,7 +323,7 @@ export function FindRightDialog({
               Suggest Right
             </h2>
             <p className="mt-1 truncate font-mono text-xs text-amber-100/90">
-              From: {fromKey}
+              From: {fromDisplay}
             </p>
             <p className="mt-0.5 text-[10px] text-slate-500">
               Fuzzy first; if nothing matches, LLM runs automatically
@@ -517,19 +539,28 @@ export function FindRightDialog({
             onClick={() => {
               if (!picked) return;
               const leftOn = report?.left_on ?? [];
+              const selectedParts =
+                keyIndex != null && fromParts[keyIndex] != null
+                  ? [fromParts[keyIndex]!]
+                  : fromParts.length === 1
+                    ? [fromParts[0]!]
+                    : fromParts;
+              const fromVal = selectedParts[0] ?? fromDisplay;
               const applyOpts =
                 keyIndex != null && leftOn[keyIndex]
                   ? {
                       applyColumns: [leftOn[keyIndex]!],
                       outputColumn: leftOn[keyIndex]!,
+                      fromParts: selectedParts,
                     }
                   : leftOn.length === 1
                     ? {
                         applyColumns: [leftOn[0]!],
                         outputColumn: leftOn[0]!,
+                        fromParts: selectedParts,
                       }
-                    : undefined;
-              onAccept(fromKey, picked, applyOpts);
+                    : { fromParts: selectedParts };
+              onAccept(fromVal, picked, applyOpts);
               onClose();
             }}
             className="rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35 disabled:opacity-40"

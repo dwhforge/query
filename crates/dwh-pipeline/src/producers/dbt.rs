@@ -12,7 +12,7 @@ use crate::export_manifest::commit_export_plan;
 use crate::graph::{sanitize_id, topo_queries};
 use crate::model::{KeyMapEntry, TransformationStep, Workspace};
 use crate::producers::{DbtTarget, OutputProducer};
-use crate::schema::{infer_workspace_schemas, WorkspaceSchemas};
+use crate::schema::{infer_workspace_schemas_ex, WorkspaceSchemas};
 use crate::parquet_scan::read_parquet_call_opts;
 use crate::sql_escape::escape_sql_string;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -117,6 +117,7 @@ impl OutputProducer for DbtProducer {
             target,
             dialect,
             &HashMap::new(),
+            &HashMap::new(),
         )
     }
 }
@@ -131,6 +132,7 @@ impl DbtProducer {
         target: DbtTarget,
         dialect: WarehouseDialect,
         load_seeds: &HashMap<String, Vec<String>>,
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         let has_files = workspace_needs_s3_landing(&workspace.queries)
             || workspace.queries.iter().any(|q| {
@@ -161,6 +163,7 @@ impl DbtProducer {
             engine,
             destination,
             load_seeds,
+            sql_model_schemas,
         )
     }
 
@@ -174,6 +177,7 @@ impl DbtProducer {
         engine: ExecutionEngine,
         destination: DestinationKind,
         load_seeds: &HashMap<String, Vec<String>>,
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         // Pure postgres engine historically used `sys`; duckdb→pg marts use `public`.
         let default_schema = match engine {
@@ -190,6 +194,7 @@ impl DbtProducer {
             default_schema,
             &[],
             load_seeds,
+            sql_model_schemas,
         )
     }
 
@@ -206,6 +211,7 @@ impl DbtProducer {
         postgres_schema: &str,
         published_query_ids: &[String],
         load_seeds: &HashMap<String, Vec<String>>,
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         self.produce_routed_with_schema_and_sources(
             pipeline_name,
@@ -218,6 +224,7 @@ impl DbtProducer {
             published_query_ids,
             load_seeds,
             &[],
+            sql_model_schemas,
         )
     }
 
@@ -233,6 +240,7 @@ impl DbtProducer {
         published_query_ids: &[String],
         load_seeds: &HashMap<String, Vec<String>>,
         sources: &[crate::project::SourceDef],
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         if matches!(target, DbtTarget::V2) {
             return Err(
@@ -276,6 +284,7 @@ impl DbtProducer {
             published_query_ids,
             load_seeds,
             sources,
+            sql_model_schemas,
         )?;
         let root = Path::new(output_dir).join(pipeline_name);
         let manifest_tag = if is_duckdb_to_postgres(engine, destination) {
@@ -311,12 +320,14 @@ pub fn build_export_plan(
         &[],
         load_seeds,
         &[],
+        &HashMap::new(),
     )
 }
 
 /// Export plan with explicit engine × destination (four routes).
 /// `postgres_schema` = where marts land when destination is Postgres (default callers use `public`).
 /// `published_query_ids` empty → only focus query is `mart_*`.
+/// `sql_model_schemas`: live-described SqlModel columns (from engine); empty → unknown SqlModel schema.
 pub fn build_export_plan_routed(
     pipeline_name: &str,
     workspace: &Workspace,
@@ -327,6 +338,7 @@ pub fn build_export_plan_routed(
     published_query_ids: &[String],
     load_seeds: &HashMap<String, Vec<String>>,
     sources: &[crate::project::SourceDef],
+    sql_model_schemas: &HashMap<String, Vec<String>>,
 ) -> Result<BTreeMap<String, String>, String> {
     let dialect = engine.dialect();
     let mut plan = BTreeMap::new();
@@ -470,7 +482,7 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
     }
 
     let order = topo_queries(workspace)?;
-    let schemas = infer_workspace_schemas(workspace, load_seeds)?;
+    let schemas = infer_workspace_schemas_ex(workspace, load_seeds, sql_model_schemas)?;
     let mut model_name_by_query: HashMap<String, String> = HashMap::new();
     let mut pg_by_schema: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
@@ -640,22 +652,24 @@ pub fn preview_dbt_model_sql_with_seeds(
         dialect,
         load_seeds,
         &[],
+        &HashMap::new(),
     )
 }
 
-/// Like [`preview_dbt_model_sql_with_seeds`], with project sources (Hive partitioning).
+/// Like [`preview_dbt_model_sql_with_seeds`], with project sources + optional SqlModel schemas.
 pub fn preview_dbt_model_sql_with_seeds_and_sources(
     workspace: &Workspace,
     query_id: &str,
     dialect: WarehouseDialect,
     load_seeds: &HashMap<String, Vec<String>>,
     sources: &[crate::project::SourceDef],
+    sql_model_schemas: &HashMap<String, Vec<String>>,
 ) -> Result<PreviewDbtModel, String> {
     let query = workspace
         .query(query_id)
         .ok_or_else(|| format!("query '{query_id}' not found"))?;
     let names = dbt_model_names(workspace)?;
-    let schemas = infer_workspace_schemas(workspace, load_seeds)?;
+    let schemas = infer_workspace_schemas_ex(workspace, load_seeds, sql_model_schemas)?;
     let sql = compile_query_as_dbt_model(
         workspace,
         query,
@@ -1016,6 +1030,7 @@ mod tests {
                 dir.to_str().unwrap(),
                 DbtTarget::V1,
                 WarehouseDialect::Postgres,
+                &HashMap::new(),
                 &HashMap::new(),
             )
             .expect("Files→PG via duckdb engine must not require landing");
@@ -1386,12 +1401,17 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert(
+            "q".into(),
+            vec!["ext_offer_id".into(), "day".into(), "amt".into()],
+        );
         let plan = build_export_plan(
             "comp",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         let yml = &plan["dbt_project.yml"];

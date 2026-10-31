@@ -1,5 +1,6 @@
 # Publishes website/ → gh-pages branch (no pre-existing Pages "site" required).
 # One-time: Settings → Pages → Build and deployment → Deploy from a branch → gh-pages / (root)
+# Live URL: https://dwhforge.github.io/query/
 name: pages
 
 on:
@@ -28,4 +29,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./website
           force_orphan: true
-          commit_message: "Deploy download site"
+          commit_message: "Deploy DWHForge Query site"

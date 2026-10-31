@@ -2,12 +2,21 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ColumnMetadata,
   ConnectionDef,
+  SourceDef,
   Workspace,
 } from "../types/pipeline";
 import {
   blameUnmatchedKey,
+  cancelRunningQuery,
+  describeWorkspace,
   explainJoinKey,
+  formatJoinPrepareHint,
+  formatJoinPrepareStatusHint,
   joinKeyNearMiss,
+  joinPrepareProgress,
+  joinPrepareStatus,
+  prepareJoinInputs,
+  previewPreparedJoinSide,
   previewWorkspace,
   type BlameUnmatchedKeyResult,
   type ExplainJoinKeyResult,
@@ -22,8 +31,11 @@ import {
   pinSideIndicesToResult,
   type JoinColumnOrigin,
 } from "../lib/joinColumnOrigin";
+import { shouldAutoRunJoinDiagnostics } from "../lib/joinAutoDiag";
+import { FindRightDialog } from "./FindRightDialog";
 import { JoinLensAuto } from "./JoinLensAuto";
 import { PreviewTable } from "./PreviewTable";
+import type { JoinPrepareStatus } from "../lib/bridge";
 
 /** Fill result right-origin columns from a Probe right row (hypothetical map pair). */
 function overlayRightOntoResultRows(
@@ -148,10 +160,12 @@ function probeListLabel(
   side: "left" | "right",
   sample: JoinDiagSample | null | undefined,
   shown: number,
+  loading: boolean,
 ): string {
-  if (!sample) return "Waiting for diagnostics…";
-  const kind = side === "left" ? "unmatched left" : "unmatched right";
-  return `Probe · ${kind} · ${shown}/${sample.sample_rows} of ${sample.total_count}`;
+  if (loading) return "Diagnostics running…";
+  if (!sample) return "Not listed yet — click Find gaps";
+  const kind = side === "left" ? "left, no match" : "right, no match";
+  return `${kind} · ${shown}/${sample.sample_rows} of ${sample.total_count}`;
 }
 
 function blameLabel(b: BlameUnmatchedKeyResult): string {
@@ -201,6 +215,8 @@ type SidePanelProps = {
   selectedKeyLabel?: string | null;
   onAddToMap?: () => void;
   mapButtonLabel?: string;
+  /** Probe left: open Suggest Right (fuzzy / LLM) for this From. */
+  onFindRight?: () => void;
 };
 
 function SidePanel({
@@ -222,7 +238,8 @@ function SidePanel({
   scrollToken,
   selectedKeyLabel,
   onAddToMap,
-  mapButtonLabel = "Add to map…",
+  mapButtonLabel = "Save mapping…",
+  onFindRight,
 }: SidePanelProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const keyFold = new Set(keyNames.map(fold));
@@ -259,14 +276,14 @@ function SidePanel({
             title === "Left" ? "text-sky-300/90" : "text-amber-300/90"
           }`}
         >
-          {title} · {mode === "linked" ? "parents" : "unmatched"}
+          {title} · {mode === "linked" ? "for this row" : "no match"}
         </div>
         {mode !== "linked" && (
           <input
             type="search"
             value={search}
             onChange={(e) => onSearch(e.target.value)}
-            placeholder="Filter unmatched sample…"
+            placeholder="Filter…"
             className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[10px] text-slate-200 outline-none placeholder:text-slate-600 focus:ring-1 focus:ring-teal-700"
           />
         )}
@@ -331,7 +348,9 @@ function SidePanel({
           })
         )}
       </div>
-      {mode === "probe" && onAddToMap && selectedIndex != null && (
+      {mode === "probe" &&
+        (onAddToMap || onFindRight) &&
+        selectedIndex != null && (
         <div className="shrink-0 space-y-1.5 border-t border-amber-900/50 bg-amber-950/35 px-2 py-2">
           <div className="text-[9px] uppercase tracking-wide text-amber-200/80">
             This key
@@ -342,14 +361,28 @@ function SidePanel({
           >
             {selectedKeyLabel || "∅"}
           </div>
-          <button
-            type="button"
-            title={mapButtonLabel}
-            onClick={onAddToMap}
-            className="w-full rounded border border-amber-600/70 bg-amber-500/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-500/30"
-          >
-            {mapButtonLabel}
-          </button>
+          <div className="flex flex-col gap-1">
+            {onFindRight && (
+              <button
+                type="button"
+                title="Fuzzy / LLM suggestions for To"
+                onClick={onFindRight}
+                className="w-full rounded border border-teal-700/70 bg-teal-500/15 px-2 py-1 text-[10px] font-semibold text-teal-50 hover:bg-teal-500/25"
+              >
+                Suggest…
+              </button>
+            )}
+            {onAddToMap && (
+              <button
+                type="button"
+                title={mapButtonLabel}
+                onClick={onAddToMap}
+                className="w-full rounded border border-amber-600/70 bg-amber-500/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-500/30"
+              >
+                {mapButtonLabel}
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -367,6 +400,7 @@ export type JoinLensProps = {
   leftOn: string[];
   rightOn: string[];
   connections: ConnectionDef[];
+  sources?: SourceDef[];
   columns: ColumnMetadata[];
   rows: unknown[][];
   /** Opposite-probe candidates (unmatched samples). */
@@ -385,6 +419,10 @@ export type JoinLensProps = {
     fromValues: string[],
     opts?: { toValues?: string[] },
   ) => void;
+  /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
+  onPrepareBusy?: (busy: boolean) => void;
+  /** Run Join diagnostics (Probe lists unmatched samples). */
+  onRunDiagnostics?: () => void;
 };
 
 function JoinLensImpl({
@@ -396,6 +434,7 @@ function JoinLensImpl({
   leftOn,
   rightOn,
   connections,
+  sources = [],
   columns,
   rows,
   joinDiag,
@@ -403,13 +442,28 @@ function JoinLensImpl({
   forceProbeNonce = 0,
   onApplyNearMiss,
   onMapKey,
+  onPrepareBusy,
+  onRunDiagnostics,
 }: JoinLensProps) {
-  /** Linked-mode parent lookup (preview of left/right inputs). */
+  /** Linked-mode: parent schemas + sample rows for This row. */
   const [parentLeftCols, setParentLeftCols] = useState<ColumnMetadata[]>([]);
   const [parentRightCols, setParentRightCols] = useState<ColumnMetadata[]>([]);
   const [parentLeftRows, setParentLeftRows] = useState<unknown[][]>([]);
   const [parentRightRows, setParentRightRows] = useState<unknown[][]>([]);
-  const [sidesLoading, setSidesLoading] = useState(false);
+  const [leftSideLoading, setLeftSideLoading] = useState(false);
+  const [rightSideLoading, setRightSideLoading] = useState(false);
+  const [samplesLoaded, setSamplesLoaded] = useState(false);
+  const [samplesLoading, setSamplesLoading] = useState(false);
+  const [prepareLoading, setPrepareLoading] = useState(false);
+  const [prepared, setPrepared] = useState(false);
+  const [prepareStatus, setPrepareStatus] = useState<JoinPrepareStatus | null>(
+    null,
+  );
+  const [prepareHint, setPrepareHint] = useState<string | null>(null);
+  const [preparePct, setPreparePct] = useState<number | null>(null);
+  const [preparePhase, setPreparePhase] = useState<string | null>(null);
+  /** Avoid re-firing auto-diag after cancel for the same Join. */
+  const autoDiagAttemptedRef = useRef<string>("");
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
   const [searchLeft, setSearchLeft] = useState("");
@@ -430,6 +484,7 @@ function JoinLensImpl({
   const [nearMissLoading, setNearMissLoading] = useState(false);
   const [nearMissOpen, setNearMissOpen] = useState(false);
   const [mapToast, setMapToast] = useState<string | null>(null);
+  const [findRightKey, setFindRightKey] = useState<string | null>(null);
   const [showFirstUseHint, setShowFirstUseHint] = useState(() => {
     try {
       return localStorage.getItem(FIRST_USE_HINT_KEY) !== "1";
@@ -451,11 +506,9 @@ function JoinLensImpl({
     setRightSel(null);
   }, [forceProbeNonce]);
 
-  useEffect(() => {
-    if (!enabled || !hostQueryId || joinStepIndex < 1 || !rightQueryId) return;
-    let cancelled = false;
-    setSidesLoading(true);
-    const leftWs: Workspace = {
+  const leftInputWs = useMemo((): Workspace | null => {
+    if (!hostQueryId || joinStepIndex < 1) return null;
+    return {
       ...workspace,
       focus_query_id: hostQueryId,
       queries: workspace.queries.map((q) =>
@@ -464,42 +517,221 @@ function JoinLensImpl({
           : q,
       ),
     };
-    const rightWs: Workspace = {
-      ...workspace,
-      focus_query_id: rightQueryId,
-    };
-    void Promise.all([
-      previewWorkspace(leftWs, connections),
-      previewWorkspace(rightWs, connections),
-    ])
-      .then(([left, right]) => {
+  }, [workspace, hostQueryId, joinStepIndex]);
+
+  const rightInputWs = useMemo((): Workspace | null => {
+    if (!rightQueryId) return null;
+    return { ...workspace, focus_query_id: rightQueryId };
+  }, [workspace, rightQueryId]);
+
+  // Open Lens → schema only (cheap). Sample rows: prepared TEMPs or explicit Show rows.
+  useEffect(() => {
+    if (!enabled || !leftInputWs || !rightInputWs) return;
+    let cancelled = false;
+    setLeftSideLoading(true);
+    setRightSideLoading(true);
+    setSamplesLoaded(false);
+    setParentLeftRows([]);
+    setParentRightRows([]);
+    void (async () => {
+      try {
+        const left = await describeWorkspace(
+          leftInputWs,
+          connections,
+          sources,
+        );
         if (cancelled) return;
         setParentLeftCols(left.columns);
-        setParentLeftRows(left.rows);
+      } catch {
+        if (!cancelled) setParentLeftCols([]);
+      } finally {
+        if (!cancelled) setLeftSideLoading(false);
+      }
+      try {
+        const right = await describeWorkspace(
+          rightInputWs,
+          connections,
+          sources,
+        );
+        if (cancelled) return;
         setParentRightCols(right.columns);
-        setParentRightRows(right.rows);
-        setSidesLoading(false);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setParentLeftCols([]);
-          setParentLeftRows([]);
-          setParentRightCols([]);
-          setParentRightRows([]);
-          setSidesLoading(false);
-        }
-      });
+      } catch {
+        if (!cancelled) setParentRightCols([]);
+      } finally {
+        if (!cancelled) setRightSideLoading(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [
-    enabled,
-    workspace,
-    hostQueryId,
-    joinStepIndex,
-    rightQueryId,
-    connections,
-  ]);
+  }, [enabled, leftInputWs, rightInputWs, connections, sources]);
+
+  function refreshPrepareStatus() {
+    if (!hostQueryId || joinStepIndex < 1) return;
+    void joinPrepareStatus(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      sources,
+      connections,
+    )
+      .then((s) => {
+        setPrepareStatus(s);
+        setPrepared(s.prepared);
+        if (s.prepared) {
+          setPrepareHint(formatJoinPrepareStatusHint(s));
+          // Cheap path: fill This-row samples from prepared TEMPs/live SQL.
+          if (!samplesLoaded && !samplesLoading) {
+            void loadLinkedSamples({ forcePrepared: true });
+          }
+        } else if (s.stale) {
+          setPrepareHint("Outdated — Reload sides");
+          setPrepared(false);
+        } else {
+          setPrepareHint(null);
+        }
+      })
+      .catch(() => {
+        setPrepareStatus(null);
+        setPrepared(false);
+        setPrepareHint(null);
+      });
+  }
+
+  useEffect(() => {
+    if (!enabled) return;
+    refreshPrepareStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, hostQueryId, joinStepIndex, workspace, sources]);
+
+  useEffect(() => {
+    autoDiagAttemptedRef.current = "";
+  }, [hostQueryId, joinStepIndex]);
+
+  function runPrepare(force = false) {
+    if (!hostQueryId || joinStepIndex < 1 || prepareLoading) return;
+    setPrepareLoading(true);
+    onPrepareBusy?.(true);
+    void cancelRunningQuery().catch(() => {});
+    setPreparePct(0);
+    setPreparePhase("Queued…");
+    const poll = window.setInterval(() => {
+      void joinPrepareProgress()
+        .then((p) => {
+          if (!p.active && p.fraction <= 0) return;
+          setPreparePct(
+            Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
+          );
+          setPreparePhase(p.message || p.stage || "Preparing…");
+        })
+        .catch(() => {});
+    }, 250);
+    void prepareJoinInputs(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      connections,
+      sources,
+      force,
+    )
+      .then((r) => {
+        setPrepared(true);
+        setPrepareHint(formatJoinPrepareHint(r));
+        setPrepareStatus({
+          prepared: true,
+          fingerprint: r.fingerprint,
+          host_query_id: r.host_query_id,
+          join_step_index: r.join_step_index,
+          left_rows: r.left_rows,
+          right_rows: r.right_rows,
+          left_expensive: r.left_expensive,
+          right_expensive: r.right_expensive,
+          left_materialized: r.left_materialized,
+          right_materialized: r.right_materialized,
+          stale: false,
+        });
+        // Allow auto-diag again after a fresh prepare (sizes may now qualify).
+        autoDiagAttemptedRef.current = "";
+        // Refresh This-row parents from prepared sides.
+        void loadLinkedSamples({ forcePrepared: true });
+      })
+      .catch(() => {
+        setPrepared(false);
+      })
+      .finally(() => {
+        window.clearInterval(poll);
+        setPrepareLoading(false);
+        onPrepareBusy?.(false);
+        setPreparePct(null);
+        setPreparePhase(null);
+      });
+  }
+
+  function loadLinkedSamples(opts?: { forcePrepared?: boolean }) {
+    // After Prepare, always refresh even if an open-load is in flight.
+    if (samplesLoading && !opts?.forcePrepared) return;
+    const usePrepared = opts?.forcePrepared || prepared;
+    setSamplesLoading(true);
+    setLeftSideLoading(true);
+    setRightSideLoading(true);
+    void (async () => {
+      try {
+        if (usePrepared) {
+          const left = await previewPreparedJoinSide("left", 50);
+          setParentLeftCols(left.columns);
+          setParentLeftRows(left.rows);
+          setLeftSideLoading(false);
+          const right = await previewPreparedJoinSide("right", 50);
+          setParentRightCols(right.columns);
+          setParentRightRows(right.rows);
+        } else if (leftInputWs && rightInputWs) {
+          const left = await previewWorkspace(
+            leftInputWs,
+            connections,
+            sources,
+          );
+          setParentLeftCols(left.columns);
+          setParentLeftRows(left.rows);
+          setLeftSideLoading(false);
+          const right = await previewWorkspace(
+            rightInputWs,
+            connections,
+            sources,
+          );
+          setParentRightCols(right.columns);
+          setParentRightRows(right.rows);
+        }
+      } catch {
+        setParentLeftRows([]);
+        setParentRightRows([]);
+      } finally {
+        setLeftSideLoading(false);
+        setRightSideLoading(false);
+        setSamplesLoading(false);
+        setSamplesLoaded(true);
+      }
+    })();
+  }
+
+  function runNearMiss() {
+    if (!hostQueryId || joinStepIndex < 1 || nearMissLoading) return;
+    setNearMissLoading(true);
+    setNearMissOpen(true);
+    void joinKeyNearMiss(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      connections,
+      sources,
+    )
+      .then((r) => setNearMiss(r))
+      .catch(() => setNearMiss(null))
+      .finally(() => setNearMissLoading(false));
+  }
+
+  function cancelHeavy() {
+    void cancelRunningQuery().catch(() => {});
+  }
 
   useEffect(() => {
     setLeftSel(null);
@@ -513,29 +745,29 @@ function JoinLensImpl({
     setKeyBlame(null);
     setKeyExplainError(null);
     setNearMiss(null);
+    setNearMissOpen(false);
+    setSamplesLoaded(false);
+    setPrepared(false);
+    setPrepareHint(null);
   }, [hostQueryId, joinStepIndex, leftOn.join("\0"), rightOn.join("\0")]);
-
-  useEffect(() => {
-    if (!enabled || !hostQueryId || joinStepIndex < 1) return;
-    let cancelled = false;
-    setNearMissLoading(true);
-    void joinKeyNearMiss(workspace, hostQueryId, joinStepIndex, connections)
-      .then((r) => {
-        if (!cancelled) setNearMiss(r);
-      })
-      .catch(() => {
-        if (!cancelled) setNearMiss(null);
-      })
-      .finally(() => {
-        if (!cancelled) setNearMissLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, workspace, hostQueryId, joinStepIndex, connections]);
 
   const unmatchedLeft = joinDiag?.unmatched_left ?? null;
   const unmatchedRight = joinDiag?.unmatched_right ?? null;
+
+  /** Keys already in a KeyMap — hide from No match lists (left From / right To|From). */
+  const mappedKeys = useMemo(() => {
+    const from = new Set<string>();
+    const to = new Set<string>();
+    for (const m of workspace.key_maps ?? []) {
+      for (const e of m.entries) {
+        const f = e.from.trim();
+        const t = e.to.trim();
+        if (f) from.add(f);
+        if (t) to.add(t);
+      }
+    }
+    return { from, to };
+  }, [workspace.key_maps]);
 
   const probeLeftCols = useMemo(
     () => asColumns(unmatchedLeft),
@@ -598,6 +830,7 @@ function JoinLensImpl({
       side,
       keys,
       connections,
+      sources,
     )
       .then(async (ex) => {
         if (cancelled) return;
@@ -612,6 +845,7 @@ function JoinLensImpl({
               side,
               keys,
               connections,
+              sources,
             );
             if (!cancelled) setKeyBlame(blame);
           } catch (e) {
@@ -807,19 +1041,77 @@ function JoinLensImpl({
     if (sideMode !== "linked") {
       return probeLeftRows
         .map((_, i) => i)
-        .filter((i) => rowMatchesSearch(probeLeftRows[i]!, searchLeft));
+        .filter((i) => {
+          const row = probeLeftRows[i]!;
+          if (!rowMatchesSearch(row, searchLeft)) return false;
+          const label = keyValuesFromRow(row, probeLeftCols, leftOn)
+            .map((v) => cellStr(v))
+            .join(" · ")
+            .trim();
+          return !label || !mappedKeys.from.has(label);
+        });
     }
     return linkedLeft;
-  }, [sideMode, probeLeftRows, searchLeft, linkedLeft]);
+  }, [
+    sideMode,
+    probeLeftRows,
+    searchLeft,
+    linkedLeft,
+    probeLeftCols,
+    leftOn,
+    mappedKeys.from,
+  ]);
 
   const visibleRight = useMemo(() => {
     if (sideMode !== "linked") {
       return probeRightRows
         .map((_, i) => i)
-        .filter((i) => rowMatchesSearch(probeRightRows[i]!, searchRight));
+        .filter((i) => {
+          const row = probeRightRows[i]!;
+          if (!rowMatchesSearch(row, searchRight)) return false;
+          const label = keyValuesFromRow(row, probeRightCols, rightOn)
+            .map((v) => cellStr(v))
+            .join(" · ")
+            .trim();
+          if (!label) return true;
+          // Hide if used as From (mapped from right) or as To (partner of a left map).
+          return !mappedKeys.from.has(label) && !mappedKeys.to.has(label);
+        });
     }
     return linkedRight;
-  }, [sideMode, probeRightRows, searchRight, linkedRight]);
+  }, [
+    sideMode,
+    probeRightRows,
+    searchRight,
+    linkedRight,
+    probeRightCols,
+    rightOn,
+    mappedKeys.from,
+    mappedKeys.to,
+  ]);
+
+  // After a key is mapped away, drop side highlight but keep the center result row.
+  useEffect(() => {
+    if (sideMode !== "probe") return;
+    if (leftSel != null && !visibleLeft.includes(leftSel)) {
+      setLeftSel(null);
+      setKeyExplain(null);
+      setKeyBlame(null);
+      setKeyExplainError(null);
+    }
+  }, [sideMode, leftSel, visibleLeft]);
+
+  useEffect(() => {
+    if (sideMode !== "probe") return;
+    if (rightSel != null && !visibleRight.includes(rightSel)) {
+      setRightSel(null);
+      if (leftSel == null) {
+        setKeyExplain(null);
+        setKeyBlame(null);
+        setKeyExplainError(null);
+      }
+    }
+  }, [sideMode, rightSel, leftSel, visibleRight]);
 
   /** Prefer full-input explain sample when showing matches for a key. */
   const showingExplainSample =
@@ -954,35 +1246,61 @@ function JoinLensImpl({
       ? linkedListLabel(leftPin)
       : sideMode === "auto"
         ? `Unmatched sample · ${visibleLeft.length}`
-        : probeListLabel("left", unmatchedLeft, visibleLeft.length);
+        : probeListLabel(
+            "left",
+            unmatchedLeft,
+            visibleLeft.length,
+            joinDiagLoading,
+          );
   const rightListMode =
     sideMode === "linked"
       ? linkedListLabel(rightPin)
       : sideMode === "auto"
         ? `Unmatched sample · ${visibleRight.length}`
-        : probeListLabel("right", unmatchedRight, visibleRight.length);
+        : probeListLabel(
+            "right",
+            unmatchedRight,
+            visibleRight.length,
+            joinDiagLoading,
+          );
 
   const leftEmpty =
     sideMode === "linked"
-      ? "No parent for this result row."
-      : joinDiagLoading || !joinDiag
-        ? "Waiting for diagnostics…"
-        : searchLeft.trim()
-          ? "No sample rows match filter."
-          : unmatchedLeft && unmatchedLeft.total_count === 0
-            ? "No unmatched left (full input)."
-            : "No unmatched left in sample.";
+      ? samplesLoading
+        ? "Loading left parents…"
+        : samplesLoaded
+          ? "Nothing on the left for this result row."
+          : prepared
+            ? "Prepared — loading parents…"
+            : "Schema ready — Show rows (or Load sides) for parents."
+      : joinDiagLoading
+        ? "Looking for values that didn’t match…"
+        : !joinDiag
+          ? "Click Find gaps to list values that didn’t join."
+          : searchLeft.trim()
+            ? "No rows match the filter."
+            : unmatchedLeft && unmatchedLeft.total_count === 0
+              ? "Every left key found a match."
+              : "No left gaps in this sample.";
 
   const rightEmpty =
     sideMode === "linked"
-      ? "No parent for this result row."
-      : joinDiagLoading || !joinDiag
-        ? "Waiting for diagnostics…"
-        : searchRight.trim()
-          ? "No sample rows match filter."
-          : unmatchedRight && unmatchedRight.total_count === 0
-            ? "No unmatched right (full input)."
-            : "No unmatched right in sample.";
+      ? samplesLoading
+        ? "Loading right parents…"
+        : samplesLoaded
+          ? "Nothing on the right for this result row."
+          : prepared
+            ? "Prepared — loading parents…"
+            : "Schema ready — Show rows (or Load sides) for parents."
+      : joinDiagLoading
+        ? "Looking for values that didn’t match…"
+        : !joinDiag
+          ? "Click Find gaps to list values that didn’t join."
+          : searchRight.trim()
+            ? "No rows match the filter."
+            : unmatchedRight && unmatchedRight.total_count === 0
+              ? "Every right key found a match."
+              : "No right gaps in this sample.";
 
   const leftStatus = useMemo(() => {
     if (!sideProbe) return null;
@@ -1057,12 +1375,28 @@ function JoinLensImpl({
       .filter((v) => v.trim());
   }
 
+  /** Keep the center result row on this join key after it leaves No match lists. */
+  function pinCenterToFromKey(fromLabel: string) {
+    const want = fromLabel.trim();
+    if (!want) return;
+    const idx = rows.findIndex((row) => {
+      const label = keyValuesFromRow(row, columns, leftOn)
+        .map((v) => cellStr(v))
+        .join(" · ")
+        .trim();
+      return label === want;
+    });
+    if (idx >= 0) setActiveIndex(idx);
+  }
+
   function emitMapKey(side: JoinKeySide, rowIndex: number) {
     if (!onMapKey) return;
     const vals = keyValsFor(side, rowIndex);
     if (!vals.length) return;
+    const fromLabel = vals.join(" · ");
+    if (side === "left") pinCenterToFromKey(fromLabel);
     onMapKey(side, vals);
-    const toast = `Opened KeyMap · from=${vals.join(" · ")}`;
+    const toast = `Opened KeyMap · from=${fromLabel}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1075,8 +1409,26 @@ function JoinLensImpl({
     const fromVals = keyValsFor("left", leftSel);
     const toVals = keyValsFor("right", rightSel);
     if (!fromVals.length || !toVals.length) return;
+    pinCenterToFromKey(fromVals.join(" · "));
     onMapKey("left", fromVals, { toValues: toVals });
     const toast = `Opened KeyMap · ${fromVals.join(" · ")} → ${toVals.join(" · ")}`;
+    setMapToast(toast);
+    window.setTimeout(() => {
+      setMapToast((cur) => (cur === toast ? null : cur));
+    }, 3500);
+  }
+
+  function openFindRight(fromDisplay: string | null | undefined) {
+    const from = (fromDisplay ?? "").trim();
+    if (!from) return;
+    setFindRightKey(from);
+  }
+
+  function acceptFindRight(from: string, to: string) {
+    if (!onMapKey) return;
+    pinCenterToFromKey(from);
+    onMapKey("left", [from], { toValues: [to] });
+    const toast = `Opened KeyMap · ${from} → ${to}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1102,6 +1454,37 @@ function JoinLensImpl({
     setNearMissOpen(false);
   };
 
+  // Small joins: auto-run diagnostics when entering Probe (manual for large).
+  useEffect(() => {
+    if (!enabled || sideMode !== "probe") return;
+    if (!hostQueryId || joinStepIndex < 1) return;
+    if (!onRunDiagnostics || joinDiag || joinDiagLoading) return;
+    const id = `${hostQueryId}#${joinStepIndex}`;
+    if (autoDiagAttemptedRef.current === id) return;
+    if (
+      !shouldAutoRunJoinDiagnostics(
+        workspace,
+        hostQueryId,
+        joinStepIndex,
+        prepareStatus,
+      )
+    ) {
+      return;
+    }
+    autoDiagAttemptedRef.current = id;
+    onRunDiagnostics();
+  }, [
+    enabled,
+    sideMode,
+    hostQueryId,
+    joinStepIndex,
+    workspace,
+    prepareStatus,
+    joinDiag,
+    joinDiagLoading,
+    onRunDiagnostics,
+  ]);
+
   const dismissFirstUseHint = () => {
     setShowFirstUseHint(false);
     try {
@@ -1111,9 +1494,12 @@ function JoinLensImpl({
     }
   };
 
+  // Prefer live visible lists (mapped keys already hidden) over stale diag totals.
   const unmatchedTotal =
-    (joinDiag?.unmatched_left_count ?? 0) +
-    (joinDiag?.unmatched_right_count ?? 0);
+    sideMode === "probe" && joinDiag
+      ? visibleLeft.length + visibleRight.length
+      : (joinDiag?.unmatched_left_count ?? 0) +
+        (joinDiag?.unmatched_right_count ?? 0);
 
   const selectedProbeSide: JoinKeySide | null =
     sideMode === "probe"
@@ -1136,37 +1522,57 @@ function JoinLensImpl({
       ? keyLabelFor(selectedProbeSide, selectedProbeIndex)
       : null;
 
+  /** Join key on the highlighted center result row (No match → Suggest). */
+  const centerFromKey = useMemo(() => {
+    const row = rows[activeIndex];
+    if (!row || leftOn.length === 0) return null;
+    const vals = keyValuesFromRow(row, columns, leftOn)
+      .map((v) => cellStr(v))
+      .filter((v) => v.trim() && v !== "∅");
+    if (!vals.length) return null;
+    return vals.join(" · ");
+  }, [rows, activeIndex, columns, leftOn]);
+
   const statusLine = (() => {
     if (sideMode === "linked") {
-      return `Result row ${activeIndex + 1} of ${rows.length} · parents highlighted on Left/Right`;
+      return `Result row ${activeIndex + 1} of ${rows.length} · matching left/right rows highlighted`;
+    }
+    if (sideMode === "probe" && joinDiagLoading) {
+      return "Finding gaps… Cancel in the toolbar if this takes too long";
+    }
+    if (sideMode === "probe" && !joinDiag) {
+      return "Click Find gaps to see values that didn’t join";
     }
     if (!sideProbe) {
+      if (centerFromKey) {
+        return `Result row “${centerFromKey}” · Suggest… a right partner or Save mapping…`;
+      }
       return unmatchedTotal > 0
-        ? `Pick an unmatched row on Left or Right to map or blame (${unmatchedTotal} unmatched)`
-        : "No unmatched keys in the current sample";
+        ? `Pick a result row or a value on Left/Right (${unmatchedTotal} with no partner)`
+        : "No gaps in this sample — keys already match";
     }
     if (pairMode && pairFromLabel && pairToLabel) {
       if (pairHypothetical) {
         const n =
           keyExplain?.result_rows.length ?? matchedIndices.length;
-        return `Pair preview “${pairFromLabel}” → “${pairToLabel}” · ${n} left row(s), right cols filled as if mapped · Map this pair to apply`;
+        return `Preview “${pairFromLabel}” → “${pairToLabel}” · ${n} left row(s) as if mapped · Save mapping to apply`;
       }
       const inResult =
         matchedIndices.length > 0
-          ? `${matchedIndices.length} result row(s) (keys already equal)`
-          : "not in result";
+          ? `${matchedIndices.length} result row(s) (already equal)`
+          : "not in the result yet";
       return `Pair “${pairFromLabel}” → “${pairToLabel}” · ${inResult}`;
     }
     if (keyBlame) return blameLabel(keyBlame);
     if (keyExplainError) return keyExplainError;
-    if (keyExplainLoading) return "Explaining key…";
+    if (keyExplainLoading) return "Checking this value…";
     if (keyExplain && selectedKeyDisplay) {
-      return `Key “${selectedKeyDisplay}” · ${keyExplain.result_match_count} result · L${keyExplain.left_match_count}/R${keyExplain.right_match_count}`;
+      return `“${selectedKeyDisplay}” · ${keyExplain.result_match_count} in result · left ${keyExplain.left_match_count} / right ${keyExplain.right_match_count}`;
     }
     if (selectedKeyDisplay) {
-      return `Selected “${selectedKeyDisplay}” · pick a partner on the other side to Map the pair, or Add to map with empty To`;
+      return `Selected “${selectedKeyDisplay}” · pick a partner on the other side, or Suggest… / Save mapping…`;
     }
-    return "Select an unmatched row (or both sides to Map a pair)";
+    return "Select a result row or a Left/Right value";
   })();
 
   if (!enabled) {
@@ -1175,12 +1581,14 @@ function JoinLensImpl({
     );
   }
 
-  const sideLoading =
-    sideMode === "linked" ? sidesLoading : joinDiagLoading && !joinDiag;
+  const probeLoading = joinDiagLoading && !joinDiag;
+  const leftPanelLoading =
+    sideMode === "linked" ? leftSideLoading : probeLoading;
+  const rightPanelLoading =
+    sideMode === "linked" ? rightSideLoading : probeLoading;
 
   const nearMissCount = nearMiss?.hypotheses.length ?? 0;
-  const showNearMissChrome =
-    nearMissLoading || nearMissCount > 0;
+  const showNearMissChrome = nearMissOpen;
 
   return (
     <div className="relative flex h-full min-h-0 gap-2 p-1">
@@ -1191,7 +1599,7 @@ function JoinLensImpl({
         rows={leftRows}
         visibleIndices={visibleLeft}
         keyNames={leftOn}
-        loading={sideLoading}
+        loading={leftPanelLoading}
         search={searchLeft}
         onSearch={setSearchLeft}
         selectedIndex={leftSel}
@@ -1207,12 +1615,20 @@ function JoinLensImpl({
           if (sideMode === "auto") return;
           setLeftSel((prev) => (prev === index ? null : index));
         }}
-        mapButtonLabel={pairMode ? "Map this pair…" : "Add to map…"}
+        mapButtonLabel={pairMode ? "Save mapping…" : "Save mapping…"}
         onAddToMap={
           onMapKey && sideMode === "probe" && leftSel != null
             ? pairMode
               ? () => emitMapPair()
               : () => emitMapKey("left", leftSel)
+            : undefined
+        }
+        onFindRight={
+          onMapKey &&
+          sideMode === "probe" &&
+          !pairMode &&
+          leftSel != null
+            ? () => openFindRight(keyLabelFor("left", leftSel))
             : undefined
         }
       />
@@ -1227,63 +1643,58 @@ function JoinLensImpl({
             <button
               type="button"
               onClick={() => switchMode("linked")}
-              title="Parents of the selected result row"
+              title="Which left/right rows built this result row?"
               className={`px-1.5 py-0.5 text-[9px] ${
                 sideMode === "linked"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
               }`}
             >
-              Linked
+              This row
             </button>
             <button
               type="button"
               onClick={() => switchMode("probe")}
-              title="Keys that did not join — pick one to map or blame"
+              title="Values that didn’t find a partner in the join"
               className={`px-1.5 py-0.5 text-[9px] ${
                 sideMode === "probe"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
               }`}
             >
-              Probe
+              No match
               {unmatchedTotal > 0 && (
                 <span className="ml-1 text-amber-300/90">·{unmatchedTotal}</span>
-              )}
-              {unmatchedTotal > 0 && (
-                <span className="ml-1 text-[8px] font-normal normal-case text-amber-200/70">
-                  needs map?
-                </span>
               )}
             </button>
             <button
               type="button"
               onClick={() => switchMode("auto")}
-              title="Suggest From→To with Jaro-Winkler. Accept writes a KeyMap. Probe stays manual."
+              title="Propose renames for all unmatched keys (similar names + optional AI)"
               className={`px-1.5 py-0.5 text-[9px] ${
                 sideMode === "auto"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
               }`}
             >
-              Auto
+              Suggest all
             </button>
           </div>
           <span
             className="min-w-0 flex-1 truncate text-[10px] text-slate-500"
             title={
               sideMode === "linked"
-                ? "Parents of the selected result row"
+                ? "Which left/right rows built this result row?"
                 : sideMode === "auto"
-                  ? "Fuzzy suggestions — accept into a KeyMap"
-                  : "Keys that did not join — pick one to map or blame"
+                  ? "Propose renames for all unmatched → save into a key map"
+                  : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
-              ? "Parents of the selected result row"
+              ? "Where this result came from"
               : sideMode === "auto"
-                ? "Fuzzy suggestions — accept into a KeyMap"
-                : "Keys that did not join — pick one to map or blame"}
+                ? "Propose renames for all unmatched keys"
+                : "Values that didn’t join"}
           </span>
         </div>
 
@@ -1292,23 +1703,22 @@ function JoinLensImpl({
             <div className="flex items-start justify-between gap-2">
               <ol className="list-decimal space-y-0.5 pl-3.5">
                 <li>
-                  <span className="font-semibold text-teal-200">Linked</span> —
-                  understand fan-out of the result row
+                  <span className="font-semibold text-teal-200">This row</span> —
+                  see which left/right rows made the selected result
                 </li>
                 <li>
-                  <span className="font-semibold text-teal-200">Probe</span> —
-                  find holes (unmatched keys)
+                  <span className="font-semibold text-teal-200">No match</span> —
+                  list values that didn’t find a partner
                 </li>
                 <li>
-                  Click unmatched (ideally left + right partner) →{" "}
+                  Pick left (+ right) →{" "}
                   <span className="font-semibold text-amber-200">
-                    Map this pair…
+                    Save mapping…
                   </span>
                 </li>
                 <li>
-                  <span className="font-semibold text-teal-200">Auto</span> —
-                  Jaro-Winkler suggestions, then Accept. Leftovers can go to the
-                  LLM chat.
+                  <span className="font-semibold text-teal-200">Suggest all</span>{" "}
+                  — get rename ideas for many keys at once
                 </li>
               </ol>
               <button
@@ -1350,15 +1760,122 @@ function JoinLensImpl({
         ) : (
           <>
         {/* Layer 2: status */}
-        <div className="shrink-0 border-b border-slate-800/60 bg-slate-950/50 px-2 py-1 text-[10px] leading-snug text-slate-400">
+        <div className="h-6 shrink-0 truncate border-b border-slate-800/60 bg-slate-950/50 px-2 py-1 text-[10px] leading-snug text-slate-400">
           {statusLine}
         </div>
 
         {/* Layer 3: secondary controls */}
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/80 px-2 py-1">
-          <span className="text-[9px] text-teal-300/80">join</span>
-          <span className="text-[9px] text-sky-300/80">left</span>
-          <span className="text-[9px] text-amber-300/80">right</span>
+          <span className="text-[9px] text-teal-300/80" title="Result columns">
+            result
+          </span>
+          <span className="text-[9px] text-sky-300/80" title="Left table">
+            left
+          </span>
+          <span className="text-[9px] text-amber-300/80" title="Right table">
+            right
+          </span>
+          <button
+            type="button"
+            disabled={prepareLoading}
+            onClick={() => runPrepare(!!prepared)}
+            className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
+            title={
+              prepared
+                ? "Force rebuild prepared sides (picks up file/data changes)"
+                : "Load left/right once so later checks reuse them (faster on big joins)"
+            }
+          >
+            {prepareLoading
+              ? "Loading sides…"
+              : prepared
+                ? "Reload sides"
+                : "Load sides"}
+          </button>
+          {prepareHint && !prepareLoading && (
+            <span className="text-[9px] text-slate-500">{prepareHint}</span>
+          )}
+          {(prepareLoading || joinDiagLoading) && (
+            <div
+              className="flex min-w-[10rem] max-w-xs flex-1 flex-col gap-0.5"
+              role="status"
+              aria-live="polite"
+            >
+              <div className="flex items-baseline justify-between gap-2 text-[9px] text-slate-400">
+                <span className="truncate">
+                  {prepareLoading
+                    ? (preparePhase ?? "Loading sides…")
+                    : "Finding gaps…"}
+                </span>
+                {prepareLoading && preparePct != null && (
+                  <span className="shrink-0 font-mono text-slate-500">
+                    {preparePct}%
+                  </span>
+                )}
+              </div>
+              <div className="h-1 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className={`h-full rounded-full bg-teal-400/90 ${
+                    prepareLoading
+                      ? "transition-[width] duration-300 ease-out"
+                      : "op-progress-indeterminate w-1/3"
+                  }`}
+                  style={
+                    prepareLoading
+                      ? {
+                          width: `${preparePct != null ? preparePct : 8}%`,
+                        }
+                      : undefined
+                  }
+                />
+              </div>
+            </div>
+          )}
+          {sideMode === "probe" &&
+            !joinDiag &&
+            !joinDiagLoading &&
+            onRunDiagnostics && (
+            <button
+              type="button"
+              onClick={() => {
+                if (hostQueryId) {
+                  autoDiagAttemptedRef.current = `${hostQueryId}#${joinStepIndex}`;
+                }
+                onRunDiagnostics();
+              }}
+              className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200 hover:bg-teal-500/10"
+              title="List values that didn’t join — runs automatically on small joins"
+            >
+              Find gaps
+            </button>
+          )}
+          {sideMode === "linked" && (
+            <button
+              type="button"
+              disabled={samplesLoading}
+              onClick={() => loadLinkedSamples()}
+              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
+              title="Load or reload left/right parent sample for This row"
+            >
+              {samplesLoading
+                ? "Loading rows…"
+                : samplesLoaded
+                  ? "Reload rows"
+                  : "Show rows"}
+            </button>
+          )}
+          {(samplesLoading ||
+            prepareLoading ||
+            nearMissLoading ||
+            joinDiagLoading) && (
+            <button
+              type="button"
+              onClick={() => cancelHeavy()}
+              className="rounded border border-amber-800/70 px-1.5 py-0.5 text-[9px] text-amber-200/90 hover:bg-amber-500/10"
+            >
+              Cancel
+            </button>
+          )}
           {sideProbe &&
             (keyExplain
               ? keyExplain.result_match_count > 0
@@ -1369,8 +1886,8 @@ function JoinLensImpl({
                 className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
               >
                 {matchesOnly || showingExplainSample
-                  ? "Show all preview"
-                  : "Matches only"}
+                  ? "Show all rows"
+                  : "Matching only"}
               </button>
             )}
           {sideProbe && (
@@ -1386,21 +1903,28 @@ function JoinLensImpl({
               }}
               className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-500 hover:text-slate-300"
             >
-              Clear
+              Clear selection
             </button>
           )}
-          {showNearMissChrome && (
-            <button
-              type="button"
-              onClick={() => setNearMissOpen((v) => !v)}
-              className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10"
-            >
-              {nearMissLoading
-                ? "Near-miss…"
-                : `${nearMissCount} near-miss hypothes${nearMissCount === 1 ? "is" : "es"}`}
-              {nearMissOpen ? " ▾" : " ▸"}
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={nearMissLoading}
+            onClick={() => {
+              if (!nearMiss && !nearMissLoading) {
+                runNearMiss();
+              } else {
+                setNearMissOpen((v) => !v);
+              }
+            }}
+            className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
+            title="Try trim/case/zeros cleanup that might create more matches"
+          >
+            {nearMissLoading
+              ? "Checking cleanup…"
+              : nearMiss
+                ? `${nearMissCount} cleanup ideas · ${nearMissOpen ? "▾" : "▸"}`
+                : "Try cleanup"}
+          </button>
         </div>
 
         {showNearMissChrome && nearMissOpen && (
@@ -1438,7 +1962,7 @@ function JoinLensImpl({
             <div className="flex flex-wrap items-center gap-3">
               <div className="min-w-0 flex-1">
                 <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
-                  Map pair · left → right
+                  Mapping · left → right
                 </div>
                 <div className="truncate font-mono text-[12px] text-amber-50">
                   From: {pairFromLabel}
@@ -1453,7 +1977,7 @@ function JoinLensImpl({
                   onClick={() => emitMapPair()}
                   className="shrink-0 rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35"
                 >
-                  Map this pair…
+                  Save mapping…
                 </button>
               )}
             </div>
@@ -1467,7 +1991,7 @@ function JoinLensImpl({
               <div className="flex flex-wrap items-center gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
-                    Selected key · {selectedProbeSide}
+                    Selected · {selectedProbeSide}
                   </div>
                   <div className="truncate font-mono text-[12px] text-amber-50">
                     From: {selectedKeyDisplay || "∅"}
@@ -1475,29 +1999,85 @@ function JoinLensImpl({
                   <div className="text-[10px] text-slate-500">
                     To:{" "}
                     <span className="italic text-slate-600">
-                      (pick unmatched on the other side, or set in KeyMap)
+                      (pick a partner on the other side, or Suggest Right)
                     </span>
                   </div>
                 </div>
-                {onMapKey && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      emitMapKey(selectedProbeSide, selectedProbeIndex)
-                    }
-                    className="shrink-0 rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35"
-                  >
-                    Add to map…
-                  </button>
-                )}
+                <div className="flex shrink-0 flex-wrap gap-1.5">
+                  {onMapKey &&
+                    selectedProbeSide === "left" && (
+                      <button
+                        type="button"
+                        onClick={() => openFindRight(selectedKeyDisplay)}
+                        className="rounded border border-teal-700/80 bg-teal-500/20 px-3 py-1.5 text-[11px] font-semibold text-teal-50 hover:bg-teal-500/30"
+                        title="Suggest a matching right value"
+                      >
+                        Suggest…
+                      </button>
+                    )}
+                  {onMapKey && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        emitMapKey(selectedProbeSide, selectedProbeIndex)
+                      }
+                      className="rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35"
+                    >
+                      Save mapping…
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
 
-        {sideMode === "probe" && !sideProbe && unmatchedTotal > 0 && (
-          <div className="shrink-0 border-b border-amber-950/40 bg-amber-950/15 px-2 py-1.5 text-[10px] text-amber-100/80">
-            Select unmatched left + right partner → Map this pair… (or one side
-            → Add to map…)
+        {sideMode === "probe" && !sideProbe && onMapKey && (
+          <div className="flex h-[3.75rem] shrink-0 items-center border-b border-amber-950/40 bg-gradient-to-r from-amber-950/30 via-slate-950/40 to-slate-950/20 px-2">
+            {centerFromKey ? (
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
+                    Selected result row
+                  </div>
+                  <div className="truncate font-mono text-[12px] text-amber-50">
+                    From: {centerFromKey}
+                  </div>
+                  <div className="truncate text-[10px] text-slate-500">
+                    Suggest a right-side partner, or pick rows on Left/Right
+                  </div>
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => openFindRight(centerFromKey)}
+                    className="rounded border border-teal-700/80 bg-teal-500/20 px-3 py-1.5 text-[11px] font-semibold text-teal-50 hover:bg-teal-500/30"
+                    title="Propose a matching right value for this key"
+                  >
+                    Suggest…
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      pinCenterToFromKey(centerFromKey);
+                      onMapKey("left", [centerFromKey]);
+                      const toast = `Opened KeyMap · from=${centerFromKey}`;
+                      setMapToast(toast);
+                      window.setTimeout(() => {
+                        setMapToast((cur) => (cur === toast ? null : cur));
+                      }, 3500);
+                    }}
+                    className="rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35"
+                  >
+                    Save mapping…
+                  </button>
+                </div>
+              </div>
+            ) : unmatchedTotal > 0 ? (
+              <div className="text-[10px] text-amber-100/80">
+                Select a result row, or a value on Left/Right → Suggest… / Save
+                mapping…
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -1530,7 +2110,7 @@ function JoinLensImpl({
         rows={rightRows}
         visibleIndices={visibleRight}
         keyNames={rightOn}
-        loading={sideLoading}
+        loading={rightPanelLoading}
         search={searchRight}
         onSearch={setSearchRight}
         selectedIndex={rightSel}
@@ -1546,7 +2126,7 @@ function JoinLensImpl({
           if (sideMode === "auto") return;
           setRightSel((prev) => (prev === index ? null : index));
         }}
-        mapButtonLabel={pairMode ? "Map this pair…" : "Add to map…"}
+        mapButtonLabel="Save mapping…"
         onAddToMap={
           onMapKey && sideMode === "probe" && rightSel != null
             ? pairMode
@@ -1555,6 +2135,20 @@ function JoinLensImpl({
             : undefined
         }
       />
+
+      {findRightKey != null && hostQueryId && (
+        <FindRightDialog
+          open
+          fromKey={findRightKey}
+          workspace={workspace}
+          hostQueryId={hostQueryId}
+          joinStepIndex={joinStepIndex}
+          connections={connections}
+          sources={sources}
+          onClose={() => setFindRightKey(null)}
+          onAccept={acceptFindRight}
+        />
+      )}
     </div>
   );
 }

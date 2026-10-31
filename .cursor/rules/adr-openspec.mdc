@@ -1,0 +1,46 @@
+---
+description: Product decisions via ADR; behavior deltas via OpenSpec — required for all agents
+alwaysApply: true
+---
+
+# ADR + OpenSpec (required)
+
+This repo separates **product decisions** from **implementation deltas**. Agents must follow both.
+
+## Where truth lives
+
+| Layer | Path | Role |
+|-------|------|------|
+| Product / architecture | `docs/adr/` | Long-lived decisions (Accepted / Rejected). Link from code and specs. |
+| Product narrative | `docs/DESIGN.md`, `docs/SPEC.md` | North star and IR — do not contradict Accepted ADRs. |
+| Change in flight | `openspec/changes/<id>/` | One change: `proposal.md` → `specs/` → `design.md` → `tasks.md`. |
+| Delta specs (in flight) | `openspec/changes/<id>/specs/<capability>/spec.md` | ADDED/MODIFIED for that change only. |
+| Merged SoT (done) | `openspec/specs/<capability>/spec.md` | **Required** after a change completes — merge the delta here. |
+| OpenSpec index | `openspec/README.md` | Active changes and review order. |
+
+`docs/SPEC.md` = product IR. **`openspec/specs/`** = merged OpenSpec capability contracts. Do not confuse them.
+
+**Completed changes must merge into `openspec/specs/`.** A change is not done until its `changes/<id>/specs/` deltas are applied into `openspec/specs/`.
+
+## When to use what
+
+- **New capability, constraint, or “we refuse X”** → write or update an **ADR** under `docs/adr/` (next free number, e.g. `0021-….md`). Reference related ADRs; do not silently reverse Accepted ones.
+- **Implementing a change** → work under an **OpenSpec change** (`openspec/changes/<id>/`). Prefer an existing active change; otherwise create one.
+- **Change finished** → merge `changes/<id>/specs/` → **`openspec/specs/`**, then close/archive the change.
+- **Bugfix / tiny refactor with no behavior contract change** → no new OpenSpec/ADR unless it alters a stated requirement.
+
+## OpenSpec workflow (agents)
+
+1. Read `openspec/README.md`, **`openspec/specs/`**, and the active change’s `proposal.md`.
+2. Review order: **proposal → specs → design → tasks**. Do not implement ahead of reviewed requirements.
+3. While in flight, edit only **`openspec/changes/<id>/specs/**/spec.md`**.
+4. Check off `tasks.md`; stay inside proposal “In scope”.
+5. **Done = merged into `openspec/specs/`.** Do not leave completed deltas only under `changes/`.
+6. Link ADR ↔ OpenSpec both ways (see ADR-0020 ↔ `openspec/changes/join-key-mapping/`).
+
+## Do / don’t
+
+- **Do** cite ADR numbers in PRs, commits, and UI/help when touching decided behavior.
+- **Do** refuse features that Accepted ADRs forbid (e.g. automatic fuzzy Join ON — ADR-0019/0020).
+- **Don’t** treat chat agreement as a substitute for ADR/OpenSpec.
+- **Don’t** put product policy only in code comments — promote it to ADR when durable.

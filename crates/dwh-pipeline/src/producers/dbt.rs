@@ -13,6 +13,7 @@ use crate::graph::{sanitize_id, topo_queries};
 use crate::model::{KeyMapEntry, TransformationStep, Workspace};
 use crate::producers::{DbtTarget, OutputProducer};
 use crate::schema::{infer_workspace_schemas, WorkspaceSchemas};
+use crate::parquet_scan::read_parquet_call_opts;
 use crate::sql_escape::escape_sql_string;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -210,6 +211,33 @@ impl DbtProducer {
         published_query_ids: &[String],
         load_seeds: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
+        self.produce_routed_with_schema_and_sources(
+            pipeline_name,
+            workspace,
+            output_dir,
+            target,
+            engine,
+            destination,
+            postgres_schema,
+            published_query_ids,
+            load_seeds,
+            &[],
+        )
+    }
+
+    pub fn produce_routed_with_schema_and_sources(
+        &self,
+        pipeline_name: &str,
+        workspace: &Workspace,
+        output_dir: &str,
+        target: DbtTarget,
+        engine: ExecutionEngine,
+        destination: DestinationKind,
+        postgres_schema: &str,
+        published_query_ids: &[String],
+        load_seeds: &HashMap<String, Vec<String>>,
+        sources: &[crate::project::SourceDef],
+    ) -> Result<String, String> {
         if matches!(target, DbtTarget::V2) {
             return Err(
                 "dbt v2 export is reserved (ADR-0006) but not implemented yet. Use dbt_target: v1."
@@ -251,6 +279,7 @@ impl DbtProducer {
             postgres_schema,
             published_query_ids,
             load_seeds,
+            sources,
         )?;
         let root = Path::new(output_dir).join(pipeline_name);
         let manifest_tag = if is_duckdb_to_postgres(engine, destination) {
@@ -285,6 +314,7 @@ pub fn build_export_plan(
         pg_schema,
         &[],
         load_seeds,
+        &[],
     )
 }
 
@@ -300,6 +330,7 @@ pub fn build_export_plan_routed(
     postgres_schema: &str,
     published_query_ids: &[String],
     load_seeds: &HashMap<String, Vec<String>>,
+    sources: &[crate::project::SourceDef],
 ) -> Result<BTreeMap<String, String>, String> {
     let dialect = engine.dialect();
     let mut plan = BTreeMap::new();
@@ -468,8 +499,14 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
         } else {
             "models/intermediate"
         };
-        let sql =
-            compile_query_as_dbt_model(workspace, query, &model_name_by_query, dialect, &schemas)?;
+        let sql = compile_query_as_dbt_model(
+            workspace,
+            query,
+            &model_name_by_query,
+            dialect,
+            &schemas,
+            sources,
+        )?;
         plan.insert(format!("{folder}/{model_name}.sql"), sql);
         model_name_by_query.insert(qid.clone(), model_name);
 
@@ -610,12 +647,36 @@ pub fn preview_dbt_model_sql_with_seeds(
     dialect: WarehouseDialect,
     load_seeds: &HashMap<String, Vec<String>>,
 ) -> Result<PreviewDbtModel, String> {
+    preview_dbt_model_sql_with_seeds_and_sources(
+        workspace,
+        query_id,
+        dialect,
+        load_seeds,
+        &[],
+    )
+}
+
+/// Like [`preview_dbt_model_sql_with_seeds`], with project sources (Hive partitioning).
+pub fn preview_dbt_model_sql_with_seeds_and_sources(
+    workspace: &Workspace,
+    query_id: &str,
+    dialect: WarehouseDialect,
+    load_seeds: &HashMap<String, Vec<String>>,
+    sources: &[crate::project::SourceDef],
+) -> Result<PreviewDbtModel, String> {
     let query = workspace
         .query(query_id)
         .ok_or_else(|| format!("query '{query_id}' not found"))?;
     let names = dbt_model_names(workspace)?;
     let schemas = infer_workspace_schemas(workspace, load_seeds)?;
-    let sql = compile_query_as_dbt_model(workspace, query, &names, dialect, &schemas)?;
+    let sql = compile_query_as_dbt_model(
+        workspace,
+        query,
+        &names,
+        dialect,
+        &schemas,
+        sources,
+    )?;
     let model_name = names
         .get(query_id)
         .cloned()
@@ -648,6 +709,7 @@ fn compile_query_as_dbt_model(
     models: &std::collections::HashMap<String, String>,
     dialect: WarehouseDialect,
     schemas: &WorkspaceSchemas,
+    sources: &[crate::project::SourceDef],
 ) -> Result<String, String> {
     // v1: collapse query into one model SQL (WITH inside file) using ref() for deps.
     if query.steps.is_empty() {
@@ -661,10 +723,20 @@ fn compile_query_as_dbt_model(
                 "-- source: csv\nselect * from read_csv_auto('{}')\n",
                 escape_sql_string(path)
             ),
-            TransformationStep::LoadParquet { path, .. } => format!(
-                "-- source: parquet\nselect * from read_parquet('{}')\n",
-                escape_sql_string(path)
-            ),
+            TransformationStep::LoadParquet {
+                path,
+                connection_id,
+            } => {
+                let hive = crate::project::parquet_hive_partitioning(
+                    sources,
+                    path,
+                    connection_id.as_deref(),
+                );
+                format!(
+                    "-- source: parquet\nselect * from {}\n",
+                    read_parquet_call_opts(path, hive)
+                )
+            }
             TransformationStep::LoadPostgres {
                 schema,
                 table_name,
@@ -735,12 +807,17 @@ fn compile_query_as_dbt_model(
                     escape_sql_string(path)
                 )
             }
-            TransformationStep::LoadParquet { path, .. } => {
+            TransformationStep::LoadParquet {
+                path,
+                connection_id,
+            } => {
                 left_dbt = None;
-                format!(
-                    "select * from read_parquet('{}')",
-                    escape_sql_string(path)
-                )
+                let hive = crate::project::parquet_hive_partitioning(
+                    sources,
+                    path,
+                    connection_id.as_deref(),
+                );
+                format!("select * from {}", read_parquet_call_opts(path, hive))
             }
             TransformationStep::LoadPostgres {
                 schema,

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Accepted** (MVP). Fuzzy suggestions → Accept into KeyMap are opt-in later; automatic fuzzy merge remains forbidden.
+**Accepted** (MVP). Fuzzy suggestions are opt-in and require explicit acceptance into a KeyMap draft; automatic fuzzy merge remains forbidden.
 
 ## Business north star (two product directions)
 
@@ -55,6 +55,17 @@ Data engineers edit mappings as a **table** (`from`, `to`) — in git as `seeds/
    - **Bind:** KeyMap storage may be generated **seed** (default), existing dbt **`ref(model)`**, or **`source(name, table)`**. Explorer lists KeyMaps; editor sets storage + from/to column names. CSV seed is the default portable form, not the only backend.
    - **Write-back (source):** editing From→To and Save does a **full replace** (`DELETE` + `INSERT`) into the Postgres `source.table` via DuckDB ATTACH (writable). Open reloads live rows from WH. **ref** has no write-back (dbt run owns the model). **seed** write-back is the export CSV / push to export tree.
 5. **Out of scope:** automatic fuzzy merge; AI inventing aliases; universal column schema mapper.
+
+## Fuzzy implementation and full dictionaries
+
+- `key_match.rs` owns normalization, candidate retrieval, Jaro–Winkler, best/runner-up ranking and ambiguity. It contains no DuckDB API or SQL. `strsim` supplies the tested string metrics; their implementations are not copied into this project.
+- Join Lens remains an adapter over unmatched join keys (200 values per side, 40 proposals, existing short-key/NormalizeKey guards). `key_map_fuzzy.rs` reads two query outputs with explicit key and optional label columns. Both use the same `FuzzyPair` and matching core. Labels are comparison evidence; returned keys are never rewritten or normalized.
+- Full dictionaries use a bounded rare-token index: right token frequency ≤32, top 16 token candidates per From, plus exact normalized labels when at most 32 targets share that label. Common buckets stop retaining row lists at the cap. This prevents a hidden all-pairs expansion but does not guarantee exhaustive recall. Identical names under different codes are eligible; many From keys may choose one To.
+- Inputs are unique trimmed nonblank keys; key/label length ≤512 characters; at most 250000 rows per side. Duplicate keys, NULL/blank labels, invalid thresholds and overflow return errors, never a partial successful map. Small Join Lens inputs retain their distinct, explicitly bounded exhaustive search.
+- Defaults: score cutoff 0.88, ambiguity gap 0.03; both configurable for dictionary matching. Runner-up means another eligible candidate within the retrieved set. Exact score ties are always ambiguous, including gap=0. Equal-score dictionary targets are ordered by original key for reproducibility.
+- `key_map_fuzzy_suggest` is read-only. The editor can accept unambiguous proposals into its existing draft; filled mappings are preserved. Existing Save / conflict detection / seed-source-ref paths remain authoritative. There is no Catalog IR object, extra map store, benchmark-specific default or fuzzy Join ON.
+- DuckDB resolves connections and reads source query outputs under the session lock; Rust matching runs after that lock is released. Long dictionary requests run on the host's existing worker path. This is not a new job scheduler or cancellable background-task framework.
+- Production contains one matcher. The previous SQL implementation survives only as an ignored, explicit benchmark fixture (`scripts/stress/fuzzy_baseline.sql`). Performance, equality checks and limitations are recorded in `scripts/stress/BENCHMARK.md`.
 
 ## Consequences
 

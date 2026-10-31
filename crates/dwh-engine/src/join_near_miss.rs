@@ -5,7 +5,7 @@
 
 use crate::session::DbSession;
 use dwh_pipeline::{
-    cte_name, normalize_column_expr, quote_ident, ConnectionDef, GraphCompiler, NormalizeOp,
+    cte_name, normalize_key_column_expr, quote_ident, ConnectionDef, GraphCompiler, NormalizeOp,
     TransformationStep, Workspace,
 };
 use duckdb::params;
@@ -47,6 +47,7 @@ pub fn join_key_near_miss(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Result<JoinKeyNearMiss, String> {
@@ -77,8 +78,8 @@ pub fn join_key_near_miss(
         return Err("Join cannot be the first step (no left input)".into());
     }
 
-    let left_cte = cte_name(host_query_id, join_step_index - 1);
-    let right_cte = cte_name(right_query_id, {
+    let left_cte_full = cte_name(host_query_id, join_step_index - 1);
+    let right_cte_full = cte_name(right_query_id, {
         let rq = resolved
             .query(right_query_id)
             .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
@@ -88,11 +89,45 @@ pub fn join_key_near_miss(
         rq.steps.len() - 1
     });
 
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    crate::join_prepare::ensure_join_sides_materialized(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+        None,
+    )?;
+    let prep = crate::join_prepare::prepared_join_with(
+        db,
+        workspace,
+        sources,
+        connections,
+        host_query_id,
+        join_step_index,
+    );
+    let (left_cte, right_cte, wrap_select): (String, String, Box<dyn Fn(&str) -> String>) =
+        if let Some((_h, defs)) = prep {
+            let (l, r, _) = crate::join_prepare::prepared_cte_names();
+            (
+                l.into(),
+                r.into(),
+                Box::new(move |body: &str| format!("WITH \n{defs}\n{body}")),
+            )
+        } else {
+            let compiled = GraphCompiler::new(&resolved)
+                .with_sources(sources)
+                .compile_ctes_from(host_query_id)?;
+            (
+                left_cte_full,
+                right_cte_full,
+                Box::new(move |body: &str| compiled.wrap_select(body)),
+            )
+        };
 
     let baseline = count_overlap(
         db,
-        &compiled.wrap_select(&overlap_sql(
+        &wrap_select(&overlap_sql(
             &left_cte,
             &right_cte,
             left_on,
@@ -135,7 +170,7 @@ pub fn join_key_near_miss(
         };
         let after = count_overlap(
             db,
-            &compiled.wrap_select(&overlap_sql(
+            &wrap_select(&overlap_sql(
                 &left_cte,
                 &right_cte,
                 left_on,
@@ -149,7 +184,7 @@ pub fn join_key_near_miss(
         }
         let sample_pairs = sample_new_pairs(
             db,
-            &compiled.wrap_select(&new_pairs_sql(
+            &wrap_select(&new_pairs_sql(
                 &left_cte,
                 &right_cte,
                 left_on,
@@ -187,9 +222,7 @@ pub fn join_key_near_miss(
 fn key_expr(alias: &str, col: &str, ops: Option<&[NormalizeOp]>) -> String {
     let base = format!("{alias}.{}", quote_ident(col));
     match ops {
-        Some(ops) if !ops.is_empty() => {
-            format!("CAST({} AS VARCHAR)", normalize_column_expr(&base, ops))
-        }
+        Some(ops) if !ops.is_empty() => normalize_key_column_expr(&base, ops),
         _ => format!("CAST({base} AS VARCHAR)"),
     }
 }
@@ -326,6 +359,12 @@ mod tests {
     }
 
     #[test]
+    fn key_expr_casts_before_trim_for_numeric_keys() {
+        let sql = key_expr("l", "batch_id", Some(&[NormalizeOp::Trim]));
+        assert_eq!(sql, "trim(CAST(l.\"batch_id\" AS VARCHAR))");
+    }
+
+    #[test]
     fn near_miss_finds_case_trim() {
         let dir = fixtures();
         // Build tiny CSVs via DuckDB VALUES by LoadCsv fixtures if present;
@@ -366,7 +405,7 @@ mod tests {
             focus_query_id: "fact".into(),
             key_maps: vec![],
         };
-        let out = join_key_near_miss(&db, &ws, &[], "fact", 1).unwrap();
+        let out = join_key_near_miss(&db, &ws, &[], &[], "fact", 1).unwrap();
         // May or may not find hypotheses depending on fixture content — API must succeed.
         assert_eq!(out.host_query_id, "fact");
         let _ = out.hypotheses;

@@ -9,6 +9,7 @@ interface EmptyHeroProps {
   onLoadDemo: (id: DemoId) => void;
   onAddCsv: () => void;
   onAddParquet: () => void;
+  onAddHiveParquet: () => void;
   onAddPostgres: () => void;
   onAddSqlModel: () => void;
 }
@@ -25,7 +26,7 @@ const DEMOS: { id: DemoId; label: string; hint: string }[] = [
   {
     id: "keymap",
     label: "Key mapping",
-    hint: "ticker · old name · Probe",
+    hint: "ticker · old name · No match",
   },
 ];
 
@@ -60,6 +61,7 @@ export function EmptyHero({
   onLoadDemo,
   onAddCsv,
   onAddParquet,
+  onAddHiveParquet,
   onAddPostgres,
   onAddSqlModel,
 }: EmptyHeroProps) {
@@ -125,6 +127,13 @@ export function EmptyHero({
               className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-200 hover:border-teal-600"
             >
               Open Parquet
+            </button>
+            <button
+              type="button"
+              onClick={onAddHiveParquet}
+              className="rounded-lg border border-slate-600 px-4 py-2.5 text-sm text-slate-200 hover:border-teal-600"
+            >
+              Hive Parquet
             </button>
             <button
               type="button"

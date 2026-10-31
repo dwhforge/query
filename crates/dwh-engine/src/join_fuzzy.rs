@@ -1,23 +1,26 @@
 //! Fuzzy join-key suggestions for Join Lens Auto.
 //!
-//! DuckDB core `jaro_winkler_similarity` (v2 text functions) scores unmatched
-//! left keys against unmatched right keys. Suggestions are explicit From→To
+//! Shared Rust matching scores unmatched left keys against right keys.
+//! Suggestions are explicit From→To
 //! candidates for a KeyMap — Join ON is never rewritten.
 //!
 //! Keys that fail the cutoff stay in `leftover_*` so the user can discuss them
 //! with an LLM. Case/trim-only differences are excluded (that is NormalizeKey).
 
 use crate::arrow_json::{array_value_to_json, map_arrow_type};
+use crate::key_match::{
+    match_keys, CandidateSearch, FuzzyPair, KeyMatchOptions, MatchPolicy, MatchRecord,
+};
 use crate::preview::ColumnMetadata;
 use crate::session::DbSession;
+use duckdb::params;
 use dwh_pipeline::{
     cte_name, escape_sql_string, quote_ident, CompiledCtes, ConnectionDef, GraphCompiler,
     TransformationStep, Workspace,
 };
-use duckdb::params;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const SCORE_CUTOFF: f64 = 0.88;
 const KEY_SCAN_CAP: usize = 200;
@@ -27,21 +30,6 @@ const CONTEXT_SAMPLE_KEYS: usize = 25;
 const CONTEXT_SIDE_COLS: usize = 6;
 const CONTEXT_MAP_ENTRIES: usize = 40;
 const CONTEXT_VALUE_CHARS: usize = 80;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FuzzyPair {
-    pub from_key: String,
-    pub to_key: String,
-    pub score: f64,
-    pub edits: u32,
-    /// Close runner-up for the same From — do not pre-accept.
-    pub ambiguous: bool,
-    /// Second-best To when `ambiguous` (many-to-one still allows shared To across Froms).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alt_to_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alt_score: Option<f64>,
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FuzzyFieldSample {
@@ -94,7 +82,7 @@ pub struct JoinKeyFuzzySuggest {
     pub join_step_index: usize,
     pub left_on: Vec<String>,
     pub right_on: Vec<String>,
-    /// DuckDB function used. Core in DuckDB 2, no extension.
+    /// Similarity metric; implemented by the shared Rust matcher.
     pub metric: String,
     pub score_cutoff: f64,
     pub suggestions: Vec<FuzzyPair>,
@@ -113,19 +101,12 @@ pub struct JoinKeyFuzzySuggest {
     pub chat_context: FuzzyChatContext,
 }
 
-#[derive(Debug, Clone)]
-struct Scored {
-    from_key: String,
-    to_key: String,
-    score: f64,
-    edits: u32,
-}
-
 /// Suggest left→right alias pairs for keys that do not already match exactly.
 pub fn join_key_fuzzy_suggest(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Result<JoinKeyFuzzySuggest, String> {
@@ -163,7 +144,9 @@ pub fn join_key_fuzzy_suggest(
     }
     let left_cte = cte_name(host_query_id, join_step_index - 1);
     let right_cte = cte_name(right_query_id, rq.steps.len() - 1);
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    let compiled = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .compile_ctes_from(host_query_id)?;
     let left_query_name = host.name.clone();
     let right_query_name = rq.name.clone();
     let right_query_id = right_query_id.clone();
@@ -280,12 +263,28 @@ pub fn join_key_fuzzy_suggest(
 
     let scanned_left = left_keys.len() as u64;
     let scanned_right = right_to_candidates.len() as u64;
-    let scored = if left_keys.is_empty() || right_to_candidates.is_empty() {
-        Vec::new()
-    } else {
-        score_pairs(db, &left_keys, &right_to_candidates)?
+    let records = |keys: &[String]| {
+        keys.iter()
+            .map(|key| MatchRecord {
+                key: key.clone(),
+                label: key.clone(),
+            })
+            .collect::<Vec<_>>()
     };
-    let suggestions = assign_pairs(scored);
+    let mut suggestions = match_keys(
+        &records(&left_keys),
+        &records(&right_to_candidates),
+        KeyMatchOptions::default(),
+        MatchPolicy::JoinKeyTypos,
+        CandidateSearch::Exhaustive,
+    );
+    // Preserve Join Lens's existing cap and score-first display order.
+    suggestions.truncate(MAX_SUGGESTIONS);
+    suggestions.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.from_key.cmp(&b.from_key))
+    });
     let used_from: HashSet<&str> = suggestions.iter().map(|p| p.from_key.as_str()).collect();
     for k in left_keys {
         if !used_from.contains(k.as_str()) {
@@ -375,7 +374,10 @@ fn key_expr(alias: &str, cols: &[String]) -> String {
         .map(|c| format!("{alias}.{} IS NULL", quote_ident(c)))
         .collect::<Vec<_>>()
         .join(" OR ");
-    format!("CASE WHEN {null_guard} THEN NULL ELSE {} END", parts.join(" || ' · ' || "))
+    format!(
+        "CASE WHEN {null_guard} THEN NULL ELSE {} END",
+        parts.join(" || ' · ' || ")
+    )
 }
 
 fn summarize_lineage(steps: &[TransformationStep]) -> String {
@@ -558,10 +560,7 @@ fn sample_key_rows(
                     }
                 }
                 if !key_s.is_empty() {
-                    out.push(FuzzyKeySample {
-                        key: key_s,
-                        fields,
-                    });
+                    out.push(FuzzyKeySample { key: key_s, fields });
                 }
             }
         }
@@ -602,133 +601,11 @@ fn collect_alias_examples(workspace: &Workspace) -> Vec<FuzzyAliasExample> {
     out
 }
 
-fn score_pairs(db: &DbSession, left: &[String], right: &[String]) -> Result<Vec<Scored>, String> {
-    let lvals = values_list(left);
-    let rvals = values_list(right);
-    let cutoff = format!("{SCORE_CUTOFF}");
-    let sql = format!(
-        "WITH l(k) AS (SELECT * FROM (VALUES {lvals}) t(k)),\n\
-         r(k) AS (SELECT * FROM (VALUES {rvals}) t(k))\n\
-         SELECT l.k, r.k,\n\
-           jaro_winkler_similarity(lower(trim(l.k)), lower(trim(r.k)), {cutoff}) AS score,\n\
-           levenshtein(lower(trim(l.k)), lower(trim(r.k))) AS edits\n\
-         FROM l CROSS JOIN r\n\
-         WHERE lower(trim(l.k)) <> lower(trim(r.k))\n\
-           AND jaro_winkler_similarity(lower(trim(l.k)), lower(trim(r.k)), {cutoff}) >= {cutoff}"
-    );
-    db.with_conn(|conn| {
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let from_key: String = row.get(0).map_err(|e| e.to_string())?;
-            let to_key: String = row.get(1).map_err(|e| e.to_string())?;
-            let score: f64 = row.get(2).map_err(|e| e.to_string())?;
-            let edits: i64 = row.get(3).map_err(|e| e.to_string())?;
-            out.push(Scored {
-                from_key,
-                to_key,
-                score,
-                edits: edits.max(0) as u32,
-            });
-        }
-        Ok(out)
-    })
-}
-
 fn values_list(keys: &[String]) -> String {
     keys.iter()
         .map(|k| format!("('{}')", escape_sql_string(k)))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn passes(s: &Scored) -> bool {
-    let fl = s.from_key.trim().chars().count();
-    let tl = s.to_key.trim().chars().count();
-    let min_l = fl.min(tl);
-    let max_l = fl.max(tl);
-    if min_l < 3 || max_l >= MAX_KEY_CHARS {
-        return false;
-    }
-    if s.score < SCORE_CUTOFF {
-        return false;
-    }
-    // Short codes collide easily; require a tighter edit budget.
-    if min_l <= 5 && (s.score < 0.92 || s.edits > 2) {
-        return false;
-    }
-    // A tiny token inside a long name is an abbreviation, not a typo.
-    if min_l <= 8 && max_l > min_l * 22 / 10 && s.score < 0.96 {
-        return false;
-    }
-    let a = s.from_key.trim().to_lowercase();
-    let b = s.to_key.trim().to_lowercase();
-    a != b
-}
-
-fn assign_pairs(mut rows: Vec<Scored>) -> Vec<FuzzyPair> {
-    rows.retain(passes);
-    rows.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.edits.cmp(&b.edits))
-            .then_with(|| a.from_key.cmp(&b.from_key))
-            .then_with(|| a.to_key.cmp(&b.to_key))
-    });
-    // Best (+ runner-up) per From independently. Same To may be reused (many-to-one).
-    let mut by_from: HashMap<String, Vec<Scored>> = HashMap::new();
-    for s in rows {
-        by_from.entry(s.from_key.clone()).or_default().push(s);
-    }
-    let mut out = Vec::new();
-    let mut from_keys: Vec<String> = by_from.keys().cloned().collect();
-    from_keys.sort();
-    for from in from_keys {
-        let mut cands = by_from.remove(&from).unwrap_or_default();
-        cands.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.edits.cmp(&b.edits))
-                .then_with(|| a.to_key.cmp(&b.to_key))
-        });
-        let Some(best) = cands.first().cloned() else {
-            continue;
-        };
-        let alt = cands.get(1);
-        let ambiguous = alt
-            .map(|a| best.score - a.score < 0.03)
-            .unwrap_or(false);
-        out.push(FuzzyPair {
-            from_key: best.from_key,
-            to_key: best.to_key,
-            score: best.score,
-            edits: best.edits,
-            ambiguous,
-            alt_to_key: if ambiguous {
-                alt.map(|a| a.to_key.clone())
-            } else {
-                None
-            },
-            alt_score: if ambiguous {
-                alt.map(|a| a.score)
-            } else {
-                None
-            },
-        });
-        if out.len() == MAX_SUGGESTIONS {
-            break;
-        }
-    }
-    out.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.from_key.cmp(&b.from_key))
-    });
-    out
 }
 
 fn query_pair_counts(db: &DbSession, sql: &str) -> Result<(u64, u64), String> {
@@ -775,61 +652,6 @@ mod tests {
     use dwh_pipeline::{JoinType, QueryDef, TransformationStep, Workspace};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn passes_score(from: &str, to: &str, score: f64, edits: u32) -> bool {
-        passes(&Scored {
-            from_key: from.into(),
-            to_key: to.into(),
-            score,
-            edits,
-        })
-    }
-
-    #[test]
-    fn rejects_case_only_and_short_abbreviations() {
-        assert!(!passes_score("Widget", "widget", 1.0, 0));
-        assert!(!passes_score("acme", "acme corp", 0.93, 5));
-        assert!(passes_score("Acme Corporation", "Acme Corp", 0.91, 6));
-    }
-
-    #[test]
-    fn ambiguous_pair_is_flagged_and_many_to_one_allowed() {
-        let rows = vec![
-            Scored {
-                from_key: "Alpha Co".into(),
-                to_key: "Alpha Company".into(),
-                score: 0.94,
-                edits: 3,
-            },
-            Scored {
-                from_key: "Alpha Co".into(),
-                to_key: "Alpha Corp".into(),
-                score: 0.93,
-                edits: 3,
-            },
-            Scored {
-                from_key: "Alpha Corpp".into(),
-                to_key: "Alpha Company".into(),
-                score: 0.91,
-                edits: 4,
-            },
-            Scored {
-                from_key: "Beta LLC".into(),
-                to_key: "Beta Limited".into(),
-                score: 0.90,
-                edits: 5,
-            },
-        ];
-        let out = assign_pairs(rows);
-        assert_eq!(out.len(), 3);
-        let alpha = out.iter().find(|p| p.from_key == "Alpha Co").unwrap();
-        assert!(alpha.ambiguous);
-        assert_eq!(alpha.to_key, "Alpha Company");
-        assert_eq!(alpha.alt_to_key.as_deref(), Some("Alpha Corp"));
-        let typo = out.iter().find(|p| p.from_key == "Alpha Corpp").unwrap();
-        assert_eq!(typo.to_key, "Alpha Company");
-        assert!(!out.iter().any(|p| p.from_key == "Beta LLC" && p.ambiguous));
-    }
 
     #[test]
     fn fuzzy_suggests_typos_and_leaves_the_rest() {
@@ -882,8 +704,12 @@ mod tests {
             focus_query_id: "fact".into(),
             key_maps: vec![],
         };
-        let out = join_key_fuzzy_suggest(&db, &ws, &[], "fact", 1).unwrap();
-        let froms: Vec<_> = out.suggestions.iter().map(|p| p.from_key.as_str()).collect();
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], &[], "fact", 1).unwrap();
+        let froms: Vec<_> = out
+            .suggestions
+            .iter()
+            .map(|p| p.from_key.as_str())
+            .collect();
         assert!(
             froms.contains(&"Acme Corporation"),
             "suggestions: {froms:?} leftovers L {:?} R {:?}",
@@ -961,7 +787,7 @@ mod tests {
             focus_query_id: "fact".into(),
             key_maps: vec![],
         };
-        let out = join_key_fuzzy_suggest(&db, &ws, &[], "fact", 1).unwrap();
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], &[], "fact", 1).unwrap();
         assert!(out.suggestions.is_empty());
         assert!(out
             .disabled_reason

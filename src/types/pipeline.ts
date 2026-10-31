@@ -223,6 +223,8 @@ export interface SourceDef {
   connection_string?: string;
   schema?: string;
   table_name?: string;
+  /** Parquet Hive partitions (explicit opt-in). */
+  hive_partitioning?: boolean;
 }
 
 /** Saved React Flow positions (query id → coords). */
@@ -459,6 +461,24 @@ export function connectionById(
   return project.connections.find((c) => c.id === id);
 }
 
+/** Last concrete path segment. Skips globs; strips a trailing `.parquet`. */
+export function parquetSourceName(path: string, fallback = "parquet"): string {
+  const parts = path
+    .trim()
+    .replace(/[\\/]+$/, "")
+    .split(/[/\\]/)
+    .filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i];
+    if (part.includes("*") || part.includes("?")) continue;
+    if (part.toLowerCase().endsWith(".parquet")) {
+      return part.replace(/\.parquet$/i, "") || fallback;
+    }
+    return part;
+  }
+  return fallback;
+}
+
 /** Mirror Load* steps into Sources catalog (idempotent). */
 export function syncSourcesFromQueries(
   sources: SourceDef[],
@@ -471,6 +491,7 @@ export function syncSourcesFromQueries(
       : `${s.kind}:${s.connection_id ?? ""}:${s.path}`;
 
   const seen = new Set(next.map(keyOf));
+  const existingByKey = new Map(sources.map((s) => [keyOf(s), s] as const));
 
   for (const q of queries) {
     const step = q.steps[0];
@@ -490,13 +511,16 @@ export function syncSourcesFromQueries(
       const key = `parquet:${step.payload.connection_id ?? ""}:${step.payload.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const fileName = step.payload.path.split(/[/\\]/).pop() ?? q.name;
+      const fileName = parquetSourceName(step.payload.path, q.name);
+      const existing = existingByKey.get(key);
       next.push({
         id: newSourceId(fileName, next.map((s) => s.id)),
         name: fileName,
         kind: "parquet",
         path: step.payload.path,
         connection_id: step.payload.connection_id,
+        // Hive is source-specific — preserve when re-syncing from queries.
+        hive_partitioning: existing?.hive_partitioning || undefined,
       });
     } else if (step.type === "LoadPostgres") {
       const schema = step.payload.schema || "public";

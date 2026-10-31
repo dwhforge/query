@@ -32,6 +32,24 @@ pub struct SourceDef {
     pub schema: Option<String>,
     #[serde(default)]
     pub table_name: Option<String>,
+    /// Hive-style `key=value` partition folders → columns (Parquet sources only).
+    #[serde(default)]
+    pub hive_partitioning: bool,
+}
+
+/// Look up source-specific Hive partitioning for a LoadParquet path.
+pub fn parquet_hive_partitioning(
+    sources: &[SourceDef],
+    path: &str,
+    connection_id: Option<&str>,
+) -> bool {
+    let path = path.trim();
+    sources.iter().any(|s| {
+        s.kind == SourceKind::Parquet
+            && s.hive_partitioning
+            && s.path.as_deref().map(str::trim) == Some(path)
+            && s.connection_id.as_deref() == connection_id
+    })
 }
 
 /// Saved React Flow node positions (query id → canvas coords).

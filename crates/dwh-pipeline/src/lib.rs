@@ -10,6 +10,7 @@ pub mod export_tree;
 pub mod graph;
 pub mod key_map_sync;
 pub mod model;
+pub mod parquet_scan;
 pub mod postgres_attach;
 pub mod producers;
 pub mod project;
@@ -18,7 +19,11 @@ pub mod secrets;
 pub mod sql_escape;
 
 pub use compiler::{CompiledCtes, GraphCompiler, PipelineCompiler};
-pub use graph::cte_name;
+pub use graph::{
+    cte_name, join_left_input_is_expensive, join_right_input_is_expensive,
+    query_closure_is_expensive, step_is_derived_expensive, steps_are_derived_expensive,
+};
+pub use parquet_scan::{read_parquet_call, read_parquet_call_opts};
 pub use sql_escape::{escape_sql_string, quote_ident};
 pub use connection::{ConnectionDef, ConnectionKind, DuckdbParams, PostgresParams, S3Params};
 pub use destination::{
@@ -35,7 +40,8 @@ pub use dialect::{
 };
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
-    key_map_seed_csv_named, key_map_seed_name, normalize_column_expr, parse_key_map_seed_csv,
+    key_map_seed_csv_named, key_map_seed_name, normalize_column_expr, normalize_key_column_expr,
+    parse_key_map_seed_csv,
     parse_key_map_seed_csv_mode, rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
     validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,
@@ -62,10 +68,13 @@ pub use model::{
 };
 pub use producers::{
     build_export_plan, build_export_plan_routed, dbt_model_name, dbt_model_names_published,
-    preview_dbt_model_sql, preview_dbt_model_sql_with_seeds, DbtProducer, DbtTarget, OutputProducer,
+    preview_dbt_model_sql, preview_dbt_model_sql_with_seeds,
+    preview_dbt_model_sql_with_seeds_and_sources, DbtProducer, DbtTarget, OutputProducer,
     PreviewDbtModel,
 };
-pub use project::{CanvasLayout, CanvasPosition, Project, SourceDef, SourceKind};
+pub use project::{
+    parquet_hive_partitioning, CanvasLayout, CanvasPosition, Project, SourceDef, SourceKind,
+};
 pub use secrets::{
     connections_for_disk, extract_connection_secret, merge_connection_list_secrets,
     merge_project_secrets, migrate_legacy_project_secrets, project_for_disk,

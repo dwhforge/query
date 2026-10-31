@@ -47,6 +47,7 @@ import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
+import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
   OpProgress,
   type OpProgressState,
@@ -95,15 +96,22 @@ import { SelectColumnsEditor } from "./components/SelectColumnsEditor";
 import { SourceSchemaPanel } from "./components/SourceSchemaPanel";
 import { debounce } from "./lib/debounce";
 import {
+  cancelRunningQuery,
   describePostgresObject,
+  describeWorkspace,
   exportDbt,
   joinDiagnostics,
+  formatJoinPrepareHint,
+  formatJoinPrepareStatusHint,
+  joinPrepareProgress,
+  joinPrepareStatus,
   listExportTree,
   getAppSettings,
   getGlobalConnections,
   getLastProjectPath,
   loadProject,
   loadDemoWorkspace,
+  prepareJoinInputs,
   previewDbtModel,
   previewWorkspace,
   pushKeyMapToExport,
@@ -148,6 +156,7 @@ import {
   type JoinType,
   type ColumnMetadata,
   type PreviewResult,
+  parquetSourceName,
   type Project,
   type QueryDef,
   type QueryExecution,
@@ -244,6 +253,12 @@ function App() {
   const [joinDiag, setJoinDiag] = useState<JoinDiagnostics | null>(null);
   const [joinDiagLoading, setJoinDiagLoading] = useState(false);
   const [joinDiagError, setJoinDiagError] = useState<string | null>(null);
+  const [joinPrepareLoading, setJoinPrepareLoading] = useState(false);
+  /** Prepare started from Join Lens (separate from panel Prepare). */
+  const [lensPrepareBusy, setLensPrepareBusy] = useState(false);
+  const [joinPrepareLabel, setJoinPrepareLabel] = useState<string | null>(
+    null,
+  );
   /** Overrides Data tab when user opens a Join diagnostic sample. */
   const [diagView, setDiagView] = useState<{
     label: string;
@@ -303,6 +318,8 @@ function App() {
   const [modelError, setModelError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** Monotonic id so a slow preview for node A cannot overwrite node B. */
+  const previewReqIdRef = useRef(0);
   /** Bottom dock: sample rows vs generated model SQL (H0 projection; H1 editable later). */
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -335,6 +352,7 @@ function App() {
   );
   const [showPgPicker, setShowPgPicker] = useState(false);
   const [showS3Dialog, setShowS3Dialog] = useState(false);
+  const [showHiveDialog, setShowHiveDialog] = useState(false);
   /** Dialog outcome: catalog-only source vs source+query. */
   const [pickerIntent, setPickerIntent] = useState<"source" | "query">("query");
   const [connEditorOpen, setConnEditorOpen] = useState(false);
@@ -420,20 +438,31 @@ function App() {
   }, []);
 
   const connections = project.connections;
+  const sources = project.sources;
 
   const runPreview = useCallback(
-    async (ws: Workspace, conns: ConnectionDef[]) => {
+    async (ws: Workspace, conns: ConnectionDef[], srcs: SourceDef[] = []) => {
       // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
+      const reqId = ++previewReqIdRef.current;
       setLoading(true);
       try {
-        const result = await previewWorkspace(ws, conns);
+        const result = await previewWorkspace(ws, conns, srcs);
+        if (reqId !== previewReqIdRef.current) return;
         setPreview(result);
         setError(null);
       } catch (e) {
+        if (reqId !== previewReqIdRef.current) return;
+        const msg = typeof e === "string" ? e : String(e);
+        // Preempted by a newer preview / prepare — keep UI quiet.
+        if (/preview cancelled|superseded/i.test(msg)) {
+          return;
+        }
         setPreview(null);
-        setError(typeof e === "string" ? e : String(e));
+        setError(msg);
       } finally {
-        setLoading(false);
+        if (reqId === previewReqIdRef.current) {
+          setLoading(false);
+        }
       }
     },
     [],
@@ -441,8 +470,8 @@ function App() {
 
   const debouncedPreview = useMemo(
     () =>
-      debounce((ws: Workspace, conns: ConnectionDef[]) => {
-        void runPreview(ws, conns);
+      debounce((ws: Workspace, conns: ConnectionDef[], srcs: SourceDef[]) => {
+        void runPreview(ws, conns, srcs);
       }, 150),
     [runPreview],
   );
@@ -452,13 +481,14 @@ function App() {
     helpOpen ||
     showPgPicker ||
     showS3Dialog ||
+    showHiveDialog ||
     Boolean(mapPickPending);
 
   useEffect(() => {
     // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
     if (overlayOpen || !dataWorkspace) return;
-    debouncedPreview(dataWorkspace, connections);
-  }, [dataWorkspace, connections, debouncedPreview, overlayOpen]);
+    debouncedPreview(dataWorkspace, connections, sources);
+  }, [dataWorkspace, connections, sources, debouncedPreview, overlayOpen]);
 
   // Schema-aware Join: column lists from truncated preview (left before Join, full right).
   useEffect(() => {
@@ -505,65 +535,202 @@ function App() {
     overlayOpen,
   ]);
 
-  // Join diagnostics (DESIGN §9) — async, never blocks Apply / canvas.
-  // Skip until ON keys exist: a new Join is often saved with left_on=[], and
-  // the engine rejects that with "left_on/right_on must be non-empty…".
-  useEffect(() => {
-    if (overlayOpen) return;
+  // Clear stale diagnostics when leaving Join / changing keys — do not auto-run
+  // full-input scans (explicit "Run diagnostics" in the panel).
+  const joinDiagIdentity = (() => {
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
         : undefined;
-    if (!activeQueryId || selectedStepIndex === null || step?.type !== "Join") {
-      setJoinDiag(null);
-      setJoinDiagError(null);
-      setJoinDiagLoading(false);
-      setDiagView(null);
+    if (
+      !activeQueryId ||
+      selectedStepIndex === null ||
+      step?.type !== "Join"
+    ) {
+      return "";
+    }
+    return `${activeQueryId}#${selectedStepIndex}:${step.payload.left_on.join(",")}|${step.payload.right_on.join(",")}`;
+  })();
+  useEffect(() => {
+    setJoinDiag(null);
+    setJoinDiagError(null);
+    setJoinDiagLoading(false);
+    setDiagView(null);
+    setJoinPrepareLabel(null);
+  }, [joinDiagIdentity]);
+
+  useEffect(() => {
+    if (!joinDiagIdentity) return;
+    refreshJoinPrepareStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinDiagIdentity, sources]);
+
+  function refreshJoinPrepareStatus() {
+    const step =
+      selectedStepIndex != null && activeQuery
+        ? activeQuery.steps[selectedStepIndex]
+        : undefined;
+    if (
+      !activeQueryId ||
+      selectedStepIndex === null ||
+      step?.type !== "Join"
+    ) {
+      setJoinPrepareLabel(null);
+      return;
+    }
+    void joinPrepareStatus(
+      project.workspace,
+      activeQueryId,
+      selectedStepIndex,
+      sources,
+      connections,
+    )
+      .then((s) => {
+        if (s.prepared) {
+          setJoinPrepareLabel(formatJoinPrepareStatusHint(s));
+        } else if (s.stale) {
+          setJoinPrepareLabel("Loaded sides are outdated — Reload sides after graph/source changes");
+        } else {
+          setJoinPrepareLabel(null);
+        }
+      })
+      .catch(() => setJoinPrepareLabel(null));
+  }
+
+  function runPrepareJoinInputs() {
+    const step =
+      selectedStepIndex != null && activeQuery
+        ? activeQuery.steps[selectedStepIndex]
+        : undefined;
+    if (
+      !activeQueryId ||
+      selectedStepIndex === null ||
+      step?.type !== "Join"
+    ) {
       return;
     }
     const { left_on, right_on } = step.payload;
-    if (
-      left_on.length === 0 ||
-      left_on.length !== right_on.length
-    ) {
-      setJoinDiag(null);
-      setJoinDiagError(null);
-      setJoinDiagLoading(false);
+    if (left_on.length === 0 || left_on.length !== right_on.length) {
+      setJoinDiagError("Set join keys and Apply before preparing inputs.");
       return;
     }
-    let cancelled = false;
+    setJoinPrepareLoading(true);
+    setJoinDiagError(null);
+    void cancelRunningQuery().catch(() => {});
+    previewReqIdRef.current += 1;
+    setLoading(false);
+    setOpProgress({
+      kind: "prepare",
+      phase: "Queued…",
+      percent: 1,
+    });
+    const poll = window.setInterval(() => {
+      void joinPrepareProgress()
+        .then((p) => {
+          if (!p.active && p.fraction <= 0) return;
+          setOpProgress({
+            kind: "prepare",
+            phase: p.message || p.stage || "Preparing…",
+            percent: Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
+          });
+        })
+        .catch(() => {});
+    }, 250);
+    void prepareJoinInputs(
+      project.workspace,
+      activeQueryId,
+      selectedStepIndex,
+      connections,
+      sources,
+      !!joinPrepareLabel,
+    )
+      .then((r) => {
+        setJoinPrepareLabel(formatJoinPrepareHint(r));
+        setJoinPrepareLoading(false);
+        setOpProgress(null);
+      })
+      .catch((e) => {
+        setJoinPrepareLoading(false);
+        setOpProgress(null);
+        const msg = typeof e === "string" ? e : String(e);
+        if (!/preview cancelled|superseded/i.test(msg)) {
+          setJoinDiagError(msg);
+        }
+      })
+      .finally(() => {
+        window.clearInterval(poll);
+      });
+  }
+
+  function runJoinDiagnostics() {
+    const step =
+      selectedStepIndex != null && activeQuery
+        ? activeQuery.steps[selectedStepIndex]
+        : undefined;
+    if (
+      !activeQueryId ||
+      selectedStepIndex === null ||
+      step?.type !== "Join"
+    ) {
+      return;
+    }
+    const { left_on, right_on } = step.payload;
+    if (left_on.length === 0 || left_on.length !== right_on.length) {
+      setJoinDiagError("Set join keys and Apply before running diagnostics.");
+      return;
+    }
     setJoinDiagLoading(true);
     setJoinDiagError(null);
+    void cancelRunningQuery().catch(() => {});
+    previewReqIdRef.current += 1;
+    setLoading(false);
+    setOpProgress({
+      kind: "prepare",
+      phase: "Diagnostics — materializing sides…",
+      percent: 5,
+    });
+    const poll = window.setInterval(() => {
+      void joinPrepareProgress()
+        .then((p) => {
+          if (!p.active && p.fraction <= 0) return;
+          setOpProgress({
+            kind: "prepare",
+            phase: p.message || p.stage || "Diagnostics…",
+            percent: Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
+          });
+        })
+        .catch(() => {});
+    }, 250);
     void joinDiagnostics(
       project.workspace,
       activeQueryId,
       selectedStepIndex,
       connections,
+      sources,
     )
       .then((d) => {
-        if (!cancelled) {
-          setJoinDiag(d);
-          setJoinDiagLoading(false);
-        }
+        setJoinDiag(d);
+        setJoinDiagLoading(false);
+        setOpProgress(null);
+        refreshJoinPrepareStatus();
       })
       .catch((e) => {
-        if (!cancelled) {
-          setJoinDiag(null);
-          setJoinDiagLoading(false);
-          setJoinDiagError(typeof e === "string" ? e : String(e));
+        setJoinDiag(null);
+        setJoinDiagLoading(false);
+        setOpProgress(null);
+        const msg = typeof e === "string" ? e : String(e);
+        if (!/preview cancelled|superseded/i.test(msg)) {
+          setJoinDiagError(msg);
         }
+      })
+      .finally(() => {
+        window.clearInterval(poll);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeQueryId,
-    selectedStepIndex,
-    activeQuery,
-    project.workspace,
-    connections,
-    overlayOpen,
-  ]);
+  }
+
+  function cancelHeavyQuery() {
+    void cancelRunningQuery().catch(() => {});
+  }
 
   // Model tab: dbt SQL for the selected query (instant, no DuckDB).
   useEffect(() => {
@@ -580,6 +747,7 @@ function App() {
       id,
       projectDialect(project),
       connections,
+      sources,
     )
       .then((m) => {
         if (!cancelled) {
@@ -860,26 +1028,43 @@ function App() {
     path: string,
     kind: "csv" | "parquet",
     connectionId?: string,
+    nameOverride?: string,
+    /** Source-only: Hive partition folders (not a step field). */
+    hivePartitioning?: boolean,
   ) {
     const base = path.split(/[/\\]/).pop() ?? "file";
     const name =
-      kind === "csv"
+      nameOverride ??
+      (kind === "csv"
         ? base.replace(/\.csv$/i, "")
-        : base.replace(/\.parquet$/i, "");
+        : base.replace(/\.parquet$/i, ""));
     const id = newQueryId(name, queries.map((q) => q.id));
     const step: TransformationStep =
       kind === "csv"
         ? { type: "LoadCsv", payload: { path } }
         : {
             type: "LoadParquet",
-            payload: { path, connection_id: connectionId },
+            payload: {
+              path,
+              connection_id: connectionId,
+            },
           };
     const q: QueryDef = { id, name, steps: [step] };
     setProject((p) => {
       const nextQueries = [...p.workspace.queries, q];
+      let nextSources = syncSourcesFromQueries(p.sources, nextQueries);
+      if (kind === "parquet" && hivePartitioning) {
+        nextSources = nextSources.map((s) =>
+          s.kind === "parquet" &&
+          s.path === path &&
+          (s.connection_id ?? undefined) === (connectionId ?? undefined)
+            ? { ...s, hive_partitioning: true }
+            : s,
+        );
+      }
       return {
         ...p,
-        sources: syncSourcesFromQueries(p.sources, nextQueries),
+        sources: nextSources,
         workspace: {
           queries: nextQueries,
           focus_query_id: p.workspace.focus_query_id || id,
@@ -1076,6 +1261,24 @@ function App() {
     setError(null);
   }
 
+  function addSourceOnlyHive(path: string) {
+    const name = parquetSourceName(path);
+    const id = newSourceId(
+      name,
+      project.sources.map((s) => s.id),
+    );
+    setProject((p) => ({
+      ...p,
+      sources: [
+        ...p.sources,
+        { id, name, kind: "parquet", path, hive_partitioning: true },
+      ],
+    }));
+    setSelectedSourceId(id);
+    setShowHiveDialog(false);
+    setError(null);
+  }
+
   function addSourceOnlyS3(sel: { path: string; connection_id?: string }) {
     const name = sel.path.split(/[/\\]/).pop() ?? "parquet";
     const id = newSourceId(
@@ -1133,6 +1336,11 @@ function App() {
   function openS3Dialog(intent: "source" | "query") {
     setPickerIntent(intent);
     setShowS3Dialog(true);
+  }
+
+  function openHiveDialog(intent: "source" | "query") {
+    setPickerIntent(intent);
+    setShowHiveDialog(true);
   }
 
   function addPostgresFromPicker(sel: PostgresSelection) {
@@ -1465,7 +1673,7 @@ function App() {
           ),
         };
       }
-      const result = await previewWorkspace(ws, connections);
+      const result = await previewWorkspace(ws, connections, sources);
       const total =
         kind === "left"
           ? joinDiag.left_count
@@ -1517,14 +1725,13 @@ function App() {
       focus_query_id: rightQueryId,
     };
 
-    const [leftRes, rightRes] = await Promise.all([
-      leftWs
-        ? previewWorkspace(leftWs, connections).catch(() => null)
-        : Promise.resolve(null),
-      rightQueryId
-        ? previewWorkspace(rightWs, connections).catch(() => null)
-        : Promise.resolve(null),
-    ]);
+    // Schema only — avoid LIMIT 50 scans just to populate Join column pickers.
+    const leftRes = leftWs
+      ? await describeWorkspace(leftWs, connections, sources).catch(() => null)
+      : null;
+    const rightRes = rightQueryId
+      ? await describeWorkspace(rightWs, connections, sources).catch(() => null)
+      : null;
     return {
       left: leftRes?.columns ?? [],
       right: rightRes?.columns ?? [],
@@ -1978,16 +2185,29 @@ function App() {
         joinCtx: opts?.joinCtx,
       };
       if (i < 0) return [...tabs, session];
-      // Refresh opts / map shell but keep in-tab edits if re-opening same id from explorer
-      // with a newer project copy — prefer project map entries when opening from tree.
+      // Merge new From→To into the open tab (don't drop freshly added Suggest/Save rows).
       const prev = tabs[i]!;
+      const byFrom = new Map(
+        prev.map.entries.map((e) => [e.from.trim(), e] as const),
+      );
+      for (const e of normalized.entries) {
+        const from = e.from.trim();
+        if (!from) continue;
+        const cur = byFrom.get(from);
+        if (!cur) {
+          byFrom.set(from, e);
+        } else if (e.to.trim() && !cur.to.trim()) {
+          byFrom.set(from, { ...cur, to: e.to });
+        } else if (e.to.trim() && e.to.trim() !== cur.to.trim()) {
+          byFrom.set(from, { ...cur, to: e.to });
+        }
+      }
       const next = [...tabs];
       next[i] = {
         ...session,
         map: {
           ...normalized,
-          // Keep unsaved tab entries if same revision id already open
-          entries: prev.map.entries.length ? prev.map.entries : normalized.entries,
+          entries: [...byFrom.values()],
           storage: normalized.storage ?? prev.map.storage,
         },
       };
@@ -2259,6 +2479,15 @@ function App() {
       entries.push({ from, to });
     });
     const merged = { ...map, entries };
+    // Persist into the project so Join Lens can hide mapped unmatched keys immediately.
+    setProject((p) => {
+      const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], merged);
+      const queries = syncApplyKeyMapEntries(p.workspace.queries, merged);
+      return {
+        ...p,
+        workspace: { ...p.workspace, key_maps, queries },
+      };
+    });
     openKeyMapEditor(merged, {
       suggestedFrom: fromValues,
       joinCtx,
@@ -2535,6 +2764,7 @@ function App() {
         dest.schema ?? "public",
         project.outputs ?? [],
         true,
+        sources,
       );
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
@@ -2696,7 +2926,7 @@ function App() {
         q.id === hostId ? { ...q, steps: upstreamSteps } : q,
       ),
     };
-    void previewWorkspace(leftWs, connections)
+    void previewWorkspace(leftWs, connections, sources)
       .then((res) => {
         if (!cancelled) {
           setUpstreamColumnNames(res.columns.map((c) => c.name));
@@ -3230,12 +3460,32 @@ function App() {
           }
         }}
       />
+      <HiveParquetDialog
+        open={showHiveDialog}
+        confirmLabel={pickerIntent === "source" ? "Add source" : "Add as query"}
+        onClose={() => setShowHiveDialog(false)}
+        onSelect={(path) => {
+          if (pickerIntent === "source") {
+            addSourceOnlyHive(path);
+          } else {
+            addFileQuery(
+              path,
+              "parquet",
+              undefined,
+              parquetSourceName(path),
+              true,
+            );
+            setShowHiveDialog(false);
+          }
+        }}
+      />
 
       {empty ? (
         <EmptyHero
           onLoadDemo={(id) => void handleLoadDemo(id)}
           onAddCsv={() => void addCsvQuery()}
           onAddParquet={() => void addParquetQuery()}
+          onAddHiveParquet={() => openHiveDialog("query")}
           onAddPostgres={() => openPgPicker("query")}
           onAddSqlModel={() => addSqlModelQuery()}
         />
@@ -3268,10 +3518,12 @@ function App() {
               onAddConnection={() => openNewConnection("postgres")}
               onAddSourceCsv={() => void addSourceOnlyCsv()}
               onAddSourceParquet={() => void addSourceOnlyParquet()}
+              onAddSourceHiveParquet={() => openHiveDialog("source")}
               onAddSourceS3={() => openS3Dialog("source")}
               onAddSourcePostgres={() => openPgPicker("source")}
               onNewQueryCsv={() => void addCsvQuery()}
               onNewQueryParquet={() => void addParquetQuery()}
+              onNewQueryHiveParquet={() => openHiveDialog("query")}
               onNewQueryS3={() => openS3Dialog("query")}
               onNewQueryPostgres={() => openPgPicker("query")}
               onNewQueryFromSource={addQueryFromSource}
@@ -3410,6 +3662,8 @@ function App() {
               >
                 <KeyMapEditor
                   map={keyMapEditor.map}
+                  workspace={project.workspace}
+                  connections={project.connections}
                   pickToOptions={keyMapEditor.pickTo}
                   suggestedFrom={keyMapEditor.suggestedFrom}
                   exportPath={project.last_dbt_export_path}
@@ -3700,15 +3954,31 @@ function App() {
                       Join Lens
                     </button>
                   )}
+                  {(loading ||
+                    joinDiagLoading ||
+                    joinPrepareLoading ||
+                    lensPrepareBusy) && (
+                    <button
+                      type="button"
+                      onClick={cancelHeavyQuery}
+                      className="rounded border border-amber-800/70 px-2 py-0.5 text-[10px] text-amber-200/90 hover:bg-amber-500/10"
+                    >
+                      Cancel
+                    </button>
+                  )}
                   <span className="text-xs text-slate-500">
                     {bottomTab === "data"
                       ? diagView
                         ? `diag · ${diagView.rows.length}/${diagView.totalCount} · ${diagView.columns.length} cols`
-                        : loading
-                          ? "running…"
-                          : preview
-                            ? `${preview.rows.length} rows · ${preview.columns.length} cols`
-                            : "—"
+                        : joinPrepareLoading || lensPrepareBusy
+                          ? "loading join sides…"
+                          : joinDiagLoading
+                            ? "finding gaps…"
+                            : loading
+                              ? "computing… (LIMIT on output only)"
+                              : preview
+                                ? `${preview.rows.length} rows · ${preview.columns.length} cols`
+                                : "—"
                       : modelPreview
                         ? `${modelPreview.model_name}.sql · dbt`
                         : "—"}
@@ -3734,14 +4004,14 @@ function App() {
                         <button
                           type="button"
                           className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:border-teal-800 hover:text-teal-200"
-                          title="Map unmatched keys in Join Lens Probe (primary path)"
+                          title="Open Join Lens → No match to fix values without a partner"
                           onClick={() => {
                             setDiagView(null);
                             setJoinLensOn(true);
                             setForceProbeNonce((n) => n + 1);
                           }}
                         >
-                          Open in Probe
+                          Open No match
                         </button>
                       )}
                       <button
@@ -3780,6 +4050,7 @@ function App() {
                         leftOn={joinLensTarget.leftOn}
                         rightOn={joinLensTarget.rightOn}
                         connections={connections}
+                        sources={sources}
                         columns={preview.columns}
                         rows={preview.rows}
                         joinDiag={joinDiag}
@@ -3787,6 +4058,8 @@ function App() {
                         forceProbeNonce={forceProbeNonce}
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
+                        onPrepareBusy={setLensPrepareBusy}
+                        onRunDiagnostics={runJoinDiagnostics}
                       />
                     ) : preview ? (
                       <PreviewTable
@@ -4223,6 +4496,11 @@ function App() {
                           loading={joinDiagLoading}
                           error={joinDiagError}
                           diag={joinDiag}
+                          onRun={runJoinDiagnostics}
+                          onPrepare={runPrepareJoinInputs}
+                          prepareLoading={joinPrepareLoading}
+                          prepareLabel={joinPrepareLabel}
+                          onCancel={cancelHeavyQuery}
                           onOpen={(kind, sample, label) =>
                             void openJoinDiagnostic(kind, sample, label)
                           }

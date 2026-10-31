@@ -56,7 +56,7 @@ fn main() {
             focus_query_id: "left".into(),
             key_maps: vec![],
         };
-        preview_workspace(&db, &ws, &[])
+        preview_workspace(&db, &ws, &[], &[])
     } else {
         let path = args.remove(0);
         let filter = args.first().cloned();

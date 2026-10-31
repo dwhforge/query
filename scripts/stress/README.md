@@ -1,0 +1,196 @@
+# Воспроизводимый тест DWH Query → fuzzy 100K → seed → dbt-duckdb → публикация
+
+Это код для запуска НА ВАШЕЙ машине. Большие данные не прилагаются. Генератор создаёт файлы, отдельный проект DWH Query с пустой картой и эталон для проверки. Рабочая карта заполняется в приложении, не генератором.
+
+## 1. Подготовка приложения
+
+Изменения рассчитаны на `feature/mapping_tools`, commit `79111d5`. Применяйте патч в отдельной чистой копии репозитория; `git apply --check` должен пройти. Это ПОЛНАЯ ЗАМЕНА предыдущего патча, а не добавка к нему. Сначала откатите предыдущий патч. Лицензия репозитория не меняется.
+
+```bash
+git clone --branch feature/mapping_tools https://github.com/dwhforge/query.git query-stress-test
+cd query-stress-test
+git switch --detach 79111d5
+git switch -c test/mapping-stress
+git apply --check /path/to/dwhquery-stress-v2.patch
+git apply /path/to/dwhquery-stress-v2.patch
+
+export DBT_SEND_ANONYMOUS_USAGE_STATS=false
+python3 -m venv dbt-venv
+./dbt-venv/bin/python -m pip install -r scripts/stress/requirements-dbt.txt
+npm install
+./scripts/fetch-duckdb-extensions.sh
+cargo build -p dwh-host --release
+./scripts/sync-duckdb-lib.sh
+```
+
+Если автоматическая загрузка libduckdb не проходит, для Linux x86_64 используйте официальный архив и передайте путь линковщику (в других ОС выбирайте соответствующий asset):
+
+```bash
+mkdir -p duckdb-sdk
+curl -fL https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-shared-libs-linux-amd64.tar.gz -o duckdb-sdk/core.tar.gz
+tar -xzf duckdb-sdk/core.tar.gz -C duckdb-sdk
+export DUCKDB_LIB_DIR="$PWD/duckdb-sdk"
+export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:${LD_LIBRARY_PATH:-}"
+cargo build -p dwh-host --release
+cp duckdb-sdk/libduckdb.so target/release/
+```
+
+В этом случае `sync-duckdb-lib.sh` не нужен: библиотека скопирована явно. Переменные сохраняйте в терминале, из которого запускаете приложение.
+
+Команды для Bash/Linux; на Windows Python находится в `dbt-venv/Scripts/`, бинарник host имеет `.exe`. Портативный старый релиз не содержит новых элементов UI: требуется сборка с патчем.
+
+Изменения приложения:
+
+- Общий Rust-модуль `key_match.rs` используется и Join Lens, и KeyMap. DuckDB читает входные query; нормализация, retrieval, Jaro–Winkler, edit distance и best/runner-up выполняются в Rust. Новая зависимость `strsim` 0.11.1 (MIT).
+- Join Lens сохраняет свои пределы (200 ключей на сторону, 40 предложений), защиту коротких ключей и запрет маскировать NormalizeKey. Полные справочники используют ограниченный индекс; это разные входные адаптеры к одному алгоритму.
+- Нет отдельной сущности Catalog, второго хранилища или нового пути сохранения. Fuzzy возвращает предложения, Accept меняет черновик существующего KeyMap, Save использует прежний seed/source/ref контракт.
+
+- В редактор KeyMap добавлен **Fuzzy suggestions · compare keys or labels**.
+- Входы — два каталога: query, колонка кода и колонка названия с каждой стороны.
+- Кандидаты отбираются по редким токенам; максимум 16 token-кандидатов на From плюс ограниченные совпадения нормализованных названий. Оценка — Jaro–Winkler, порог по умолчанию 0.88, разница с runner-up <0.03 помечает неоднозначность; точная ничья всегда неоднозначна. Порог и разницу можно настроить.
+- Читается весь каталог, до 250K строк с каждой стороны, ключи уникальны, не пусты и без краевых пробелов, ключ/название до 512 символов; превышение вызывает отказ, не тихую обрезку.
+- Поддерживается many-to-one. Принимать можно все однозначные предложения одной кнопкой; существующие заполненные соответствия сохраняются.
+- Сетка KeyMap виртуализирована: 100K строк не превращаются в 200K DOM-input.
+
+Это ограниченный поиск кандидатов, не универсальная entity resolution. Тестовые названия специально содержат однозначную серию/рецептуру и небольшие различия написания. Здесь проверяется технический масштаб, а не точность fuzzy на любых реальных справочниках.
+
+## 2. Сначала проверьте 100K карту на небольших фактах
+
+```bash
+./dbt-venv/bin/python scripts/stress/generate.py \
+  --out /your/ssd/stress-100k-small \
+  --sales-rows 10000 --products 100000
+```
+
+Данные двух блоков имеют несовпадающие `SKU-…` и `TECH-…` коды. В sales нет готового продуктового кода. В проекте есть пустой `map_commercial_to_production`. `_oracle/expected_map.csv` используется ТОЛЬКО verifier и не является источником проекта, seed или fuzzy.
+
+Запуск приложения:
+
+```bash
+DBT_SEND_ANONYMOUS_USAGE_STATS=false PATH="$PWD/dbt-venv/bin:$PATH" npm run electron:dev
+```
+
+1. Откройте **File → Open**: `<out>/stress.dwhproj.json`.
+2. В Explorer откройте KeyMap **Commercial → Production (fill with batch fuzzy)**.
+3. Разверните **Fuzzy suggestions**. Выберите входы явно (в продукте нет настроек, зашитых под демо): From=`commercial_catalog`, код=`commercial_code`, название=`name`; To=`production_catalog`, код=`product_code`, название=`name`.
+4. Нажмите **Suggest mappings**. Для штатного fixture ожидаются 100000 предложений, 0 ambiguous, 0 unmatched.
+5. Нажмите **Accept unambiguous proposals into draft**, затем **Save map**. Поиск по карте позволяет проверить и отредактировать отдельные значения.
+6. **Сохраните сам проект через File → Save**: verifier читает именно сохранённый `.dwhproj.json`.
+7. Вернитесь на canvas и выберите `sales_mapped`: preview должен показывать `TECH-…` в `product_code`.
+8. Убедитесь, что Execution engine = **DuckDB**. Destination выбираете сами: DuckDB либо PostgreSQL и ваше подключение/schema.
+9. В outputs уже включены `monthly_all` и `monthly_product_margin`. Выполните **Export dbt**, затем **Build export**.
+
+`monthly_all` нужен для контроля сохранения всех продаж; `monthly_product_margin` — бизнесовый отбор. Не снимайте публикацию контрольной витрины до проверки.
+
+## 3. Что вычисляет pipeline
+
+Продуктовый блок: расход ресурсов по партиям, выпуск партий, измерения качества. Коммерческий блок: строки продаж в своих кодах, корректировки, распределение отгрузок по партиям. Сначала применяется KeyMap, затем соединения выполняются по номеру продажи и согласованному продуктовому коду.
+
+Дальше: фактическая стоимость партии / выпуск в кг → стоимость отгруженной части партии → себестоимость продажи; месячная агрегация по товару, клиенту, валюте, рынку. Итог отбирает продукты с долей отгруженного объёма из партий с отклонениями >3% и строки с маржой <10% выручки. Названия берутся из продуктового каталога и клиентов.
+
+GroupBy сопровождается явным SelectColumns: текущий компилятор не выводит схему из произвольных строк агрегатов. Это сохраняет однозначные имена колонок в цепочках Join и при экспорте.
+
+В fixture 40 полей sales, но запрос использует только нужные; проекция Parquet — нормальная оптимизация. Размер всех файлов не равен объёму прочитанных колонок. Даты покрывают 2024–2025 без фильтра: итоговый build обрабатывает полный набор. Preview ограничен по выводу, но GroupBy может потребовать полного вычисления.
+
+## 4. Проверка реального опубликованного результата
+
+DuckDB destination (приложение/другой процесс не должны держать файл открытым):
+
+```bash
+./dbt-venv/bin/python scripts/stress/verify.py \
+  --data /your/ssd/stress-100k-small \
+  --project /your/ssd/stress-100k-small/stress.dwhproj.json \
+  --export /your/export/stress_product_commercial
+```
+
+Если рабочая база имеет другой путь: `--duckdb /actual/path.duckdb`.
+
+### Postgres sources (identical graph)
+
+Same queries/joins/keymap/outputs as the parquet project; `LoadParquet` → `LoadPostgres` on schema `stress`, connection id `conn_postgres` (must exist in the app).
+
+```bash
+export STRESS_PG_DSN='postgresql://user:password@127.0.0.1:5432/postgres'
+# load is resumable; full 100M fixture is large — expect a long run
+./dbt-venv/bin/python scripts/stress/load_postgres.py \
+  --data /app2/stress-test/100k \
+  --schema stress \
+  --connection-id conn_postgres
+```
+
+Project only (no load): add `--skip-load` → writes `stress_pg.dwhproj.json`. Then open that file in DWH Query after tables exist.
+
+PostgreSQL destination (verify published marts):
+
+```bash
+export STRESS_PG_DSN='postgresql://user:password@host:5432/database'
+./dbt-venv/bin/python scripts/stress/verify.py \
+  --data /your/ssd/stress-100k-small \
+  --project /your/ssd/stress-100k-small/stress.dwhproj.json \
+  --export /your/export/stress_product_commercial \
+  --pg-env STRESS_PG_DSN --schema public
+```
+
+Verifier использует Python DuckDB postgres extension; на первом подключении может потребоваться доступ к серверу расширений. DSN не передаётся аргументом CLI и не печатается.
+
+Проверяются: полный/правильный map в проекте и CSV seed; количество строк и кг продаж; чистая выручка с корректировками; отсутствие unmatched; общая распределённая производственная себестоимость по независимой агрегации сырья/аллокаций; предикаты итогового отбора и заполненные имена. Результат — `verification.json`, при ошибке ненулевой exit code. Производственные стоимости с делением сравниваются с указанным в коде допуском.
+
+Это проверки покрытия/инвариантов, не доказательство равенства каждого поля каждой строки. Они не подменяют тесты качества реального маппинга.
+
+## 5. Затем масштабируйте факты
+
+В НОВЫЙ каталог, чтобы сохранить маленький воспроизводимый тест:
+
+```bash
+./dbt-venv/bin/python scripts/stress/generate.py \
+  --out /your/ssd/stress-100m \
+  --sales-rows 100000000 --products 100000 \
+  --chunk-rows 1000000 --memory 8GB --threads 4
+```
+
+При N=100 млн продаж: 300 млн производственных операций, 200 млн измерений, 200 млн аллокаций, 10 млн корректировок, 25 млн партий, 1 млн клиентов и два каталога по 100K. Всего около **836.2 млн строк**.
+
+Это синтетический нагрузочный набор, не аудированная бухгалтерская модель. История производства/качества используется для стоимости/атрибуции партии, а не для восстановления реальных технологических процессов.
+
+Генерация пакетная, строки не собираются в Python. JSON manifest хранит строки/байты/время каждого файла. `--resume` с теми же параметрами продолжает прерванный запуск, проверяя размеры завершённых файлов. Это не криптографическая проверка файлов. Готовый проект при resume НЕ перезаписывается. Параллельная генерация в один каталог не поддерживается.
+
+Сначала измерьте размер 1 млн продаж на вашем SSD; далее подберите N для 200GB. Текст `--payload-bytes` увеличивает ширину sales и CPU генерации, но не заставляет запрос читать ненужный текст. Не считайте увеличенный payload эквивалентом более тяжёлой аналитики.
+
+`--memory` и `--threads` генератора управляют генерацией, а не настройками отдельного экземпляра DuckDB в приложении/dbt. Build использует профиль, созданный DWH Query. Временным файлам и результату нужно свободное место сверх исходников. Для больших групп итоговые таблицы тоже могут быть большими.
+
+## 6. Необязательный автоматизированный backend smoke
+
+Это тот же matcher/export/build API, который вызывает Electron, но без GUI. Не проверяет отрисовку/отзывчивость интерфейса. На пользовательском проекте вручную заполненный map не нужен: тест начинает с пустого проекта и принимает результат matcher программно, НЕ из oracle.
+
+```bash
+./dbt-venv/bin/python scripts/stress/smoke_rpc.py \
+  --data /your/ssd/stress-100k-small \
+  --host target/release/dwh-host --dbt-dir dbt-venv/bin --builds 2
+```
+
+`--builds 2` проверяет повторную сборку в той же базе без сброса. `--export-dir /new/path` выбирает другой каталог экспорта. По умолчанию повторный запуск использует существующий экспорт и тоже должен проходить.
+
+Создаёт отдельный `stress.rpc.dwhproj.json` и `_rpc_smoke_export/`, не переписывает проект, сохранённый вами в UI. Логи: `rpc-host.log`, `rpc-dbt-build-1.log`, `rpc-dbt-build-2.log`; времена matcher/preview/export/build: `rpc-timings.json`; общий статус — `rpc-result.json`. На Windows укажите `.exe` и `dbt-venv/Scripts`.
+
+Карта, preview и все модели должны пройти до проверки результата. Если Build зелёный, но опубликованная БД не открывается или проверки не сходятся, тест НЕ считается успешным. Сохраните БД вместе с WAL и логами; verifier не удаляет WAL и не чинит данные.
+
+## 7. Что зафиксировать в нагрузочном прогоне
+
+- CPU, RAM, диск/USB, файловую систему, версии приложения/DuckDB/dbt.
+- N и реальные байты файлов из manifest; свободное место до/после.
+- Время fuzzy, Accept, поиска/изменения одной строки, Save project, preview, Export, Build.
+- RSS `dwh-host`, Electron и dbt; пик временного диска; размер опубликованных витрин.
+- Холодный/тёплый запуск отдельно: новый процесс не очищает файловый кеш ОС.
+- Результат `verify.py`, отмену/ошибку/повторную сборку.
+
+Ни большой успешный расчёт без UI, ни отзывчивый UI на выборке отдельно не означают успех всего сценария.
+
+## 8. Воспроизвести сравнение Rust и прежнего DuckDB fuzzy
+
+```bash
+cargo test -p dwh-engine --release --lib benchmark_key_match -- --ignored --nocapture
+```
+
+Выполняется 3 повтора для 1K/10K/100K на сторону: однозначные названия, дубли с неоднозначностью и плотные блоки до 16 кандидатов. Время включает нормализацию и формирование всех предложений, исключает загрузку исходных записей. Сравниваются коды, score (допуск 1e-12) и ambiguous. SQL предыдущего патча находится только в `fuzzy_baseline.sql` для бенчмарка и не вызывается продуктом.
+
+Для отдельного замера пика памяти запустите ту же команду с `DWH_MATCH_BENCH_ENGINE=rust` или `duckdb` под `/usr/bin/time -v` (после предварительной сборки, чтобы не измерять память компилятора). Методика и измерения — `BENCHMARK.md`.

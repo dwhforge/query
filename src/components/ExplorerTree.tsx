@@ -25,11 +25,13 @@ interface ExplorerTreeProps {
   /** Catalog only — no query. */
   onAddSourceCsv: () => void;
   onAddSourceParquet: () => void;
+  onAddSourceHiveParquet: () => void;
   onAddSourceS3: () => void;
   onAddSourcePostgres: () => void;
   /** New source + query in one go (Queries menu). */
   onNewQueryCsv: () => void;
   onNewQueryParquet: () => void;
+  onNewQueryHiveParquet: () => void;
   onNewQueryS3: () => void;
   onNewQueryPostgres: () => void;
   onNewQueryFromSource: (source: SourceDef) => void;
@@ -238,10 +240,12 @@ export function ExplorerTree({
   onAddConnection,
   onAddSourceCsv,
   onAddSourceParquet,
+  onAddSourceHiveParquet,
   onAddSourceS3,
   onAddSourcePostgres,
   onNewQueryCsv,
   onNewQueryParquet,
+  onNewQueryHiveParquet,
   onNewQueryS3,
   onNewQueryPostgres,
   onNewQueryFromSource,
@@ -294,6 +298,14 @@ export function ExplorerTree({
         }}
       />
       <MenuItem
+        label="Hive Parquet…"
+        hint="directory"
+        onClick={() => {
+          closeMenus();
+          onAddSourceHiveParquet();
+        }}
+      />
+      <MenuItem
         label="S3 Parquet…"
         hint="s3"
         onClick={() => {
@@ -331,6 +343,14 @@ export function ExplorerTree({
         onClick={() => {
           closeMenus();
           onNewQueryParquet();
+        }}
+      />
+      <MenuItem
+        label="Hive Parquet…"
+        hint="directory"
+        onClick={() => {
+          closeMenus();
+          onNewQueryHiveParquet();
         }}
       />
       <MenuItem

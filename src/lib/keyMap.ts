@@ -399,3 +399,16 @@ export function deleteKeyMapFromWorkspace(
     removedSteps,
   };
 }
+
+/** Accept into a draft only. Filled mappings and ambiguous proposals are untouched. */
+export function mergeKeyMapProposals(
+  entries: KeyMapEntry[],
+  proposals: { from_key: string; to_key: string; ambiguous: boolean }[],
+): KeyMapEntry[] {
+  const merged = new Map(entries.map((entry) => [entry.from, entry]));
+  for (const proposal of proposals) {
+    if (proposal.ambiguous || merged.get(proposal.from_key)?.to.trim()) continue;
+    merged.set(proposal.from_key, { from: proposal.from_key, to: proposal.to_key });
+  }
+  return [...merged.values()];
+}

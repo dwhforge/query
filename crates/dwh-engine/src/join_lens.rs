@@ -63,6 +63,7 @@ pub fn explain_join_rows(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
     keys: &[JoinKeyTuple],
@@ -107,7 +108,9 @@ pub fn explain_join_rows(
                 offs.len()
             ));
         }
-        let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+        let compiled = GraphCompiler::new(&resolved)
+            .with_sources(sources)
+            .compile_ctes_from(host_query_id)?;
         Some(resolve_preview_offsets(
             db,
             &compiled.definitions,
@@ -184,7 +187,9 @@ pub fn explain_join_rows(
         cte_name(right_query_id, rq.steps.len() - 1)
     };
 
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    let compiled = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .compile_ctes_from(host_query_id)?;
     let batch_sql = values_batch_sql(&batch_refs, left_on.len())?;
     let left_on_join = left_on
         .iter()
@@ -871,12 +876,20 @@ pub fn explain_join_key(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
     side: JoinKeySide,
     key_values: &[JsonValue],
 ) -> Result<ExplainJoinKeyResult, String> {
-    let ctx = join_key_context(db, workspace, connections, host_query_id, join_step_index)?;
+    let ctx = join_key_context(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+    )?;
     if key_values.len() != ctx.left_on.len() {
         return Err(format!(
             "key arity {} != left_on {}",
@@ -997,12 +1010,20 @@ pub fn blame_unmatched_key(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
     side: JoinKeySide,
     key_values: &[JsonValue],
 ) -> Result<BlameUnmatchedKeyResult, String> {
-    let ctx = join_key_context(db, workspace, connections, host_query_id, join_step_index)?;
+    let ctx = join_key_context(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+    )?;
     if key_values.len() != ctx.left_on.len() {
         return Err(format!(
             "key arity {} != left_on {}",
@@ -1132,6 +1153,7 @@ fn join_key_context(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Result<JoinKeyCtx, String> {
@@ -1167,11 +1189,44 @@ fn join_key_context(
     if rq.steps.is_empty() {
         return Err(format!("right query '{right_query_id}' has no steps"));
     }
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    // Prefer prepared inputs when available (same fingerprint).
+    let (compiled, left_cte, right_cte, join_cte) =
+        if let Some((_h, defs)) = crate::join_prepare::prepared_join_with(
+            db,
+            workspace,
+            sources,
+            connections,
+            host_query_id,
+            join_step_index,
+        ) {
+            let (l, r, j) = crate::join_prepare::prepared_cte_names();
+            let mut last_by_query = std::collections::HashMap::new();
+            last_by_query.insert(host_query_id.to_string(), j.to_string());
+            last_by_query.insert(right_query_id.clone(), r.to_string());
+            (
+                dwh_pipeline::CompiledCtes {
+                    definitions: defs,
+                    last_by_query,
+                },
+                l.to_string(),
+                r.to_string(),
+                j.to_string(),
+            )
+        } else {
+            let compiled = GraphCompiler::new(&resolved)
+                .with_sources(sources)
+                .compile_ctes_from(host_query_id)?;
+            (
+                compiled,
+                cte_name(host_query_id, join_step_index - 1),
+                cte_name(right_query_id, rq.steps.len() - 1),
+                cte_name(host_query_id, join_step_index),
+            )
+        };
     Ok(JoinKeyCtx {
-        left_cte: cte_name(host_query_id, join_step_index - 1),
-        right_cte: cte_name(right_query_id, rq.steps.len() - 1),
-        join_cte: cte_name(host_query_id, join_step_index),
+        left_cte,
+        right_cte,
+        join_cte,
         resolved_right_steps_len: rq.steps.len(),
         left_on: left_on.clone(),
         right_on: right_on.clone(),
@@ -1328,7 +1383,7 @@ mod tests {
                 values: vec![JsonValue::String("US".into())],
             },
         ];
-        let out = explain_join_rows(&db, &ws, &[], "fact", 1, &keys, None).unwrap();
+        let out = explain_join_rows(&db, &ws, &[], &[], "fact", 1, &keys, None).unwrap();
         assert_eq!(out.explanations.len(), 2);
         let eu = &out.explanations[0];
         assert!(eu.left_match_count >= 1);
@@ -1383,7 +1438,7 @@ mod tests {
         };
         let db = DbSession::new().unwrap();
         let out =
-            explain_join_rows(&db, &ws, &[], "fact", 1, &[], Some(&[0, 1])).unwrap();
+            explain_join_rows(&db, &ws, &[], &[], "fact", 1, &[], Some(&[0, 1])).unwrap();
         assert_eq!(out.explanations.len(), 2);
         assert!(!out.explanations[0].key_values.is_empty());
         assert!(out.explanations[0].right_match_count >= 1);
@@ -1445,7 +1500,7 @@ mod tests {
             key_maps: vec![],
         };
         let db = DbSession::new().unwrap();
-        let out = explain_join_rows(&db, &ws, &[], "fact", 1, &[], Some(&[0, 2])).unwrap();
+        let out = explain_join_rows(&db, &ws, &[], &[], "fact", 1, &[], Some(&[0, 2])).unwrap();
         assert_eq!(out.explanations.len(), 2);
         let left0 = &out.explanations[0].left_rows;
         let left2 = &out.explanations[1].left_rows;
@@ -1525,7 +1580,7 @@ mod tests {
         };
         let db = DbSession::new().unwrap();
         // First Join (index 1) while second Join still follows in the query.
-        let out = explain_join_rows(&db, &ws, &[], "coverage", 1, &[], Some(&[0])).unwrap();
+        let out = explain_join_rows(&db, &ws, &[], &[], "coverage", 1, &[], Some(&[0])).unwrap();
         assert_eq!(out.explanations.len(), 1);
         assert!(
             !out.explanations[0].right_rows.is_empty()
@@ -1535,7 +1590,7 @@ mod tests {
             out.explanations[0]
         );
         // Second Join alone (no steps after).
-        let out2 = explain_join_rows(&db, &ws, &[], "coverage", 2, &[], Some(&[0])).unwrap();
+        let out2 = explain_join_rows(&db, &ws, &[], &[], "coverage", 2, &[], Some(&[0])).unwrap();
         assert_eq!(out2.explanations.len(), 1);
         assert!(
             out2.right_columns.iter().any(|c| c.name == "channel_name"),
@@ -1582,6 +1637,7 @@ mod tests {
         let out = explain_join_key(
             &db,
             &ws,
+            &[],
             &[],
             "fact",
             1,
@@ -1636,6 +1692,7 @@ mod tests {
             &db,
             &ws,
             &[],
+            &[],
             "fact",
             1,
             JoinKeySide::Right,
@@ -1689,6 +1746,7 @@ mod tests {
         let blame = blame_unmatched_key(
             &db,
             &ws,
+            &[],
             &[],
             "fact",
             2,

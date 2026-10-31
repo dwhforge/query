@@ -8,171 +8,12 @@ import {
   type JoinKeyFuzzySuggest,
   type LlmConfig,
 } from "../lib/bridge";
+import {
+  joinKeyMapSystemPrompt,
+  parseSuggestedPairs,
+} from "../lib/joinLensLlmPrompt";
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
-
-type SuggestedPair = { from: string; to: string; why?: string };
-
-function parseSuggestedPairs(text: string): SuggestedPair[] {
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const raw =
-    fence?.[1] ??
-    text.match(/\{[\s\S]*"pairs"\s*:[\s\S]*\}/)?.[0];
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as {
-      pairs?: { from?: string; to?: string; why?: string }[];
-    };
-    if (!Array.isArray(parsed.pairs)) return [];
-    return parsed.pairs
-      .map((p) => ({
-        from: String(p.from ?? "").trim(),
-        to: String(p.to ?? "").trim(),
-        why: p.why?.trim() || undefined,
-      }))
-      .filter((p) => p.from && p.to);
-  } catch {
-    return [];
-  }
-}
-
-/** Soft budget under host llm_chat per-message limit (12_000). */
-const PROMPT_BUDGET = 10_500;
-
-function takeLines(lines: string[], maxChars: number): { text: string; omitted: number } {
-  const out: string[] = [];
-  let used = 0;
-  let omitted = 0;
-  for (const line of lines) {
-    const add = (out.length ? 1 : 0) + line.length;
-    if (used + add > maxChars) {
-      omitted += 1;
-      continue;
-    }
-    out.push(line);
-    used += add;
-  }
-  return { text: out.join("\n"), omitted };
-}
-
-function fmtCols(cols: { name: string; type: string }[], max = 24): string {
-  if (!cols.length) return "(schema unavailable)";
-  const shown = cols.slice(0, max);
-  const extra = cols.length - shown.length;
-  return (
-    shown.map((c) => `${c.name}:${c.type}`).join(", ") +
-    (extra > 0 ? ` …+${extra} cols` : "")
-  );
-}
-
-function fmtSamples(
-  samples: JoinKeyFuzzySuggest["chat_context"]["leftover_left_samples"],
-  max = 12,
-): string[] {
-  return samples.slice(0, max).map((s) => {
-    const fields = s.fields
-      .slice(0, 4)
-      .map((f) => `${f.name}=${JSON.stringify(f.value)}`)
-      .join("; ");
-    return `- key=${JSON.stringify(s.key)} | ${fields || "(key only)"}`;
-  });
-}
-
-function systemPrompt(report: JoinKeyFuzzySuggest): string {
-  const ctx = report.chat_context;
-  const truncNotes: string[] = [];
-  if (ctx.context_truncated || report.truncated) {
-    truncNotes.push("Context lists were capped for size; prefer listed keys only.");
-  }
-
-  const head = [
-    "You help map join keys inside DWHForge Query.",
-    "Fuzzy Jaro-Winkler already proposed close spellings; discuss leftover left keys that still need a To.",
-    "Use join lineage, schemas, neighbor-field samples, KeyMap aliases, and fuzzy examples for domain (tickers, old names, codes).",
-    "From must be an exact leftover left key. To must be an exact value from the right-key universe (may already match other left rows — many-to-one is OK).",
-    "Never invent keys. Never suggest a fuzzy Join ON.",
-    "If neighbor fields conflict, refuse the pair.",
-    "Response format (required):",
-    "1) First write a short prose rationale (2–6 sentences): for each proposed pair say what evidence you used (ticker/old name/neighbor fields/lineage). If none are safe, say why.",
-    "2) Then end with a json fence. Every pair MUST include a non-empty why with the same evidence in one line:",
-    '{"pairs":[{"from":"<exact leftover left>","to":"<exact right universe value>","why":"<short evidence>"}]}',
-    'or {"pairs":[]}.',
-    "Do not output only JSON — the prose rationale comes first.",
-    "",
-    "## Join",
-    `Host: ${ctx.left_query_name} (${ctx.left_query_id}) step ${report.join_step_index}`,
-    `Right: ${ctx.right_query_name} (${ctx.right_query_id})`,
-    `Left ON: ${report.left_on.join(", ") || "(none)"} · Right ON: ${report.right_on.join(", ") || "(none)"}`,
-    `Left lineage: ${ctx.left_lineage || "(unknown)"}`,
-    `Right lineage: ${ctx.right_lineage || "(unknown)"}`,
-    `Left columns: ${fmtCols(ctx.left_columns)}`,
-    `Right columns: ${fmtCols(ctx.right_columns)}`,
-  ].join("\n");
-
-  let budget = PROMPT_BUDGET - head.length - 80;
-  const sections: string[] = [head];
-
-  const pushSection = (title: string, lines: string[], softCap: number) => {
-    const room = Math.max(200, Math.min(softCap, budget));
-    const { text, omitted } = takeLines(lines, room);
-    if (!text && omitted === 0) {
-      sections.push(`\n## ${title}\n(none)`);
-      return;
-    }
-    const note = omitted > 0 ? `\n… omitted ${omitted} more lines` : "";
-    if (omitted > 0) truncNotes.push(`${title}: omitted ${omitted}`);
-    const block = `\n## ${title}\n${text || "(none)"}${note}`;
-    sections.push(block);
-    budget -= block.length;
-  };
-
-  pushSection(
-    "Fuzzy suggestions already offered",
-    report.suggestions.slice(0, 10).map(
-      (p) =>
-        `- ${JSON.stringify(p.from_key)} → ${JSON.stringify(p.to_key)} (jaro=${p.score.toFixed(3)}${p.ambiguous && p.alt_to_key ? `; alt ${JSON.stringify(p.alt_to_key)}` : ""})`,
-    ),
-    1200,
-  );
-  pushSection(
-    "Existing KeyMap aliases",
-    ctx.existing_aliases
-      .slice(0, 12)
-      .map(
-        (a) =>
-          `- [${a.map_name || a.map_id}] ${JSON.stringify(a.from)} → ${JSON.stringify(a.to)}`,
-      ),
-    1000,
-  );
-  const leftKeys = report.leftover_left.slice(0, 40).map((k) => `- ${k}`);
-  pushSection(
-    `Leftover left (From), ${report.leftover_left.length}`,
-    leftKeys,
-    2000,
-  );
-  pushSection("Left leftover samples", fmtSamples(ctx.leftover_left_samples, 10), 2200);
-  const universe = (ctx.right_to_universe ?? []).slice(0, 40).map((k) => `- ${k}`);
-  pushSection(
-    `Right key universe (allowed To), ${(ctx.right_to_universe ?? []).length}`,
-    universe,
-    1800,
-  );
-  pushSection(
-    `Unmatched right (still open), ${report.leftover_right.length}`,
-    report.leftover_right.slice(0, 30).map((k) => `- ${k}`),
-    1200,
-  );
-  pushSection("Right leftover samples", fmtSamples(ctx.leftover_right_samples, 8), 1800);
-
-  if (truncNotes.length) {
-    sections.push(`\n## Truncation\n- ${truncNotes.join("\n- ")}`);
-  }
-  let out = sections.join("\n");
-  if (out.length > PROMPT_BUDGET) {
-    out = `${out.slice(0, PROMPT_BUDGET - 40)}\n…[prompt truncated]`;
-  }
-  return out;
-}
 
 export function JoinLensAuto({
   workspace,
@@ -306,7 +147,7 @@ export function JoinLensAuto({
     setChatError(null);
     try {
       const res = await llmChat([
-        { role: "system", content: systemPrompt(report) },
+        { role: "system", content: joinKeyMapSystemPrompt(report) },
         ...next,
       ]);
       if (
@@ -334,10 +175,10 @@ export function JoinLensAuto({
           {loading
             ? "Scoring unmatched keys…"
             : report?.disabled_reason
-              ? "Auto unavailable for this Join"
+              ? "Suggestions unavailable for this join"
               : report
-                ? `${report.suggestions.length} fuzzy pair${report.suggestions.length === 1 ? "" : "s"} · ${report.metric} ≥ ${report.score_cutoff}`
-                : "Auto map"}
+                ? `${report.suggestions.length} similar name${report.suggestions.length === 1 ? "" : "s"} · score ≥ ${report.score_cutoff}`
+                : "Suggest all"}
         </span>
         {report?.truncated && !report.disabled_reason && (
           <span className="text-[10px] text-amber-300/90">
@@ -432,7 +273,7 @@ export function JoinLensAuto({
         {report && report.suggestions.length === 0 && !loading && (
           <div className="border-b border-slate-800 px-2 py-2 text-[10px] text-slate-400">
             No fuzzy pairs above the cutoff. Leftovers can be discussed in the LLM chat, then
-            accepted into the KeyMap. Probe stays manual.
+            accepted into the key map. Use No match for one-by-one fixes.
           </div>
         )}
         {report?.suggestions.map((p, i) => (

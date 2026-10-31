@@ -1,6 +1,6 @@
 /** Indeterminate / phased progress for long File → Export / Parse / Build ops. */
 
-export type OpProgressKind = "export" | "parse" | "build";
+export type OpProgressKind = "export" | "parse" | "build" | "prepare";
 
 export interface OpProgressState {
   kind: OpProgressKind;
@@ -14,6 +14,7 @@ const KIND_TITLE: Record<OpProgressKind, string> = {
   export: "Export dbt",
   parse: "dbt parse",
   build: "dbt build",
+  prepare: "Load join sides",
 };
 
 export function OpProgress({ state }: { state: OpProgressState }) {

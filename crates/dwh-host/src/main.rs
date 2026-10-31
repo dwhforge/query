@@ -36,7 +36,7 @@ struct RpcRequest {
 fn main() {
     configure_paths();
     let state = match HostState::new() {
-        Ok(s) => Arc::new(s),
+        Ok(s) => s,
         Err(e) => {
             eprintln!("[dwh-host] failed to start DuckDB session: {e}");
             std::process::exit(1);
@@ -194,22 +194,30 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
             }
         };
         let id = rpc.id;
-        if rpc.cmd == "llm_chat" {
+        // Keep the accept loop free so Cancel can be read while other work runs.
+        // Heavy RPCs share a bounded queue (1 pending; stale → superseded).
+        // join_prepare_status is cheap but must not block the reader on `db`.
+        let async_cmd = rpc.cmd == "llm_chat"
+            || rpc.cmd == "key_map_fuzzy_suggest"
+            || rpc.cmd == "join_prepare_status"
+            || HostState::is_heavy_rpc(&rpc.cmd);
+        if async_cmd {
             let st = Arc::clone(&state);
             let w = Arc::clone(&writer);
             let args = rpc.args;
+            let cmd = rpc.cmd;
             thread::spawn(move || {
-                let reply = match st.dispatch("llm_chat", args) {
+                let reply = match st.dispatch(&cmd, args) {
                     Ok(result) => json!({ "id": id, "ok": true, "result": result }),
                     Err(error) => json!({ "id": id, "ok": false, "error": error }),
                 };
                 match w.lock() {
                     Ok(mut guard) => {
                         if let Err(e) = write_frame(&mut *guard, &reply) {
-                            eprintln!("[dwh-host] llm reply write failed: {e}");
+                            eprintln!("[dwh-host] async reply write failed: {e}");
                         }
                     }
-                    Err(e) => eprintln!("[dwh-host] llm reply lock poisoned: {e}"),
+                    Err(e) => eprintln!("[dwh-host] async reply lock poisoned: {e}"),
                 }
             });
             continue;

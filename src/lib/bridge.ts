@@ -2,6 +2,7 @@ import type {
   ConnectionDef,
   PreviewResult,
   Project,
+  SourceDef,
   TransformationStep,
   WarehouseDialect,
   Workspace,
@@ -27,8 +28,154 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 export function previewWorkspace(
   workspace: Workspace,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<PreviewResult> {
-  return invoke<PreviewResult>("preview_workspace", { workspace, connections });
+  return invoke<PreviewResult>("preview_workspace", {
+    workspace,
+    connections,
+    sources,
+  });
+}
+
+/** Schema only (`LIMIT 0`) — no sample rows. */
+export function describeWorkspace(
+  workspace: Workspace,
+  connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
+): Promise<PreviewResult> {
+  return invoke<PreviewResult>("describe_workspace", {
+    workspace,
+    connections,
+    sources,
+  });
+}
+
+/** Interrupt the DuckDB query currently running on the host. */
+export function cancelRunningQuery(): Promise<boolean> {
+  return invoke<boolean>("cancel_running_query", {});
+}
+
+export type JoinPrepareResult = {
+  fingerprint: string;
+  host_query_id: string;
+  join_step_index: number;
+  right_query_id: string;
+  left_on: string[];
+  right_on: string[];
+  left_rows: number;
+  right_rows: number;
+  reused: boolean;
+  left_expensive: boolean;
+  right_expensive: boolean;
+  left_materialized: boolean;
+  right_materialized: boolean;
+};
+
+export type JoinPrepareStatus = {
+  prepared: boolean;
+  fingerprint?: string | null;
+  host_query_id?: string | null;
+  join_step_index?: number | null;
+  left_rows?: number | null;
+  right_rows?: number | null;
+  left_expensive?: boolean | null;
+  right_expensive?: boolean | null;
+  left_materialized?: boolean | null;
+  right_materialized?: boolean | null;
+  stale: boolean;
+};
+
+export type JoinPrepareProgress = {
+  active: boolean;
+  fraction: number;
+  stage: string;
+  message: string;
+  leftExpensive?: boolean | null;
+  rightExpensive?: boolean | null;
+};
+
+export function formatJoinPrepareHint(
+  r: Pick<
+    JoinPrepareResult,
+    | "reused"
+    | "left_expensive"
+    | "right_expensive"
+    | "left_materialized"
+    | "right_materialized"
+    | "left_rows"
+    | "right_rows"
+  >,
+): string {
+  const side = (expensive: boolean, mat: boolean, rows: number) =>
+    mat
+      ? `${rows.toLocaleString()} rows`
+      : expensive
+        ? "built on the fly"
+        : "direct read";
+  return `${r.reused ? "Ready" : "Loaded"} · ${side(r.left_expensive, r.left_materialized, r.left_rows)} / ${side(r.right_expensive, r.right_materialized, r.right_rows)}`;
+}
+
+export function formatJoinPrepareStatusHint(s: JoinPrepareStatus): string {
+  const side = (
+    expensive: boolean | null | undefined,
+    mat: boolean | null | undefined,
+    rows: number | null | undefined,
+  ) => {
+    if (mat) return `${Number(rows ?? 0).toLocaleString()} rows`;
+    if (expensive === false) return "direct read";
+    if (expensive) return "built on the fly";
+    return Number(rows ?? 0).toLocaleString();
+  };
+  return `Ready · ${side(s.left_expensive, s.left_materialized, s.left_rows)} / ${side(s.right_expensive, s.right_materialized, s.right_rows)}`;
+}
+
+export function prepareJoinInputs(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
+  force = false,
+): Promise<JoinPrepareResult> {
+  return invoke<JoinPrepareResult>("prepare_join_inputs", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+    sources,
+    force,
+  });
+}
+
+export function joinPrepareStatus(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  sources: SourceDef[] = [],
+  connections: ConnectionDef[] = [],
+): Promise<JoinPrepareStatus> {
+  return invoke<JoinPrepareStatus>("join_prepare_status", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    sources,
+    connections,
+  });
+}
+
+export function clearJoinPrepare(): Promise<boolean> {
+  return invoke<boolean>("clear_join_prepare", {});
+}
+
+export function joinPrepareProgress(): Promise<JoinPrepareProgress> {
+  return invoke<JoinPrepareProgress>("join_prepare_progress", {});
+}
+
+export function previewPreparedJoinSide(
+  side: "left" | "right",
+  limit = 50,
+): Promise<PreviewResult> {
+  return invoke<PreviewResult>("preview_prepared_join_side", { side, limit });
 }
 
 export type PreviewDbtModel = {
@@ -42,12 +189,14 @@ export function previewDbtModel(
   queryId: string,
   targetDialect: WarehouseDialect = "duckdb",
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<PreviewDbtModel> {
   return invoke<PreviewDbtModel>("preview_dbt_model", {
     workspace,
     queryId,
     targetDialect,
     connections,
+    sources,
   });
 }
 
@@ -91,12 +240,14 @@ export function joinDiagnostics(
   hostQueryId: string,
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<JoinDiagnostics> {
   return invoke<JoinDiagnostics>("join_diagnostics", {
     workspace,
     hostQueryId,
     joinStepIndex,
     connections,
+    sources,
   });
 }
 
@@ -132,6 +283,7 @@ export function explainJoinRows(
     previewOffsets?: number[];
   },
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<ExplainJoinRowsResult> {
   return invoke<ExplainJoinRowsResult>("explain_join_rows", {
     workspace,
@@ -140,6 +292,7 @@ export function explainJoinRows(
     keys: opts.keys ?? [],
     previewOffsets: opts.previewOffsets ?? null,
     connections,
+    sources,
   });
 }
 
@@ -189,6 +342,7 @@ export function explainJoinKey(
   side: JoinKeySide,
   keyValues: unknown[],
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<ExplainJoinKeyResult> {
   return invoke<ExplainJoinKeyResult>("explain_join_key", {
     workspace,
@@ -197,6 +351,7 @@ export function explainJoinKey(
     side,
     keyValues,
     connections,
+    sources,
   });
 }
 
@@ -207,6 +362,7 @@ export function blameUnmatchedKey(
   side: JoinKeySide,
   keyValues: unknown[],
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<BlameUnmatchedKeyResult> {
   return invoke<BlameUnmatchedKeyResult>("blame_unmatched_key", {
     workspace,
@@ -215,6 +371,7 @@ export function blameUnmatchedKey(
     side,
     keyValues,
     connections,
+    sources,
   });
 }
 
@@ -243,12 +400,14 @@ export function joinKeyNearMiss(
   hostQueryId: string,
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<JoinKeyNearMiss> {
   return invoke<JoinKeyNearMiss>("join_key_near_miss", {
     workspace,
     hostQueryId,
     joinStepIndex,
     connections,
+    sources,
   });
 }
 
@@ -319,12 +478,14 @@ export function joinKeyFuzzySuggest(
   hostQueryId: string,
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<JoinKeyFuzzySuggest> {
   return invoke<JoinKeyFuzzySuggest>("join_key_fuzzy_suggest", {
     workspace,
     hostQueryId,
     joinStepIndex,
     connections,
+    sources,
   });
 }
 
@@ -452,6 +613,7 @@ export function exportDbt(
   outputs?: string[],
   /** UI progress: write files only; call `parseExport` as a second phase. */
   skipParse?: boolean,
+  sources: SourceDef[] = [],
 ): Promise<ExportResult> {
   return invoke<ExportResult>("export_dbt", {
     pipelineName,
@@ -460,6 +622,7 @@ export function exportDbt(
     dbtTarget,
     targetDialect,
     connections,
+    sources,
     executionEngine: executionEngine ?? targetDialect,
     destinationKind: destinationKind ?? targetDialect,
     destinationConnectionId,
@@ -653,4 +816,37 @@ export function windowAction(action: WindowAction): Promise<void> {
   const dwh = window.dwh;
   if (!dwh?.windowAction) return Promise.resolve();
   return dwh.windowAction(action).then(() => undefined);
+}
+
+export type KeyMapMatchSource = {
+  query_id: string;
+  key_column: string;
+  label_column?: string | null;
+};
+
+export type KeyMatchOptions = { score_cutoff: number; ambiguity_gap: number };
+export type KeyMapFuzzySuggest = {
+  left_rows: number;
+  right_rows: number;
+  unmatched: number;
+  ambiguous: number;
+  seconds: number;
+  options: KeyMatchOptions;
+  candidate_limited: boolean;
+  suggestions: FuzzyPair[];
+};
+
+export function keyMapFuzzySuggest(
+  workspace: Workspace,
+  connections: ConnectionDef[],
+  left: KeyMapMatchSource,
+  right: KeyMapMatchSource,
+  options: KeyMatchOptions,
+): Promise<KeyMapFuzzySuggest> {
+  const source = (value: KeyMapMatchSource) => ({
+    ...value, label_column: value.label_column?.trim() || null,
+  });
+  return invoke<KeyMapFuzzySuggest>("key_map_fuzzy_suggest", {
+    workspace, connections, left: source(left), right: source(right), options,
+  });
 }

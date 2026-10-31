@@ -3,148 +3,347 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DWHForge Query — Download</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg: #071018;
-        --fg: #e2e8f0;
-        --muted: #94a3b8;
-        --accent: #2dd4bf;
-        --line: #1e293b;
-      }
-      * {
-        box-sizing: border-box;
-      }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: "Segoe UI", system-ui, sans-serif;
-        background: radial-gradient(1200px 600px at 20% -10%, #0f766e33, transparent),
-          var(--bg);
-        color: var(--fg);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 2rem;
-      }
-      main {
-        max-width: 36rem;
-        width: 100%;
-      }
-      h1 {
-        font-size: 1.75rem;
-        letter-spacing: -0.02em;
-        margin: 0 0 0.5rem;
-      }
-      p {
-        color: var(--muted);
-        line-height: 1.5;
-        margin: 0 0 1.25rem;
-      }
-      .card {
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        padding: 1.25rem 1.35rem;
-        background: #0a1520cc;
-      }
-      a.btn {
-        display: inline-block;
-        margin: 0.35rem 0.5rem 0.35rem 0;
-        padding: 0.65rem 1.1rem;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #042f2e;
-        font-weight: 700;
-        text-decoration: none;
-      }
-      a.btn.secondary {
-        background: transparent;
-        color: var(--accent);
-        border: 1px solid #2dd4bf66;
-      }
-      a.btn[disabled],
-      a.btn.is-disabled {
-        opacity: 0.45;
-        pointer-events: none;
-      }
-      .meta {
-        font-size: 0.85rem;
-        color: var(--muted);
-        margin-top: 1rem;
-      }
-      code {
-        font-size: 0.9em;
-      }
-    </style>
+    <title>DWHForge Query — Build visually. Verify on real data. Ship dbt.</title>
+    <meta
+      name="description"
+      content="Local desktop workbench: connect Postgres and files, investigate joins, export a runnable dbt project. Data stays on your machine."
+    />
+    <meta property="og:title" content="DWHForge Query" />
+    <meta
+      property="og:description"
+      content="Build visually. Verify on real data. Ship dbt. Local-first workbench for data engineers."
+    />
+    <meta property="og:image" content="assets/welcome.png" />
+    <meta property="og:type" content="website" />
+    <link rel="canonical" href="https://dwhforge.github.io/query/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Orbitron:wght@700;800;900&family=Syne:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main>
-      <h1>DWHForge Query</h1>
-      <p>
-        Visual transforms → real dbt. Local desktop workbench — DuckDB preview,
-        Postgres sources, offline engine. BSL 1.1 licensed.
-      </p>
-      <div class="card">
-        <p id="status">Loading latest release…</p>
-        <div id="actions"></div>
-        <p class="meta">
-          Linux + Windows x86_64 · Electron portable · offline DuckDB extensions.
-          Source:
-          <a href="https://github.com/dwhforge/query" style="color: var(--accent)"
-            >github.com/dwhforge/query</a
-          >
-        </p>
+    <div class="atmosphere" aria-hidden="true">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+    </div>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="./">DWHForge <span>Query</span></a>
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="site-nav"
+        >
+          Menu
+        </button>
+        <nav class="nav" id="site-nav">
+          <a href="#features">Features</a>
+          <a href="#workflow">Workflow</a>
+          <a href="#demo">Demo</a>
+          <a href="docs.html">Docs</a>
+          <a class="nav-cta" href="download.html">Download</a>
+        </nav>
       </div>
+    </header>
+
+    <main>
+      <section class="hero wrap">
+        <div class="hero-copy">
+          <p class="hero-chip">
+            <span class="chip-dot"></span> Local-first · DuckDB · dbt export
+          </p>
+          <h1 class="hero-brand" aria-label="DWHForge Query">
+            <span class="brand-stem">DWHForge</span>
+            <span class="query">Query</span>
+          </h1>
+          <p class="hero-headline">
+            Build visually. Verify on real data. Ship dbt.
+          </p>
+          <p class="hero-lede">
+            A local desktop workbench for turning PostgreSQL and files into
+            inspectable transforms and a runnable dbt project—without sending
+            raw data off your machine.
+          </p>
+          <div class="cta-row">
+            <a class="btn btn-primary btn-glow" href="download.html">Download</a>
+            <a class="btn btn-ghost" href="docs.html">Documentation</a>
+          </div>
+        </div>
+        <div class="hero-stage">
+          <div class="hero-glow" aria-hidden="true"></div>
+          <div class="hero-frame">
+            <div class="hero-shine" aria-hidden="true"></div>
+            <div class="hero-scan" aria-hidden="true"></div>
+            <img
+              src="assets/welcome.png"
+              width="1100"
+              height="640"
+              alt="DWHForge Query: explorer, pipeline canvas with a join, applied steps, and data preview"
+            />
+          </div>
+        </div>
+      </section>
+
+      <section id="features">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="section-kicker">Why it exists</p>
+            <h2 class="section-title">From messy inputs to a pipeline you keep</h2>
+            <p class="section-lede">
+              Two feeds spell the same company differently. A join drops rows.
+              A rule changes a week after the first export. Investigate and edit
+              where you build—then ship code you can run in your own infra.
+            </p>
+          </div>
+          <ul class="feature-list">
+            <li>
+              <h3>See the data behind the graph</h3>
+              <p>
+                Select a query or an applied step and inspect its intermediate
+                result before you publish.
+              </p>
+            </li>
+            <li>
+              <h3>Investigate joins where you build them</h3>
+              <p>
+                Join Lens shows matched and unmatched keys. Turn corrections into
+                reusable KeyMaps that export as dbt seeds.
+              </p>
+            </li>
+            <li>
+              <h3>Compute where it makes sense</h3>
+              <p>
+                DuckDB for files and prep; PostgreSQL when the warehouse should
+                own execution. Engine and destination are separate choices.
+              </p>
+            </li>
+            <li>
+              <h3>Keep the result as code</h3>
+              <p>
+                Export SQL models, sources, dependencies, and mapping seeds.
+                Run them with dbt outside the app—in Git, CI, or your existing
+                automation.
+              </p>
+            </li>
+            <li>
+              <h3>Come back and change it</h3>
+              <p>
+                Edit the workspace and re-export. Hash checks detect hand-edits
+                to generator-owned files before overwrite.
+              </p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="workflow">
+        <div class="wrap split split-aside">
+          <div>
+            <div class="section-head">
+              <p class="section-kicker">Core loop</p>
+              <h2 class="section-title">Connect → transform → publish → build</h2>
+              <p class="section-lede">
+                Built for data engineers, DBAs, and consultants who already live
+                in Postgres, files, and dbt—not another analyst black box.
+              </p>
+            </div>
+            <ol class="steps">
+              <li>
+                <div>
+                  <h3>Connect sources</h3>
+                  <p>
+                    PostgreSQL tables, CSV, Parquet, S3-compatible storage, and
+                    DuckDB files in one project explorer.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <h3>Build the graph</h3>
+                  <p>
+                    Join, append, filter, group, sort, calculated columns, and
+                    custom SQL—with Applied Steps you can revisit.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <h3>Mark what to publish</h3>
+                  <p>
+                    Choose the execution engine and destination, then enable
+                    Publish to destination on the queries that become marts.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <h3>Export → Parse → Build</h3>
+                  <p>
+                    Write a real dbt project, gate on offline parse, then build
+                    with progress and logs—inside the app or from the CLI.
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
+          <div>
+            <p class="section-kicker">Routes</p>
+            <h3 class="section-title" style="font-size: 1.35rem; margin-bottom: 1rem">
+              Engine ≠ destination
+            </h3>
+            <table class="matrix">
+              <thead>
+                <tr>
+                  <th>Sources</th>
+                  <th>Execution</th>
+                  <th>Destination</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>PostgreSQL</td>
+                  <td><code>dbt-postgres</code></td>
+                  <td>PostgreSQL</td>
+                </tr>
+                <tr>
+                  <td>Files / S3</td>
+                  <td><code>dbt-duckdb</code></td>
+                  <td>DuckDB</td>
+                </tr>
+                <tr>
+                  <td>Files / S3</td>
+                  <td><code>dbt-duckdb</code></td>
+                  <td>PostgreSQL</td>
+                </tr>
+                <tr>
+                  <td>DuckDB</td>
+                  <td><code>dbt-duckdb</code></td>
+                  <td>PostgreSQL</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="meta-line" style="margin-top: 1.25rem">
+              For files → PostgreSQL, DuckDB transforms locally; published tables
+              land through a PostgreSQL attachment. Raw files need not load into
+              Postgres first.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="demo-band" id="demo">
+        <div class="wrap split split-2">
+          <div>
+            <p class="section-kicker">Try it</p>
+            <h2 class="section-title">Company aliases → PostgreSQL</h2>
+            <p class="section-lede">
+              The bundled Key mapping demo follows sales and spending across 15
+              companies and 60 days—same businesses, different names.
+            </p>
+            <div class="cta-row" style="margin-top: 1.5rem">
+              <a
+                class="btn btn-primary"
+                href="https://github.com/dwhforge/query/blob/main/docs/keymap-workflows.md"
+                >Mapping walkthrough</a
+              >
+              <a class="btn btn-ghost" href="docs.html">All docs</a>
+            </div>
+          </div>
+          <ol class="demo-points">
+            <li>
+              <strong style="color: var(--fg)">Open the problem.</strong> Help →
+              Load demo → Key mapping; inspect the dirty join.
+            </li>
+            <li>
+              <strong style="color: var(--fg)">Investigate and map.</strong> Join
+              Lens + KeyMap editor connect aliases to canonical IDs.
+            </li>
+            <li>
+              <strong style="color: var(--fg)">Inspect intermediates.</strong>
+              Follow daily combine into monthly rollup; read generated SQL.
+            </li>
+            <li>
+              <strong style="color: var(--fg)">Publish and build.</strong>
+              Engine DuckDB, destination PostgreSQL, then Export and Build.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="download">
+        <div class="wrap split split-2">
+          <div class="section-head" style="margin-bottom: 0">
+            <p class="section-kicker">Get the app</p>
+            <h2 class="section-title">Linux and Windows portable builds</h2>
+            <p class="section-lede">
+              Electron portable packages with offline DuckDB extensions. No
+              DWHForge account. Early development—expect sharp edges.
+            </p>
+          </div>
+          <div class="download-panel" data-download-panel>
+            <p class="status" data-release-status>Loading latest release…</p>
+            <div class="download-actions" data-release-actions></div>
+            <p class="meta-line">
+              Prefer source?
+              <a href="https://github.com/dwhforge/query#get-started"
+                >Clone and run from the repo</a
+              >
+              ·
+              <a href="download.html">Full download page</a>
+            </p>
+          </div>
+        </div>
+      </section>
     </main>
-    <script>
-      const API =
-        "https://api.github.com/repos/dwhforge/query/releases/latest";
-      const status = document.getElementById("status");
-      const actions = document.getElementById("actions");
 
-      function pick(assets, re) {
-        return assets.find((a) => re.test(a.name));
-      }
+    <footer class="site-footer">
+      <div class="wrap footer-grid">
+        <div>
+          <a class="brand" href="./">DWHForge <span>Query</span></a>
+          <p>
+            Local-first visual transforms that export real dbt. Licensed under
+            Business Source License 1.1 (Apache-2.0 after four years).
+          </p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul>
+            <li><a href="download.html">Download</a></li>
+            <li><a href="docs.html">Documentation</a></li>
+            <li>
+              <a href="https://github.com/dwhforge/query/releases">Releases</a>
+            </li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Source</h4>
+          <ul>
+            <li>
+              <a href="https://github.com/dwhforge/query">GitHub</a>
+            </li>
+            <li>
+              <a href="https://github.com/dwhforge/query/blob/main/LICENSE"
+                >License (BSL 1.1)</a
+              >
+            </li>
+            <li>
+              <a href="https://github.com/dwhforge/query/issues">Issues</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div class="wrap footer-bottom">
+        <span>© 2026 DWHForge</span>
+        <span>https://dwhforge.github.io/query/</span>
+      </div>
+    </footer>
 
-      fetch(API)
-        .then((r) => {
-          if (!r.ok) throw new Error("No release yet");
-          return r.json();
-        })
-        .then((rel) => {
-          const assets = rel.assets || [];
-          const linux =
-            pick(assets, /electron-linux-x64\.tar\.gz$/i) ||
-            pick(assets, /linux-x86_64\.tar\.gz$/i);
-          const win =
-            pick(assets, /electron-windows-x64\.zip$/i) ||
-            pick(assets, /windows-x86_64\.zip$/i);
-          status.textContent = `Latest: ${rel.tag_name}`;
-          const bits = [];
-          if (linux) {
-            bits.push(
-              `<a class="btn" href="${linux.browser_download_url}">Linux (Electron)</a>`,
-            );
-          }
-          if (win) {
-            bits.push(
-              `<a class="btn" href="${win.browser_download_url}">Windows (Electron)</a>`,
-            );
-          }
-          bits.push(
-            `<a class="btn secondary" href="${rel.html_url}">All assets on GitHub</a>`,
-          );
-          if (!linux && !win) {
-            status.textContent =
-              `${rel.tag_name} — binaries still uploading, or open GitHub.`;
-          }
-          actions.innerHTML = bits.join("");
-        })
-        .catch(() => {
-          status.textContent = "No published release yet.";
-          actions.innerHTML = `<a class="btn" href="https://github.com/dwhforge/query/releases">Open releases</a>`;
-        });
-    </script>
+    <script src="site.js"></script>
   </body>
 </html>

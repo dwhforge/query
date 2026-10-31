@@ -5,12 +5,18 @@ mod join_diagnostics;
 mod join_fuzzy;
 mod join_lens;
 mod join_near_miss;
+mod join_prepare;
+mod key_map_fuzzy;
 mod key_map_write;
+mod key_match;
+#[cfg(test)]
+mod key_match_bench;
 mod load_seeds;
 mod postgres_catalog;
 mod preview;
 mod secrets;
 mod session;
+mod session_limits;
 
 pub use extensions::{
     duckdb_platform, duckdb_version_tag, extensions_dir_display, parquet_available,
@@ -28,11 +34,19 @@ pub use join_lens::{
 };
 pub use join_fuzzy::{
     join_key_fuzzy_suggest, FuzzyAliasExample, FuzzyChatContext, FuzzyFieldSample, FuzzyKeySample,
-    FuzzyPair, JoinKeyFuzzySuggest,
+    JoinKeyFuzzySuggest,
 };
 pub use join_near_miss::{
     join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,
 };
+pub use join_prepare::{
+    clear_join_prepare, clear_prepare_progress, ensure_join_sides_materialized,
+    format_prepare_hint, get_prepare_progress, join_prepare_status, prepare_join_inputs,
+    prepare_join_inputs_with_progress, preview_prepared_join_side, set_prepare_progress,
+    JoinPrepareProgress, JoinPrepareResult, JoinPrepareStatus,
+};
+pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
+pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use key_map_write::{
     key_map_content_hash, read_key_map, read_key_map_from_postgres, read_key_map_with_hash,
     write_key_map, write_key_map_to_postgres, write_key_map_with_expected, KeyMapReadResult,
@@ -43,5 +57,10 @@ pub use postgres_catalog::{
     describe_postgres_object, list_postgres_objects, test_postgres_connection,
     PostgresColumn, PostgresObject,
 };
-pub use preview::{preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult};
-pub use session::DbSession;
+pub use preview::{
+    describe_workspace, preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult,
+};
+pub use session::{DbSession, QueryCancelHandle};
+pub use session_limits::{
+    map_engine_error, resolve_memory_limit, resolve_temp_directory, ENV_MEMORY, ENV_TEMP,
+};

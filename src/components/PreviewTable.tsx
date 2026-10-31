@@ -1,4 +1,10 @@
-import { memo, useEffect, useMemo, useRef } from "react";
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -11,6 +17,9 @@ import {
   JOIN_ORIGIN_LABEL,
   type JoinColumnOrigin,
 } from "../lib/joinColumnOrigin";
+
+/** Ignore hover within this many px of a row edge — stops enter/leave oscillation. */
+const HOVER_EDGE_PX = 3;
 
 interface PreviewTableProps {
   columns: ColumnMetadata[];
@@ -91,11 +100,52 @@ function PreviewTableImpl({
 }: PreviewTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const rowEls = useRef<Map<number, HTMLElement>>(new Map());
+  const lastHoverIndex = useRef<number | null>(null);
+  const hoverRaf = useRef<number | null>(null);
+  const pendingHover = useRef<number | null>(null);
+  const onActiveRowChangeRef = useRef(onActiveRowChange);
+  onActiveRowChangeRef.current = onActiveRowChange;
   const hi = new Set(highlightKeys.map(foldKey));
   const matched = useMemo(
     () => new Set(matchedRowIndices ?? []),
     [matchedRowIndices],
   );
+
+  useEffect(() => {
+    return () => {
+      if (hoverRaf.current != null) cancelAnimationFrame(hoverRaf.current);
+    };
+  }, []);
+
+  function queueHoverRow(index: number) {
+    if (lastHoverIndex.current === index) return;
+    pendingHover.current = index;
+    if (hoverRaf.current != null) return;
+    hoverRaf.current = requestAnimationFrame(() => {
+      hoverRaf.current = null;
+      const next = pendingHover.current;
+      if (next == null || lastHoverIndex.current === next) return;
+      lastHoverIndex.current = next;
+      onActiveRowChangeRef.current?.(next);
+    });
+  }
+
+  function onRowPointerMove(
+    index: number,
+    e: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    const el = e.currentTarget;
+    const rect = el.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    // Dead zone on shared borders so the pointer doesn't thrash between rows.
+    if (y < HOVER_EDGE_PX || y > rect.height - HOVER_EDGE_PX) return;
+    queueHoverRow(index);
+  }
+
+  // Keep hover cursor in sync when selection changes from outside (click / parent).
+  useEffect(() => {
+    if (activeRowIndex != null) lastHoverIndex.current = activeRowIndex;
+  }, [activeRowIndex]);
 
   useEffect(() => {
     onScrollParentRef?.(parentRef.current);
@@ -217,9 +267,12 @@ function PreviewTableImpl({
                 }}
                 role="row"
                 tabIndex={0}
-                onMouseEnter={() => onActiveRowChange?.(virtualRow.index)}
-                onFocus={() => onActiveRowChange?.(virtualRow.index)}
-                onClick={() => onActiveRowChange?.(virtualRow.index)}
+                onPointerMove={(e) => onRowPointerMove(virtualRow.index, e)}
+                onFocus={() => queueHoverRow(virtualRow.index)}
+                onClick={() => {
+                  lastHoverIndex.current = virtualRow.index;
+                  onActiveRowChange?.(virtualRow.index);
+                }}
                 className={`absolute left-0 flex border-b border-slate-800/80 ${
                   active
                     ? "bg-teal-500/15 ring-1 ring-inset ring-teal-500/40"

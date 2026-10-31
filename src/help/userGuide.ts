@@ -97,7 +97,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "No match: values that didn’t join — click one to inspect; Find gaps loads the list",
       "Explain key: full-input result count + sample rows (not only preview LIMIT 50)",
       "Blame: absent at source 0vs filtered upstream (which step) vs no partner at Join",
-      "Near-miss strip: Apply NormalizeKey when trim/case/zeros would add matches",
+      "NormalizeKey… in Join Lens: near-miss trim/case/zeros → Apply NormalizeKey before Join",
       "Suggest all: similar-name proposals for unmatched keys → Accept into the key map. Leftovers can use the LLM chat (lineage, schemas, neighbor fields). Connection: llm.base_url / llm.model / llm.api_key in ~/.dwhforge-query/settings.json",
       "Collapse the graph for Join Lens: drag the horizontal splitter up (canvas shrinks to a thin strip) or double-click the splitter to maximize the dock / restore",
       "Save mapping…: from the Inspector unmatched banner, or Join Lens → No match → left/right. Several key maps → pick target; one map → opens it",

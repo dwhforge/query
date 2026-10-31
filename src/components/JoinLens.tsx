@@ -1917,18 +1917,21 @@ function JoinLensImpl({
               }
             }}
             className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
-            title="Try trim/case/zeros cleanup that might create more matches"
+            title="Near-miss: try trim/case/zeros → insert NormalizeKey before Join"
           >
             {nearMissLoading
-              ? "Checking cleanup…"
+              ? "Checking NormalizeKey…"
               : nearMiss
-                ? `${nearMissCount} cleanup ideas · ${nearMissOpen ? "▾" : "▸"}`
-                : "Try cleanup"}
+                ? `NormalizeKey · ${nearMissCount} · ${nearMissOpen ? "▾" : "▸"}`
+                : "NormalizeKey…"}
           </button>
         </div>
 
         {showNearMissChrome && nearMissOpen && (
           <div className="shrink-0 space-y-1 border-b border-teal-950/60 bg-teal-950/20 px-2 py-1">
+            <div className="text-[9px] font-semibold uppercase tracking-wide text-teal-400/85">
+              NormalizeKey ideas
+            </div>
             {(nearMiss?.hypotheses ?? []).slice(0, 3).map((h, i) => (
               <div
                 key={i}
@@ -1951,7 +1954,9 @@ function JoinLensImpl({
               </div>
             ))}
             {!nearMissLoading && nearMissCount === 0 && (
-              <div className="text-[10px] text-slate-500">No hypotheses yet</div>
+              <div className="text-[10px] text-slate-500">
+                No trim/case/zeros cleanup would add matches on this Join
+              </div>
             )}
           </div>
         )}

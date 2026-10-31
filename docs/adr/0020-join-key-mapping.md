@@ -53,7 +53,7 @@ Data engineers edit mappings as a **table** (`from`, `to`) — in git as `seeds/
    - **Before first export:** KeyMap in the project (editor) is SoT; export writes `seeds/map_*.csv`.
    - **After first export** (project has `last_dbt_export_path` / linked export tree): the seed file (and thus the warehouse table after `dbt seed`) is SoT. Opening the project or refreshing maps **SHALL sync seed → KeyMap** (and refresh ApplyKeyMap snapshots). Re-export must not clobber hand-edited seeds without the safe-re-export conflict rules (hash / refuse).
    - **Bind:** KeyMap storage may be generated **seed** (default), existing dbt **`ref(model)`**, or **`source(name, table)`**. Explorer lists KeyMaps; editor sets storage + from/to column names. CSV seed is the default portable form, not the only backend.
-   - **Write-back (source):** editing From→To and Save does a **full replace** (`DELETE` + `INSERT`) into the Postgres `source.table` via DuckDB ATTACH (writable). Open reloads live rows from WH. **ref** has no write-back (dbt run owns the model). **seed** write-back is the export CSV / push to export tree.
+   - **Write-back (source):** editing From→To (+ whitelisted attrs) and Save upserts by **From** into the Postgres `source.table` via DuckDB ATTACH (writable); see scale/wizard rules in [ADR-0022](0022-keymap-postgres-live-bind.md). Open/Reload pages live rows from WH. **ref** has no write-back (dbt run owns the model). **seed** write-back is the export CSV / push to export tree.
 5. **Out of scope:** automatic fuzzy merge; AI inventing aliases; universal column schema mapper.
 
 ## Fuzzy implementation and full dictionaries

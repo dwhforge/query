@@ -123,6 +123,8 @@ export type NormalizeOp =
 export interface KeyMapEntry {
   from: string;
   to: string;
+  /** Extra editable WH columns (ADR-0022); keys ⊆ KeyMapDef.editable_columns. */
+  attrs?: Record<string, string>;
 }
 
 /** Where the From→To table lives (ADR-0020). */
@@ -137,7 +139,7 @@ export type KeyMapStorage =
       connection_id?: string;
     };
 
-/** Named From→To join-key alias table (ADR-0020). */
+/** Named From→To join-key alias table (ADR-0020 / ADR-0022). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -146,6 +148,8 @@ export interface KeyMapDef {
   storage?: KeyMapStorage;
   from_column?: string;
   to_column?: string;
+  /** Extra WH columns editable in the UI (not From/To). */
+  editable_columns?: string[];
 }
 
 /** Preview engine for this Query node only (ADR-0014). */

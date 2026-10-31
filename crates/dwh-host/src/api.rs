@@ -1,6 +1,7 @@
 //! Command dispatch — Electron IPC → JSON-RPC (camelCase args).
 
 use crate::connections_io;
+use crate::dbt_setup;
 use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
@@ -15,13 +16,13 @@ use dwh_engine::{
     prepare_join_inputs_with_progress as run_prepare_join_inputs,
     preview_pipeline as run_preview_steps,
     preview_prepared_join_side as run_preview_prepared_join_side,
-    preview_workspace as run_preview_workspace, read_key_map_with_hash as run_read_key_map_with_hash,
+    preview_workspace as run_preview_workspace, read_key_map_paged as run_read_key_map_paged,
     set_extensions_dir, set_prepare_progress, test_postgres_connection as run_test_postgres_connection,
-    write_key_map_with_expected as run_write_key_map_with_expected, BlameUnmatchedKeyResult,
+    write_key_map_with_delta as run_write_key_map_with_delta, BlameUnmatchedKeyResult,
     DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyFuzzySuggest,
     JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, JoinPrepareProgress, JoinPrepareResult,
-    JoinPrepareStatus, KeyMapReadResult, KeyMapWriteResult, PostgresColumn, PostgresObject,
-    PreviewResult, QueryCancelHandle,
+    JoinPrepareStatus, KeyMapDirtyDelta, KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
+    PostgresColumn, PostgresObject, PreviewResult, QueryCancelHandle,
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
@@ -157,6 +158,13 @@ fn find_fixtures_dir() -> Result<PathBuf, String> {
 
 fn dbt_bin_candidates() -> Vec<PathBuf> {
     let mut extra = Vec::new();
+    // ADR-0021: custom venv from Options first when set.
+    if let Ok(settings) = settings_io::load_settings() {
+        let venv = settings.dbt_venv_path.trim();
+        if !venv.is_empty() {
+            extra.push(settings_io::dbt_bin_in_venv(Path::new(venv)));
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             extra.push(parent.join("dbt-venv/bin/dbt"));
@@ -497,88 +505,109 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
         KeyMapEntry {
             from: "STARBUCKS CORP".into(),
             to: "STBUX".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Nestle SA".into(),
             to: "NESTLE".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "NESTLÉ INTERNATIONAL".into(),
             to: "NESTLE".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Coca Cola Co".into(),
             to: "KO".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "THE COCA-COLA COMPANY".into(),
             to: "KO".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Pepsi Co".into(),
             to: "PEP".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "PEPSICO INC".into(),
             to: "PEP".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Danone Group".into(),
             to: "DANO".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "DANONE SA".into(),
             to: "DANO".into(),
+            ..Default::default()
         },
         // spend-side legal name only — sales uses ticker DEO (unmapped, LLM lab)
         KeyMapEntry {
             from: "DIAGEO PLC".into(),
             to: "UBL".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Heineken NV".into(),
             to: "HEIN".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "HEINEKEN N.V.".into(),
             to: "HEIN".into(),
+            ..Default::default()
         },
         // spend-side only — sales uses old name "The South African Breweries" (unmapped)
         KeyMapEntry {
             from: "AB INBEV".into(),
             to: "ABEV".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Yum Brands".into(),
             to: "YUM".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "YUM! BRANDS INC".into(),
             to: "YUM".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Mondelez Int".into(),
             to: "MOND".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "MONDELEZ INTERNATIONAL".into(),
             to: "MOND".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Unilever PLC".into(),
             to: "UNIL".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "UNILEVER N.V.".into(),
             to: "UNIL".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "Keurig DrPepper".into(),
             to: "KDP".into(),
+            ..Default::default()
         },
         KeyMapEntry {
             from: "KEURIG DR PEPPER".into(),
             to: "KDP".into(),
+            ..Default::default()
         },
     ];
 
@@ -834,6 +863,15 @@ struct KeyMapWhArgs {
     connection_string: String,
     /// Optimistic concurrency token from the prior read (checked under lock in TX).
     expected_content_hash: Option<String>,
+    /// ADR-0022 dirty delta; when set, only these upserts/deletes are applied.
+    #[serde(default)]
+    delta: Option<KeyMapDirtyDelta>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    from_prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1138,6 +1176,7 @@ impl HostState {
                 | "join_key_fuzzy_suggest"
                 | "prepare_join_inputs"
                 | "preview_prepared_join_side"
+                | "install_dbt_venv"
         )
     }
 
@@ -1643,18 +1682,24 @@ impl HostState {
             }
             "write_key_map" => {
                 let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let out: KeyMapWriteResult = run_write_key_map_with_expected(
+                let out: KeyMapWriteResult = run_write_key_map_with_delta(
                     &db,
                     &a.key_map,
                     &a.connection_string,
+                    a.delta.as_ref(),
                     a.expected_content_hash.as_deref(),
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "read_key_map" => {
                 let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let q = KeyMapReadQuery {
+                    limit: a.limit,
+                    offset: a.offset,
+                    from_prefix: a.from_prefix,
+                };
                 let out: KeyMapReadResult =
-                    run_read_key_map_with_hash(&db, &a.key_map, &a.connection_string)?;
+                    run_read_key_map_paged(&db, &a.key_map, &a.connection_string, &q)?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "preview_dbt_model" => {
@@ -1826,12 +1871,28 @@ impl HostState {
                 let settings_val = args.get("settings").cloned().unwrap_or(Value::Null);
                 let mut settings: AppSettings =
                     serde_json::from_value(settings_val).map_err(|e| e.to_string())?;
-                // Panel-width saves must not clobber llm (base URL, model, key).
+                // Panel-width / Options / Recent saves must not clobber llm (base URL, model, key).
                 if let Ok(prev) = settings_io::load_settings() {
                     settings.llm = prev.llm;
                 }
+                settings.normalize_for_save();
                 settings_io::save_settings(&settings)?;
                 Ok(Value::Null)
+            }
+            "dbt_setup_status" => {
+                drop(db);
+                let status = dbt_setup::setup_status(&dbt_bin_candidates())?;
+                serde_json::to_value(status).map_err(|e| e.to_string())
+            }
+            "dbt_install_script" => {
+                drop(db);
+                let script = dbt_setup::install_script()?;
+                serde_json::to_value(script).map_err(|e| e.to_string())
+            }
+            "install_dbt_venv" => {
+                drop(db);
+                let result = dbt_setup::install_dbt_venv()?;
+                serde_json::to_value(result).map_err(|e| e.to_string())
             }
             "get_global_connections" => {
                 drop(db);

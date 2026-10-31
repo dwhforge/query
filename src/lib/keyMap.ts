@@ -117,7 +117,11 @@ export function validateKeyMapEntries(
       return { ok: false, error: `Duplicate From '${from}'` };
     }
     seen.add(from);
-    cleaned.push({ from, to: e.to });
+    cleaned.push({
+      from,
+      to: e.to,
+      ...(e.attrs && Object.keys(e.attrs).length ? { attrs: e.attrs } : {}),
+    });
   }
   return { ok: true, entries: cleaned };
 }
@@ -269,13 +273,16 @@ export function syncApplyKeyMapEntries(
   queries: QueryDef[],
   map: KeyMapDef,
 ): QueryDef[] {
+  // ADR-0022: source maps must not snapshot the WH dictionary into ApplyKeyMap.
+  const snapEntries =
+    map.storage?.kind === "source" ? [] : map.entries;
   return queries.map((q) => ({
     ...q,
     steps: q.steps.map((s) =>
       s.type === "ApplyKeyMap" && s.payload.map_id === map.id
         ? {
             ...s,
-            payload: { ...s.payload, entries: map.entries },
+            payload: { ...s.payload, entries: snapEntries },
           }
         : s,
     ),

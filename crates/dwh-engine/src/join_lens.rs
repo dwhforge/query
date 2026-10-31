@@ -110,6 +110,7 @@ pub fn explain_join_rows(
         }
         let compiled = GraphCompiler::new(&resolved)
             .with_sources(sources)
+            .with_connections(connections)
             .compile_ctes_from(host_query_id)?;
         Some(resolve_preview_offsets(
             db,
@@ -189,6 +190,7 @@ pub fn explain_join_rows(
 
     let compiled = GraphCompiler::new(&resolved)
         .with_sources(sources)
+        .with_connections(connections)
         .compile_ctes_from(host_query_id)?;
     let batch_sql = values_batch_sql(&batch_refs, left_on.len())?;
     let left_on_join = left_on
@@ -1215,6 +1217,7 @@ fn join_key_context(
         } else {
             let compiled = GraphCompiler::new(&resolved)
                 .with_sources(sources)
+                .with_connections(connections)
                 .compile_ctes_from(host_query_id)?;
             (
                 compiled,

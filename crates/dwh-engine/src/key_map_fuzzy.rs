@@ -48,8 +48,8 @@ pub fn key_map_fuzzy_suggest(
     options.validate()?;
     let started = Instant::now();
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let left_sql = input_sql(&resolved, left)?;
-    let right_sql = input_sql(&resolved, right)?;
+    let left_sql = input_sql(&resolved, connections, left)?;
+    let right_sql = input_sql(&resolved, connections, right)?;
     // One lock for both reads. Release it before the CPU-bound matching phase.
     let (left, right) = db.with_conn(|conn| {
         Ok((
@@ -76,7 +76,11 @@ pub fn key_map_fuzzy_suggest(
     })
 }
 
-fn input_sql(workspace: &Workspace, source: &KeyMapMatchSource) -> Result<String, String> {
+fn input_sql(
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    source: &KeyMapMatchSource,
+) -> Result<String, String> {
     let label_column = source.label_column.as_deref().unwrap_or(&source.key_column);
     if source.key_column.trim().is_empty() || label_column.trim().is_empty() {
         return Err("Key and label column names must be nonblank".into());
@@ -89,7 +93,9 @@ fn input_sql(workspace: &Workspace, source: &KeyMapMatchSource) -> Result<String
         .len()
         .checked_sub(1)
         .ok_or_else(|| format!("Mapping query '{}' has no steps", source.query_id))?;
-    let compiled = GraphCompiler::new(workspace).compile_ctes_from(&source.query_id)?;
+    let compiled = GraphCompiler::new(workspace)
+        .with_connections(connections)
+        .compile_ctes_from(&source.query_id)?;
     Ok(compiled.wrap_select(&format!(
         "SELECT CAST({} AS VARCHAR), CAST({} AS VARCHAR) FROM {} LIMIT {}",
         quote_ident(&source.key_column),
@@ -191,6 +197,7 @@ mod tests {
         let before = serde_json::to_value(&workspace).unwrap();
         let sql = input_sql(
             &workspace,
+            &[],
             &KeyMapMatchSource {
                 query_id: "dictionary".into(),
                 key_column: "odd\"key".into(),

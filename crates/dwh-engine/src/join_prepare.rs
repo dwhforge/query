@@ -520,6 +520,7 @@ fn prepare_join_inputs_ex(
 
     let compiled = GraphCompiler::new(&resolved)
         .with_sources(sources)
+        .with_connections(connections)
         .compile_ctes_from(host_query_id)?;
 
     let left_sql = compiled.wrap_select(&format!("SELECT * FROM {left_cte}"));
@@ -870,6 +871,7 @@ pub fn prepared_join_with(
     if h.left_materialized && !h.right_materialized {
         let right_compiled = GraphCompiler::new(workspace)
             .with_sources(sources)
+            .with_connections(connections)
             .compile_ctes_from(&h.right_query_id)
             .ok()?;
         let rq = workspace.query(&h.right_query_id)?;
@@ -887,6 +889,7 @@ pub fn prepared_join_with(
     let left_ws = left_prefix_workspace(workspace, host_query_id, join_step_index).ok()?;
     let left_compiled = GraphCompiler::new(&left_ws)
         .with_sources(sources)
+        .with_connections(connections)
         .compile_ctes_from(host_query_id)
         .ok()?;
     let left_cte = cte_name(host_query_id, join_step_index.saturating_sub(1));

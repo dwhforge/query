@@ -1375,6 +1375,7 @@ mod tests {
         map.entries = vec![KeyMapEntry {
             from: "www".into(),
             to: "web".into(),
+            ..Default::default()
         }];
         let ws = Workspace {
             queries: vec![QueryDef {
@@ -1452,6 +1453,7 @@ mod tests {
         map.entries = vec![KeyMapEntry {
             from: "www".into(),
             to: "web".into(),
+            ..Default::default()
         }];
         let ws = Workspace {
             queries: vec![QueryDef {

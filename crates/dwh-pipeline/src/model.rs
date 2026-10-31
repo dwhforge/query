@@ -111,10 +111,24 @@ pub enum TransformationStep {
 }
 
 /// One From→To alias row. `from` must be unique within a [`KeyMapDef`].
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// Optional `attrs` hold whitelisted extra columns for Postgres source maps ([ADR-0022](../../../docs/adr/0022-keymap-postgres-live-bind.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct KeyMapEntry {
     pub from: String,
     pub to: String,
+    /// Extra editable column values (keys ⊆ `KeyMapDef.editable_columns`). Ignored by ApplyKeyMap join.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub attrs: std::collections::BTreeMap<String, String>,
+}
+
+impl KeyMapEntry {
+    pub fn pair(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            attrs: std::collections::BTreeMap::new(),
+        }
+    }
 }
 
 /// Where the From→To table lives (ADR-0020). Default = generated dbt seed.
@@ -151,6 +165,7 @@ pub struct KeyMapDef {
     pub id: String,
     pub name: String,
     /// Row cache for editor / DuckDB preview (SoT when `storage=seed`).
+    /// For `storage=source` at scale, prefer empty cache + paged WH reads ([ADR-0022](../../../docs/adr/0022-keymap-postgres-live-bind.md)).
     #[serde(default)]
     pub entries: Vec<KeyMapEntry>,
     /// Backend relation — seed (default), dbt ref, or dbt source.
@@ -162,6 +177,9 @@ pub struct KeyMapDef {
     /// Column on the map relation used as To (default `to`).
     #[serde(default = "default_to_col")]
     pub to_column: String,
+    /// Extra WH columns editable in the KeyMap UI (not From/To). Empty = from/to only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editable_columns: Vec<String>,
 }
 
 impl KeyMapDef {
@@ -173,6 +191,7 @@ impl KeyMapDef {
             storage: KeyMapStorage::Seed,
             from_column: default_from_col(),
             to_column: default_to_col(),
+            editable_columns: vec![],
         }
     }
 
@@ -280,14 +299,27 @@ impl Workspace {
     }
 
     pub fn uses_postgres(&self) -> bool {
-        self.queries.iter().any(|q| {
+        let load = self.queries.iter().any(|q| {
             q.steps
                 .iter()
                 .any(|s| matches!(s, TransformationStep::LoadPostgres { .. }))
+        });
+        if load {
+            return true;
+        }
+        // ADR-0022: source KeyMaps also need Postgres ATTACH for preview ApplyKeyMap.
+        self.key_maps.iter().any(|km| {
+            matches!(
+                km.storage,
+                KeyMapStorage::Source {
+                    connection_id: Some(_),
+                    ..
+                }
+            )
         })
     }
 
-    /// Collect connection ids referenced by Load* steps.
+    /// Collect connection ids referenced by Load* steps and source KeyMaps.
     pub fn referenced_connection_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         for q in &self.queries {
@@ -309,7 +341,43 @@ impl Workspace {
                 }
             }
         }
+        for km in &self.key_maps {
+            if let KeyMapStorage::Source {
+                connection_id: Some(id),
+                ..
+            } = &km.storage
+            {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
         ids
+    }
+
+    /// DSNs for source-backed KeyMaps (id → DSN), for preview ATTACH.
+    pub fn source_key_map_dsns(
+        &self,
+        connections: &[crate::connection::ConnectionDef],
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        let mut out = std::collections::HashMap::new();
+        for km in &self.key_maps {
+            if let KeyMapStorage::Source {
+                connection_id: Some(cid),
+                ..
+            } = &km.storage
+            {
+                let c = connections
+                    .iter()
+                    .find(|c| &c.id == cid)
+                    .ok_or_else(|| format!("Unknown connection_id '{cid}' for KeyMap '{}'", km.id))?;
+                let dsn = c.postgres_dsn().ok_or_else(|| {
+                    format!("Connection '{cid}' is not a postgres connection with DSN")
+                })?;
+                out.insert(km.id.clone(), dsn.to_string());
+            }
+        }
+        Ok(out)
     }
 
     /// Resolve `connection_id` → inline DSN for compile/runtime (does not strip ids).

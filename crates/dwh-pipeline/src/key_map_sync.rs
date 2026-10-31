@@ -272,6 +272,7 @@ mod tests {
                     entries: vec![KeyMapEntry {
                         from: "old".into(),
                         to: "x".into(),
+                        ..Default::default()
                     }],
                 }],
                 execution: Default::default(),
@@ -325,6 +326,7 @@ mod tests {
         map.entries = vec![KeyMapEntry {
             from: "www".into(),
             to: "online".into(),
+            ..Default::default()
         }];
         let err = push_key_map_to_export(&dir, &map).unwrap_err();
         assert!(err.contains("refused"), "{err}");
@@ -390,6 +392,7 @@ mod tests {
             &[KeyMapEntry {
                 from: "001".into(),
                 to: "online".into(),
+                ..Default::default()
             }],
             "from",
             "to",
@@ -404,6 +407,7 @@ mod tests {
         let entries = vec![KeyMapEntry {
             from: "a\nb".into(),
             to: "x".into(),
+            ..Default::default()
         }];
         let body = key_map_seed_csv(&entries);
         let back = parse_key_map_seed_csv(&body).unwrap();

@@ -6,7 +6,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VENV="$ROOT/dbt-venv"
+# Default: repo-local. App guided install uses ~/.dwhforge-query/dbt-venv (ADR-0023).
+VENV="${DWH_DBT_VENV:-$ROOT/dbt-venv}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required" >&2

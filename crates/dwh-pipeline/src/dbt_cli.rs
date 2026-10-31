@@ -470,10 +470,12 @@ mod tests {
             KeyMapEntry {
                 from: "001".into(),
                 to: "online".into(),
+                ..Default::default()
             },
             KeyMapEntry {
                 from: "1".into(),
                 to: "offline".into(),
+                ..Default::default()
             },
         ];
         let ws = Workspace {
@@ -543,6 +545,17 @@ mod tests {
         assert!(seed.status.success(), "dbt seed failed:\n{log}");
 
         let duck_path = root.join("local.duckdb");
+        // Use the same venv as `dbt` — system python3 often lacks the duckdb package.
+        let py_bin = bin
+            .parent()
+            .map(|d| d.join("python3"))
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                bin.parent()
+                    .map(|d| d.join("python"))
+                    .filter(|p| p.is_file())
+            })
+            .unwrap_or_else(|| PathBuf::from("python3"));
         let py = format!(
             r#"import duckdb
 con=duckdb.connect({duck_path:?})
@@ -552,14 +565,14 @@ assert any(r[0]=='001' and r[1]=='online' and 'VARCHAR' in r[2] for r in rows), 
 assert any(r[0]=='1' for r in rows), rows
 "#
         );
-        let check = Command::new("python3")
+        let check = Command::new(&py_bin)
             .arg("-c")
             .arg(&py)
             .output()
-            .expect("python3");
+            .unwrap_or_else(|e| panic!("run {py_bin:?}: {e}"));
         assert!(
             check.status.success(),
-            "leading-zero check failed:\n{}{}",
+            "leading-zero check failed (python={py_bin:?}):\n{}{}",
             String::from_utf8_lossy(&check.stdout),
             String::from_utf8_lossy(&check.stderr)
         );

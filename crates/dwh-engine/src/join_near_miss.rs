@@ -117,6 +117,7 @@ pub fn join_key_near_miss(
         } else {
             let compiled = GraphCompiler::new(&resolved)
                 .with_sources(sources)
+                .with_connections(connections)
                 .compile_ctes_from(host_query_id)?;
             (
                 left_cte_full,

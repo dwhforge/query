@@ -595,7 +595,11 @@ pub fn parse_key_map_seed_csv_mode(
                 "key map seed: duplicate from '{from}' (line {lineno})"
             ));
         }
-        entries.push(KeyMapEntry { from, to });
+        entries.push(KeyMapEntry {
+            from,
+            to,
+            ..Default::default()
+        });
         Ok(())
     };
 
@@ -1363,6 +1367,7 @@ mod tests {
             entries: vec![KeyMapEntry {
                 from: "web".into(),
                 to: "online".into(),
+                ..Default::default()
             }],
         };
         let sql = emit_transform_step(&step, "s0", &HashMap::new(), WarehouseDialect::Duckdb)
@@ -1385,10 +1390,12 @@ mod tests {
                 KeyMapEntry {
                     from: "www".into(),
                     to: "web".into(),
+                    ..Default::default()
                 },
                 KeyMapEntry {
                     from: "shop".into(),
                     to: "store".into(),
+                    ..Default::default()
                 },
             ]
         );

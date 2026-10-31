@@ -51,6 +51,7 @@ pub fn preview_workspace(
     let resolved = db.prepare_workspace(workspace, connections)?;
     let sql = GraphCompiler::new(&resolved)
         .with_sources(sources)
+        .with_connections(connections)
         .to_sql(true)?;
     run_sql(db, sql)
 }
@@ -62,7 +63,9 @@ pub fn preview_pipeline(
 ) -> Result<PreviewResult, String> {
     let ws = Workspace::from_linear_steps(steps.to_vec());
     let resolved = db.prepare_workspace(&ws, connections)?;
-    let sql = GraphCompiler::new(&resolved).to_sql(true)?;
+    let sql = GraphCompiler::new(&resolved)
+        .with_connections(connections)
+        .to_sql(true)?;
     run_sql(db, sql)
 }
 
@@ -76,6 +79,7 @@ pub fn describe_workspace(
     let resolved = db.prepare_workspace(workspace, connections)?;
     let compiled = GraphCompiler::new(&resolved)
         .with_sources(sources)
+        .with_connections(connections)
         .compile_ctes()?;
     let focus_last = compiled
         .last_by_query

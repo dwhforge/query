@@ -11,7 +11,7 @@ import type {
   KeyMapEntry,
   KeyMapStorage,
 } from "../types/pipeline";
-import { listPostgresObjects, readKeyMap } from "../lib/bridge";
+import { listPostgresObjects, readKeyMap, type KeyMapDirtyDelta } from "../lib/bridge";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
 import { mergeKeyMapProposals } from "../lib/keyMap";
@@ -22,6 +22,12 @@ import {
   validateKeyMapEntries,
   type ApplySide,
 } from "../lib/keyMap";
+import { KeyMapDirtyBuffer, KEYMAP_PAGE_SIZE } from "../lib/keyMapDirty";
+import {
+  KeyMapBindWizard,
+  applyKeyMapBind,
+  type KeyMapBindResult,
+} from "./KeyMapBindWizard";
 
 export type KeyMapSourceOption = {
   source: string;
@@ -45,7 +51,9 @@ export type KeyMapEditorProps = {
   refOptions?: string[];
   onChange: (map: KeyMapDef) => void;
   /** Fired after a successful warehouse read (optimistic concurrency token). */
-  onWarehouseRead?: (contentHash: string) => void;
+  onWarehouseRead?: (contentHash: string, totalCount?: number | null) => void;
+  /** Dirty delta for source Save (ADR-0022). */
+  onDirtyChange?: (delta: KeyMapDirtyDelta | null) => void;
   onApply?: (side: ApplySide) => void;
   onClose?: () => void;
   onSave?: () => void;
@@ -89,6 +97,7 @@ export function KeyMapEditor({
   refOptions = [],
   onChange,
   onWarehouseRead,
+  onDirtyChange,
   onApply,
   onClose,
   onSave,
@@ -112,8 +121,21 @@ export function KeyMapEditor({
   const [pgCatalogStatus, setPgCatalogStatus] = useState<string | null>(null);
   const [rowsStatus, setRowsStatus] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [pageOffset, setPageOffset] = useState(0);
+  const [totalCount, setTotalCount] = useState<number | null>(null);
+  const [serverFilter, setServerFilter] = useState("");
+  const [rebindOpen, setRebindOpen] = useState(false);
+  const [dirtyTick, setDirtyTick] = useState(0);
   const loadedTableKey = useRef<string>("");
+  const dirtyRef = useRef(new KeyMapDirtyBuffer());
   const gridRef = useRef<HTMLDivElement>(null);
+  const isSource = map.storage?.kind === "source";
+  const editableCols = map.editable_columns ?? [];
+
+  function bumpDirty() {
+    onDirtyChange?.(dirtyRef.current.toDelta());
+    setDirtyTick((n) => n + 1);
+  }
 
   // Never invent a connection_id — empty means "not assigned for write".
   const activeConnectionId =
@@ -162,11 +184,22 @@ export function KeyMapEditor({
     };
   }, [map.storage?.kind, activeConnectionId, postgresConnections]);
 
-  // Load From→To rows when schema+table are chosen (in-place edit of warehouse table).
+  // Debounce filter → server prefix for source maps.
+  useEffect(() => {
+    if (!isSource) return;
+    const t = window.setTimeout(() => {
+      setServerFilter(filter.trim());
+      setPageOffset(0);
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [filter, isSource]);
+
+  // Paged WH read when schema+table are chosen (ADR-0022).
   useEffect(() => {
     if (map.storage?.kind !== "source") {
       loadedTableKey.current = "";
       setRowsStatus(null);
+      setTotalCount(null);
       return;
     }
     const { source, table } = map.storage;
@@ -174,7 +207,17 @@ export function KeyMapEditor({
     const conn = postgresConnections.find((c) => c.id === activeConnectionId);
     const dsn = conn?.postgres?.connection_string?.trim();
     if (!dsn) return;
-    const key = `${activeConnectionId}|${source}|${table}|${map.from_column ?? "from"}|${map.to_column ?? "to"}|${reloadNonce}`;
+    const key = [
+      activeConnectionId,
+      source,
+      table,
+      map.from_column ?? "from",
+      map.to_column ?? "to",
+      (map.editable_columns ?? []).join(","),
+      pageOffset,
+      serverFilter,
+      reloadNonce,
+    ].join("|");
     if (loadedTableKey.current === key) return;
     loadedTableKey.current = key;
     let cancelled = false;
@@ -190,20 +233,28 @@ export function KeyMapEditor({
         },
       },
       dsn,
+      {
+        limit: KEYMAP_PAGE_SIZE,
+        offset: pageOffset,
+        fromPrefix: serverFilter || undefined,
+      },
     )
       .then((r) => {
         if (cancelled) return;
         onChange({ ...map, entries: r.entries });
-        onWarehouseRead?.(r.content_hash);
+        onWarehouseRead?.(r.content_hash, r.total_count);
+        setTotalCount(r.total_count ?? null);
+        const total = r.total_count;
         setRowsStatus(
           r.entries.length === 0
-            ? "Table empty — add rows below, then Save to warehouse"
-            : `Loaded ${r.entries.length} rows — edit in place, then Save`,
+            ? "No rows on this page — add below or clear filter"
+            : total != null
+              ? `Page ${Math.floor(pageOffset / KEYMAP_PAGE_SIZE) + 1} · ${r.entries.length} shown · ${total} total`
+              : `Loaded ${r.entries.length} rows`,
         );
       })
       .catch((e) => {
         if (cancelled) return;
-        // Keep key so we don't hammer; allow Reload to reset.
         setRowsStatus(
           typeof e === "string" ? e : `Could not load rows: ${String(e)}`,
         );
@@ -211,14 +262,17 @@ export function KeyMapEditor({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- load only when table binding changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load when binding/page/filter changes
   }, [
     map.storage,
     map.from_column,
     map.to_column,
+    map.editable_columns,
     activeConnectionId,
     postgresConnections,
     reloadNonce,
+    pageOffset,
+    serverFilter,
   ]);
 
   const tableOptions = useMemo(() => {
@@ -246,6 +300,10 @@ export function KeyMapEditor({
   }, [tableOptions, selectedSchema]);
 
   const rows = useMemo(() => {
+    if (isSource) {
+      // Server-side fromPrefix already applied.
+      return map.entries.map((e, i) => ({ e, i }));
+    }
     const q = filter.trim().toLowerCase();
     if (!q) return map.entries.map((e, i) => ({ e, i }));
     return map.entries
@@ -254,7 +312,7 @@ export function KeyMapEditor({
         ({ e }) =>
           e.from.toLowerCase().includes(q) || e.to.toLowerCase().includes(q),
       );
-  }, [map.entries, filter]);
+  }, [map.entries, filter, isSource]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -265,7 +323,7 @@ export function KeyMapEditor({
   });
   const virtualRows = virtualizer.getVirtualItems();
 
-  function setEntries(entries: KeyMapEntry[]) {
+  function setEntries(entries: KeyMapEntry[], opts?: { trackAll?: boolean }) {
     const v = validateKeyMapEntries(entries);
     if (!v.ok) {
       setError(v.error);
@@ -273,18 +331,73 @@ export function KeyMapEditor({
       return;
     }
     setError(null);
+    if (isSource && opts?.trackAll) {
+      for (const e of v.entries) dirtyRef.current.noteUpsert(e);
+      bumpDirty();
+    }
     onChange({ ...map, entries: v.entries });
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
-    const next = map.entries.map((e, i) =>
-      i === index ? { ...e, ...patch } : e,
-    );
-    setEntries(next);
+    const prev = map.entries[index];
+    if (!prev) return;
+    const merged: KeyMapEntry = {
+      ...prev,
+      ...patch,
+      attrs:
+        patch.attrs !== undefined
+          ? patch.attrs
+          : prev.attrs,
+    };
+    if (patch.attrs === undefined && prev.attrs) {
+      merged.attrs = { ...prev.attrs };
+    }
+    const next = map.entries.map((e, i) => (i === index ? merged : e));
+    const v = validateKeyMapEntries(next);
+    if (!v.ok) {
+      setError(v.error);
+      onChange({ ...map, entries: next });
+      return;
+    }
+    setError(null);
+    if (isSource) {
+      if (patch.from !== undefined && patch.from.trim() !== prev.from.trim()) {
+        dirtyRef.current.noteRename(prev.from, merged);
+      } else {
+        dirtyRef.current.noteUpsert(merged);
+      }
+      bumpDirty();
+    }
+    onChange({ ...map, entries: v.entries });
+  }
+
+  function updateAttr(index: number, col: string, value: string) {
+    const prev = map.entries[index];
+    if (!prev) return;
+    updateRow(index, {
+      attrs: { ...(prev.attrs ?? {}), [col]: value },
+    });
   }
 
   function addRow(from = "", to = "") {
-    setEntries([...map.entries, { from, to }]);
+    const entry: KeyMapEntry = { from, to };
+    if (editableCols.length) {
+      entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
+    }
+    if (isSource) {
+      dirtyRef.current.noteUpsert(entry);
+      bumpDirty();
+    }
+    setEntries([...map.entries, entry]);
+  }
+
+  function deleteRow(index: number) {
+    const prev = map.entries[index];
+    if (isSource && prev) {
+      dirtyRef.current.noteDelete(prev.from);
+      bumpDirty();
+    }
+    setEntries(map.entries.filter((_, j) => j !== index));
   }
 
   function addSuggested() {
@@ -293,7 +406,7 @@ export function KeyMapEditor({
       .map((s) => s.trim())
       .filter((s) => s && !have.has(s))
       .map((from) => ({ from, to: "" }));
-    if (extra.length) setEntries([...map.entries, ...extra]);
+    if (extra.length) setEntries([...map.entries, ...extra], { trackAll: true });
   }
 
   function applyPaste() {
@@ -313,7 +426,7 @@ export function KeyMapEditor({
         merged[i] = e;
       }
     }
-    setEntries(merged);
+    setEntries(merged, { trackAll: true });
     setPasteOpen(false);
     setPasteText("");
   }
@@ -363,7 +476,7 @@ export function KeyMapEditor({
           : "pick schema.table";
       return {
         label: "SoT · warehouse table",
-        detail: `${loc} · Save does full replace write-back`,
+        detail: `${loc} · Save upserts dirty From keys only`,
       };
     }
     if (kind === "ref") {
@@ -420,6 +533,7 @@ export function KeyMapEditor({
                       table: "",
                     };
             onChange({ ...map, storage });
+            if (kind === "source") setRebindOpen(true);
           }}
           className={fieldClass}
         >
@@ -595,12 +709,19 @@ export function KeyMapEditor({
             <p className="text-[11px] text-slate-500">{pgCatalogStatus}</p>
           )}
           <p className="text-[11px] leading-snug text-teal-400/85">
-            Edit the grid, then save — full replace write-back to{" "}
+            Edit the grid, then save — dirty-delta upsert to{" "}
             <span className="font-mono">
               {sourceStorage.source || "?"}.{sourceStorage.table || "?"}
             </span>
             .
           </p>
+          <button
+            type="button"
+            onClick={() => setRebindOpen(true)}
+            className="rounded-md border border-slate-700 px-2.5 py-1.5 text-[12px] text-slate-300 hover:border-teal-700 hover:text-teal-100"
+          >
+            Rebind…
+          </button>
         </div>
       )}
       {refStorage && (
@@ -650,7 +771,7 @@ export function KeyMapEditor({
       <input
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
-        placeholder="Filter rows…"
+        placeholder={isSource ? "Filter From prefix…" : "Filter rows…"}
         className={`rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-[12px] text-slate-200 ${
           compact ? "w-28 py-0.5 text-[11px]" : "w-48"
         }`}
@@ -668,8 +789,11 @@ export function KeyMapEditor({
           <button
             type="button"
             onClick={() => {
+              dirtyRef.current.clear();
+              bumpDirty();
               loadedTableKey.current = "";
               setRowsStatus(null);
+              setPageOffset(0);
               setReloadNonce((n) => n + 1);
             }}
             className="rounded-md border border-slate-700 px-2.5 py-1.5 text-[12px] text-slate-400 hover:border-teal-700 hover:text-teal-200"
@@ -694,10 +818,45 @@ export function KeyMapEditor({
         Paste CSV
       </button>
       <span className="text-[11px] text-slate-500">
-        {filter.trim()
-          ? `${rows.length} / ${map.entries.length} rows`
-          : `${map.entries.length} rows`}
+        {isSource
+          ? `${map.entries.length} on page`
+          : filter.trim()
+            ? `${rows.length} / ${map.entries.length} rows`
+            : `${map.entries.length} rows`}
+        {dirtyTick >= 0 && dirtyRef.current.dirtyCount() > 0
+          ? ` · ${dirtyRef.current.dirtyCount()} dirty`
+          : ""}
       </span>
+      {isSource && (
+        <span className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={pageOffset <= 0}
+            onClick={() => {
+              loadedTableKey.current = "";
+              setPageOffset((o) => Math.max(0, o - KEYMAP_PAGE_SIZE));
+            }}
+            className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300 disabled:opacity-30"
+          >
+            Prev
+          </button>
+          <button
+            type="button"
+            disabled={
+              totalCount != null
+                ? pageOffset + KEYMAP_PAGE_SIZE >= totalCount
+                : map.entries.length < KEYMAP_PAGE_SIZE
+            }
+            onClick={() => {
+              loadedTableKey.current = "";
+              setPageOffset((o) => o + KEYMAP_PAGE_SIZE);
+            }}
+            className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300 disabled:opacity-30"
+          >
+            Next
+          </button>
+        </span>
+      )}
       {rowsStatus && (
         <span className="max-w-md truncate text-[11px] text-slate-500">
           {rowsStatus}
@@ -732,11 +891,16 @@ export function KeyMapEditor({
                 </span>
               ) : null}
             </th>
+            {editableCols.map((c) => (
+              <th key={c} className="px-3 py-2 font-semibold font-mono normal-case">
+                {c}
+              </th>
+            ))}
             <th className="w-12" />
           </tr>
         </thead>
         <tbody>
-          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={4} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
+          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={4 + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
           {virtualRows.map((v) => { const {e,i}=rows[v.index]!; return (
             <tr
               key={i}
@@ -769,12 +933,19 @@ export function KeyMapEditor({
                   className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-teal-200/90 focus:border-slate-600 focus:bg-slate-950"
                 />
               </td>
+              {editableCols.map((c) => (
+                <td key={c} className="px-2 py-1">
+                  <input
+                    value={e.attrs?.[c] ?? ""}
+                    onChange={(ev) => updateAttr(i, c, ev.target.value)}
+                    className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-slate-300 focus:border-slate-600 focus:bg-slate-950"
+                  />
+                </td>
+              ))}
               <td className="px-2 text-center">
                 <button
                   type="button"
-                  onClick={() =>
-                    setEntries(map.entries.filter((_, j) => j !== i))
-                  }
+                  onClick={() => deleteRow(i)}
                   className="px-1 text-lg leading-none text-slate-600 hover:text-rose-400"
                   aria-label="Delete row"
                 >
@@ -783,7 +954,7 @@ export function KeyMapEditor({
               </td>
             </tr>
           ); })}
-          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={4} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
+          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={4 + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
         </tbody>
       </table>
       {pickToOptions.length > 0 && (
@@ -1085,6 +1256,28 @@ export function KeyMapEditor({
           </div>
         );
       })()}
+      {rebindOpen && (
+        <KeyMapBindWizard
+          postgresConnections={postgresConnections}
+          initial={{
+            storage:
+              map.storage?.kind === "source" ? map.storage : undefined,
+            from_column: map.from_column,
+            to_column: map.to_column,
+            editable_columns: map.editable_columns,
+          }}
+          onCancel={() => setRebindOpen(false)}
+          onConfirm={(bind: KeyMapBindResult) => {
+            dirtyRef.current.clear();
+            bumpDirty();
+            loadedTableKey.current = "";
+            setPageOffset(0);
+            setRebindOpen(false);
+            onChange(applyKeyMapBind(map, bind));
+            setReloadNonce((n) => n + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

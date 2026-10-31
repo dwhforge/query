@@ -179,6 +179,8 @@ type KeyMapTabSession = {
   contentHash?: string;
   /** ADR-0022 dirty delta for source Save. */
   dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
+  /** Bumped after successful WH Save so KeyMapEditor clears dirtyRef. */
+  dirtyResetSeq?: number;
   totalCount?: number | null;
   pickTo?: string[];
   suggestedFrom?: string[];
@@ -2410,6 +2412,7 @@ function App() {
           ...s,
           contentHash: r.content_hash,
           dirtyDelta: null,
+          dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
         }));
         const result: KeyMapSaveResult = {
           local: "saved",
@@ -3790,6 +3793,7 @@ function App() {
                   connections={project.connections}
                   pickToOptions={keyMapEditor.pickTo}
                   suggestedFrom={keyMapEditor.suggestedFrom}
+                  dirtyResetSeq={keyMapEditor.dirtyResetSeq}
                   exportPath={project.last_dbt_export_path}
                   joinApplyHint={
                     keyMapEditor.joinCtx

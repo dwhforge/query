@@ -57,4 +57,28 @@ export class KeyMapDirtyBuffer {
   }
 }
 
+/**
+ * Overlay unsaved dirty state onto a warehouse page so paging/reload does not
+ * show stale server values or let a later edit clobber earlier unsaved attrs.
+ */
+export function applyDirtyToPage(
+  page: KeyMapEntry[],
+  dirty: KeyMapDirtyBuffer,
+): KeyMapEntry[] {
+  if (dirty.isEmpty()) return page;
+  const delta = dirty.toDelta();
+  if (!delta) return page;
+  const deleted = new Set(
+    delta.deletedFroms.map((f) => f.trim()).filter(Boolean),
+  );
+  const upserts = new Map<string, KeyMapEntry>();
+  for (const e of delta.upserts) {
+    const from = e.from.trim();
+    if (from) upserts.set(from, e);
+  }
+  return page
+    .filter((e) => !deleted.has(e.from.trim()))
+    .map((e) => upserts.get(e.from.trim()) ?? e);
+}
+
 export const KEYMAP_PAGE_SIZE = 200;

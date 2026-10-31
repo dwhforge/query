@@ -191,14 +191,22 @@ fn read_entries_on_conn(
     Ok((out, total_count))
 }
 
+/// Literal for a VALUES cell. Missing attr → SQL NULL (not `''`) so NULL round-trips
+/// and an edit to one field does not blank other nullable columns.
+fn sql_value_literal(v: Option<&str>) -> String {
+    match v {
+        None => "NULL".into(),
+        Some(s) => format!("'{}'", escape_sql_string(s)),
+    }
+}
+
 fn values_row(e: &KeyMapEntry, editable: &[String]) -> String {
     let mut parts = vec![
-        format!("'{}'", escape_sql_string(e.from.trim())),
-        format!("'{}'", escape_sql_string(&e.to)),
+        sql_value_literal(Some(e.from.trim())),
+        sql_value_literal(Some(&e.to)),
     ];
     for c in editable {
-        let v = e.attrs.get(c).map(|s| s.as_str()).unwrap_or("");
-        parts.push(format!("'{}'", escape_sql_string(v)));
+        parts.push(sql_value_literal(e.attrs.get(c).map(|s| s.as_str())));
     }
     format!("({})", parts.join(", "))
 }
@@ -209,6 +217,64 @@ fn values_alias_cols(editable: &[String]) -> String {
         cols.push(format!("a{i}"));
     }
     cols.join(", ")
+}
+
+fn is_textual_pg_type(data_type: &str) -> bool {
+    let dt = data_type.trim().to_ascii_lowercase();
+    matches!(
+        dt.as_str(),
+        "text"
+            | "character varying"
+            | "character"
+            | "citext"
+            | "name"
+            | "xml"
+            | "json"
+            | "jsonb"
+            | "bytea"
+            | "tsvector"
+            | "tsquery"
+    ) || dt.starts_with("character varying")
+        || dt.starts_with("character(")
+        || dt.starts_with("char(")
+}
+
+/// Normalize information_schema.data_type for use in `CAST(… AS …)`.
+fn pg_cast_type(data_type: &str) -> String {
+    let dt = data_type.trim().to_ascii_lowercase();
+    match dt.as_str() {
+        "" | "user-defined" | "array" => "text".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Cast a VALUES text/NULL cell to the Postgres column type.
+/// Non-text: empty string → NULL (UI may send `""` for cleared cells).
+fn sql_cast_expr(value_ref: &str, data_type: &str) -> String {
+    let ty = pg_cast_type(data_type);
+    if is_textual_pg_type(&ty) {
+        format!("CAST({value_ref} AS {ty})")
+    } else {
+        format!("CAST(NULLIF({value_ref}, '') AS {ty})")
+    }
+}
+
+fn col_type_map(
+    db: &DbSession,
+    connection_string: &str,
+    schema: &str,
+    table: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let cols = crate::postgres_catalog::describe_postgres_object(
+        db,
+        connection_string,
+        schema,
+        table,
+    )?;
+    Ok(cols
+        .into_iter()
+        .map(|c| (c.name, c.data_type))
+        .collect())
 }
 
 /// Apply a dirty delta (ADR-0022): batched DELETE removed Froms + UPDATE/INSERT upserts.
@@ -250,6 +316,21 @@ pub fn write_key_map_delta_to_postgres(
         .iter()
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty() && c != from_column && c != to_column)
+        .collect();
+
+    // Resolve PG types once so VALUES text/NULL cells cast correctly on write-back.
+    let type_map = col_type_map(db, connection_string, schema, table)?;
+    let from_ty = type_map
+        .get(from_column)
+        .map(|s| s.as_str())
+        .unwrap_or("text");
+    let to_ty = type_map
+        .get(to_column)
+        .map(|s| s.as_str())
+        .unwrap_or("text");
+    let editable_tys: Vec<&str> = editable
+        .iter()
+        .map(|c| type_map.get(c).map(|s| s.as_str()).unwrap_or("text"))
         .collect();
 
     db.with_conn(|conn| {
@@ -294,9 +375,16 @@ pub fn write_key_map_delta_to_postgres(
                     .join(", ");
                 let values_sql = format!("(VALUES {values}) AS v({vcols})");
 
-                let mut set_parts = vec![format!("{q_to} = v.to_val")];
+                let mut set_parts = vec![format!(
+                    "{q_to} = {}",
+                    sql_cast_expr("v.to_val", to_ty)
+                )];
                 for (i, c) in editable.iter().enumerate() {
-                    set_parts.push(format!("{} = v.a{i}", quote_ident(c)));
+                    set_parts.push(format!(
+                        "{} = {}",
+                        quote_ident(c),
+                        sql_cast_expr(&format!("v.a{i}"), editable_tys[i])
+                    ));
                 }
                 let upd = format!(
                     "UPDATE {pg_rel} AS m SET {} FROM {values_sql} WHERE CAST(m.{q_from} AS VARCHAR) = v.from_val",
@@ -308,9 +396,12 @@ pub fn write_key_map_delta_to_postgres(
                 for c in &editable {
                     insert_cols.push(quote_ident(c));
                 }
-                let mut select_cols = vec!["v.from_val".to_string(), "v.to_val".to_string()];
+                let mut select_cols = vec![
+                    sql_cast_expr("v.from_val", from_ty),
+                    sql_cast_expr("v.to_val", to_ty),
+                ];
                 for (i, _) in editable.iter().enumerate() {
-                    select_cols.push(format!("v.a{i}"));
+                    select_cols.push(sql_cast_expr(&format!("v.a{i}"), editable_tys[i]));
                 }
                 let ins = format!(
                     "INSERT INTO {pg_rel} ({cols}) \
@@ -629,6 +720,41 @@ mod tests {
         let row = values_row(&e, &["note".into()]);
         assert!(row.contains("'x'"));
         assert!(!row.contains("'y'"), "unselected attr must not be in upsert VALUES");
+    }
+
+    #[test]
+    fn values_row_missing_attr_is_sql_null_not_empty_string() {
+        let e = KeyMapEntry::pair("a", "b");
+        let row = values_row(&e, &["note".into()]);
+        assert_eq!(row, "('a', 'b', NULL)");
+    }
+
+    #[test]
+    fn values_row_empty_string_attr_stays_quoted_empty() {
+        let mut e = KeyMapEntry::pair("a", "b");
+        e.attrs.insert("note".into(), "".into());
+        let row = values_row(&e, &["note".into()]);
+        assert_eq!(row, "('a', 'b', '')");
+    }
+
+    #[test]
+    fn sql_cast_expr_text_keeps_empty_string() {
+        assert_eq!(
+            sql_cast_expr("v.a0", "character varying"),
+            "CAST(v.a0 AS character varying)"
+        );
+    }
+
+    #[test]
+    fn sql_cast_expr_numeric_nullif_empty() {
+        assert_eq!(
+            sql_cast_expr("v.a0", "integer"),
+            "CAST(NULLIF(v.a0, '') AS integer)"
+        );
+        assert_eq!(
+            sql_cast_expr("v.to_val", "boolean"),
+            "CAST(NULLIF(v.to_val, '') AS boolean)"
+        );
     }
 
     #[test]

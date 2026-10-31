@@ -22,7 +22,11 @@ import {
   validateKeyMapEntries,
   type ApplySide,
 } from "../lib/keyMap";
-import { KeyMapDirtyBuffer, KEYMAP_PAGE_SIZE } from "../lib/keyMapDirty";
+import {
+  applyDirtyToPage,
+  KeyMapDirtyBuffer,
+  KEYMAP_PAGE_SIZE,
+} from "../lib/keyMapDirty";
 import {
   KeyMapBindWizard,
   applyKeyMapBind,
@@ -54,6 +58,11 @@ export type KeyMapEditorProps = {
   onWarehouseRead?: (contentHash: string, totalCount?: number | null) => void;
   /** Dirty delta for source Save (ADR-0022). */
   onDirtyChange?: (delta: KeyMapDirtyDelta | null) => void;
+  /**
+   * Bumped by App after a successful warehouse Save so the editor clears its
+   * internal dirty buffer (App alone clearing dirtyDelta is not enough).
+   */
+  dirtyResetSeq?: number;
   onApply?: (side: ApplySide) => void;
   onClose?: () => void;
   onSave?: () => void;
@@ -98,6 +107,7 @@ export function KeyMapEditor({
   onChange,
   onWarehouseRead,
   onDirtyChange,
+  dirtyResetSeq,
   onApply,
   onClose,
   onSave,
@@ -128,6 +138,7 @@ export function KeyMapEditor({
   const [dirtyTick, setDirtyTick] = useState(0);
   const loadedTableKey = useRef<string>("");
   const dirtyRef = useRef(new KeyMapDirtyBuffer());
+  const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
   const editableCols = map.editable_columns ?? [];
@@ -136,6 +147,15 @@ export function KeyMapEditor({
     onDirtyChange?.(dirtyRef.current.toDelta());
     setDirtyTick((n) => n + 1);
   }
+
+  // App clears tab.dirtyDelta on Save; mirror that into the editor buffer.
+  useEffect(() => {
+    if (dirtyResetSeq === undefined) return;
+    if (dirtyResetSeen.current === dirtyResetSeq) return;
+    dirtyResetSeen.current = dirtyResetSeq;
+    dirtyRef.current.clear();
+    setDirtyTick((n) => n + 1);
+  }, [dirtyResetSeq]);
 
   // Never invent a connection_id — empty means "not assigned for write".
   const activeConnectionId =
@@ -241,7 +261,8 @@ export function KeyMapEditor({
     )
       .then((r) => {
         if (cancelled) return;
-        onChange({ ...map, entries: r.entries });
+        const entries = applyDirtyToPage(r.entries, dirtyRef.current);
+        onChange({ ...map, entries });
         onWarehouseRead?.(r.content_hash, r.total_count);
         setTotalCount(r.total_count ?? null);
         const total = r.total_count;

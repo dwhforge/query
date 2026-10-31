@@ -711,7 +711,22 @@ export function listExportTree(path: string): Promise<string[]> {
   return invoke<string[]>("list_export_tree", { path });
 }
 
-export type DemoWorkspaceName = "sales" | "union" | "sql" | "right" | "keymap";
+export type DemoWorkspaceName =
+  | "sales"
+  | "union"
+  | "sql"
+  | "right"
+  | "keymap"
+  | "keymap_crosswalk"
+  | "keymap_dual"
+  | "keymap_codes"
+  | "keymap_hop"
+  | "keymap_pg"
+  | "keymap_pg_dual"
+  | "keymap_pg_seed"
+  | "keymap_ref"
+  | "keymap_mixed"
+  | "keymap_parquet";
 
 export function loadDemoWorkspace(
   name: DemoWorkspaceName | string,

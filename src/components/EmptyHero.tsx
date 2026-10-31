@@ -3,7 +3,22 @@ import type { KeyMapDef } from "../types/pipeline";
 import { emptyKeyMap } from "../lib/keyMap";
 import { KeyMapEditor } from "./KeyMapEditor";
 
-export type DemoId = "sales" | "union" | "sql" | "right" | "keymap";
+export type DemoId =
+  | "sales"
+  | "union"
+  | "sql"
+  | "right"
+  | "keymap"
+  | "keymap_crosswalk"
+  | "keymap_dual"
+  | "keymap_codes"
+  | "keymap_hop"
+  | "keymap_pg"
+  | "keymap_pg_dual"
+  | "keymap_pg_seed"
+  | "keymap_ref"
+  | "keymap_mixed"
+  | "keymap_parquet";
 
 interface EmptyHeroProps {
   onLoadDemo: (id: DemoId) => void;

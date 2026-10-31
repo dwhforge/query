@@ -778,14 +778,30 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
 
 fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
     let fixtures = find_fixtures_dir()?;
+    use crate::demo_keymap_labs as labs;
     match name.trim().to_ascii_lowercase().as_str() {
         "sales" | "sample" | "" => demo_sales(&fixtures),
         "union" => demo_union(&fixtures),
         "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
         "right" | "right_joins" | "coverage" => demo_right_joins(&fixtures),
         "keymap" | "key_map" | "mapping" | "aliases" => demo_keymap(&fixtures),
+        "keymap_crosswalk" | "crosswalk" => labs::demo_keymap_crosswalk(&fixtures),
+        "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
+        "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
+        "keymap_hop" | "hop" => labs::demo_keymap_hop(&fixtures),
+        "keymap_pg" | "keymap_pg_crosswalk" | "pg_crosswalk" => {
+            labs::demo_keymap_pg_crosswalk(&fixtures)
+        }
+        "keymap_pg_dual" | "pg_dual" => labs::demo_keymap_pg_dual(&fixtures),
+        "keymap_pg_seed" | "pg_seed" => labs::demo_keymap_pg_seed(&fixtures),
+        "keymap_ref" | "ref" => labs::demo_keymap_ref(&fixtures),
+        "keymap_mixed" | "mixed" => labs::demo_keymap_mixed(&fixtures),
+        "keymap_parquet" | "parquet" => labs::demo_keymap_parquet(&fixtures),
         other => Err(format!(
-            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap"
+            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap | \
+             keymap_crosswalk | keymap_dual | keymap_codes | keymap_hop | \
+             keymap_pg | keymap_pg_dual | keymap_pg_seed | keymap_ref | \
+             keymap_mixed | keymap_parquet"
         )),
     }
 }

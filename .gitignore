@@ -34,3 +34,4 @@ target/
 *.sln
 *.sw?
 dist-portable/
+fixtures/examples/*

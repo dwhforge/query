@@ -1,8 +1,8 @@
 # Demo workspaces — dbt practice coverage
 
-Canon: visual IR → DuckDB preview → dbt export. Bundled demos use CSV fixtures only (Postgres = Connect Postgres in UI, not a offline demo).
+Canon: visual IR → DuckDB preview → dbt export. Classic demos use CSV under `fixtures/`. KeyMap labs also use `fixtures/examples/` ([scripts/examples/](../scripts/examples/)); PG labs need `dwh_tests` + `load_postgres.py` and connection `conn_postgres`.
 
-Related: [ADR-0001](adr/0001-product-positioning.md), [SPEC.md](SPEC.md).
+Related: [ADR-0001](adr/0001-product-positioning.md), [SPEC.md](SPEC.md), [keymap-workflows.md](keymap-workflows.md).
 
 ---
 
@@ -43,6 +43,14 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | A17 | Daily combine + cleaned metric | multi-key Join + Derive net | keymap (`daily_pnl`) |
 | A18 | Monthly rollup after clean | GroupBy month | keymap (`monthly_pnl`) |
 | A19 | Unmatched → Add to map (Lens) | dirty join without map | keymap (`dirty_join`) |
+| A20 | Crosswalk A↔B (POS↔WMS) | seed ApplyKeyMap | keymap_crosswalk |
+| A21 | Dual maps + editable master | two KeyMaps → dim_party | keymap_dual / keymap_pg_dual |
+| A22 | Code synonyms | channel map | keymap_codes / keymap_pg_seed |
+| A23 | Multi-hop ApplyKeyMap | store→region→country | keymap_hop |
+| A24 | KeyMap storage=ref | ref model + ApplyKeyMap | keymap_ref |
+| A25 | KeyMap storage=source (PG) | live map table | keymap_pg / keymap_pg_dual |
+| A26 | Mixed Parquet + Postgres | R2 route | keymap_mixed |
+| A27 | Parquet + seed (R3) | LoadParquet | keymap_parquet |
 
 ### B — Partial
 
@@ -139,3 +147,22 @@ Food & beverage brands: POS/sales vs cost feed spell names differently. Fixtures
 `Workspace.key_maps`: `map_company_alias` (spelling aliases filled; **non-lexical blanks** `DEO`→`UBL`, `The South African Breweries`→`ABEV`; also `SBUX` / McDonalds / Costa / RedBull). Export → `seeds/map_company_alias.csv`.
 
 Categories: A1, A3, A5, A8, A15–A19.
+
+### 6. KeyMap labs (`fixtures/examples/`)
+
+Full pattern matrix: [keymap-workflows.md](keymap-workflows.md). Regenerate: `python scripts/examples/generate_all.py`. PG: `python scripts/examples/load_postgres.py` → schema `keymap_demo`.
+
+| DemoId | Story | Storage | PG? |
+|--------|-------|---------|-----|
+| `keymap_crosswalk` | Grocery POS sku ↔ WMS item | seed | no |
+| `keymap_dual` | Restaurant brands vs AP vendors → `dim_party` | seed ×2 | no |
+| `keymap_codes` | eCom channel synonyms | seed | no |
+| `keymap_hop` | Café store → region → country | seed ×2 | no |
+| `keymap_ref` | Channel map as `ref('map_channel')` | ref | no |
+| `keymap_parquet` | Same crosswalk on Parquet, duckdb dest | seed | no |
+| `keymap_pg` | Crosswalk facts+map in Postgres | source | yes |
+| `keymap_pg_dual` | Dual maps + `dim_party` in Postgres | source ×2 | yes |
+| `keymap_pg_seed` | PG sales + seed channel map | seed | yes |
+| `keymap_mixed` | POS Parquet + WMS/map Postgres | source | yes |
+
+Categories: A13, A15, A20–A27.

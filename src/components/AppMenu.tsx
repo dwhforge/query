@@ -437,9 +437,52 @@ export function AppMenu({
             label="Right joins — two RIGHT OUTER · coverage"
             onClick={() => run(() => onLoadDemo("right"))}
           />
+          <Sep />
+          <SubLabel>KeyMap labs</SubLabel>
           <Item
-            label="Key mapping — F&B aliases · daily → month"
+            label="F&B hub — seed · daily → month"
             onClick={() => run(() => onLoadDemo("keymap"))}
+          />
+          <Item
+            label="Crosswalk — POS sku ↔ WMS (seed)"
+            onClick={() => run(() => onLoadDemo("keymap_crosswalk"))}
+          />
+          <Item
+            label="Dual maps — parties + master (seed)"
+            onClick={() => run(() => onLoadDemo("keymap_dual"))}
+          />
+          <Item
+            label="Channel codes — synonyms (seed)"
+            onClick={() => run(() => onLoadDemo("keymap_codes"))}
+          />
+          <Item
+            label="Multi-hop — store → region → country"
+            onClick={() => run(() => onLoadDemo("keymap_hop"))}
+          />
+          <Item
+            label="Ref map — channel model ref"
+            onClick={() => run(() => onLoadDemo("keymap_ref"))}
+          />
+          <Item
+            label="Parquet lab — seed · duckdb dest"
+            onClick={() => run(() => onLoadDemo("keymap_parquet"))}
+          />
+          <SubLabel>KeyMap · needs Postgres</SubLabel>
+          <Item
+            label="PG crosswalk — source map (dwh_tests)"
+            onClick={() => run(() => onLoadDemo("keymap_pg"))}
+          />
+          <Item
+            label="PG dual + master — two source maps"
+            onClick={() => run(() => onLoadDemo("keymap_pg_dual"))}
+          />
+          <Item
+            label="PG facts + seed map — channels"
+            onClick={() => run(() => onLoadDemo("keymap_pg_seed"))}
+          />
+          <Item
+            label="Mixed — parquet POS + PG WMS/map"
+            onClick={() => run(() => onLoadDemo("keymap_mixed"))}
           />
         </MenuBarItem>
       </nav>

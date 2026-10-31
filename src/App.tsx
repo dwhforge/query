@@ -1516,16 +1516,24 @@ function App() {
   async function handleLoadDemo(id: DemoId) {
     try {
       const ws = await loadDemoWorkspace(id);
-      const projectName =
-        id === "sales"
-          ? "demo_sales"
-          : id === "union"
-            ? "demo_union"
-            : id === "right"
-              ? "demo_right_joins"
-              : id === "keymap"
-                ? "demo_keymap"
-                : "demo_sql";
+      const projectName = `demo_${id}`;
+      // Route presets for KeyMap labs (ADR-0014). PG labs need conn_postgres.
+      type Eng = "duckdb" | "postgres";
+      let engine: Eng =
+        appSettings.default_execution_engine ??
+        appSettings.default_target_dialect ??
+        "duckdb";
+      let destKind: Eng | null = null;
+      if (id === "keymap_pg" || id === "keymap_pg_dual") {
+        engine = "postgres";
+        destKind = "postgres";
+      } else if (id === "keymap_pg_seed" || id === "keymap_mixed") {
+        engine = "duckdb";
+        destKind = "postgres";
+      } else if (id === "keymap_parquet") {
+        engine = "duckdb";
+        destKind = "duckdb";
+      }
       setProject((p) =>
         migrateProject({
           ...p,
@@ -1535,13 +1543,23 @@ function App() {
           workspace: ws,
           canvas: { positions: {} },
           dbt_target: appSettings.default_dbt_target,
-          execution_engine:
-            appSettings.default_execution_engine ??
-            appSettings.default_target_dialect ??
-            "duckdb",
-          target_dialect:
-            appSettings.default_execution_engine ??
-            appSettings.default_target_dialect,
+          execution_engine: engine,
+          target_dialect: engine,
+          ...(destKind
+            ? {
+                destination: {
+                  kind: destKind,
+                  connection_id:
+                    destKind === "postgres"
+                      ? (p.connections.find((c) => c.id === "conn_postgres")
+                          ?.id ??
+                        p.destination?.connection_id ??
+                        "conn_postgres")
+                      : p.destination?.connection_id,
+                  duckdb_path: p.destination?.duckdb_path,
+                },
+              }
+            : {}),
         }),
       );
       setActiveQueryId(ws.focus_query_id);

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Download — DWHForge Query</title>
+    <meta
+      name="description"
+      content="Download DWHForge Query for Linux and Windows. Portable Electron builds with offline DuckDB extensions."
+    />
+    <link rel="canonical" href="https://dwhforge.github.io/query/download.html" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+    </div>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="./">DWHForge <span>Query</span></a>
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="site-nav"
+        >
+          Menu
+        </button>
+        <nav class="nav" id="site-nav">
+          <a href="./#features">Features</a>
+          <a href="./#workflow">Workflow</a>
+          <a href="docs.html">Docs</a>
+          <a class="nav-cta" href="download.html" aria-current="page">Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="page-hero wrap">
+        <p class="section-kicker">Releases</p>
+        <h1>Download DWHForge Query</h1>
+        <p>
+          Portable Electron packages for Linux and Windows x86_64. Includes the
+          offline DuckDB extension set used by the host. Early development
+          builds—report issues on GitHub.
+        </p>
+      </div>
+
+      <section style="padding-top: 0">
+        <div class="wrap" style="max-width: 40rem">
+          <div class="download-panel" data-download-panel>
+            <p class="status" data-release-status>Loading latest release…</p>
+            <div class="download-actions" data-release-actions></div>
+            <p class="meta-line">
+              After unpacking, run the app binary from the portable tree. For
+              Parse / Build inside the app, set up a local dbt venv—see
+              <a
+                href="https://github.com/dwhforge/query/blob/main/docs/GETTING_STARTED.md"
+                >Getting started</a
+              >.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="wrap split split-2">
+          <div>
+            <p class="section-kicker">From source</p>
+            <h2 class="section-title" style="font-size: 1.5rem">
+              Build the desktop app locally
+            </h2>
+            <p class="section-lede">
+              Prerequisites: Git, Node.js 20+, npm, stable Rust, and Python 3
+              with venv support.
+            </p>
+          </div>
+          <div>
+            <pre
+              style="
+                margin: 0;
+                padding: 1.25rem 1.35rem;
+                border: 1px solid var(--line);
+                border-radius: 6px;
+                background: rgba(17, 26, 36, 0.72);
+                overflow-x: auto;
+                font-family: 'IBM Plex Mono', ui-monospace, monospace;
+                font-size: 0.82rem;
+                line-height: 1.55;
+                color: var(--muted);
+              "
+            ><code style="color: var(--fg)">git clone https://github.com/dwhforge/query.git
+cd query
+./scripts/fetch-duckdb-extensions.sh
+./scripts/fetch-dbt-venv.sh
+npm install
+npm run electron:dev</code></pre>
+            <p class="meta-line">
+              Full steps:
+              <a href="https://github.com/dwhforge/query#get-started"
+                >README → Get started</a
+              >
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section style="padding-top: 0">
+        <div class="wrap">
+          <p class="section-kicker">License</p>
+          <h2 class="section-title" style="font-size: 1.5rem">
+            Business Source License 1.1
+          </h2>
+          <p class="section-lede">
+            Production use is allowed except as a competing hosted/SaaS offering.
+            Change License is Apache-2.0 four years after publication of a given
+            version. See the
+            <a href="https://github.com/dwhforge/query/blob/main/LICENSE"
+              >LICENSE</a
+            >
+            file for the full text.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-grid">
+        <div>
+          <a class="brand" href="./">DWHForge <span>Query</span></a>
+          <p>
+            Local-first visual transforms that export real dbt. Licensed under
+            Business Source License 1.1.
+          </p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul>
+            <li><a href="download.html" aria-current="page">Download</a></li>
+            <li><a href="docs.html">Documentation</a></li>
+            <li>
+              <a href="https://github.com/dwhforge/query/releases">Releases</a>
+            </li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Source</h4>
+          <ul>
+            <li><a href="https://github.com/dwhforge/query">GitHub</a></li>
+            <li>
+              <a href="https://github.com/dwhforge/query/blob/main/LICENSE"
+                >License (BSL 1.1)</a
+              >
+            </li>
+            <li>
+              <a href="https://github.com/dwhforge/query/issues">Issues</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div class="wrap footer-bottom">
+        <span>© 2026 DWHForge</span>
+        <span>https://dwhforge.github.io/query/</span>
+      </div>
+    </footer>
+
+    <script src="site.js"></script>
+  </body>
+</html>

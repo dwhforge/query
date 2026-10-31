@@ -55,6 +55,125 @@ export function cancelRunningQuery(): Promise<boolean> {
   return invoke<boolean>("cancel_running_query", {});
 }
 
+export type JoinPrepareResult = {
+  fingerprint: string;
+  host_query_id: string;
+  join_step_index: number;
+  right_query_id: string;
+  left_on: string[];
+  right_on: string[];
+  left_rows: number;
+  right_rows: number;
+  reused: boolean;
+  left_expensive: boolean;
+  right_expensive: boolean;
+  left_materialized: boolean;
+  right_materialized: boolean;
+};
+
+export type JoinPrepareStatus = {
+  prepared: boolean;
+  fingerprint?: string | null;
+  host_query_id?: string | null;
+  join_step_index?: number | null;
+  left_rows?: number | null;
+  right_rows?: number | null;
+  left_expensive?: boolean | null;
+  right_expensive?: boolean | null;
+  left_materialized?: boolean | null;
+  right_materialized?: boolean | null;
+  stale: boolean;
+};
+
+export type JoinPrepareProgress = {
+  active: boolean;
+  fraction: number;
+  stage: string;
+  message: string;
+  leftExpensive?: boolean | null;
+  rightExpensive?: boolean | null;
+};
+
+export function formatJoinPrepareHint(
+  r: Pick<
+    JoinPrepareResult,
+    | "reused"
+    | "left_expensive"
+    | "right_expensive"
+    | "left_materialized"
+    | "right_materialized"
+    | "left_rows"
+    | "right_rows"
+  >,
+): string {
+  const side = (expensive: boolean, mat: boolean, rows: number) =>
+    mat
+      ? `${rows.toLocaleString()} rows`
+      : expensive
+        ? "built on the fly"
+        : "direct read";
+  return `${r.reused ? "Ready" : "Loaded"} · ${side(r.left_expensive, r.left_materialized, r.left_rows)} / ${side(r.right_expensive, r.right_materialized, r.right_rows)}`;
+}
+
+export function formatJoinPrepareStatusHint(s: JoinPrepareStatus): string {
+  const side = (
+    expensive: boolean | null | undefined,
+    mat: boolean | null | undefined,
+    rows: number | null | undefined,
+  ) => {
+    if (mat) return `${Number(rows ?? 0).toLocaleString()} rows`;
+    if (expensive === false) return "direct read";
+    if (expensive) return "built on the fly";
+    return Number(rows ?? 0).toLocaleString();
+  };
+  return `Ready · ${side(s.left_expensive, s.left_materialized, s.left_rows)} / ${side(s.right_expensive, s.right_materialized, s.right_rows)}`;
+}
+
+export function prepareJoinInputs(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
+): Promise<JoinPrepareResult> {
+  return invoke<JoinPrepareResult>("prepare_join_inputs", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    connections,
+    sources,
+  });
+}
+
+export function joinPrepareStatus(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  sources: SourceDef[] = [],
+): Promise<JoinPrepareStatus> {
+  return invoke<JoinPrepareStatus>("join_prepare_status", {
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    sources,
+  });
+}
+
+export function clearJoinPrepare(): Promise<boolean> {
+  return invoke<boolean>("clear_join_prepare", {});
+}
+
+export function joinPrepareProgress(): Promise<JoinPrepareProgress> {
+  return invoke<JoinPrepareProgress>("join_prepare_progress", {});
+}
+
+export function previewPreparedJoinSide(
+  side: "left" | "right",
+  limit = 50,
+): Promise<PreviewResult> {
+  return invoke<PreviewResult>("preview_prepared_join_side", { side, limit });
+}
+
 export type PreviewDbtModel = {
   query_id: string;
   model_name: string;
@@ -66,12 +185,14 @@ export function previewDbtModel(
   queryId: string,
   targetDialect: WarehouseDialect = "duckdb",
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<PreviewDbtModel> {
   return invoke<PreviewDbtModel>("preview_dbt_model", {
     workspace,
     queryId,
     targetDialect,
     connections,
+    sources,
   });
 }
 
@@ -488,6 +609,7 @@ export function exportDbt(
   outputs?: string[],
   /** UI progress: write files only; call `parseExport` as a second phase. */
   skipParse?: boolean,
+  sources: SourceDef[] = [],
 ): Promise<ExportResult> {
   return invoke<ExportResult>("export_dbt", {
     pipelineName,
@@ -496,6 +618,7 @@ export function exportDbt(
     dbtTarget,
     targetDialect,
     connections,
+    sources,
     executionEngine: executionEngine ?? targetDialect,
     destinationKind: destinationKind ?? targetDialect,
     destinationConnectionId,

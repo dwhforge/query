@@ -5,6 +5,7 @@ mod join_diagnostics;
 mod join_fuzzy;
 mod join_lens;
 mod join_near_miss;
+mod join_prepare;
 mod key_map_fuzzy;
 mod key_map_write;
 mod key_match;
@@ -37,6 +38,12 @@ pub use join_fuzzy::{
 };
 pub use join_near_miss::{
     join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,
+};
+pub use join_prepare::{
+    clear_join_prepare, clear_prepare_progress, ensure_join_sides_materialized,
+    format_prepare_hint, get_prepare_progress, join_prepare_status, prepare_join_inputs,
+    prepare_join_inputs_with_progress, preview_prepared_join_side, set_prepare_progress,
+    JoinPrepareProgress, JoinPrepareResult, JoinPrepareStatus,
 };
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
 pub use key_match::{FuzzyPair, KeyMatchOptions};

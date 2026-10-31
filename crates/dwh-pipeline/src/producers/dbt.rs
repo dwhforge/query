@@ -211,6 +211,33 @@ impl DbtProducer {
         published_query_ids: &[String],
         load_seeds: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
+        self.produce_routed_with_schema_and_sources(
+            pipeline_name,
+            workspace,
+            output_dir,
+            target,
+            engine,
+            destination,
+            postgres_schema,
+            published_query_ids,
+            load_seeds,
+            &[],
+        )
+    }
+
+    pub fn produce_routed_with_schema_and_sources(
+        &self,
+        pipeline_name: &str,
+        workspace: &Workspace,
+        output_dir: &str,
+        target: DbtTarget,
+        engine: ExecutionEngine,
+        destination: DestinationKind,
+        postgres_schema: &str,
+        published_query_ids: &[String],
+        load_seeds: &HashMap<String, Vec<String>>,
+        sources: &[crate::project::SourceDef],
+    ) -> Result<String, String> {
         if matches!(target, DbtTarget::V2) {
             return Err(
                 "dbt v2 export is reserved (ADR-0006) but not implemented yet. Use dbt_target: v1."
@@ -252,6 +279,7 @@ impl DbtProducer {
             postgres_schema,
             published_query_ids,
             load_seeds,
+            sources,
         )?;
         let root = Path::new(output_dir).join(pipeline_name);
         let manifest_tag = if is_duckdb_to_postgres(engine, destination) {
@@ -286,6 +314,7 @@ pub fn build_export_plan(
         pg_schema,
         &[],
         load_seeds,
+        &[],
     )
 }
 
@@ -301,6 +330,7 @@ pub fn build_export_plan_routed(
     postgres_schema: &str,
     published_query_ids: &[String],
     load_seeds: &HashMap<String, Vec<String>>,
+    sources: &[crate::project::SourceDef],
 ) -> Result<BTreeMap<String, String>, String> {
     let dialect = engine.dialect();
     let mut plan = BTreeMap::new();
@@ -475,7 +505,7 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
             &model_name_by_query,
             dialect,
             &schemas,
-            &[],
+            sources,
         )?;
         plan.insert(format!("{folder}/{model_name}.sql"), sql);
         model_name_by_query.insert(qid.clone(), model_name);
@@ -617,6 +647,23 @@ pub fn preview_dbt_model_sql_with_seeds(
     dialect: WarehouseDialect,
     load_seeds: &HashMap<String, Vec<String>>,
 ) -> Result<PreviewDbtModel, String> {
+    preview_dbt_model_sql_with_seeds_and_sources(
+        workspace,
+        query_id,
+        dialect,
+        load_seeds,
+        &[],
+    )
+}
+
+/// Like [`preview_dbt_model_sql_with_seeds`], with project sources (Hive partitioning).
+pub fn preview_dbt_model_sql_with_seeds_and_sources(
+    workspace: &Workspace,
+    query_id: &str,
+    dialect: WarehouseDialect,
+    load_seeds: &HashMap<String, Vec<String>>,
+    sources: &[crate::project::SourceDef],
+) -> Result<PreviewDbtModel, String> {
     let query = workspace
         .query(query_id)
         .ok_or_else(|| format!("query '{query_id}' not found"))?;
@@ -628,7 +675,7 @@ pub fn preview_dbt_model_sql_with_seeds(
         &names,
         dialect,
         &schemas,
-        &[],
+        sources,
     )?;
     let model_name = names
         .get(query_id)

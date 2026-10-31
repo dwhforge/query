@@ -26,7 +26,7 @@ const DEMOS: { id: DemoId; label: string; hint: string }[] = [
   {
     id: "keymap",
     label: "Key mapping",
-    hint: "ticker · old name · Probe",
+    hint: "ticker · old name · No match",
   },
 ];
 

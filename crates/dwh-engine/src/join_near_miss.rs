@@ -78,8 +78,8 @@ pub fn join_key_near_miss(
         return Err("Join cannot be the first step (no left input)".into());
     }
 
-    let left_cte = cte_name(host_query_id, join_step_index - 1);
-    let right_cte = cte_name(right_query_id, {
+    let left_cte_full = cte_name(host_query_id, join_step_index - 1);
+    let right_cte_full = cte_name(right_query_id, {
         let rq = resolved
             .query(right_query_id)
             .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
@@ -89,13 +89,44 @@ pub fn join_key_near_miss(
         rq.steps.len() - 1
     });
 
-    let compiled = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .compile_ctes_from(host_query_id)?;
+    let _ = crate::join_prepare::ensure_join_sides_materialized(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+        None,
+    );
+    let prep = crate::join_prepare::prepared_join_with(
+        db,
+        workspace,
+        sources,
+        host_query_id,
+        join_step_index,
+    );
+    let (left_cte, right_cte, wrap_select): (String, String, Box<dyn Fn(&str) -> String>) =
+        if let Some((_h, defs)) = prep {
+            let (l, r, _) = crate::join_prepare::prepared_cte_names();
+            (
+                l.into(),
+                r.into(),
+                Box::new(move |body: &str| format!("WITH \n{defs}\n{body}")),
+            )
+        } else {
+            let compiled = GraphCompiler::new(&resolved)
+                .with_sources(sources)
+                .compile_ctes_from(host_query_id)?;
+            (
+                left_cte_full,
+                right_cte_full,
+                Box::new(move |body: &str| compiled.wrap_select(body)),
+            )
+        };
 
     let baseline = count_overlap(
         db,
-        &compiled.wrap_select(&overlap_sql(
+        &wrap_select(&overlap_sql(
             &left_cte,
             &right_cte,
             left_on,
@@ -138,7 +169,7 @@ pub fn join_key_near_miss(
         };
         let after = count_overlap(
             db,
-            &compiled.wrap_select(&overlap_sql(
+            &wrap_select(&overlap_sql(
                 &left_cte,
                 &right_cte,
                 left_on,
@@ -152,7 +183,7 @@ pub fn join_key_near_miss(
         }
         let sample_pairs = sample_new_pairs(
             db,
-            &compiled.wrap_select(&new_pairs_sql(
+            &wrap_select(&new_pairs_sql(
                 &left_cte,
                 &right_cte,
                 left_on,

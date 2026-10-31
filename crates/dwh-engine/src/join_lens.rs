@@ -1189,13 +1189,43 @@ fn join_key_context(
     if rq.steps.is_empty() {
         return Err(format!("right query '{right_query_id}' has no steps"));
     }
-    let compiled = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .compile_ctes_from(host_query_id)?;
+    // Prefer prepared inputs when available (same fingerprint).
+    let (compiled, left_cte, right_cte, join_cte) =
+        if let Some((_h, defs)) = crate::join_prepare::prepared_join_with(
+            db,
+            workspace,
+            sources,
+            host_query_id,
+            join_step_index,
+        ) {
+            let (l, r, j) = crate::join_prepare::prepared_cte_names();
+            let mut last_by_query = std::collections::HashMap::new();
+            last_by_query.insert(host_query_id.to_string(), j.to_string());
+            last_by_query.insert(right_query_id.clone(), r.to_string());
+            (
+                dwh_pipeline::CompiledCtes {
+                    definitions: defs,
+                    last_by_query,
+                },
+                l.to_string(),
+                r.to_string(),
+                j.to_string(),
+            )
+        } else {
+            let compiled = GraphCompiler::new(&resolved)
+                .with_sources(sources)
+                .compile_ctes_from(host_query_id)?;
+            (
+                compiled,
+                cte_name(host_query_id, join_step_index - 1),
+                cte_name(right_query_id, rq.steps.len() - 1),
+                cte_name(host_query_id, join_step_index),
+            )
+        };
     Ok(JoinKeyCtx {
-        left_cte: cte_name(host_query_id, join_step_index - 1),
-        right_cte: cte_name(right_query_id, rq.steps.len() - 1),
-        join_cte: cte_name(host_query_id, join_step_index),
+        left_cte,
+        right_cte,
+        join_cte,
         resolved_right_steps_len: rq.steps.len(),
         left_on: left_on.clone(),
         right_on: right_on.clone(),

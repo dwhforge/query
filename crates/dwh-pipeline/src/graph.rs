@@ -179,6 +179,77 @@ fn topo_subset(workspace: &Workspace, need: &HashSet<String>) -> Result<Vec<Stri
     Ok(order)
 }
 
+/// Step that forces a real recompute (not a thin source read / projection).
+///
+/// Cheap: Load*, FromQuery, Filter, Select, Rename, Sort, Limit, NormalizeKey, ApplyKeyMap.
+/// Expensive: GroupBy, Join, Append, SqlModel, CustomSql, DeriveColumn.
+pub fn step_is_derived_expensive(step: &TransformationStep) -> bool {
+    matches!(
+        step,
+        TransformationStep::GroupBy { .. }
+            | TransformationStep::Join { .. }
+            | TransformationStep::Append { .. }
+            | TransformationStep::SqlModel { .. }
+            | TransformationStep::CustomSql { .. }
+            | TransformationStep::DeriveColumn { .. }
+    )
+}
+
+pub fn steps_are_derived_expensive(steps: &[TransformationStep]) -> bool {
+    steps.iter().any(step_is_derived_expensive)
+}
+
+/// True if `query_id` or any transitive dep contains an expensive step.
+pub fn query_closure_is_expensive(
+    workspace: &Workspace,
+    query_id: &str,
+) -> Result<bool, String> {
+    let need = reachable_from(workspace, query_id)?;
+    for id in need {
+        let q = workspace
+            .query(&id)
+            .ok_or_else(|| format!("missing query {id}"))?;
+        if steps_are_derived_expensive(&q.steps) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Left input of a Join: host steps before the Join + deps those steps reference.
+pub fn join_left_input_is_expensive(
+    workspace: &Workspace,
+    host_query_id: &str,
+    join_step_index: usize,
+) -> Result<bool, String> {
+    let host = workspace
+        .query(host_query_id)
+        .ok_or_else(|| format!("missing host query '{host_query_id}'"))?;
+    if join_step_index > host.steps.len() {
+        return Err(format!(
+            "join_step_index {join_step_index} out of range for '{host_query_id}'"
+        ));
+    }
+    let prefix = &host.steps[..join_step_index];
+    if steps_are_derived_expensive(prefix) {
+        return Ok(true);
+    }
+    for dep in direct_deps(prefix) {
+        if query_closure_is_expensive(workspace, &dep)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Right input of a Join: the right query and its full closure.
+pub fn join_right_input_is_expensive(
+    workspace: &Workspace,
+    right_query_id: &str,
+) -> Result<bool, String> {
+    query_closure_is_expensive(workspace, right_query_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +292,66 @@ mod tests {
             order.iter().position(|x| x == "orders").unwrap()
                 < order.iter().position(|x| x == "joined").unwrap()
         );
+        assert!(!join_left_input_is_expensive(&ws, "joined", 1).unwrap());
+        assert!(!join_right_input_is_expensive(&ws, "orders").unwrap());
+    }
+
+    #[test]
+    fn expensive_right_via_groupby() {
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "batches".into(),
+                    name: "batches".into(),
+                    steps: vec![TransformationStep::LoadParquet {
+                        path: "b.parquet".into(),
+                        connection_id: None,
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "batch_cost".into(),
+                    name: "batch_cost".into(),
+                    steps: vec![
+                        TransformationStep::FromQuery {
+                            query_id: "batches".into(),
+                        },
+                        TransformationStep::GroupBy {
+                            dimensions: vec!["batch_id".into()],
+                            aggregates: vec!["sum(kg) as total".into()],
+                        },
+                        TransformationStep::DeriveColumn {
+                            name: "unit_cost".into(),
+                            expression: "1.0".into(),
+                            mode: Default::default(),
+                            op: None,
+                            sql_dialect: None,
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "costed".into(),
+                    name: "costed".into(),
+                    steps: vec![
+                        TransformationStep::LoadParquet {
+                            path: "a.parquet".into(),
+                            connection_id: None,
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "batch_cost".into(),
+                            join_type: JoinType::Left,
+                            left_on: vec!["batch_id".into()],
+                            right_on: vec!["batch_id".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "costed".into(),
+            key_maps: vec![],
+        };
+        assert!(!join_left_input_is_expensive(&ws, "costed", 1).unwrap());
+        assert!(join_right_input_is_expensive(&ws, "batch_cost").unwrap());
     }
 }

@@ -19,7 +19,10 @@ pub mod secrets;
 pub mod sql_escape;
 
 pub use compiler::{CompiledCtes, GraphCompiler, PipelineCompiler};
-pub use graph::cte_name;
+pub use graph::{
+    cte_name, join_left_input_is_expensive, join_right_input_is_expensive,
+    query_closure_is_expensive, step_is_derived_expensive, steps_are_derived_expensive,
+};
 pub use parquet_scan::{read_parquet_call, read_parquet_call_opts};
 pub use sql_escape::{escape_sql_string, quote_ident};
 pub use connection::{ConnectionDef, ConnectionKind, DuckdbParams, PostgresParams, S3Params};
@@ -65,7 +68,8 @@ pub use model::{
 };
 pub use producers::{
     build_export_plan, build_export_plan_routed, dbt_model_name, dbt_model_names_published,
-    preview_dbt_model_sql, preview_dbt_model_sql_with_seeds, DbtProducer, DbtTarget, OutputProducer,
+    preview_dbt_model_sql, preview_dbt_model_sql_with_seeds,
+    preview_dbt_model_sql_with_seeds_and_sources, DbtProducer, DbtTarget, OutputProducer,
     PreviewDbtModel,
 };
 pub use project::{

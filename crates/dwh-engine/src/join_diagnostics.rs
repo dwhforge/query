@@ -106,9 +106,9 @@ pub fn join_diagnostics_with_limit(
         return Err("Join cannot be the first step (no left input)".into());
     }
 
-    let left_cte = cte_name(host_query_id, join_step_index - 1);
-    let join_cte = cte_name(host_query_id, join_step_index);
-    let right_cte = cte_name(right_query_id, {
+    let left_cte_full = cte_name(host_query_id, join_step_index - 1);
+    let join_cte_full = cte_name(host_query_id, join_step_index);
+    let right_cte_full = cte_name(right_query_id, {
         let rq = resolved
             .query(right_query_id)
             .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
@@ -118,9 +118,49 @@ pub fn join_diagnostics_with_limit(
         rq.steps.len() - 1
     });
 
-    let compiled = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .compile_ctes_from(host_query_id)?;
+    // Diagnostics needs both sides as TEMP — live 200M anti-joins take minutes.
+    let _ = crate::join_prepare::ensure_join_sides_materialized(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+        None,
+    );
+
+    // Prefer prepared temp tables when fingerprint matches (avoid re-scanning inputs).
+    let prep = crate::join_prepare::prepared_join_with(
+        db,
+        workspace,
+        sources,
+        host_query_id,
+        join_step_index,
+    );
+    let (left_cte, right_cte, join_cte, wrap_select): (
+        String,
+        String,
+        String,
+        Box<dyn Fn(&str) -> String>,
+    ) = if let Some((_h, defs)) = prep {
+        let (l, r, j) = crate::join_prepare::prepared_cte_names();
+        (
+            l.into(),
+            r.into(),
+            j.into(),
+            Box::new(move |body: &str| format!("WITH \n{defs}\n{body}")),
+        )
+    } else {
+        let compiled = GraphCompiler::new(&resolved)
+            .with_sources(sources)
+            .compile_ctes_from(host_query_id)?;
+        (
+            left_cte_full,
+            right_cte_full,
+            join_cte_full,
+            Box::new(move |body: &str| compiled.wrap_select(body)),
+        )
+    };
     let on_sql = join_on_sql(left_on, right_on);
     let left_keys_sql = left_on
         .iter()
@@ -132,32 +172,49 @@ pub fn join_diagnostics_with_limit(
         .map(|c| quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ");
-    let on_sql_r2 = left_on
+    let on_keys = left_on
         .iter()
         .zip(right_on.iter())
-        .map(|(l, r)| format!("l.{} = r2.{}", quote_ident(l), quote_ident(r)))
+        .map(|(l, r)| format!("l.{} = d.{}", quote_ident(l), quote_ident(r)))
         .collect::<Vec<_>>()
         .join(" AND ");
 
-    // Scalar counts in one round-trip.
-    let sql_counts = compiled.wrap_select(&format!(
+    // Hash-friendly counts — no per-row correlated subqueries (those took minutes on 200M).
+    // Appended as sibling CTEs (cannot nest WITH inside wrap_select).
+    let count_ctes = format!(
+        "_rc AS (SELECT COUNT(*) AS c FROM {right_cte}),\n\
+         _lc AS (SELECT COUNT(*) AS c FROM {left_cte}),\n\
+         _jc AS (SELECT COUNT(*) AS c FROM {join_cte}),\n\
+         _dup AS (\n\
+           SELECT {right_keys_list} FROM {right_cte}\n\
+           GROUP BY {right_keys_list} HAVING COUNT(*) > 1\n\
+         ),\n\
+         _dup_n AS (SELECT COUNT(*) AS c FROM _dup),\n\
+         _ul AS (\n\
+           SELECT COUNT(*) AS c FROM {left_cte} l\n\
+           WHERE NOT EXISTS (SELECT 1 FROM {right_cte} r WHERE {on_sql})\n\
+         ),\n\
+         _ur AS (\n\
+           SELECT COUNT(*) AS c FROM {right_cte} r\n\
+           WHERE NOT EXISTS (SELECT 1 FROM {left_cte} l WHERE {on_sql})\n\
+         ),\n\
+         _fo AS (\n\
+           SELECT COUNT(*) AS c FROM {left_cte} l\n\
+           INNER JOIN _dup d ON {on_keys}\n\
+         )"
+    );
+    let sql_counts = wrap_select_with_extra(
+        &wrap_select,
+        &count_ctes,
         "SELECT\n\
-         (SELECT COUNT(*) FROM {left_cte}) AS left_count,\n\
-         (SELECT COUNT(*) FROM {right_cte}) AS right_count,\n\
-         (SELECT COUNT(*) FROM {join_cte}) AS output_count,\n\
-         (SELECT COUNT(*) FROM {left_cte} l WHERE NOT EXISTS (\n\
-            SELECT 1 FROM {right_cte} r WHERE {on_sql}\n\
-         )) AS unmatched_left_count,\n\
-         (SELECT COUNT(*) FROM {right_cte} r WHERE NOT EXISTS (\n\
-            SELECT 1 FROM {left_cte} l WHERE {on_sql}\n\
-         )) AS unmatched_right_count,\n\
-         (SELECT COUNT(*) FROM {left_cte} l WHERE (\n\
-            SELECT COUNT(*) FROM {right_cte} r WHERE {on_sql}\n\
-         ) > 1) AS fanout_left_count,\n\
-         (SELECT COUNT(*) FROM (\n\
-            SELECT 1 FROM {right_cte} GROUP BY {right_keys_list} HAVING COUNT(*) > 1\n\
-         ) d) AS right_dup_key_group_count"
-    ));
+           (SELECT c FROM _lc) AS left_count,\n\
+           (SELECT c FROM _rc) AS right_count,\n\
+           (SELECT c FROM _jc) AS output_count,\n\
+           (SELECT c FROM _ul) AS unmatched_left_count,\n\
+           (SELECT c FROM _ur) AS unmatched_right_count,\n\
+           (SELECT c FROM _fo) AS fanout_left_count,\n\
+           (SELECT c FROM _dup_n) AS right_dup_key_group_count",
+    );
 
     let (
         left_count,
@@ -185,25 +242,34 @@ pub fn join_diagnostics_with_limit(
         ))
     })?;
 
-    let unmatched_left_sql = compiled.wrap_select(&format!(
+    let unmatched_left_sql = wrap_select(&format!(
         "SELECT l.* FROM {left_cte} l\n\
          WHERE NOT EXISTS (SELECT 1 FROM {right_cte} r WHERE {on_sql})\n\
          LIMIT {sample_limit}"
     ));
-    let unmatched_right_sql = compiled.wrap_select(&format!(
+    let unmatched_right_sql = wrap_select(&format!(
         "SELECT r.* FROM {right_cte} r\n\
          WHERE NOT EXISTS (SELECT 1 FROM {left_cte} l WHERE {on_sql})\n\
          LIMIT {sample_limit}"
     ));
-    let fanout_pairs_sql = compiled.wrap_select(&format!(
-        "SELECT l.*, r.*\n\
-         FROM {left_cte} l\n\
-         INNER JOIN {right_cte} r ON {on_sql}\n\
-         WHERE (SELECT COUNT(*) FROM {right_cte} r2 WHERE {on_sql_r2}) > 1\n\
-         ORDER BY {left_keys_sql}\n\
-         LIMIT {sample_limit}"
-    ));
-    let right_dup_sql = compiled.wrap_select(&format!(
+    let fanout_pairs_sql = wrap_select_with_extra(
+        &wrap_select,
+        &format!(
+            "_dup AS (\n\
+               SELECT {right_keys_list} FROM {right_cte}\n\
+               GROUP BY {right_keys_list} HAVING COUNT(*) > 1\n\
+             )"
+        ),
+        &format!(
+            "SELECT l.*, r.*\n\
+             FROM {left_cte} l\n\
+             INNER JOIN {right_cte} r ON {on_sql}\n\
+             INNER JOIN _dup d ON {on_keys}\n\
+             ORDER BY {left_keys_sql}\n\
+             LIMIT {sample_limit}"
+        ),
+    );
+    let right_dup_sql = wrap_select(&format!(
         "SELECT {right_keys_list}, COUNT(*) AS _dup_n\n\
          FROM {right_cte}\n\
          GROUP BY {right_keys_list}\n\
@@ -253,6 +319,23 @@ pub fn join_diagnostics_with_limit(
         right_dup_keys,
         sql_counts,
     })
+}
+
+/// `wrap` builds `WITH <defs>\n<body>`. Inject extra CTEs before `body`.
+fn wrap_select_with_extra(
+    wrap: &dyn Fn(&str) -> String,
+    extra_ctes: &str,
+    select_body: &str,
+) -> String {
+    let marker = "\n__DWH_DIAG_BODY__";
+    let skeleton = wrap(marker);
+    let Some(idx) = skeleton.find(marker) else {
+        return wrap(select_body);
+    };
+    let (prefix, _) = skeleton.split_at(idx);
+    // prefix ends with "WITH \n{defs}" or "WITH \n{defs}\n" — append comma + extras.
+    let prefix = prefix.trim_end();
+    format!("{prefix},\n{extra_ctes}\n{select_body}")
 }
 
 fn join_on_sql(left_on: &[String], right_on: &[String]) -> String {

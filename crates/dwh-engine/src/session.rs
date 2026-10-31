@@ -2,6 +2,7 @@ use crate::extensions::{
     extensions_dir_display, load_aws_extension, load_httpfs_extension, load_postgres_extension,
     path_needs_httpfs, try_load_spatial_extension,
 };
+use crate::join_prepare::JoinPrepareHandle;
 use crate::postgres_catalog::ensure_pg_attached;
 use crate::secrets::apply_s3_connections;
 use crate::session_limits::{apply_resource_settings, map_engine_error};
@@ -17,6 +18,8 @@ pub struct DbSession {
     httpfs_ready: Mutex<bool>,
     postgres_error: Mutex<Option<String>>,
     httpfs_error: Mutex<Option<String>>,
+    /// Materialized Join left/right inputs for Lens / diagnostics reuse.
+    join_prep: Mutex<Option<JoinPrepareHandle>>,
 }
 
 impl DbSession {
@@ -37,6 +40,7 @@ impl DbSession {
             httpfs_ready: Mutex::new(false),
             postgres_error: Mutex::new(None),
             httpfs_error: Mutex::new(None),
+            join_prep: Mutex::new(None),
         };
         session.load_extensions();
         Ok(session)
@@ -235,6 +239,17 @@ impl DbSession {
     {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         f(&conn).map_err(|e| map_engine_error(&e))
+    }
+
+    pub fn join_prep_get(&self) -> Option<JoinPrepareHandle> {
+        self.join_prep
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn join_prep_set(&self, v: Option<JoinPrepareHandle>) {
+        *self.join_prep.lock().unwrap_or_else(|e| e.into_inner()) = v;
     }
 }
 

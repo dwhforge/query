@@ -16,6 +16,10 @@ type Props = {
   onOpen: (kind: JoinDiagKind, sample: JoinDiagSample | null, label: string) => void;
   /** Explicit full-input run — not fired automatically on Join select. */
   onRun?: () => void;
+  onPrepare?: () => void;
+  prepareLoading?: boolean;
+  prepareLabel?: string | null;
+  onCancel?: () => void;
 };
 
 function Row({
@@ -62,29 +66,61 @@ export function JoinDiagnosticsPanel({
   diag,
   onOpen,
   onRun,
+  onPrepare,
+  prepareLoading = false,
+  prepareLabel = null,
+  onCancel,
 }: Props) {
+  const busy = loading || prepareLoading;
   return (
     <div className="mt-2 space-y-1 rounded-lg border border-slate-800 bg-slate-950/50 p-2">
       <div className="flex items-center justify-between gap-2">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
           Join diagnostics
         </span>
-        <div className="flex items-center gap-1.5">
-          {loading && (
-            <span className="text-[10px] text-slate-600">computing…</span>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {busy && (
+            <span className="text-[10px] text-slate-600">
+              {prepareLoading ? "preparing…" : "computing…"}
+            </span>
+          )}
+          {busy && onCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded border border-amber-800/70 px-1.5 py-0.5 text-[9px] text-amber-200/90 hover:bg-amber-500/10"
+            >
+              Cancel
+            </button>
+          )}
+          {onPrepare && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onPrepare}
+              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
+            >
+              {prepareLabel?.startsWith("Ready") ||
+              prepareLabel?.startsWith("Loaded")
+                ? "Reload sides"
+                : "Load sides"}
+            </button>
           )}
           {onRun && (
             <button
               type="button"
-              disabled={loading}
+              disabled={busy}
               onClick={onRun}
               className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
             >
-              {diag ? "Re-run" : "Run diagnostics"}
+              {diag ? "Refresh gaps" : "Find gaps"}
             </button>
           )}
         </div>
       </div>
+      {prepareLabel && (
+        <p className="text-[10px] text-slate-500">{prepareLabel}</p>
+      )}
       <p className="text-[10px] leading-relaxed text-slate-600">
         Full-input counts (explicit run). Click a row to open a sample (≤
         {diag?.sample_limit ?? 50}) in Data. A clean sample is not proof for the

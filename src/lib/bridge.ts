@@ -135,6 +135,7 @@ export function prepareJoinInputs(
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  force = false,
 ): Promise<JoinPrepareResult> {
   return invoke<JoinPrepareResult>("prepare_join_inputs", {
     workspace,
@@ -142,6 +143,7 @@ export function prepareJoinInputs(
     joinStepIndex,
     connections,
     sources,
+    force,
   });
 }
 
@@ -150,12 +152,14 @@ export function joinPrepareStatus(
   hostQueryId: string,
   joinStepIndex: number,
   sources: SourceDef[] = [],
+  connections: ConnectionDef[] = [],
 ): Promise<JoinPrepareStatus> {
   return invoke<JoinPrepareStatus>("join_prepare_status", {
     workspace,
     hostQueryId,
     joinStepIndex,
     sources,
+    connections,
   });
 }
 

@@ -71,7 +71,10 @@ function joinSideSteps(
   return { left, right };
 }
 
-/** Graph looks like a small fixture (CSV/PG/DuckDB loads, no derived/parquet). */
+/**
+ * Graph looks like a tiny CSV fixture (known local files).
+ * Do NOT treat LoadPostgres / LoadDuckdb as small — row counts are unknown.
+ */
 export function joinLooksFixtureSmall(
   workspace: Workspace,
   hostQueryId: string,
@@ -82,12 +85,8 @@ export function joinLooksFixtureSmall(
   const all = [...sides.left, ...sides.right];
   if (all.length === 0) return false;
   if (all.some(stepExpensive) || all.some(stepHasHeavyFile)) return false;
-  return all.some(
-    (s) =>
-      s.type === "LoadCsv" ||
-      s.type === "LoadPostgres" ||
-      s.type === "LoadDuckdb",
-  );
+  // Only local CSV — PG/DuckDB tables may be huge with no size hint.
+  return all.every((s) => s.type === "LoadCsv");
 }
 
 /**

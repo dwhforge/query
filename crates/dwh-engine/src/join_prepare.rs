@@ -4,23 +4,33 @@
 //! live CTEs (read on demand) so a 200M parquet left is not copied into TEMP.
 //!
 //! Temp tables live on the session connection. Fingerprint covers workspace + sources +
-//! join identity; mismatch → treat as stale (caller re-prepares).
+//! connections + file revisions + join identity; mismatch → treat as stale.
+//!
+//! Prepared join SQL uses the shared Join emitter (`USING` / key alignment) so TEMP
+//! shortcuts do not change result schema or key semantics.
 
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
 use crate::preview::{ColumnMetadata, PreviewResult};
 use crate::session::DbSession;
 use dwh_pipeline::{
-    cte_name, join_left_input_is_expensive, join_right_input_is_expensive, quote_ident,
-    ConnectionDef, GraphCompiler, JoinType, SourceDef, TransformationStep, Workspace,
+    cte_name, emit_transform_step, join_left_input_is_expensive, join_right_input_is_expensive,
+    ConnectionDef, GraphCompiler, JoinType, SourceDef, TransformationStep, WarehouseDialect,
+    Workspace,
 };
 use duckdb::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 pub const PREP_LEFT: &str = "_dwh_join_prep_left";
 pub const PREP_RIGHT: &str = "_dwh_join_prep_right";
+
+const PREP_LEFT_BUILDING: &str = "_dwh_join_prep_left__building";
+const PREP_RIGHT_BUILDING: &str = "_dwh_join_prep_right__building";
 
 /// Live prepare progress (polled from UI; stored outside the DuckDB conn lock).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,9 +119,61 @@ pub struct JoinPrepareHandle {
     pub right_live_sql: Option<String>,
 }
 
+fn hash_file_revision(path: &str, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    let p = Path::new(path);
+    match std::fs::metadata(p) {
+        Ok(meta) => {
+            meta.len().hash(hasher);
+            if let Ok(modified) = meta.modified() {
+                if let Ok(dur) = modified.duration_since(SystemTime::UNIX_EPOCH) {
+                    dur.as_nanos().hash(hasher);
+                }
+            }
+        }
+        Err(_) => {
+            // Missing path still participates so delete→recreate invalidates.
+            0u8.hash(hasher);
+        }
+    }
+}
+
+fn collect_workspace_paths(workspace: &Workspace, sources: &[SourceDef]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for q in &workspace.queries {
+        for step in &q.steps {
+            match step {
+                TransformationStep::LoadCsv { path }
+                | TransformationStep::LoadParquet { path, .. } => {
+                    if !path.trim().is_empty() {
+                        paths.push(path.clone());
+                    }
+                }
+                TransformationStep::LoadDuckdb { path, .. } => {
+                    if !path.trim().is_empty() {
+                        paths.push(path.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for s in sources {
+        if let Some(path) = s.path.as_deref() {
+            if !path.trim().is_empty() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub fn join_prepare_fingerprint(
     workspace: &Workspace,
     sources: &[SourceDef],
+    connections: &[ConnectionDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> String {
@@ -121,6 +183,12 @@ pub fn join_prepare_fingerprint(
     }
     if let Ok(bytes) = serde_json::to_vec(sources) {
         bytes.hash(&mut h);
+    }
+    if let Ok(bytes) = serde_json::to_vec(connections) {
+        bytes.hash(&mut h);
+    }
+    for path in collect_workspace_paths(workspace, sources) {
+        hash_file_revision(&path, &mut h);
     }
     host_query_id.hash(&mut h);
     join_step_index.hash(&mut h);
@@ -189,6 +257,42 @@ fn progress(
     );
 }
 
+fn drop_building(conn: &duckdb::Connection) {
+    let _ = conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {PREP_LEFT_BUILDING};\n\
+         DROP TABLE IF EXISTS {PREP_RIGHT_BUILDING};"
+    ));
+}
+
+fn create_temp_as(conn: &duckdb::Connection, name: &str, select_sql: &str) -> Result<(), String> {
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {name};\n\
+         CREATE TEMP TABLE {name} AS ({select_sql});"
+    ))
+    .map_err(|e| e.to_string())
+}
+
+fn count_temp(conn: &duckdb::Connection, name: &str) -> Result<u64, String> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|n| n as u64)
+    .map_err(|e| e.to_string())
+}
+
+/// Atomically replace `final_name` with `building` (DROP + RENAME).
+fn swap_building_into(
+    conn: &duckdb::Connection,
+    building: &str,
+    final_name: &str,
+) -> Result<(), String> {
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS {final_name};\n\
+         ALTER TABLE {building} RENAME TO {final_name};"
+    ))
+    .map_err(|e| e.to_string())
+}
+
 /// Materialize expensive sides only; cheap sides stay live.
 pub fn prepare_join_inputs(
     db: &DbSession,
@@ -206,10 +310,12 @@ pub fn prepare_join_inputs(
         host_query_id,
         join_step_index,
         None,
+        false,
     )
 }
 
 /// Same as [`prepare_join_inputs`], updating `progress_slot` for UI polling.
+/// `force_refresh` skips fingerprint reuse (Reload sides).
 pub fn prepare_join_inputs_with_progress(
     db: &DbSession,
     workspace: &Workspace,
@@ -218,6 +324,7 @@ pub fn prepare_join_inputs_with_progress(
     host_query_id: &str,
     join_step_index: usize,
     progress_slot: Option<&Mutex<JoinPrepareProgress>>,
+    force_refresh: bool,
 ) -> Result<JoinPrepareResult, String> {
     prepare_join_inputs_ex(
         db,
@@ -228,11 +335,12 @@ pub fn prepare_join_inputs_with_progress(
         join_step_index,
         progress_slot,
         false,
+        force_refresh,
     )
 }
 
 /// Materialize both sides (even source-backed) before diagnostics / near-miss.
-/// Anti-joins over a live 200M parquet are multi-minute; TEMP once is cheaper.
+/// Only builds sides that are not already TEMP for this fingerprint.
 pub fn ensure_join_sides_materialized(
     db: &DbSession,
     workspace: &Workspace,
@@ -242,9 +350,37 @@ pub fn ensure_join_sides_materialized(
     join_step_index: usize,
     progress_slot: Option<&Mutex<JoinPrepareProgress>>,
 ) -> Result<(), String> {
-    let fp = join_prepare_fingerprint(workspace, sources, host_query_id, join_step_index);
+    let fp = join_prepare_fingerprint(
+        workspace,
+        sources,
+        connections,
+        host_query_id,
+        join_step_index,
+    );
     if let Some(h) = db.join_prep_get() {
         if h.fingerprint == fp && h.left_materialized && h.right_materialized {
+            return Ok(());
+        }
+        if h.fingerprint == fp && (h.left_materialized || h.right_materialized) {
+            progress(
+                progress_slot,
+                0.05,
+                "ensure",
+                "Materializing missing join side for diagnostics…",
+                Some(h.left_expensive),
+                Some(h.right_expensive),
+            );
+            prepare_join_inputs_ex(
+                db,
+                workspace,
+                connections,
+                sources,
+                host_query_id,
+                join_step_index,
+                progress_slot,
+                true,
+                false,
+            )?;
             return Ok(());
         }
     }
@@ -265,6 +401,7 @@ pub fn ensure_join_sides_materialized(
         join_step_index,
         progress_slot,
         true,
+        false,
     )?;
     Ok(())
 }
@@ -278,26 +415,35 @@ fn prepare_join_inputs_ex(
     join_step_index: usize,
     progress_slot: Option<&Mutex<JoinPrepareProgress>>,
     force_both: bool,
+    force_refresh: bool,
 ) -> Result<JoinPrepareResult, String> {
-    let fp = join_prepare_fingerprint(workspace, sources, host_query_id, join_step_index);
-    if let Some(existing) = db.join_prep_get() {
-        if existing.fingerprint == fp
-            && (!force_both || (existing.left_materialized && existing.right_materialized))
-        {
-            if let Some(slot) = progress_slot {
-                set_prepare_progress(
-                    slot,
-                    JoinPrepareProgress {
-                        active: false,
-                        fraction: 1.0,
-                        stage: "reused".into(),
-                        message: "Reused prepared inputs".into(),
-                        left_expensive: Some(existing.left_expensive),
-                        right_expensive: Some(existing.right_expensive),
-                    },
-                );
+    let fp = join_prepare_fingerprint(
+        workspace,
+        sources,
+        connections,
+        host_query_id,
+        join_step_index,
+    );
+    if !force_refresh {
+        if let Some(existing) = db.join_prep_get() {
+            if existing.fingerprint == fp
+                && (!force_both || (existing.left_materialized && existing.right_materialized))
+            {
+                if let Some(slot) = progress_slot {
+                    set_prepare_progress(
+                        slot,
+                        JoinPrepareProgress {
+                            active: false,
+                            fraction: 1.0,
+                            stage: "reused".into(),
+                            message: "Reused prepared inputs".into(),
+                            left_expensive: Some(existing.left_expensive),
+                            right_expensive: Some(existing.right_expensive),
+                        },
+                    );
+                }
+                return Ok(result_from_handle(&existing, true));
             }
-            return Ok(result_from_handle(&existing, true));
         }
     }
 
@@ -379,11 +525,26 @@ fn prepare_join_inputs_ex(
     let left_sql = compiled.wrap_select(&format!("SELECT * FROM {left_cte}"));
     let right_sql = compiled.wrap_select(&format!("SELECT * FROM {right_cte}"));
 
-    let left_materialized = force_both || left_expensive;
-    let right_materialized = force_both || right_expensive;
+    let existing = db.join_prep_get();
+    let can_upgrade = !force_refresh
+        && existing
+            .as_ref()
+            .is_some_and(|h| h.fingerprint == fp && (h.left_materialized || h.right_materialized));
 
-    // Fraction budget for materialize phases.
-    let (left_lo, left_hi, right_lo, right_hi) = match (left_materialized, right_materialized) {
+    let want_left = force_both || left_expensive;
+    let want_right = force_both || right_expensive;
+
+    // Keep already-TEMP sides when upgrading the same fingerprint.
+    let keep_left = can_upgrade && existing.as_ref().is_some_and(|h| h.left_materialized);
+    let keep_right = can_upgrade && existing.as_ref().is_some_and(|h| h.right_materialized);
+
+    let left_materialized = want_left;
+    let right_materialized = want_right;
+
+    let (left_lo, left_hi, right_lo, right_hi) = match (
+        left_materialized && !keep_left,
+        right_materialized && !keep_right,
+    ) {
         (true, true) => (0.10, 0.50, 0.50, 0.95),
         (true, false) => (0.10, 0.95, 0.95, 0.95),
         (false, true) => (0.10, 0.10, 0.10, 0.95),
@@ -392,24 +553,32 @@ fn prepare_join_inputs_ex(
 
     let result = (|| {
         let (left_rows, right_rows) = db.with_conn(|conn| {
-            let _ = conn.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {PREP_LEFT};\nDROP TABLE IF EXISTS {PREP_RIGHT};"
-            ));
+            drop_building(conn);
 
-            let mut left_rows = 0u64;
-            let mut right_rows = 0u64;
+            let mut left_rows = if keep_left {
+                existing.as_ref().map(|h| h.left_rows).unwrap_or(0)
+            } else {
+                0
+            };
+            let mut right_rows = if keep_right {
+                existing.as_ref().map(|h| h.right_rows).unwrap_or(0)
+            } else {
+                0
+            };
 
-            if left_materialized {
+            let mut built_left = false;
+            let mut built_right = false;
+
+            if left_materialized && !keep_left {
                 progress(
                     progress_slot,
                     left_lo,
                     "left",
-                    "Materializing left (derived)…",
+                    "Materializing left…",
                     Some(left_expensive),
                     Some(right_expensive),
                 );
-                conn.execute_batch(&format!("CREATE TEMP TABLE {PREP_LEFT} AS ({left_sql});"))
-                    .map_err(|e| e.to_string())?;
+                create_temp_as(conn, PREP_LEFT_BUILDING, &left_sql)?;
                 progress(
                     progress_slot,
                     (left_lo + left_hi) * 0.5,
@@ -418,11 +587,8 @@ fn prepare_join_inputs_ex(
                     Some(left_expensive),
                     Some(right_expensive),
                 );
-                left_rows = conn
-                    .query_row(&format!("SELECT COUNT(*) FROM {PREP_LEFT}"), [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                    .map_err(|e| e.to_string())? as u64;
+                left_rows = count_temp(conn, PREP_LEFT_BUILDING)?;
+                built_left = true;
                 progress(
                     progress_slot,
                     left_hi,
@@ -432,19 +598,16 @@ fn prepare_join_inputs_ex(
                     Some(right_expensive),
                 );
             }
-            if right_materialized {
+            if right_materialized && !keep_right {
                 progress(
                     progress_slot,
                     right_lo,
                     "right",
-                    "Materializing right (derived)…",
+                    "Materializing right…",
                     Some(left_expensive),
                     Some(right_expensive),
                 );
-                conn.execute_batch(&format!(
-                    "CREATE TEMP TABLE {PREP_RIGHT} AS ({right_sql});"
-                ))
-                .map_err(|e| e.to_string())?;
+                create_temp_as(conn, PREP_RIGHT_BUILDING, &right_sql)?;
                 progress(
                     progress_slot,
                     (right_lo + right_hi) * 0.5,
@@ -453,11 +616,8 @@ fn prepare_join_inputs_ex(
                     Some(left_expensive),
                     Some(right_expensive),
                 );
-                right_rows = conn
-                    .query_row(&format!("SELECT COUNT(*) FROM {PREP_RIGHT}"), [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                    .map_err(|e| e.to_string())? as u64;
+                right_rows = count_temp(conn, PREP_RIGHT_BUILDING)?;
+                built_right = true;
                 progress(
                     progress_slot,
                     right_hi,
@@ -467,6 +627,34 @@ fn prepare_join_inputs_ex(
                     Some(right_expensive),
                 );
             }
+
+            // Commit both swaps in one transaction so a mid-swap failure
+            // cannot leave one TEMP updated and the handle pointing at the other.
+            conn.execute_batch("BEGIN;")
+                .map_err(|e| e.to_string())?;
+            let commit = (|| {
+                if built_left {
+                    swap_building_into(conn, PREP_LEFT_BUILDING, PREP_LEFT)?;
+                } else if !keep_left {
+                    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {PREP_LEFT};"));
+                }
+                if built_right {
+                    swap_building_into(conn, PREP_RIGHT_BUILDING, PREP_RIGHT)?;
+                } else if !keep_right {
+                    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {PREP_RIGHT};"));
+                }
+                Ok(())
+            })();
+            match commit {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(e);
+                }
+            }
+            drop_building(conn);
             Ok((left_rows, right_rows))
         })?;
 
@@ -516,8 +704,17 @@ fn prepare_join_inputs_ex(
             }
         }
         Err(_) => {
+            // Drop partial building tables; leave any previous handle + TEMPs intact.
+            let _ = db.with_conn(|conn| {
+                drop_building(conn);
+                Ok(())
+            });
             if let Some(slot) = progress_slot {
                 clear_prepare_progress(slot);
+            }
+            // If there was no prior successful handle, ensure we are not advertising ready.
+            if db.join_prep_get().is_none() {
+                let _ = clear_join_prepare(db);
             }
         }
     }
@@ -546,10 +743,17 @@ pub fn join_prepare_status(
     db: &DbSession,
     workspace: &Workspace,
     sources: &[SourceDef],
+    connections: &[ConnectionDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> JoinPrepareStatus {
-    let want = join_prepare_fingerprint(workspace, sources, host_query_id, join_step_index);
+    let want = join_prepare_fingerprint(
+        workspace,
+        sources,
+        connections,
+        host_query_id,
+        join_step_index,
+    );
     match db.join_prep_get() {
         Some(h) if h.fingerprint == want => JoinPrepareStatus {
             prepared: true,
@@ -596,7 +800,10 @@ pub fn join_prepare_status(
 pub fn clear_join_prepare(db: &DbSession) -> Result<(), String> {
     db.with_conn(|conn| {
         let _ = conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS {PREP_LEFT};\nDROP TABLE IF EXISTS {PREP_RIGHT};"
+            "DROP TABLE IF EXISTS {PREP_LEFT};\n\
+             DROP TABLE IF EXISTS {PREP_RIGHT};\n\
+             DROP TABLE IF EXISTS {PREP_LEFT_BUILDING};\n\
+             DROP TABLE IF EXISTS {PREP_RIGHT_BUILDING};"
         ));
         Ok(())
     })?;
@@ -604,25 +811,27 @@ pub fn clear_join_prepare(db: &DbSession) -> Result<(), String> {
     Ok(())
 }
 
-fn prep_join_defs(h: &JoinPrepareHandle, left_from: &str, right_from: &str) -> String {
+/// Build prep CTE defs using the shared Join emitter (USING / key rename), not raw ON.
+fn prep_join_defs(h: &JoinPrepareHandle, left_from: &str, right_from: &str) -> Result<String, String> {
     let left = "prep_left";
     let right = "prep_right";
     let join = "prep_join";
-    let on = h
-        .left_on
-        .iter()
-        .zip(h.right_on.iter())
-        .map(|(l, r)| format!("l.{} = r.{}", quote_ident(l), quote_ident(r)))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let jkw = h.join_type.sql_keyword();
-    format!(
+    let step = TransformationStep::Join {
+        right_query_id: "__prep_right__".into(),
+        join_type: h.join_type.clone(),
+        left_on: h.left_on.clone(),
+        right_on: h.right_on.clone(),
+    };
+    let mut rel = HashMap::new();
+    rel.insert("__prep_right__".into(), right.to_string());
+    let join_sql = emit_transform_step(&step, left, &rel, WarehouseDialect::Duckdb)?;
+    Ok(format!(
         "  {left} AS (SELECT * FROM {left_from}),\n\
            {right} AS (SELECT * FROM {right_from}),\n\
            {join} AS (\n\
-             SELECT * FROM {left} l {jkw} {right} r ON {on}\n\
+             {join_sql}\n\
            )"
-    )
+    ))
 }
 
 /// WITH left/right from prep TEMP and/or live CTEs + join CTE.
@@ -632,10 +841,17 @@ pub fn prepared_join_with(
     db: &DbSession,
     workspace: &Workspace,
     sources: &[SourceDef],
+    connections: &[ConnectionDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Option<(JoinPrepareHandle, String)> {
-    let want = join_prepare_fingerprint(workspace, sources, host_query_id, join_step_index);
+    let want = join_prepare_fingerprint(
+        workspace,
+        sources,
+        connections,
+        host_query_id,
+        join_step_index,
+    );
     let h = db.join_prep_get()?;
     if h.fingerprint != want {
         return None;
@@ -646,7 +862,7 @@ pub fn prepared_join_with(
     }
 
     if h.left_materialized && h.right_materialized {
-        let defs = prep_join_defs(&h, PREP_LEFT, PREP_RIGHT);
+        let defs = prep_join_defs(&h, PREP_LEFT, PREP_RIGHT).ok()?;
         return Some((h, defs));
     }
 
@@ -658,7 +874,7 @@ pub fn prepared_join_with(
             .ok()?;
         let rq = workspace.query(&h.right_query_id)?;
         let right_cte = cte_name(&h.right_query_id, rq.steps.len().saturating_sub(1));
-        let overlay = prep_join_defs(&h, PREP_LEFT, &right_cte);
+        let overlay = prep_join_defs(&h, PREP_LEFT, &right_cte).ok()?;
         let defs = if right_compiled.definitions.is_empty() {
             overlay
         } else {
@@ -674,7 +890,7 @@ pub fn prepared_join_with(
         .compile_ctes_from(host_query_id)
         .ok()?;
     let left_cte = cte_name(host_query_id, join_step_index.saturating_sub(1));
-    let overlay = prep_join_defs(&h, &left_cte, PREP_RIGHT);
+    let overlay = prep_join_defs(&h, &left_cte, PREP_RIGHT).ok()?;
     let defs = if left_compiled.definitions.is_empty() {
         overlay
     } else {
@@ -752,14 +968,11 @@ fn wrap_limit(select_sql: &str, limit: u64) -> String {
 mod tests {
     use super::*;
     use dwh_pipeline::{JoinType, QueryDef, TransformationStep, Workspace};
-    use std::path::PathBuf;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
 
-    #[test]
-    fn prepare_both_cheap_no_temp_reuse() {
-        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
-        let sample = fixtures.join("sample.csv");
-        let dim = fixtures.join("dim_region.csv");
-        let ws = Workspace {
+    fn fixture_ws(sample: &Path, dim: &Path, join_type: JoinType) -> Workspace {
+        Workspace {
             queries: vec![
                 QueryDef {
                     id: "dim".into(),
@@ -778,7 +991,7 @@ mod tests {
                         },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
-                            join_type: JoinType::Inner,
+                            join_type,
                             left_on: vec!["region".into()],
                             right_on: vec!["region".into()],
                         },
@@ -788,7 +1001,15 @@ mod tests {
             ],
             focus_query_id: "fact".into(),
             key_maps: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn prepare_both_cheap_no_temp_reuse() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let ws = fixture_ws(&sample, &dim, JoinType::Inner);
         let db = DbSession::new().unwrap();
         let r1 = prepare_join_inputs(&db, &ws, &[], &[], "fact", 1).unwrap();
         assert!(!r1.reused);
@@ -796,7 +1017,7 @@ mod tests {
         assert!(!r1.right_expensive);
         assert!(!r1.left_materialized);
         assert!(!r1.right_materialized);
-        assert!(prepared_join_with(&db, &ws, &[], "fact", 1).is_none());
+        assert!(prepared_join_with(&db, &ws, &[], &[], "fact", 1).is_none());
         let r2 = prepare_join_inputs(&db, &ws, &[], &[], "fact", 1).unwrap();
         assert!(r2.reused);
         let side = preview_prepared_join_side(&db, "left", 10).unwrap();
@@ -857,12 +1078,325 @@ mod tests {
         assert!(!r.left_materialized);
         assert!(r.right_materialized);
         assert!(r.right_rows > 0);
-        let (h, defs) = prepared_join_with(&db, &ws, &[], "fact", 1).unwrap();
+        let (h, defs) = prepared_join_with(&db, &ws, &[], &[], "fact", 1).unwrap();
         assert!(h.right_materialized);
         assert!(defs.contains(PREP_RIGHT));
         assert!(!defs.contains(PREP_LEFT));
+        assert!(defs.contains("USING"), "prepared join must use USING emitter");
         let diag = crate::join_diagnostics::join_diagnostics(&db, &ws, &[], &[], "fact", 1)
             .unwrap();
         assert_eq!(diag.right_count, r.right_rows);
+    }
+
+    #[test]
+    fn prepared_full_join_matches_using_schema() {
+        let dir = std::env::temp_dir().join(format!(
+            "dwh_prep_full_join_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let left_path = dir.join("left.csv");
+        let right_path = dir.join("right.csv");
+        std::fs::write(&left_path, "id,v\n1,a\n").unwrap();
+        std::fs::write(&right_path, "id,w\n2,b\n").unwrap();
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "right".into(),
+                    name: "right".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: right_path.to_string_lossy().into(),
+                        },
+                        TransformationStep::DeriveColumn {
+                            name: "marker".into(),
+                            expression: "w".into(),
+                            mode: Default::default(),
+                            op: None,
+                            sql_dialect: None,
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "host".into(),
+                    name: "host".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: left_path.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "right".into(),
+                            join_type: JoinType::Full,
+                            left_on: vec!["id".into()],
+                            right_on: vec!["id".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "host".into(),
+            key_maps: vec![],
+        };
+        let db = DbSession::new().unwrap();
+        // Baseline: full graph compile.
+        let resolved = db.prepare_workspace(&ws, &[]).unwrap();
+        let compiled = GraphCompiler::new(&resolved)
+            .compile_ctes_from("host")
+            .unwrap();
+        let join_cte = cte_name("host", 1);
+        let baseline_sql = compiled.wrap_select(&format!("SELECT * FROM {join_cte}"));
+        let baseline = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(&baseline_sql).map_err(|e| e.to_string())?;
+                let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+                let schema = arrow.get_schema();
+                let cols: Vec<_> = schema.fields().iter().map(|f| f.name().clone()).collect();
+                let batches: Vec<RecordBatch> = arrow.collect();
+                let n = batches.iter().map(|b| b.num_rows()).sum::<usize>();
+                Ok((cols, n))
+            })
+            .unwrap();
+
+        ensure_join_sides_materialized(&db, &ws, &[], &[], "host", 1, None).unwrap();
+        let (_h, defs) = prepared_join_with(&db, &ws, &[], &[], "host", 1).unwrap();
+        assert!(defs.contains("USING"), "got: {defs}");
+        assert!(!defs.contains(" ON "), "must not use raw ON join: {defs}");
+        let prep_sql = format!("WITH \n{defs}\nSELECT * FROM prep_join");
+        let prepared = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(&prep_sql).map_err(|e| e.to_string())?;
+                let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+                let schema = arrow.get_schema();
+                let cols: Vec<_> = schema.fields().iter().map(|f| f.name().clone()).collect();
+                let batches: Vec<RecordBatch> = arrow.collect();
+                let n = batches.iter().map(|b| b.num_rows()).sum::<usize>();
+                Ok((cols, n))
+            })
+            .unwrap();
+        assert_eq!(prepared.0, baseline.0, "schema must match USING join");
+        assert_eq!(prepared.1, baseline.1, "row count must match");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_prepare_keeps_prior_cache() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let good = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: dim.to_string_lossy().into(),
+                        },
+                        TransformationStep::DeriveColumn {
+                            name: "region_key".into(),
+                            expression: "region".into(),
+                            mode: Default::default(),
+                            op: None,
+                            sql_dialect: None,
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sample.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region_key".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+            key_maps: vec![],
+        };
+        let db = DbSession::new().unwrap();
+        let r1 = prepare_join_inputs(&db, &good, &[], &[], "fact", 1).unwrap();
+        assert!(r1.right_materialized);
+        let rows_before = preview_prepared_join_side(&db, "right", 50)
+            .unwrap()
+            .rows
+            .len();
+        assert!(rows_before > 0);
+
+        let bad = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: dim.to_string_lossy().into(),
+                        },
+                        TransformationStep::DeriveColumn {
+                            name: "region_key".into(),
+                            expression: "totally_missing_column".into(),
+                            mode: Default::default(),
+                            op: None,
+                            sql_dialect: None,
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sample.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region_key".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+            key_maps: vec![],
+        };
+        let err = prepare_join_inputs(&db, &bad, &[], &[], "fact", 1);
+        assert!(err.is_err(), "bad prepare must fail");
+
+        // Prior good cache must still be readable (not reused=true against missing TEMP).
+        let side = preview_prepared_join_side(&db, "right", 50).unwrap();
+        assert_eq!(side.rows.len(), rows_before);
+
+        let r2 = prepare_join_inputs(&db, &good, &[], &[], "fact", 1).unwrap();
+        assert!(r2.reused);
+        let side2 = preview_prepared_join_side(&db, "right", 50).unwrap();
+        assert_eq!(side2.rows.len(), rows_before);
+    }
+
+    #[test]
+    fn file_content_change_invalidates_fingerprint() {
+        let dir = std::env::temp_dir().join(format!(
+            "dwh_prep_file_rev_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let left_path = dir.join("left.csv");
+        let right_path = dir.join("right.csv");
+        std::fs::write(&left_path, "region,x\nnorth,1\n").unwrap();
+        std::fs::write(&right_path, "region,y\nnorth,2\n").unwrap();
+        let ws = fixture_ws(&left_path, &right_path, JoinType::Inner);
+        let db = DbSession::new().unwrap();
+        ensure_join_sides_materialized(&db, &ws, &[], &[], "fact", 1, None).unwrap();
+        let r1 = prepare_join_inputs(&db, &ws, &[], &[], "fact", 1).unwrap();
+        assert!(r1.reused);
+
+        // Change file content (mtime + bytes).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&left_path)
+            .unwrap();
+        writeln!(f, "region,x\nsouth,9").unwrap();
+        drop(f);
+
+        let r2 = prepare_join_inputs(&db, &ws, &[], &[], "fact", 1).unwrap();
+        assert!(
+            !r2.reused,
+            "content change must invalidate fingerprint reuse"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn force_refresh_rebuilds_same_fingerprint() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let ws = fixture_ws(&sample, &dim, JoinType::Inner);
+        let db = DbSession::new().unwrap();
+        ensure_join_sides_materialized(&db, &ws, &[], &[], "fact", 1, None).unwrap();
+        let reused = prepare_join_inputs_with_progress(
+            &db, &ws, &[], &[], "fact", 1, None, false,
+        )
+        .unwrap();
+        assert!(reused.reused);
+        let forced = prepare_join_inputs_with_progress(
+            &db, &ws, &[], &[], "fact", 1, None, true,
+        )
+        .unwrap();
+        assert!(!forced.reused);
+    }
+
+    #[test]
+    fn ensure_upgrades_only_missing_side() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let sample = fixtures.join("sample.csv");
+        let dim = fixtures.join("dim_region.csv");
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: dim.to_string_lossy().into(),
+                        },
+                        TransformationStep::DeriveColumn {
+                            name: "region_key".into(),
+                            expression: "region".into(),
+                            mode: Default::default(),
+                            op: None,
+                            sql_dialect: None,
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: sample.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Inner,
+                            left_on: vec!["region".into()],
+                            right_on: vec!["region_key".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+            key_maps: vec![],
+        };
+        let db = DbSession::new().unwrap();
+        let r = prepare_join_inputs(&db, &ws, &[], &[], "fact", 1).unwrap();
+        assert!(r.right_materialized && !r.left_materialized);
+        let right_rows = r.right_rows;
+        ensure_join_sides_materialized(&db, &ws, &[], &[], "fact", 1, None).unwrap();
+        let h = db.join_prep_get().unwrap();
+        assert!(h.left_materialized && h.right_materialized);
+        assert_eq!(h.right_rows, right_rows);
+        // Right TEMP still readable (was not dropped/rebuilt from scratch unnecessarily).
+        assert!(!preview_prepared_join_side(&db, "right", 10)
+            .unwrap()
+            .rows
+            .is_empty());
     }
 }

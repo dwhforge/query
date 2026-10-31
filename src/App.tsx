@@ -583,6 +583,7 @@ function App() {
       activeQueryId,
       selectedStepIndex,
       sources,
+      connections,
     )
       .then((s) => {
         if (s.prepared) {
@@ -641,6 +642,7 @@ function App() {
       selectedStepIndex,
       connections,
       sources,
+      !!joinPrepareLabel,
     )
       .then((r) => {
         setJoinPrepareLabel(formatJoinPrepareHint(r));

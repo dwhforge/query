@@ -8,6 +8,7 @@ import type {
 import {
   blameUnmatchedKey,
   cancelRunningQuery,
+  describeWorkspace,
   explainJoinKey,
   formatJoinPrepareHint,
   formatJoinPrepareStatusHint,
@@ -523,54 +524,41 @@ function JoinLensImpl({
     return { ...workspace, focus_query_id: rightQueryId };
   }, [workspace, rightQueryId]);
 
-  // Open Lens → load parent sample rows for This row (no extra click).
+  // Open Lens → schema only (cheap). Sample rows: prepared TEMPs or explicit Show rows.
   useEffect(() => {
     if (!enabled || !leftInputWs || !rightInputWs) return;
     let cancelled = false;
     setLeftSideLoading(true);
     setRightSideLoading(true);
-    setSamplesLoading(true);
     setSamplesLoaded(false);
     setParentLeftRows([]);
     setParentRightRows([]);
     void (async () => {
       try {
-        const left = await previewWorkspace(
+        const left = await describeWorkspace(
           leftInputWs,
           connections,
           sources,
         );
         if (cancelled) return;
         setParentLeftCols(left.columns);
-        setParentLeftRows(left.rows);
       } catch {
-        if (!cancelled) {
-          setParentLeftCols([]);
-          setParentLeftRows([]);
-        }
+        if (!cancelled) setParentLeftCols([]);
       } finally {
         if (!cancelled) setLeftSideLoading(false);
       }
       try {
-        const right = await previewWorkspace(
+        const right = await describeWorkspace(
           rightInputWs,
           connections,
           sources,
         );
         if (cancelled) return;
         setParentRightCols(right.columns);
-        setParentRightRows(right.rows);
       } catch {
-        if (!cancelled) {
-          setParentRightCols([]);
-          setParentRightRows([]);
-        }
+        if (!cancelled) setParentRightCols([]);
       } finally {
-        if (!cancelled) {
-          setRightSideLoading(false);
-          setSamplesLoading(false);
-          setSamplesLoaded(true);
-        }
+        if (!cancelled) setRightSideLoading(false);
       }
     })();
     return () => {
@@ -580,12 +568,22 @@ function JoinLensImpl({
 
   function refreshPrepareStatus() {
     if (!hostQueryId || joinStepIndex < 1) return;
-    void joinPrepareStatus(workspace, hostQueryId, joinStepIndex, sources)
+    void joinPrepareStatus(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      sources,
+      connections,
+    )
       .then((s) => {
         setPrepareStatus(s);
         setPrepared(s.prepared);
         if (s.prepared) {
           setPrepareHint(formatJoinPrepareStatusHint(s));
+          // Cheap path: fill This-row samples from prepared TEMPs/live SQL.
+          if (!samplesLoaded && !samplesLoading) {
+            void loadLinkedSamples({ forcePrepared: true });
+          }
         } else if (s.stale) {
           setPrepareHint("Outdated — Reload sides");
           setPrepared(false);
@@ -610,7 +608,7 @@ function JoinLensImpl({
     autoDiagAttemptedRef.current = "";
   }, [hostQueryId, joinStepIndex]);
 
-  function runPrepare() {
+  function runPrepare(force = false) {
     if (!hostQueryId || joinStepIndex < 1 || prepareLoading) return;
     setPrepareLoading(true);
     onPrepareBusy?.(true);
@@ -634,6 +632,7 @@ function JoinLensImpl({
       joinStepIndex,
       connections,
       sources,
+      force,
     )
       .then((r) => {
         setPrepared(true);
@@ -1271,7 +1270,9 @@ function JoinLensImpl({
         ? "Loading left parents…"
         : samplesLoaded
           ? "Nothing on the left for this result row."
-          : "Loading left parents…"
+          : prepared
+            ? "Prepared — loading parents…"
+            : "Schema ready — Show rows (or Load sides) for parents."
       : joinDiagLoading
         ? "Looking for values that didn’t match…"
         : !joinDiag
@@ -1288,7 +1289,9 @@ function JoinLensImpl({
         ? "Loading right parents…"
         : samplesLoaded
           ? "Nothing on the right for this result row."
-          : "Loading right parents…"
+          : prepared
+            ? "Prepared — loading parents…"
+            : "Schema ready — Show rows (or Load sides) for parents."
       : joinDiagLoading
         ? "Looking for values that didn’t match…"
         : !joinDiag
@@ -1775,9 +1778,13 @@ function JoinLensImpl({
           <button
             type="button"
             disabled={prepareLoading}
-            onClick={() => runPrepare()}
+            onClick={() => runPrepare(!!prepared)}
             className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
-            title="Load left/right once so later checks reuse them (faster on big joins)"
+            title={
+              prepared
+                ? "Force rebuild prepared sides (picks up file/data changes)"
+                : "Load left/right once so later checks reuse them (faster on big joins)"
+            }
           >
             {prepareLoading
               ? "Loading sides…"
@@ -1848,9 +1855,13 @@ function JoinLensImpl({
               disabled={samplesLoading}
               onClick={() => loadLinkedSamples()}
               className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
-              title="Reload left/right parent sample for This row"
+              title="Load or reload left/right parent sample for This row"
             >
-              {samplesLoading ? "Loading rows…" : "Reload rows"}
+              {samplesLoading
+                ? "Loading rows…"
+                : samplesLoaded
+                  ? "Reload rows"
+                  : "Show rows"}
             </button>
           )}
           {(samplesLoading ||

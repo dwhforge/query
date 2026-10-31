@@ -794,6 +794,9 @@ struct JoinDiagArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    /// When true, Prepare rebuilds even if fingerprint matches (Reload sides).
+    #[serde(default)]
+    force: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1428,16 +1431,19 @@ impl HostState {
                     &a.host_query_id,
                     a.join_step_index,
                     Some(&self.join_prep_progress),
+                    a.force.unwrap_or(false),
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "join_prepare_status" => {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let sources = a.sources.unwrap_or_default();
+                let conns = a.connections.unwrap_or_default();
                 let out: JoinPrepareStatus = run_join_prepare_status(
                     &db,
                     &a.workspace,
                     &sources,
+                    &conns,
                     &a.host_query_id,
                     a.join_step_index,
                 );

@@ -89,7 +89,7 @@ pub fn join_key_near_miss(
         rq.steps.len() - 1
     });
 
-    let _ = crate::join_prepare::ensure_join_sides_materialized(
+    crate::join_prepare::ensure_join_sides_materialized(
         db,
         workspace,
         connections,
@@ -97,11 +97,12 @@ pub fn join_key_near_miss(
         host_query_id,
         join_step_index,
         None,
-    );
+    )?;
     let prep = crate::join_prepare::prepared_join_with(
         db,
         workspace,
         sources,
+        connections,
         host_query_id,
         join_step_index,
     );

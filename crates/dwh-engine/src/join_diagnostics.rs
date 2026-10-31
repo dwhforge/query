@@ -119,7 +119,7 @@ pub fn join_diagnostics_with_limit(
     });
 
     // Diagnostics needs both sides as TEMP — live 200M anti-joins take minutes.
-    let _ = crate::join_prepare::ensure_join_sides_materialized(
+    crate::join_prepare::ensure_join_sides_materialized(
         db,
         workspace,
         connections,
@@ -127,13 +127,14 @@ pub fn join_diagnostics_with_limit(
         host_query_id,
         join_step_index,
         None,
-    );
+    )?;
 
     // Prefer prepared temp tables when fingerprint matches (avoid re-scanning inputs).
     let prep = crate::join_prepare::prepared_join_with(
         db,
         workspace,
         sources,
+        connections,
         host_query_id,
         join_step_index,
     );

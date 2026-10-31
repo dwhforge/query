@@ -1195,6 +1195,7 @@ fn join_key_context(
             db,
             workspace,
             sources,
+            connections,
             host_query_id,
             join_step_index,
         ) {

@@ -47,6 +47,7 @@ import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
+import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
   OpProgress,
   type OpProgressState,
@@ -148,6 +149,7 @@ import {
   type JoinType,
   type ColumnMetadata,
   type PreviewResult,
+  parquetSourceName,
   type Project,
   type QueryDef,
   type QueryExecution,
@@ -303,6 +305,8 @@ function App() {
   const [modelError, setModelError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** Monotonic id so a slow preview for node A cannot overwrite node B. */
+  const previewReqIdRef = useRef(0);
   /** Bottom dock: sample rows vs generated model SQL (H0 projection; H1 editable later). */
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -335,6 +339,7 @@ function App() {
   );
   const [showPgPicker, setShowPgPicker] = useState(false);
   const [showS3Dialog, setShowS3Dialog] = useState(false);
+  const [showHiveDialog, setShowHiveDialog] = useState(false);
   /** Dialog outcome: catalog-only source vs source+query. */
   const [pickerIntent, setPickerIntent] = useState<"source" | "query">("query");
   const [connEditorOpen, setConnEditorOpen] = useState(false);
@@ -424,16 +429,26 @@ function App() {
   const runPreview = useCallback(
     async (ws: Workspace, conns: ConnectionDef[]) => {
       // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
+      const reqId = ++previewReqIdRef.current;
       setLoading(true);
       try {
         const result = await previewWorkspace(ws, conns);
+        if (reqId !== previewReqIdRef.current) return;
         setPreview(result);
         setError(null);
       } catch (e) {
+        if (reqId !== previewReqIdRef.current) return;
+        const msg = typeof e === "string" ? e : String(e);
+        // Preempted by a newer preview — keep UI quiet.
+        if (/preview cancelled/i.test(msg)) {
+          return;
+        }
         setPreview(null);
-        setError(typeof e === "string" ? e : String(e));
+        setError(msg);
       } finally {
-        setLoading(false);
+        if (reqId === previewReqIdRef.current) {
+          setLoading(false);
+        }
       }
     },
     [],
@@ -452,6 +467,7 @@ function App() {
     helpOpen ||
     showPgPicker ||
     showS3Dialog ||
+    showHiveDialog ||
     Boolean(mapPickPending);
 
   useEffect(() => {
@@ -860,12 +876,14 @@ function App() {
     path: string,
     kind: "csv" | "parquet",
     connectionId?: string,
+    nameOverride?: string,
   ) {
     const base = path.split(/[/\\]/).pop() ?? "file";
     const name =
-      kind === "csv"
+      nameOverride ??
+      (kind === "csv"
         ? base.replace(/\.csv$/i, "")
-        : base.replace(/\.parquet$/i, "");
+        : base.replace(/\.parquet$/i, ""));
     const id = newQueryId(name, queries.map((q) => q.id));
     const step: TransformationStep =
       kind === "csv"
@@ -1076,6 +1094,24 @@ function App() {
     setError(null);
   }
 
+  function addSourceOnlyHive(path: string) {
+    const name = parquetSourceName(path);
+    const id = newSourceId(
+      name,
+      project.sources.map((s) => s.id),
+    );
+    setProject((p) => ({
+      ...p,
+      sources: [
+        ...p.sources,
+        { id, name, kind: "parquet", path },
+      ],
+    }));
+    setSelectedSourceId(id);
+    setShowHiveDialog(false);
+    setError(null);
+  }
+
   function addSourceOnlyS3(sel: { path: string; connection_id?: string }) {
     const name = sel.path.split(/[/\\]/).pop() ?? "parquet";
     const id = newSourceId(
@@ -1133,6 +1169,11 @@ function App() {
   function openS3Dialog(intent: "source" | "query") {
     setPickerIntent(intent);
     setShowS3Dialog(true);
+  }
+
+  function openHiveDialog(intent: "source" | "query") {
+    setPickerIntent(intent);
+    setShowHiveDialog(true);
   }
 
   function addPostgresFromPicker(sel: PostgresSelection) {
@@ -1517,14 +1558,13 @@ function App() {
       focus_query_id: rightQueryId,
     };
 
-    const [leftRes, rightRes] = await Promise.all([
-      leftWs
-        ? previewWorkspace(leftWs, connections).catch(() => null)
-        : Promise.resolve(null),
-      rightQueryId
-        ? previewWorkspace(rightWs, connections).catch(() => null)
-        : Promise.resolve(null),
-    ]);
+    // Sequential — one DuckDB session; parallel preview used to cancel each other.
+    const leftRes = leftWs
+      ? await previewWorkspace(leftWs, connections).catch(() => null)
+      : null;
+    const rightRes = rightQueryId
+      ? await previewWorkspace(rightWs, connections).catch(() => null)
+      : null;
     return {
       left: leftRes?.columns ?? [],
       right: rightRes?.columns ?? [],
@@ -3230,12 +3270,26 @@ function App() {
           }
         }}
       />
+      <HiveParquetDialog
+        open={showHiveDialog}
+        confirmLabel={pickerIntent === "source" ? "Add source" : "Add as query"}
+        onClose={() => setShowHiveDialog(false)}
+        onSelect={(path) => {
+          if (pickerIntent === "source") {
+            addSourceOnlyHive(path);
+          } else {
+            addFileQuery(path, "parquet", undefined, parquetSourceName(path));
+            setShowHiveDialog(false);
+          }
+        }}
+      />
 
       {empty ? (
         <EmptyHero
           onLoadDemo={(id) => void handleLoadDemo(id)}
           onAddCsv={() => void addCsvQuery()}
           onAddParquet={() => void addParquetQuery()}
+          onAddHiveParquet={() => openHiveDialog("query")}
           onAddPostgres={() => openPgPicker("query")}
           onAddSqlModel={() => addSqlModelQuery()}
         />
@@ -3268,10 +3322,12 @@ function App() {
               onAddConnection={() => openNewConnection("postgres")}
               onAddSourceCsv={() => void addSourceOnlyCsv()}
               onAddSourceParquet={() => void addSourceOnlyParquet()}
+              onAddSourceHiveParquet={() => openHiveDialog("source")}
               onAddSourceS3={() => openS3Dialog("source")}
               onAddSourcePostgres={() => openPgPicker("source")}
               onNewQueryCsv={() => void addCsvQuery()}
               onNewQueryParquet={() => void addParquetQuery()}
+              onNewQueryHiveParquet={() => openHiveDialog("query")}
               onNewQueryS3={() => openS3Dialog("query")}
               onNewQueryPostgres={() => openPgPicker("query")}
               onNewQueryFromSource={addQueryFromSource}
@@ -3707,7 +3763,7 @@ function App() {
                       ? diagView
                         ? `diag · ${diagView.rows.length}/${diagView.totalCount} · ${diagView.columns.length} cols`
                         : loading
-                          ? "running…"
+                          ? "computing full inputs… (LIMIT on output only)"
                           : preview
                             ? `${preview.rows.length} rows · ${preview.columns.length} cols`
                             : "—"

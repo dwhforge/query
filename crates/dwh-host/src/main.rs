@@ -194,7 +194,14 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
             }
         };
         let id = rpc.id;
-        if rpc.cmd == "llm_chat" || rpc.cmd == "key_map_fuzzy_suggest" {
+        // Previews + join diagnostics share one DuckDB session (Mutex). Run them on a
+        // worker so the accept loop stays responsive. Do NOT interrupt on each new
+        // preview: Join Lens / column pickers fire LEFT∥RIGHT and would cancel each other.
+        let async_cmd = rpc.cmd == "llm_chat"
+            || rpc.cmd == "key_map_fuzzy_suggest"
+            || HostState::is_preemptible_preview(&rpc.cmd)
+            || rpc.cmd == "join_diagnostics";
+        if async_cmd {
             let st = Arc::clone(&state);
             let w = Arc::clone(&writer);
             let args = rpc.args;
@@ -207,10 +214,10 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
                 match w.lock() {
                     Ok(mut guard) => {
                         if let Err(e) = write_frame(&mut *guard, &reply) {
-                            eprintln!("[dwh-host] llm reply write failed: {e}");
+                            eprintln!("[dwh-host] async reply write failed: {e}");
                         }
                     }
-                    Err(e) => eprintln!("[dwh-host] llm reply lock poisoned: {e}"),
+                    Err(e) => eprintln!("[dwh-host] async reply lock poisoned: {e}"),
                 }
             });
             continue;

@@ -13,6 +13,7 @@ use crate::graph::{sanitize_id, topo_queries};
 use crate::model::{KeyMapEntry, TransformationStep, Workspace};
 use crate::producers::{DbtTarget, OutputProducer};
 use crate::schema::{infer_workspace_schemas, WorkspaceSchemas};
+use crate::parquet_scan::read_parquet_call;
 use crate::sql_escape::escape_sql_string;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -662,8 +663,8 @@ fn compile_query_as_dbt_model(
                 escape_sql_string(path)
             ),
             TransformationStep::LoadParquet { path, .. } => format!(
-                "-- source: parquet\nselect * from read_parquet('{}')\n",
-                escape_sql_string(path)
+                "-- source: parquet\nselect * from {}\n",
+                read_parquet_call(path)
             ),
             TransformationStep::LoadPostgres {
                 schema,
@@ -737,10 +738,7 @@ fn compile_query_as_dbt_model(
             }
             TransformationStep::LoadParquet { path, .. } => {
                 left_dbt = None;
-                format!(
-                    "select * from read_parquet('{}')",
-                    escape_sql_string(path)
-                )
+                format!("select * from {}", read_parquet_call(path))
             }
             TransformationStep::LoadPostgres {
                 schema,

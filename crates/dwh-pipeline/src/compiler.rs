@@ -3,6 +3,7 @@ use crate::emit::{emit_transform_step, substitute_query_placeholders};
 use crate::graph::{cte_name, topo_queries_from};
 use crate::model::{TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
+use crate::parquet_scan::read_parquet_call;
 use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::HashMap;
 
@@ -126,10 +127,9 @@ fn compile_step(
             "SELECT * FROM read_csv_auto('{}')",
             escape_sql_string(path)
         )),
-        TransformationStep::LoadParquet { path, .. } => Ok(format!(
-            "SELECT * FROM read_parquet('{}')",
-            escape_sql_string(path)
-        )),
+        TransformationStep::LoadParquet { path, .. } => {
+            Ok(format!("SELECT * FROM {}", read_parquet_call(path)))
+        }
         TransformationStep::LoadDuckdb {
             path,
             schema,

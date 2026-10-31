@@ -185,12 +185,11 @@ pub fn join_key_near_miss(
 }
 
 fn key_expr(alias: &str, col: &str, ops: Option<&[NormalizeOp]>) -> String {
-    let base = format!("{alias}.{}", quote_ident(col));
+    // Cast before trim/lower: DuckDB rejects trim(BIGINT) (join keys are often numeric).
+    let as_text = format!("CAST({alias}.{} AS VARCHAR)", quote_ident(col));
     match ops {
-        Some(ops) if !ops.is_empty() => {
-            format!("CAST({} AS VARCHAR)", normalize_column_expr(&base, ops))
-        }
-        _ => format!("CAST({base} AS VARCHAR)"),
+        Some(ops) if !ops.is_empty() => normalize_column_expr(&as_text, ops),
+        _ => as_text,
     }
 }
 
@@ -323,6 +322,12 @@ mod tests {
 
     fn fixtures() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
+    }
+
+    #[test]
+    fn key_expr_casts_before_trim_for_numeric_keys() {
+        let sql = key_expr("l", "batch_id", Some(&[NormalizeOp::Trim]));
+        assert_eq!(sql, "trim(CAST(l.\"batch_id\" AS VARCHAR))");
     }
 
     #[test]

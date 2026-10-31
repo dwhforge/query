@@ -1,5 +1,6 @@
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
 use crate::session::DbSession;
+use crate::session_limits::map_engine_error;
 use dwh_pipeline::{ConnectionDef, GraphCompiler, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,12 @@ pub struct PreviewResult {
 
 fn run_sql(db: &DbSession, sql: String) -> Result<PreviewResult, String> {
     db.with_conn(|conn| {
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| map_engine_error(&e.to_string()))?;
+        let arrow = stmt
+            .query_arrow([])
+            .map_err(|e| map_engine_error(&e.to_string()))?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
         let columns = schema
@@ -280,5 +285,33 @@ mod tests {
             s.starts_with("2024-"),
             "expected ISO date, got {s:?} (raw epoch days look like 19723)"
         );
+    }
+
+    #[test]
+    fn stress_commercial_catalog_parquet_preview() {
+        let path = "/app2/stress-test/100k/commercial_catalog/*.parquet";
+        if !std::path::Path::new("/app2/stress-test/100k/commercial_catalog").is_dir() {
+            eprintln!("skip: stress commercial_catalog missing");
+            return;
+        }
+        std::env::set_var("DWH_DUCKDB_MEMORY", "4GB");
+        let db = DbSession::new().expect("duckdb");
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "commercial_catalog".into(),
+                name: "commercial_catalog".into(),
+                steps: vec![TransformationStep::LoadParquet {
+                    path: path.into(),
+                    connection_id: None,
+                }],
+                execution: Default::default(),
+            }],
+            focus_query_id: "commercial_catalog".into(),
+            key_maps: vec![],
+        };
+        let out = preview_workspace(&db, &ws, &[]).expect("preview catalog");
+        assert!(!out.columns.is_empty());
+        assert!(out.rows.len() <= 50);
+        assert!(out.sql.contains("LIMIT 50"));
     }
 }

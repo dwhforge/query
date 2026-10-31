@@ -4,7 +4,7 @@ use crate::connections_io;
 use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
-    blame_unmatched_key as run_blame_unmatched_key, collect_load_seeds,
+    blame_unmatched_key as run_blame_unmatched_key, collect_load_seeds, QueryCancelHandle,
     describe_postgres_object as run_describe_postgres_object,
     explain_join_key as run_explain_join_key, explain_join_rows as run_explain_join_rows,
     join_diagnostics as run_join_diagnostics, join_key_fuzzy_suggest as run_join_key_fuzzy_suggest,
@@ -1033,16 +1033,31 @@ fn fingerprint_json(parts: &[&Value]) -> u64 {
 
 pub struct HostState {
     pub db: Mutex<DbSession>,
+    /// Outside `db` so a new preview can cancel without waiting on the conn lock.
+    preview_cancel: QueryCancelHandle,
     preview_cache: Mutex<PreviewCache>,
 }
 
 impl HostState {
     pub fn new() -> Result<Self, String> {
         configure_paths();
+        let db = DbSession::new()?;
+        let preview_cancel = db.cancel_handle();
         Ok(Self {
-            db: Mutex::new(DbSession::new()?),
+            db: Mutex::new(db),
+            preview_cancel,
             preview_cache: Mutex::new(PreviewCache::new(8)),
         })
+    }
+
+    /// Cancel the DuckDB query currently running (preview / diagnostics).
+    pub fn interrupt_running_query(&self) {
+        self.preview_cancel.interrupt();
+    }
+
+    /// True for RPCs that run DuckDB preview SQL and should preempt the previous one.
+    pub fn is_preemptible_preview(cmd: &str) -> bool {
+        matches!(cmd, "preview_workspace" | "preview_pipeline")
     }
 
     pub fn dispatch(&self, cmd: &str, args: Value) -> Result<Value, String> {

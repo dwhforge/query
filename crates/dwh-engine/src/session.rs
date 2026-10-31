@@ -4,13 +4,15 @@ use crate::extensions::{
 };
 use crate::postgres_catalog::ensure_pg_attached;
 use crate::secrets::apply_s3_connections;
-use duckdb::{Config, Connection};
+use crate::session_limits::{apply_resource_settings, map_engine_error};
+use duckdb::{Config, Connection, InterruptHandle};
 use dwh_pipeline::{ConnectionDef, ConnectionKind, TransformationStep, Workspace};
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct DbSession {
     conn: Mutex<Connection>,
+    interrupt: Arc<InterruptHandle>,
     postgres_ready: Mutex<bool>,
     httpfs_ready: Mutex<bool>,
     postgres_error: Mutex<Option<String>>,
@@ -26,8 +28,11 @@ impl DbSession {
             .with("allow_extensions_metadata_mismatch", "true")
             .map_err(|e| e.to_string())?;
         let conn = Connection::open_in_memory_with_flags(config).map_err(|e| e.to_string())?;
+        apply_resource_settings(&conn)?;
+        let interrupt = conn.interrupt_handle();
         let session = Self {
             conn: Mutex::new(conn),
+            interrupt,
             postgres_ready: Mutex::new(false),
             httpfs_ready: Mutex::new(false),
             postgres_error: Mutex::new(None),
@@ -35,6 +40,17 @@ impl DbSession {
         };
         session.load_extensions();
         Ok(session)
+    }
+
+    /// Cancel the query currently running on this session (safe from another thread).
+    pub fn interrupt(&self) {
+        self.interrupt.interrupt();
+    }
+
+    pub fn cancel_handle(&self) -> QueryCancelHandle {
+        QueryCancelHandle {
+            inner: Arc::clone(&self.interrupt),
+        }
     }
 
     fn load_extensions(&self) {
@@ -218,7 +234,57 @@ impl DbSession {
         F: FnOnce(&Connection) -> Result<T, String>,
     {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        f(&conn)
+        f(&conn).map_err(|e| map_engine_error(&e))
+    }
+}
+
+/// Thread-safe handle to interrupt a running DuckDB query (no connection lock).
+#[derive(Clone)]
+pub struct QueryCancelHandle {
+    inner: Arc<InterruptHandle>,
+}
+
+impl QueryCancelHandle {
+    pub fn interrupt(&self) {
+        self.inner.interrupt();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn interrupt_aborts_long_query_without_holding_host_lock() {
+        std::env::set_var("DWH_DUCKDB_MEMORY", "2GB");
+        let db = Arc::new(DbSession::new().expect("session"));
+        let cancel = db.cancel_handle();
+        let worker = Arc::clone(&db);
+        let join = std::thread::spawn(move || {
+            worker.with_conn(|conn| {
+                // Large enough that interrupt can land before finish.
+                conn.execute_batch(
+                    "SELECT sum(i)::BIGINT FROM range(0, 2000000000) t(i);",
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        cancel.interrupt();
+        let err = join
+            .join()
+            .expect("worker")
+            .expect_err("query should fail after interrupt");
+        let lower = err.to_ascii_lowercase();
+        assert!(
+            lower.contains("cancel")
+                || lower.contains("interrupt")
+                || lower.contains("preview cancelled"),
+            "unexpected error after interrupt: {err}"
+        );
     }
 }
 

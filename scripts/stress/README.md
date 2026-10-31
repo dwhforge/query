@@ -105,7 +105,22 @@ DuckDB destination (приложение/другой процесс не дол
 
 Если рабочая база имеет другой путь: `--duckdb /actual/path.duckdb`.
 
-PostgreSQL destination:
+### Postgres sources (identical graph)
+
+Same queries/joins/keymap/outputs as the parquet project; `LoadParquet` → `LoadPostgres` on schema `stress`, connection id `conn_postgres` (must exist in the app).
+
+```bash
+export STRESS_PG_DSN='postgresql://user:password@127.0.0.1:5432/postgres'
+# load is resumable; full 100M fixture is large — expect a long run
+./dbt-venv/bin/python scripts/stress/load_postgres.py \
+  --data /app2/stress-test/100k \
+  --schema stress \
+  --connection-id conn_postgres
+```
+
+Project only (no load): add `--skip-load` → writes `stress_pg.dwhproj.json`. Then open that file in DWH Query after tables exist.
+
+PostgreSQL destination (verify published marts):
 
 ```bash
 export STRESS_PG_DSN='postgresql://user:password@host:5432/database'

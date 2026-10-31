@@ -459,6 +459,24 @@ export function connectionById(
   return project.connections.find((c) => c.id === id);
 }
 
+/** Last concrete path segment. Skips globs; strips a trailing `.parquet`. */
+export function parquetSourceName(path: string, fallback = "parquet"): string {
+  const parts = path
+    .trim()
+    .replace(/[\\/]+$/, "")
+    .split(/[/\\]/)
+    .filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i];
+    if (part.includes("*") || part.includes("?")) continue;
+    if (part.toLowerCase().endsWith(".parquet")) {
+      return part.replace(/\.parquet$/i, "") || fallback;
+    }
+    return part;
+  }
+  return fallback;
+}
+
 /** Mirror Load* steps into Sources catalog (idempotent). */
 export function syncSourcesFromQueries(
   sources: SourceDef[],
@@ -490,7 +508,7 @@ export function syncSourcesFromQueries(
       const key = `parquet:${step.payload.connection_id ?? ""}:${step.payload.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const fileName = step.payload.path.split(/[/\\]/).pop() ?? q.name;
+      const fileName = parquetSourceName(step.payload.path, q.name);
       next.push({
         id: newSourceId(fileName, next.map((s) => s.id)),
         name: fileName,

@@ -10,6 +10,7 @@ pub mod export_tree;
 pub mod graph;
 pub mod key_map_sync;
 pub mod model;
+pub mod parquet_scan;
 pub mod postgres_attach;
 pub mod producers;
 pub mod project;
@@ -19,6 +20,7 @@ pub mod sql_escape;
 
 pub use compiler::{CompiledCtes, GraphCompiler, PipelineCompiler};
 pub use graph::cte_name;
+pub use parquet_scan::read_parquet_call;
 pub use sql_escape::{escape_sql_string, quote_ident};
 pub use connection::{ConnectionDef, ConnectionKind, DuckdbParams, PostgresParams, S3Params};
 pub use destination::{

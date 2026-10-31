@@ -12,8 +12,11 @@ export function summarizeError(raw: string): string {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
+  if (/DuckDB hit its memory_limit/i.test(plain)) {
+    return plain.split("Detail:")[0].trim().slice(0, 320);
+  }
   const prefer = lines.find((l) =>
-    /IO Error:|Runtime Error:|Compilation Error:|Database Error:|Parsing Error:|Catalog Error:|Binder Error:|Encountered an error/i.test(
+    /IO Error:|Runtime Error:|Compilation Error:|Database Error:|Parsing Error:|Catalog Error:|Binder Error:|Encountered an error|memory_limit|Out of Memory/i.test(
       l,
     ),
   );

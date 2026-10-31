@@ -15,6 +15,7 @@ mod postgres_catalog;
 mod preview;
 mod secrets;
 mod session;
+mod session_limits;
 
 pub use extensions::{
     duckdb_platform, duckdb_version_tag, extensions_dir_display, parquet_available,
@@ -50,4 +51,7 @@ pub use postgres_catalog::{
     PostgresColumn, PostgresObject,
 };
 pub use preview::{preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult};
-pub use session::DbSession;
+pub use session::{DbSession, QueryCancelHandle};
+pub use session_limits::{
+    map_engine_error, resolve_memory_limit, resolve_temp_directory, ENV_MEMORY, ENV_TEMP,
+};

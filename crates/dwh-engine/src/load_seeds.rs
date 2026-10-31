@@ -3,7 +3,7 @@
 use crate::postgres_catalog::describe_postgres_object;
 use crate::session::DbSession;
 use dwh_pipeline::sql_escape::escape_sql_string;
-use dwh_pipeline::{ConnectionDef, TransformationStep, Workspace};
+use dwh_pipeline::{read_parquet_call, ConnectionDef, TransformationStep, Workspace};
 use duckdb::params;
 use std::collections::HashMap;
 
@@ -48,7 +48,7 @@ pub fn collect_load_seeds(
                 }
             }
             TransformationStep::LoadParquet { path, .. } => {
-                match describe_file_relation(db, &format!("read_parquet('{}')", escape_sql_string(path)))
+                match describe_file_relation(db, &read_parquet_call(path))
                 {
                     Ok(c) => c,
                     Err(e) => {

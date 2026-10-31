@@ -409,7 +409,8 @@ function JoinLensImpl({
   const [parentRightCols, setParentRightCols] = useState<ColumnMetadata[]>([]);
   const [parentLeftRows, setParentLeftRows] = useState<unknown[][]>([]);
   const [parentRightRows, setParentRightRows] = useState<unknown[][]>([]);
-  const [sidesLoading, setSidesLoading] = useState(false);
+  const [leftSideLoading, setLeftSideLoading] = useState(false);
+  const [rightSideLoading, setRightSideLoading] = useState(false);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
   const [searchLeft, setSearchLeft] = useState("");
@@ -454,7 +455,12 @@ function JoinLensImpl({
   useEffect(() => {
     if (!enabled || !hostQueryId || joinStepIndex < 1 || !rightQueryId) return;
     let cancelled = false;
-    setSidesLoading(true);
+    setLeftSideLoading(true);
+    setRightSideLoading(true);
+    setParentLeftCols([]);
+    setParentLeftRows([]);
+    setParentRightCols([]);
+    setParentRightRows([]);
     const leftWs: Workspace = {
       ...workspace,
       focus_query_id: hostQueryId,
@@ -468,27 +474,33 @@ function JoinLensImpl({
       ...workspace,
       focus_query_id: rightQueryId,
     };
-    void Promise.all([
-      previewWorkspace(leftWs, connections),
-      previewWorkspace(rightWs, connections),
-    ])
-      .then(([left, right]) => {
+    // Sequential: one DuckDB session; show LEFT as soon as it returns (RIGHT may be heavy).
+    void (async () => {
+      try {
+        const left = await previewWorkspace(leftWs, connections);
         if (cancelled) return;
         setParentLeftCols(left.columns);
         setParentLeftRows(left.rows);
+      } catch {
+        if (cancelled) return;
+        setParentLeftCols([]);
+        setParentLeftRows([]);
+      } finally {
+        if (!cancelled) setLeftSideLoading(false);
+      }
+      try {
+        const right = await previewWorkspace(rightWs, connections);
+        if (cancelled) return;
         setParentRightCols(right.columns);
         setParentRightRows(right.rows);
-        setSidesLoading(false);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setParentLeftCols([]);
-          setParentLeftRows([]);
-          setParentRightCols([]);
-          setParentRightRows([]);
-          setSidesLoading(false);
-        }
-      });
+      } catch {
+        if (cancelled) return;
+        setParentRightCols([]);
+        setParentRightRows([]);
+      } finally {
+        if (!cancelled) setRightSideLoading(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -1175,8 +1187,11 @@ function JoinLensImpl({
     );
   }
 
-  const sideLoading =
-    sideMode === "linked" ? sidesLoading : joinDiagLoading && !joinDiag;
+  const probeLoading = joinDiagLoading && !joinDiag;
+  const leftPanelLoading =
+    sideMode === "linked" ? leftSideLoading : probeLoading;
+  const rightPanelLoading =
+    sideMode === "linked" ? rightSideLoading : probeLoading;
 
   const nearMissCount = nearMiss?.hypotheses.length ?? 0;
   const showNearMissChrome =
@@ -1191,7 +1206,7 @@ function JoinLensImpl({
         rows={leftRows}
         visibleIndices={visibleLeft}
         keyNames={leftOn}
-        loading={sideLoading}
+        loading={leftPanelLoading}
         search={searchLeft}
         onSearch={setSearchLeft}
         selectedIndex={leftSel}
@@ -1530,7 +1545,7 @@ function JoinLensImpl({
         rows={rightRows}
         visibleIndices={visibleRight}
         keyNames={rightOn}
-        loading={sideLoading}
+        loading={rightPanelLoading}
         search={searchRight}
         onSearch={setSearchRight}
         selectedIndex={rightSel}

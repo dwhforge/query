@@ -1371,14 +1371,16 @@ function JoinLensImpl({
       .join(" · ");
   }
 
+  /** One string per Join ON column (same length/order). NULL/empty → "". */
   function keyValsFor(side: JoinKeySide, rowIndex: number): string[] {
     const row = side === "left" ? leftRows[rowIndex] : rightRows[rowIndex];
     const cols = side === "left" ? leftCols : rightCols;
     const keys = side === "left" ? leftOn : rightOn;
     if (!row) return [];
-    return keyValuesFromRow(row, cols, keys)
-      .map((v) => cellStr(v))
-      .filter((v) => v.trim());
+    return keyValuesFromRow(row, cols, keys).map((v) => {
+      const s = cellStr(v);
+      return s === "∅" ? "" : s;
+    });
   }
 
   /** Keep the center result row on this join key after it leaves No match lists. */
@@ -1398,8 +1400,10 @@ function JoinLensImpl({
   function emitMapKey(side: JoinKeySide, rowIndex: number) {
     if (!onMapKey) return;
     const vals = keyValsFor(side, rowIndex);
-    if (!vals.length) return;
-    const fromLabel = vals.join(" · ");
+    if (!vals.some((v) => v.trim())) return;
+    const fromLabel = vals
+      .map((v) => v.trim() || "∅")
+      .join(" · ");
     if (side === "left") pinCenterToFromKey(fromLabel);
     onMapKey(side, vals);
     const toast = `Opened KeyMap · from=${fromLabel}`;
@@ -1414,10 +1418,13 @@ function JoinLensImpl({
     if (!onMapKey || leftSel == null || rightSel == null) return;
     const fromVals = keyValsFor("left", leftSel);
     const toVals = keyValsFor("right", rightSel);
-    if (!fromVals.length || !toVals.length) return;
-    pinCenterToFromKey(fromVals.join(" · "));
+    if (!fromVals.some((v) => v.trim()) || !toVals.some((v) => v.trim())) {
+      return;
+    }
+    const fromLabel = fromVals.map((v) => v.trim() || "∅").join(" · ");
+    pinCenterToFromKey(fromLabel);
     onMapKey("left", fromVals, { toValues: toVals });
-    const toast = `Opened KeyMap · ${fromVals.join(" · ")} → ${toVals.join(" · ")}`;
+    const toast = `Opened KeyMap · ${fromLabel} → ${toVals.map((v) => v.trim() || "∅").join(" · ")}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1425,9 +1432,13 @@ function JoinLensImpl({
   }
 
   function openFindRight(parts: string[] | null | undefined) {
-    const clean = (parts ?? []).map((p) => p.trim()).filter(Boolean);
-    if (!clean.length) return;
-    setFindRightParts(clean);
+    // Keep length/order aligned to Join ON — do not drop empty slots (index = column).
+    const aligned = (parts ?? []).map((p) => {
+      const t = p.trim();
+      return t === "∅" ? "" : t;
+    });
+    if (!aligned.some((p) => p.trim())) return;
+    setFindRightParts(aligned);
   }
 
   function acceptFindRight(
@@ -1440,14 +1451,14 @@ function JoinLensImpl({
     },
   ) {
     if (!onMapKey) return;
-    // `from` / fromParts are already the selected field value(s), not the UI label.
-    const parts = (opts?.fromParts?.length ? opts.fromParts : [from]).filter(
-      (p) => p.trim(),
+    // Selected field value(s) only — already index-aligned at Accept time.
+    const parts = (opts?.fromParts?.length ? opts.fromParts : [from]).map(
+      (p) => (p.trim() === "∅" ? "" : p.trim()),
     );
-    if (!parts.length) return;
-    const fromLabel = parts.join(" · ");
+    if (!parts.some((p) => p.trim())) return;
+    const fromLabel = parts.map((v) => v.trim() || "∅").join(" · ");
     pinCenterToFromKey(fromLabel);
-    onMapKey("left", parts.length === 1 ? [parts[0]!] : [fromLabel], {
+    onMapKey("left", parts.length === 1 ? [parts[0]!] : parts, {
       toValues: [to],
       fromParts: [parts],
       applyColumns: opts?.applyColumns,
@@ -1551,12 +1562,16 @@ function JoinLensImpl({
   const centerFromParts = useMemo(() => {
     const row = rows[activeIndex];
     if (!row || leftOn.length === 0) return null;
-    const vals = keyValuesFromRow(row, columns, leftOn)
-      .map((v) => cellStr(v))
-      .filter((v) => v.trim() && v !== "∅");
-    return vals.length ? vals : null;
+    // Aligned to leftOn — empty string for NULL (do not filter; Find Right uses column index).
+    const vals = keyValuesFromRow(row, columns, leftOn).map((v) => {
+      const s = cellStr(v);
+      return s === "∅" ? "" : s;
+    });
+    return vals.some((v) => v.trim()) ? vals : null;
   }, [rows, activeIndex, columns, leftOn]);
-  const centerFromKey = centerFromParts?.join(" · ") ?? null;
+  const centerFromKey = centerFromParts
+    ? centerFromParts.map((v) => v.trim() || "∅").join(" · ")
+    : null;
 
   const statusLine = (() => {
     if (sideMode === "linked") {

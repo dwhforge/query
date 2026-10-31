@@ -108,7 +108,7 @@ export function FindRightDialog({
     },
   ) => void;
 }) {
-  const fromDisplay = fromParts.join(" · ");
+  const fromDisplay = fromParts.map((p) => p.trim() || "∅").join(" · ");
   const [report, setReport] = useState<JoinKeyFuzzySuggest | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,12 +151,15 @@ export function FindRightDialog({
 
   /** Value used for fuzzy/LLM match = selected Join field, else sole part. */
   const fromMatchValue = useMemo(() => {
-    if (keyIndex != null && fromParts[keyIndex] != null) {
-      return fromParts[keyIndex]!;
+    if (keyIndex != null) {
+      return (fromParts[keyIndex] ?? "").trim();
     }
-    if (fromParts.length === 1) return fromParts[0]!;
+    if (fromParts.length === 1) return (fromParts[0] ?? "").trim();
     return fromDisplay;
   }, [keyIndex, fromParts, fromDisplay]);
+
+  const selectedFromEmpty =
+    keyIndex != null && !(fromParts[keyIndex] ?? "").trim();
 
   useEffect(() => {
     if (!open || !fromParts.length) return;
@@ -184,18 +187,20 @@ export function FindRightDialog({
         if (cancelled) return;
         setReport(r);
         const matchFrom =
-          keyIndex != null && fromParts[keyIndex] != null
-            ? fromParts[keyIndex]!
+          keyIndex != null
+            ? (fromParts[keyIndex] ?? "").trim()
             : fromParts.length === 1
-              ? fromParts[0]!
+              ? (fromParts[0] ?? "").trim()
               : fromDisplay;
-        const forKey = r.suggestions.filter((p) => p.from_key === matchFrom);
+        const forKey = matchFrom
+          ? r.suggestions.filter((p) => p.from_key === matchFrom)
+          : [];
         const hit = forKey.find((p) => !p.ambiguous);
         if (hit) setPicked(hit.to_key);
         setLoading(false);
 
         // No fuzzy hit → fall through to LLM immediately.
-        if (!r.disabled_reason && forKey.length === 0) {
+        if (!r.disabled_reason && matchFrom && forKey.length === 0) {
           await runLlm(r, matchFrom, {
             cancelled: () => cancelled,
             setBusy: setLlmBusy,
@@ -383,24 +388,36 @@ export function FindRightDialog({
                   <span className="w-full text-[10px] text-slate-500">
                     Apply KeyMap on Join key:
                   </span>
-                  {report.left_on.map((col, i) => (
-                    <button
-                      key={`ok-${col}-${i}`}
-                      type="button"
-                      onClick={() => setKeyIndex(i)}
-                      className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
-                        keyIndex === i
-                          ? "border-teal-600 bg-teal-950/40 text-teal-100"
-                          : "border-slate-700 text-slate-300 hover:border-teal-800 hover:text-teal-100"
-                      }`}
-                    >
-                      {col}
-                      <span className="text-slate-500">
-                        {" "}
-                        ↔ {report.right_on[i] ?? "?"}
-                      </span>
-                    </button>
-                  ))}
+                  {report.left_on.map((col, i) => {
+                    const partEmpty = !(fromParts[i] ?? "").trim();
+                    return (
+                      <button
+                        key={`ok-${col}-${i}`}
+                        type="button"
+                        onClick={() => setKeyIndex(i)}
+                        className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                          keyIndex === i
+                            ? "border-teal-600 bg-teal-950/40 text-teal-100"
+                            : "border-slate-700 text-slate-300 hover:border-teal-800 hover:text-teal-100"
+                        }`}
+                      >
+                        {col}
+                        <span className="text-slate-500">
+                          {" "}
+                          ↔ {report.right_on[i] ?? "?"}
+                        </span>
+                        {partEmpty && (
+                          <span className="ml-1 text-rose-300/80">∅</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {selectedFromEmpty && (
+                    <span className="w-full text-[10px] text-rose-300/80">
+                      Selected Join key is empty on this row — pick another
+                      column.
+                    </span>
+                  )}
                 </div>
               )}
               <section>
@@ -535,17 +552,20 @@ export function FindRightDialog({
           </button>
           <button
             type="button"
-            disabled={!picked}
+            disabled={!picked || selectedFromEmpty || !fromMatchValue}
             onClick={() => {
-              if (!picked) return;
+              if (!picked || selectedFromEmpty) return;
               const leftOn = report?.left_on ?? [];
+              // Per-column: value at Join ON index (aligned parts — empty slots kept).
               const selectedParts =
-                keyIndex != null && fromParts[keyIndex] != null
-                  ? [fromParts[keyIndex]!]
+                keyIndex != null
+                  ? [(fromParts[keyIndex] ?? "").trim()]
                   : fromParts.length === 1
-                    ? [fromParts[0]!]
-                    : fromParts;
-              const fromVal = selectedParts[0] ?? fromDisplay;
+                    ? [(fromParts[0] ?? "").trim()]
+                    : fromParts.map((p) => p.trim());
+              if (!selectedParts.some((p) => p.trim())) return;
+              const fromVal = selectedParts[0] ?? "";
+              if (!fromVal.trim() && keyIndex != null) return;
               const applyOpts =
                 keyIndex != null && leftOn[keyIndex]
                   ? {
@@ -560,7 +580,7 @@ export function FindRightDialog({
                         fromParts: selectedParts,
                       }
                     : { fromParts: selectedParts };
-              onAccept(fromVal, picked, applyOpts);
+              onAccept(fromVal || fromDisplay, picked, applyOpts);
               onClose();
             }}
             className="rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35 disabled:opacity-40"

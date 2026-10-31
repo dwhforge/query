@@ -169,5 +169,6 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           DIR=$(ls -d dist-portable/dwhforge-query-*-electron-windows-x64 | head -1)
           OUT="${DIR}.zip"
-          (cd dist-portable && zip -r "$(basename "$OUT")" "$(basename "$DIR")")
+          # windows-latest has no zip(1); tar -a builds a .zip
+          tar.exe -a -c -f "$OUT" -C dist-portable "$(basename "$DIR")"
           gh release upload "$TAG" "$OUT" --clobber --repo "${{ github.repository }}"

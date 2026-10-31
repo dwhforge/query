@@ -2,6 +2,9 @@ import type { KeyMapEntry } from "../types/pipeline";
 import type { KeyMapDirtyBaseline, KeyMapDirtyDelta } from "./bridge";
 import { fromPartsEff, tupleKey } from "./keyMap";
 
+/** Editor-only marker: stable across empty→filled From/To before Save. */
+export type EditorKeyMapEntry = KeyMapEntry & { __dwhLocalId?: string };
+
 function snapshotEntry(entry: KeyMapEntry): KeyMapEntry {
   const parts = fromPartsEff(entry).map((p) => p.trim());
   return {
@@ -24,6 +27,20 @@ function partsFromKey(key: string): string[] {
   return [key];
 }
 
+function newLocalId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `new-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Attach a stable local id (insert tracking) without clobbering an existing one. */
+export function withLocalId(entry: KeyMapEntry, id = newLocalId()): EditorKeyMapEntry {
+  const e = entry as EditorKeyMapEntry;
+  if (e.__dwhLocalId) return e;
+  return { ...entry, __dwhLocalId: id };
+}
+
 /** Session dirty buffer for source KeyMap edits (ADR-0022 / ADR-0024). */
 export class KeyMapDirtyBuffer {
   private upserts = new Map<string, KeyMapEntry>();
@@ -33,38 +50,77 @@ export class KeyMapDirtyBuffer {
    * Frozen until clear — page navigation must not refresh this.
    */
   private baselines = new Map<string, KeyMapEntry | null>();
+  /**
+   * Local row ids marked as inserts at add-time, independent of From/To validity.
+   * Prevents empty→filled drafts from being treated as warehouse baselines.
+   */
+  private insertIds = new Set<string>();
 
   clear() {
     this.upserts.clear();
     this.deleted.clear();
     this.baselines.clear();
+    this.insertIds.clear();
+  }
+
+  /** Call when the user adds a blank/suggested row that is not yet in the warehouse. */
+  markInsert(localId: string) {
+    if (localId) this.insertIds.add(localId);
+  }
+
+  isInsert(localId: string | undefined | null): boolean {
+    return !!localId && this.insertIds.has(localId);
   }
 
   /**
    * @param baseline Warehouse (or prior) row before this session's first edit.
    *   `null` = insert (row must be absent). Omit to leave an existing baseline alone;
    *   if no baseline yet and omitted, treated as insert (`null`).
+   * @param localId Editor row id — when marked via `markInsert`, forces insert baseline.
    */
-  noteUpsert(entry: KeyMapEntry, baseline?: KeyMapEntry | null) {
+  noteUpsert(
+    entry: KeyMapEntry,
+    baseline?: KeyMapEntry | null,
+    localId?: string,
+  ) {
     const parts = fromPartsEff(entry).map((p) => p.trim());
     if (!parts.length || parts.some((p) => !p)) return;
     const key = tupleKey(parts);
     this.deleted.delete(key);
+    const forceInsert = this.isInsert(localId);
     if (!this.baselines.has(key)) {
       this.baselines.set(
         key,
-        baseline === undefined || baseline === null
+        forceInsert || baseline === undefined || baseline === null
           ? null
           : snapshotEntry(baseline),
       );
+    } else if (forceInsert) {
+      // Insert marker wins over a mistaken draft snapshot from an earlier path.
+      this.baselines.set(key, null);
     }
     this.upserts.set(key, snapshotEntry(entry));
   }
 
-  noteDelete(partsOrFrom: string | string[], baseline?: KeyMapEntry) {
+  noteDelete(
+    partsOrFrom: string | string[],
+    baseline?: KeyMapEntry,
+    localId?: string,
+  ) {
     const parts = (
       Array.isArray(partsOrFrom) ? partsOrFrom : [partsOrFrom]
     ).map((p) => p.trim());
+    if (this.isInsert(localId)) {
+      // Never existed in WH — drop local dirty only.
+      if (parts.length && parts.every(Boolean)) {
+        const key = tupleKey(parts);
+        this.upserts.delete(key);
+        this.baselines.delete(key);
+        this.deleted.delete(key);
+      }
+      this.insertIds.delete(localId!);
+      return;
+    }
     if (!parts.length || parts.some((p) => !p)) return;
     const key = tupleKey(parts);
     this.upserts.delete(key);
@@ -82,17 +138,34 @@ export class KeyMapDirtyBuffer {
   }
 
   /** From tuple renamed: treat old as delete, new as upsert. */
-  noteRename(oldParts: string[], entry: KeyMapEntry, oldRow?: KeyMapEntry) {
+  noteRename(
+    oldParts: string[],
+    entry: KeyMapEntry,
+    oldRow?: KeyMapEntry,
+    localId?: string,
+  ) {
     const prev = oldParts.map((p) => p.trim());
     const next = fromPartsEff(entry).map((p) => p.trim());
+    const forceInsert = this.isInsert(localId);
     if (
       prev.length &&
       prev.every(Boolean) &&
       tupleKey(prev) !== tupleKey(next)
     ) {
-      this.noteDelete(prev, oldRow);
+      const oldKey = tupleKey(prev);
+      // Inserts (marked or baseline null) never existed in WH — retract only.
+      const oldWasInsert =
+        forceInsert ||
+        (this.baselines.has(oldKey) && this.baselines.get(oldKey) === null);
+      if (oldWasInsert) {
+        this.upserts.delete(oldKey);
+        this.baselines.delete(oldKey);
+        this.deleted.delete(oldKey);
+      } else {
+        this.noteDelete(prev, oldRow, localId);
+      }
     }
-    this.noteUpsert(entry, null);
+    this.noteUpsert(entry, null, localId);
   }
 
   isEmpty() {

@@ -29,6 +29,8 @@ import {
   applyDirtyToPage,
   KeyMapDirtyBuffer,
   KEYMAP_PAGE_SIZE,
+  withLocalId,
+  type EditorKeyMapEntry,
 } from "../lib/keyMapDirty";
 import {
   KeyMapBindWizard,
@@ -373,7 +375,9 @@ export function KeyMapEditor({
         const old = map.entries.find(
           (x) => tupleKey(fromPartsEff(x)) === key,
         );
-        dirtyRef.current.noteUpsert(e, old ?? null);
+        const localId = (e as EditorKeyMapEntry).__dwhLocalId;
+        const isNew = dirtyRef.current.isInsert(localId) || !old;
+        dirtyRef.current.noteUpsert(e, isNew ? null : old, localId);
       }
       bumpDirty();
     }
@@ -381,15 +385,17 @@ export function KeyMapEditor({
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
-    const prev = map.entries[index];
+    const prev = map.entries[index] as EditorKeyMapEntry | undefined;
     if (!prev) return;
-    const merged: KeyMapEntry = {
+    const localId = prev.__dwhLocalId;
+    const merged: EditorKeyMapEntry = {
       ...prev,
       ...patch,
       attrs:
         patch.attrs !== undefined
           ? patch.attrs
           : prev.attrs,
+      ...(localId ? { __dwhLocalId: localId } : {}),
     };
     if (patch.attrs === undefined && prev.attrs) {
       merged.attrs = { ...prev.attrs };
@@ -405,10 +411,11 @@ export function KeyMapEditor({
     if (isSource) {
       const prevParts = fromPartsEff(prev);
       const nextParts = fromPartsEff(merged);
+      const isNew = dirtyRef.current.isInsert(localId);
       if (tupleKey(prevParts) !== tupleKey(nextParts)) {
-        dirtyRef.current.noteRename(prevParts, merged, prev);
+        dirtyRef.current.noteRename(prevParts, merged, prev, localId);
       } else {
-        dirtyRef.current.noteUpsert(merged, prev);
+        dirtyRef.current.noteUpsert(merged, isNew ? null : prev, localId);
       }
       bumpDirty();
     }
@@ -430,7 +437,7 @@ export function KeyMapEditor({
         : from
           ? [from]
           : Array.from({ length: arity }, () => "");
-    const entry: KeyMapEntry = {
+    let entry: EditorKeyMapEntry = {
       from: parts[0] ?? "",
       from_parts: parts,
       to,
@@ -439,16 +446,22 @@ export function KeyMapEditor({
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
     }
     if (isSource) {
-      dirtyRef.current.noteUpsert(entry, null);
+      entry = withLocalId(entry);
+      dirtyRef.current.markInsert(entry.__dwhLocalId!);
+      dirtyRef.current.noteUpsert(entry, null, entry.__dwhLocalId);
       bumpDirty();
     }
     setEntries([...map.entries, entry]);
   }
 
   function deleteRow(index: number) {
-    const prev = map.entries[index];
+    const prev = map.entries[index] as EditorKeyMapEntry | undefined;
     if (isSource && prev) {
-      dirtyRef.current.noteDelete(fromPartsEff(prev), prev);
+      dirtyRef.current.noteDelete(
+        fromPartsEff(prev),
+        prev,
+        prev.__dwhLocalId,
+      );
       bumpDirty();
     }
     setEntries(map.entries.filter((_, j) => j !== index));
@@ -463,11 +476,15 @@ export function KeyMapEditor({
     const extra = fromTuples
       .map((parts) => parts.map((p) => p.trim()))
       .filter((parts) => parts.every(Boolean) && !have.has(tupleKey(parts)))
-      .map((parts) => ({
-        from: parts[0]!,
-        from_parts: parts,
-        to: "",
-      }));
+      .map((parts) => {
+        const row = withLocalId({
+          from: parts[0]!,
+          from_parts: parts,
+          to: "",
+        });
+        if (isSource) dirtyRef.current.markInsert(row.__dwhLocalId!);
+        return row;
+      });
     if (extra.length) setEntries([...map.entries, ...extra], { trackAll: true });
   }
 

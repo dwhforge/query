@@ -7,7 +7,7 @@ use duckdb::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -170,8 +170,12 @@ fn entry_to_matches(baseline: &KeyMapDirtyBaseline, row: &KeyMapEntry) -> bool {
     true
 }
 
-/// Point-read one From tuple (LIMIT 1) — used for row-level conflict checks.
-fn read_one_on_conn(
+fn baseline_tuple_key(parts: &[String]) -> String {
+    parts.join("\0")
+}
+
+/// Batch-read current warehouse rows for a set of From tuples (one IN query per chunk).
+fn read_baselines_batch_on_conn(
     conn: &duckdb::Connection,
     alias: &str,
     schema: &str,
@@ -179,8 +183,12 @@ fn read_one_on_conn(
     from_columns: &[String],
     to_column: &str,
     editable: &[String],
-    from_parts: &[String],
-) -> Result<Option<KeyMapEntry>, String> {
+    tuples: &[Vec<String>],
+) -> Result<HashMap<String, KeyMapEntry>, String> {
+    let mut out = HashMap::with_capacity(tuples.len());
+    if tuples.is_empty() {
+        return Ok(out);
+    }
     let q_froms: Vec<String> = from_columns.iter().map(|c| quote_ident(c)).collect();
     let q_to = quote_ident(to_column);
     let rel = format!(
@@ -196,46 +204,75 @@ fn read_one_on_conn(
     for c in editable {
         select_cols.push(format!("CAST({} AS VARCHAR)", quote_ident(c)));
     }
-    let pred: String = q_froms
-        .iter()
-        .enumerate()
-        .map(|(i, q)| {
-            format!(
-                "CAST({q} AS VARCHAR) = '{}'",
-                escape_sql_string(from_parts.get(i).map(|s| s.as_str()).unwrap_or(""))
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let sql = format!(
-        "SELECT {} FROM {rel} WHERE {pred} LIMIT 1",
-        select_cols.join(", ")
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("baseline read {schema}.{table}: {e}"))?;
-    let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
-    let Some(row) = rows.next().map_err(|e| e.to_string())? else {
-        return Ok(None);
-    };
     let n_from = from_columns.len();
-    let mut parts = Vec::with_capacity(n_from);
-    for i in 0..n_from {
-        parts.push(row.get::<_, String>(i).map_err(|e| e.to_string())?);
-    }
-    let to: String = row.get(n_from).map_err(|e| e.to_string())?;
-    let mut attrs = BTreeMap::new();
-    for (i, c) in editable.iter().enumerate() {
-        if let Ok(val) = row.get::<_, String>(n_from + 1 + i) {
-            attrs.insert(c.clone(), val);
+    // Keep IN-lists bounded for query size / planner (fuzzy Save can be 100K keys).
+    const CHUNK: usize = 2_000;
+    for chunk in tuples.chunks(CHUNK) {
+        let cast_tuple: String = q_froms
+            .iter()
+            .map(|q| format!("CAST({q} AS VARCHAR)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pred = if n_from == 1 {
+            let list = chunk
+                .iter()
+                .map(|p| {
+                    format!(
+                        "'{}'",
+                        escape_sql_string(p.first().map(|s| s.as_str()).unwrap_or(""))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{cast_tuple} IN ({list})")
+        } else {
+            let values: String = chunk
+                .iter()
+                .map(|parts| {
+                    let cells: String = parts
+                        .iter()
+                        .map(|p| format!("'{}'", escape_sql_string(p)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({cells})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({cast_tuple}) IN ({values})")
+        };
+        let sql = format!(
+            "SELECT {} FROM {rel} WHERE {pred}",
+            select_cols.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("baseline batch read {schema}.{table}: {e}"))?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let mut parts = Vec::with_capacity(n_from);
+            for i in 0..n_from {
+                parts.push(row.get::<_, String>(i).map_err(|e| e.to_string())?);
+            }
+            let to: String = row.get(n_from).map_err(|e| e.to_string())?;
+            let mut attrs = BTreeMap::new();
+            for (i, c) in editable.iter().enumerate() {
+                if let Ok(val) = row.get::<_, String>(n_from + 1 + i) {
+                    attrs.insert(c.clone(), val);
+                }
+            }
+            let key = baseline_tuple_key(&parts);
+            out.insert(
+                key,
+                KeyMapEntry {
+                    from: parts.first().cloned().unwrap_or_default(),
+                    from_parts: parts,
+                    to,
+                    attrs,
+                },
+            );
         }
     }
-    Ok(Some(KeyMapEntry {
-        from: parts.first().cloned().unwrap_or_default(),
-        from_parts: parts,
-        to,
-        attrs,
-    }))
+    Ok(out)
 }
 
 fn verify_baselines_on_conn(
@@ -248,6 +285,7 @@ fn verify_baselines_on_conn(
     editable: &[String],
     baselines: &[KeyMapDirtyBaseline],
 ) -> Result<(), String> {
+    let mut tuples: Vec<Vec<String>> = Vec::with_capacity(baselines.len());
     for b in baselines {
         let parts: Vec<String> = b
             .from_parts
@@ -260,17 +298,21 @@ fn verify_baselines_on_conn(
                 from_columns.len()
             ));
         }
-        let current = read_one_on_conn(
-            conn,
-            alias,
-            schema,
-            table,
-            from_columns,
-            to_column,
-            editable,
-            &parts,
-        )?;
-        match (b.existed, current.as_ref()) {
+        tuples.push(parts);
+    }
+    let found = read_baselines_batch_on_conn(
+        conn,
+        alias,
+        schema,
+        table,
+        from_columns,
+        to_column,
+        editable,
+        &tuples,
+    )?;
+    for (b, parts) in baselines.iter().zip(tuples.iter()) {
+        let current = found.get(&baseline_tuple_key(parts));
+        match (b.existed, current) {
             (false, Some(_)) => {
                 return Err(format!(
                     "refused: KeyMap row {parts:?} was created concurrently"

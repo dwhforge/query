@@ -4,11 +4,12 @@
 //! and cache by fingerprint. Server caps batch size and matches per side.
 
 use crate::arrow_json::{array_value_to_json, map_arrow_type};
+use crate::compile::compile_ctes_from;
 use crate::preview::ColumnMetadata;
 use crate::session::DbSession;
 use dwh_pipeline::{
     ascii_fold_name, cte_name, emit_transform_step, escape_sql_string, quote_ident, ConnectionDef,
-    GraphCompiler, TransformationStep, WarehouseDialect, Workspace,
+    TransformationStep, WarehouseDialect, Workspace,
 };
 use duckdb::arrow::array::*;
 use duckdb::arrow::datatypes::DataType;
@@ -108,10 +109,8 @@ pub fn explain_join_rows(
                 offs.len()
             ));
         }
-        let compiled = GraphCompiler::new(&resolved)
-            .with_sources(sources)
-            .with_connections(connections)
-            .compile_ctes_from(host_query_id)?;
+        let compiled =
+            compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
         Some(resolve_preview_offsets(
             db,
             &compiled.definitions,
@@ -188,10 +187,8 @@ pub fn explain_join_rows(
         cte_name(right_query_id, rq.steps.len() - 1)
     };
 
-    let compiled = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .with_connections(connections)
-        .compile_ctes_from(host_query_id)?;
+    let compiled =
+        compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
     let batch_sql = values_batch_sql(&batch_refs, left_on.len())?;
     let left_on_join = left_on
         .iter()
@@ -1215,10 +1212,8 @@ fn join_key_context(
                 j.to_string(),
             )
         } else {
-            let compiled = GraphCompiler::new(&resolved)
-                .with_sources(sources)
-                .with_connections(connections)
-                .compile_ctes_from(host_query_id)?;
+            let compiled =
+                compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
             (
                 compiled,
                 cte_name(host_query_id, join_step_index - 1),

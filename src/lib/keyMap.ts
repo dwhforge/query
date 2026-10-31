@@ -296,10 +296,15 @@ export function applyKeyMapToWorkspace(
   map: KeyMapDef,
   columnsLeft?: string[],
   columnsRight?: string[],
-  outputColumn?: string,
+  outputColumnLeft?: string,
+  outputColumnRight?: string,
 ): Workspace {
   const leftCols = columnsLeft?.length ? columnsLeft : [columnLeft];
   const rightCols = columnsRight?.length ? columnsRight : [columnRight];
+  const outLeft =
+    outputColumnLeft?.trim() || leftCols[0];
+  const outRight =
+    outputColumnRight?.trim() || rightCols[0];
   const queries = workspace.queries.map((q) => {
     if (side !== "right" && q.id === hostQueryId) {
       return {
@@ -309,7 +314,7 @@ export function applyKeyMapToWorkspace(
           joinStepIndex,
           leftCols,
           map,
-          outputColumn,
+          outLeft,
         ),
       };
     }
@@ -321,7 +326,7 @@ export function applyKeyMapToWorkspace(
           q.steps.length,
           rightCols,
           map,
-          outputColumn,
+          outRight,
         ),
       };
     }

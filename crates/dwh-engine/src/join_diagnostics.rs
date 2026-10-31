@@ -4,11 +4,10 @@
 //! (default 50) and labeled separately — a clean sample is not full-input proof.
 
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
+use crate::compile::compile_ctes_from;
 use crate::preview::{ColumnMetadata, PreviewResult};
 use crate::session::DbSession;
-use dwh_pipeline::{
-    cte_name, quote_ident, ConnectionDef, GraphCompiler, TransformationStep, Workspace,
-};
+use dwh_pipeline::{cte_name, quote_ident, ConnectionDef, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::params;
 use serde::{Deserialize, Serialize};
@@ -152,10 +151,8 @@ pub fn join_diagnostics_with_limit(
             Box::new(move |body: &str| format!("WITH \n{defs}\n{body}")),
         )
     } else {
-        let compiled = GraphCompiler::new(&resolved)
-            .with_sources(sources)
-            .with_connections(connections)
-            .compile_ctes_from(host_query_id)?;
+        let compiled =
+            compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
         (
             left_cte_full,
             right_cte_full,
@@ -493,5 +490,73 @@ mod tests {
         assert_eq!(diag.right_dup_key_group_count, 1); // id=1 duplicated
         assert_eq!(diag.unmatched_left.sample_rows, 1);
         assert!(!diag.fanout_pairs.rows.is_empty());
+    }
+
+    #[test]
+    fn apply_keymap_overwrite_matches_preview_and_diagnostics() {
+        use dwh_pipeline::{KeyMapDef, KeyMapEntry, JoinType};
+        // Left has canonical=OLD; ApplyKeyMap rewrites to NEW; Join ON canonical → right.NEW.
+        // Without schemas, emit would append canonical_1 and Join would still see OLD → unmatched.
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "right".into(),
+                    name: "right".into(),
+                    steps: vec![TransformationStep::SqlModel {
+                        raw_sql: "select * from (values ('NEW')) t(canonical)".into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "left".into(),
+                    name: "left".into(),
+                    steps: vec![
+                        TransformationStep::SqlModel {
+                            raw_sql: "select * from (values ('x', 'OLD')) t(ext, canonical)"
+                                .into(),
+                        },
+                        TransformationStep::ApplyKeyMap {
+                            column: "ext".into(),
+                            columns: vec!["ext".into()],
+                            output_column: Some("canonical".into()),
+                            map_id: "m".into(),
+                            entries: vec![KeyMapEntry::pair("x", "NEW")],
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "right".into(),
+                            join_type: JoinType::Left,
+                            left_on: vec!["canonical".into()],
+                            right_on: vec!["canonical".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "left".into(),
+            key_maps: vec![{
+                let mut m = KeyMapDef::new("m", "m");
+                m.entries = vec![KeyMapEntry::pair("x", "NEW")];
+                m
+            }],
+        };
+
+        let db = DbSession::new().expect("duckdb");
+        let preview = crate::preview::preview_workspace(&db, &ws, &[], &[]).expect("preview");
+        assert_eq!(preview.rows.len(), 1, "preview should match after ApplyKeyMap");
+        let canon_i = preview
+            .columns
+            .iter()
+            .position(|c| c.name == "canonical")
+            .expect("canonical");
+        assert!(
+            !preview.columns.iter().any(|c| c.name == "canonical_1"),
+            "must overwrite, not duplicate: {:?}",
+            preview.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        assert_eq!(preview.rows[0][canon_i], serde_json::json!("NEW"));
+
+        let diag = join_diagnostics(&db, &ws, &[], &[], "left", 2).expect("diag");
+        assert_eq!(diag.unmatched_left_count, 0, "diagnostics must see rewritten key");
+        assert_eq!(diag.output_count, 1);
     }
 }

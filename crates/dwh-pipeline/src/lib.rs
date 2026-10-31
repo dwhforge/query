@@ -50,7 +50,10 @@ pub use key_map_sync::{
     push_key_map_to_export, remove_key_map_from_export, sync_key_maps_from_export,
     KeyMapSyncResult, KEYMAP_CONFLICT_DIR,
 };
-pub use schema::{apply_step_schema, infer_workspace_schemas, StepSchema, WorkspaceSchemas};
+pub use schema::{
+    apply_step_schema, infer_workspace_schemas, infer_workspace_schemas_ex, StepSchema,
+    WorkspaceSchemas,
+};
 pub use postgres_attach::{
     duckdb_file_attach_alias, duckdb_postgres_relation, postgres_attach_alias,
 };

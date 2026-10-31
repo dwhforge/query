@@ -196,8 +196,10 @@ type KeyMapTabSession = {
     /** Fact columns for ApplyKeyMap (selected Join keys, ADR-0024). */
     applyLeftOn?: string[];
     applyRightOn?: string[];
-    /** Output column for ApplyKeyMap (overwrite or new). */
-    outputColumn?: string;
+    /** Output column on the left (host) ApplyKeyMap. */
+    outputColumnLeft?: string;
+    /** Output column on the right ApplyKeyMap (may differ, e.g. sku vs item_code). */
+    outputColumnRight?: string;
   };
 };
 
@@ -2644,17 +2646,11 @@ function App() {
     const toValues = opts?.toValues;
     const fromParts = opts?.fromParts;
     const tupleArity = fromParts?.find((p) => p.length)?.length ?? 0;
+    // Always left-oriented fact cols (Auto / Find Right pass leftOn names).
     const applyCols = (
       opts?.applyColumns?.filter((c) => c.trim()) ??
-      (tupleArity > 1
-        ? (side === "left" ? lensLeftOn : lensRightOn).slice(0, tupleArity)
-        : undefined)
+      (tupleArity > 1 ? lensLeftOn.slice(0, tupleArity) : undefined)
     )?.filter(Boolean);
-    const outputColumn =
-      opts?.outputColumn?.trim() ||
-      applyCols?.[0] ||
-      (side === "left" ? lensLeftOn[0] : lensRightOn[0]);
-
     const applyLeftOn =
       applyCols?.length ? applyCols : [lensLeftOn[0] ?? "key"];
     const applyRightOn = applyLeftOn.map((lc) => {
@@ -2663,6 +2659,17 @@ function App() {
       );
       return lensRightOn[idx >= 0 ? idx : 0] ?? lc;
     });
+
+    const outputColumnLeft =
+      opts?.outputColumn?.trim() || applyLeftOn[0] || lensLeftOn[0] || "key";
+    const outLeftIdx = applyLeftOn.findIndex(
+      (c) => c.toLowerCase() === outputColumnLeft.toLowerCase(),
+    );
+    const outputColumnRight =
+      applyRightOn[outLeftIdx >= 0 ? outLeftIdx : 0] ??
+      applyRightOn[0] ??
+      lensRightOn[0] ??
+      "key";
 
     const joinCtx = {
       hostQueryId,
@@ -2673,7 +2680,8 @@ function App() {
       probeSide: side,
       applyLeftOn,
       applyRightOn,
-      outputColumn,
+      outputColumnLeft,
+      outputColumnRight,
     };
     if (maps.length === 0) {
       const arity = applyLeftOn.length;
@@ -4083,8 +4091,17 @@ function App() {
                                       map.from_columns.length,
                                     )
                                   : [ctx.rightOn[0] ?? "key"];
-                            const outputColumn =
-                              ctx.outputColumn?.trim() || leftCols[0];
+                            const outputColumnLeft =
+                              ctx.outputColumnLeft?.trim() || leftCols[0];
+                            const outLeftIdx = leftCols.findIndex(
+                              (c) =>
+                                c.toLowerCase() ===
+                                outputColumnLeft.toLowerCase(),
+                            );
+                            const outputColumnRight =
+                              ctx.outputColumnRight?.trim() ||
+                              rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
+                              rightCols[0];
                             setProject((p) => ({
                               ...p,
                               workspace: applyKeyMapToWorkspace(
@@ -4104,7 +4121,8 @@ function App() {
                                 map,
                                 leftCols,
                                 rightCols,
-                                outputColumn,
+                                outputColumnLeft,
+                                outputColumnRight,
                               ),
                             }));
                             closeKeyMapTab(map.id);

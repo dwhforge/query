@@ -97,7 +97,11 @@ export function FindRightDialog({
   connections: ConnectionDef[];
   sources?: SourceDef[];
   onClose: () => void;
-  onAccept: (from: string, to: string) => void;
+  onAccept: (
+    from: string,
+    to: string,
+    opts?: { applyColumns?: string[]; outputColumn?: string },
+  ) => void;
 }) {
   const [report, setReport] = useState<JoinKeyFuzzySuggest | null>(null);
   const [loading, setLoading] = useState(false);
@@ -352,6 +356,31 @@ export function FindRightDialog({
 
           {!loading && report && !report.disabled_reason && (
             <>
+              {report.left_on.length > 1 && (
+                <div className="flex flex-wrap gap-1.5 rounded border border-slate-800 bg-slate-950/40 px-2 py-1.5">
+                  <span className="w-full text-[10px] text-slate-500">
+                    Apply KeyMap on Join key:
+                  </span>
+                  {report.left_on.map((col, i) => (
+                    <button
+                      key={`ok-${col}-${i}`}
+                      type="button"
+                      onClick={() => setKeyIndex(i)}
+                      className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                        keyIndex === i
+                          ? "border-teal-600 bg-teal-950/40 text-teal-100"
+                          : "border-slate-700 text-slate-300 hover:border-teal-800 hover:text-teal-100"
+                      }`}
+                    >
+                      {col}
+                      <span className="text-slate-500">
+                        {" "}
+                        ↔ {report.right_on[i] ?? "?"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <section>
                 <div className="mb-1 flex items-center justify-between gap-2">
                   <h3 className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
@@ -487,7 +516,20 @@ export function FindRightDialog({
             disabled={!picked}
             onClick={() => {
               if (!picked) return;
-              onAccept(fromKey, picked);
+              const leftOn = report?.left_on ?? [];
+              const applyOpts =
+                keyIndex != null && leftOn[keyIndex]
+                  ? {
+                      applyColumns: [leftOn[keyIndex]!],
+                      outputColumn: leftOn[keyIndex]!,
+                    }
+                  : leftOn.length === 1
+                    ? {
+                        applyColumns: [leftOn[0]!],
+                        outputColumn: leftOn[0]!,
+                      }
+                    : undefined;
+              onAccept(fromKey, picked, applyOpts);
               onClose();
             }}
             className="rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35 disabled:opacity-40"

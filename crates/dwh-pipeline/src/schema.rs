@@ -39,6 +39,15 @@ pub fn infer_workspace_schemas(
     workspace: &Workspace,
     load_seeds: &HashMap<String, Vec<String>>,
 ) -> Result<WorkspaceSchemas, String> {
+    infer_workspace_schemas_ex(workspace, load_seeds, &HashMap::new())
+}
+
+/// Like [`infer_workspace_schemas`], plus live-described SqlModel column lists (engine preview).
+pub fn infer_workspace_schemas_ex(
+    workspace: &Workspace,
+    load_seeds: &HashMap<String, Vec<String>>,
+    sql_model_schemas: &HashMap<String, Vec<String>>,
+) -> Result<WorkspaceSchemas, String> {
     let order = topo_queries(workspace)?;
     let mut out = WorkspaceSchemas::default();
 
@@ -50,7 +59,15 @@ pub fn infer_workspace_schemas(
         let mut prev: StepSchema = None;
 
         for (idx, step) in query.steps.iter().enumerate() {
-            let next = apply_step_schema(step, prev.as_deref(), &out.query_out, load_seeds, &qid, idx)?;
+            let next = apply_step_schema_ex(
+                step,
+                prev.as_deref(),
+                &out.query_out,
+                load_seeds,
+                sql_model_schemas,
+                &qid,
+                idx,
+            )?;
             step_schemas.push(next.clone());
             prev = next;
         }
@@ -68,6 +85,26 @@ pub fn apply_step_schema(
     prev: Option<&[String]>,
     query_out: &HashMap<String, StepSchema>,
     load_seeds: &HashMap<String, Vec<String>>,
+    query_id: &str,
+    step_idx: usize,
+) -> Result<StepSchema, String> {
+    apply_step_schema_ex(
+        step,
+        prev,
+        query_out,
+        load_seeds,
+        &HashMap::new(),
+        query_id,
+        step_idx,
+    )
+}
+
+fn apply_step_schema_ex(
+    step: &TransformationStep,
+    prev: Option<&[String]>,
+    query_out: &HashMap<String, StepSchema>,
+    load_seeds: &HashMap<String, Vec<String>>,
+    sql_model_schemas: &HashMap<String, Vec<String>>,
     query_id: &str,
     step_idx: usize,
 ) -> Result<StepSchema, String> {
@@ -91,7 +128,9 @@ pub fn apply_step_schema(
             }
             Ok(query_out.get(dep).cloned().unwrap_or(None))
         }
-        TransformationStep::SqlModel { .. } => Ok(None),
+        TransformationStep::SqlModel { .. } => {
+            Ok(sql_model_schemas.get(query_id).cloned())
+        }
         TransformationStep::Filter { .. }
         | TransformationStep::SortBy { .. }
         | TransformationStep::Limit { .. }

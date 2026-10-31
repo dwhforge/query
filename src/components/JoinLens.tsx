@@ -1429,10 +1429,18 @@ function JoinLensImpl({
     setFindRightKey(from);
   }
 
-  function acceptFindRight(from: string, to: string) {
+  function acceptFindRight(
+    from: string,
+    to: string,
+    opts?: { applyColumns?: string[]; outputColumn?: string },
+  ) {
     if (!onMapKey) return;
     pinCenterToFromKey(from);
-    onMapKey("left", [from], { toValues: [to] });
+    onMapKey("left", [from], {
+      toValues: [to],
+      applyColumns: opts?.applyColumns,
+      outputColumn: opts?.outputColumn,
+    });
     const toast = `Opened KeyMap · ${from} → ${to}`;
     setMapToast(toast);
     window.setTimeout(() => {

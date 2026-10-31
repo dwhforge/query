@@ -1,12 +1,13 @@
 //! Query adapter for full KeyMap suggestions. DuckDB reads query results; Rust
 //! owns normalization, candidate retrieval, scoring and ambiguity decisions.
 
+use crate::compile::compile_ctes_from;
 use crate::key_match::{
     match_keys, normalize_label, CandidateSearch, FuzzyPair, KeyMatchOptions, MatchPolicy,
     MatchRecord,
 };
 use crate::DbSession;
-use dwh_pipeline::{cte_name, quote_ident, ConnectionDef, GraphCompiler, Workspace};
+use dwh_pipeline::{cte_name, quote_ident, ConnectionDef, Workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -48,8 +49,8 @@ pub fn key_map_fuzzy_suggest(
     options.validate()?;
     let started = Instant::now();
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let left_sql = input_sql(&resolved, connections, left)?;
-    let right_sql = input_sql(&resolved, connections, right)?;
+    let left_sql = input_sql(db, &resolved, connections, left)?;
+    let right_sql = input_sql(db, &resolved, connections, right)?;
     // One lock for both reads. Release it before the CPU-bound matching phase.
     let (left, right) = db.with_conn(|conn| {
         Ok((
@@ -77,6 +78,7 @@ pub fn key_map_fuzzy_suggest(
 }
 
 fn input_sql(
+    db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
     source: &KeyMapMatchSource,
@@ -93,9 +95,7 @@ fn input_sql(
         .len()
         .checked_sub(1)
         .ok_or_else(|| format!("Mapping query '{}' has no steps", source.query_id))?;
-    let compiled = GraphCompiler::new(workspace)
-        .with_connections(connections)
-        .compile_ctes_from(&source.query_id)?;
+    let compiled = compile_ctes_from(db, workspace, connections, &[], &source.query_id)?;
     Ok(compiled.wrap_select(&format!(
         "SELECT CAST({} AS VARCHAR), CAST({} AS VARCHAR) FROM {} LIMIT {}",
         quote_ident(&source.key_column),
@@ -195,7 +195,9 @@ mod tests {
             ]}], "focus_query_id":"dictionary"
         })).unwrap();
         let before = serde_json::to_value(&workspace).unwrap();
+        let db = DbSession::new().unwrap();
         let sql = input_sql(
+            &db,
             &workspace,
             &[],
             &KeyMapMatchSource {
@@ -205,8 +207,10 @@ mod tests {
             },
         )
         .unwrap();
-        let conn = duckdb::Connection::open_in_memory().unwrap();
-        assert_eq!(read_input(&conn, &sql, "From").unwrap()[0].key, "SKU");
+        let rows = db
+            .with_conn(|conn| read_input(conn, &sql, "From"))
+            .unwrap();
+        assert_eq!(rows[0].key, "SKU");
         assert_eq!(serde_json::to_value(&workspace).unwrap(), before);
     }
 }

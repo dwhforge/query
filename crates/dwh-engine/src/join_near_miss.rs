@@ -3,9 +3,10 @@
 //! Try deterministic normalizations; return only hypotheses that strictly increase
 //! distinct key overlap. Apply inserts [`NormalizeKey`] before Join — never auto-ON.
 
+use crate::compile::compile_ctes_from;
 use crate::session::DbSession;
 use dwh_pipeline::{
-    cte_name, normalize_key_column_expr, quote_ident, ConnectionDef, GraphCompiler, NormalizeOp,
+    cte_name, normalize_key_column_expr, quote_ident, ConnectionDef, NormalizeOp,
     TransformationStep, Workspace,
 };
 use duckdb::params;
@@ -115,10 +116,8 @@ pub fn join_key_near_miss(
                 Box::new(move |body: &str| format!("WITH \n{defs}\n{body}")),
             )
         } else {
-            let compiled = GraphCompiler::new(&resolved)
-                .with_sources(sources)
-                .with_connections(connections)
-                .compile_ctes_from(host_query_id)?;
+            let compiled =
+                compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
             (
                 left_cte_full,
                 right_cte_full,

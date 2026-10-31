@@ -418,17 +418,28 @@ fn emit_normalize_key(
     emit_overwrite_columns(dialect, prev, &overwrites, prev_columns)
 }
 
+/// Whether `output_column` already exists on the prior step.
+///
+/// - Known `prev_columns` → definitive membership check.
+/// - Unknown schema → only unambiguous when output is one of the Apply fact cols (overwrite).
+/// - Otherwise refuse: guessing "new" silently keeps the old value beside `*_1` duplicates.
 fn output_column_exists_on_prev(
     output_column: &str,
     fact_cols: &[String],
     prev_columns: Option<&[String]>,
-) -> bool {
+) -> Result<bool, String> {
     let fold = ascii_fold_name(output_column);
     if let Some(cols) = prev_columns {
-        return cols.iter().any(|c| ascii_fold_name(c) == fold);
+        return Ok(cols.iter().any(|c| ascii_fold_name(c) == fold));
     }
-    // Without schema: treat as overwrite only when output is one of the Apply fact cols.
-    fact_cols.iter().any(|c| ascii_fold_name(c) == fold)
+    if fact_cols.iter().any(|c| ascii_fold_name(c) == fold) {
+        return Ok(true);
+    }
+    Err(format!(
+        "ApplyKeyMap: cannot tell if output_column '{output_column}' already exists \
+         (prior step has no inferred schema, e.g. bare SqlModel). \
+         Overwrite a fact column, or ensure the prior schema is known."
+    ))
 }
 
 fn emit_apply_key_map(
@@ -446,7 +457,7 @@ fn emit_apply_key_map(
     let q_to = quote_ident(to_col);
     let n = fact_cols.len();
     debug_assert_eq!(n, from_cols.len());
-    let out_exists = output_column_exists_on_prev(output_column, fact_cols, prev_columns);
+    let out_exists = output_column_exists_on_prev(output_column, fact_cols, prev_columns)?;
 
     let map_sql = if let Some(rel) = seed_relation {
         format!("{rel} AS m")
@@ -1667,6 +1678,7 @@ mod tests {
                 "offer_sk".into(),
             ),
         );
+        let prev_cols = vec!["ext_offer_id".into(), "day".into()];
         let sql = emit_transform_step_ex(
             &step,
             "s0",
@@ -1674,6 +1686,7 @@ mod tests {
             WarehouseDialect::Duckdb,
             EmitSchemaOpts {
                 key_map_columns: Some(&cols),
+                prev_columns: Some(&prev_cols),
                 ..Default::default()
             },
         )
@@ -1685,6 +1698,30 @@ mod tests {
         assert!(sql.contains("t.*"), "{sql}");
         assert!(sql.contains("AS \"offer_sk\""), "{sql}");
         assert!(sql.contains("SK-SUMMER-A"), "{sql}");
+    }
+
+    #[test]
+    fn apply_key_map_unknown_schema_refuses_non_fact_output() {
+        use crate::model::KeyMapEntry;
+        let step = TransformationStep::ApplyKeyMap {
+            column: "ext".into(),
+            columns: vec!["ext".into()],
+            output_column: Some("canonical".into()),
+            map_id: "m".into(),
+            entries: vec![KeyMapEntry::pair("OLD", "NEW")],
+        };
+        let err = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot tell if output_column"),
+            "must refuse ambiguous overwrite: {err}"
+        );
     }
 
     #[test]

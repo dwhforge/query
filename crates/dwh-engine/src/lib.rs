@@ -1,4 +1,5 @@
 mod arrow_json;
+mod compile;
 mod export_e2e;
 mod extensions;
 mod join_diagnostics;

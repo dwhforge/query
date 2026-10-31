@@ -223,6 +223,8 @@ export interface SourceDef {
   connection_string?: string;
   schema?: string;
   table_name?: string;
+  /** Parquet Hive partitions (explicit opt-in). */
+  hive_partitioning?: boolean;
 }
 
 /** Saved React Flow positions (query id → coords). */
@@ -489,6 +491,7 @@ export function syncSourcesFromQueries(
       : `${s.kind}:${s.connection_id ?? ""}:${s.path}`;
 
   const seen = new Set(next.map(keyOf));
+  const existingByKey = new Map(sources.map((s) => [keyOf(s), s] as const));
 
   for (const q of queries) {
     const step = q.steps[0];
@@ -509,12 +512,15 @@ export function syncSourcesFromQueries(
       if (seen.has(key)) continue;
       seen.add(key);
       const fileName = parquetSourceName(step.payload.path, q.name);
+      const existing = existingByKey.get(key);
       next.push({
         id: newSourceId(fileName, next.map((s) => s.id)),
         name: fileName,
         kind: "parquet",
         path: step.payload.path,
         connection_id: step.payload.connection_id,
+        // Hive is source-specific — preserve when re-syncing from queries.
+        hive_partitioning: existing?.hive_partitioning || undefined,
       });
     } else if (step.type === "LoadPostgres") {
       const schema = step.payload.schema || "public";

@@ -5,7 +5,7 @@
 
 use crate::session::DbSession;
 use dwh_pipeline::{
-    cte_name, normalize_column_expr, quote_ident, ConnectionDef, GraphCompiler, NormalizeOp,
+    cte_name, normalize_key_column_expr, quote_ident, ConnectionDef, GraphCompiler, NormalizeOp,
     TransformationStep, Workspace,
 };
 use duckdb::params;
@@ -47,6 +47,7 @@ pub fn join_key_near_miss(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Result<JoinKeyNearMiss, String> {
@@ -88,7 +89,9 @@ pub fn join_key_near_miss(
         rq.steps.len() - 1
     });
 
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    let compiled = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .compile_ctes_from(host_query_id)?;
 
     let baseline = count_overlap(
         db,
@@ -185,11 +188,10 @@ pub fn join_key_near_miss(
 }
 
 fn key_expr(alias: &str, col: &str, ops: Option<&[NormalizeOp]>) -> String {
-    // Cast before trim/lower: DuckDB rejects trim(BIGINT) (join keys are often numeric).
-    let as_text = format!("CAST({alias}.{} AS VARCHAR)", quote_ident(col));
+    let base = format!("{alias}.{}", quote_ident(col));
     match ops {
-        Some(ops) if !ops.is_empty() => normalize_column_expr(&as_text, ops),
-        _ => as_text,
+        Some(ops) if !ops.is_empty() => normalize_key_column_expr(&base, ops),
+        _ => format!("CAST({base} AS VARCHAR)"),
     }
 }
 
@@ -371,7 +373,7 @@ mod tests {
             focus_query_id: "fact".into(),
             key_maps: vec![],
         };
-        let out = join_key_near_miss(&db, &ws, &[], "fact", 1).unwrap();
+        let out = join_key_near_miss(&db, &ws, &[], &[], "fact", 1).unwrap();
         // May or may not find hypotheses depending on fixture content — API must succeed.
         assert_eq!(out.host_query_id, "fact");
         let _ = out.hypotheses;

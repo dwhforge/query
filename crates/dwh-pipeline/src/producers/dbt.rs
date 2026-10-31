@@ -13,7 +13,7 @@ use crate::graph::{sanitize_id, topo_queries};
 use crate::model::{KeyMapEntry, TransformationStep, Workspace};
 use crate::producers::{DbtTarget, OutputProducer};
 use crate::schema::{infer_workspace_schemas, WorkspaceSchemas};
-use crate::parquet_scan::read_parquet_call;
+use crate::parquet_scan::read_parquet_call_opts;
 use crate::sql_escape::escape_sql_string;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -469,8 +469,14 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
         } else {
             "models/intermediate"
         };
-        let sql =
-            compile_query_as_dbt_model(workspace, query, &model_name_by_query, dialect, &schemas)?;
+        let sql = compile_query_as_dbt_model(
+            workspace,
+            query,
+            &model_name_by_query,
+            dialect,
+            &schemas,
+            &[],
+        )?;
         plan.insert(format!("{folder}/{model_name}.sql"), sql);
         model_name_by_query.insert(qid.clone(), model_name);
 
@@ -616,7 +622,14 @@ pub fn preview_dbt_model_sql_with_seeds(
         .ok_or_else(|| format!("query '{query_id}' not found"))?;
     let names = dbt_model_names(workspace)?;
     let schemas = infer_workspace_schemas(workspace, load_seeds)?;
-    let sql = compile_query_as_dbt_model(workspace, query, &names, dialect, &schemas)?;
+    let sql = compile_query_as_dbt_model(
+        workspace,
+        query,
+        &names,
+        dialect,
+        &schemas,
+        &[],
+    )?;
     let model_name = names
         .get(query_id)
         .cloned()
@@ -649,6 +662,7 @@ fn compile_query_as_dbt_model(
     models: &std::collections::HashMap<String, String>,
     dialect: WarehouseDialect,
     schemas: &WorkspaceSchemas,
+    sources: &[crate::project::SourceDef],
 ) -> Result<String, String> {
     // v1: collapse query into one model SQL (WITH inside file) using ref() for deps.
     if query.steps.is_empty() {
@@ -662,10 +676,20 @@ fn compile_query_as_dbt_model(
                 "-- source: csv\nselect * from read_csv_auto('{}')\n",
                 escape_sql_string(path)
             ),
-            TransformationStep::LoadParquet { path, .. } => format!(
-                "-- source: parquet\nselect * from {}\n",
-                read_parquet_call(path)
-            ),
+            TransformationStep::LoadParquet {
+                path,
+                connection_id,
+            } => {
+                let hive = crate::project::parquet_hive_partitioning(
+                    sources,
+                    path,
+                    connection_id.as_deref(),
+                );
+                format!(
+                    "-- source: parquet\nselect * from {}\n",
+                    read_parquet_call_opts(path, hive)
+                )
+            }
             TransformationStep::LoadPostgres {
                 schema,
                 table_name,
@@ -736,9 +760,17 @@ fn compile_query_as_dbt_model(
                     escape_sql_string(path)
                 )
             }
-            TransformationStep::LoadParquet { path, .. } => {
+            TransformationStep::LoadParquet {
+                path,
+                connection_id,
+            } => {
                 left_dbt = None;
-                format!("select * from {}", read_parquet_call(path))
+                let hive = crate::project::parquet_hive_partitioning(
+                    sources,
+                    path,
+                    connection_id.as_deref(),
+                );
+                format!("select * from {}", read_parquet_call_opts(path, hive))
             }
             TransformationStep::LoadPostgres {
                 schema,

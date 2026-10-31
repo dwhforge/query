@@ -3,12 +3,15 @@ use crate::emit::{emit_transform_step, substitute_query_placeholders};
 use crate::graph::{cte_name, topo_queries_from};
 use crate::model::{TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
-use crate::parquet_scan::read_parquet_call;
+use crate::parquet_scan::read_parquet_call_opts;
+use crate::project::{parquet_hive_partitioning, SourceDef};
 use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::HashMap;
 
 pub struct GraphCompiler<'a> {
     workspace: &'a Workspace,
+    /// Catalog for source-specific scan options (e.g. Hive partitioning).
+    sources: &'a [SourceDef],
 }
 
 /// Shared WITH … CTE list for a workspace (Join diagnostics, custom selects).
@@ -38,7 +41,15 @@ impl CompiledCtes {
 
 impl<'a> GraphCompiler<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            sources: &[],
+        }
+    }
+
+    pub fn with_sources(mut self, sources: &'a [SourceDef]) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// Compile focus query + its deps into a CTE list (topo order).
@@ -72,7 +83,7 @@ impl<'a> GraphCompiler<'a> {
                 } else {
                     String::new()
                 };
-                let body = compile_step(step, &prev, &last_cte)?;
+                let body = compile_step(step, &prev, &last_cte, self.sources)?;
                 parts.push(format!("  {name} AS ({body})"));
                 if idx == query.steps.len() - 1 {
                     last_cte.insert(qid.clone(), name);
@@ -121,14 +132,22 @@ fn compile_step(
     step: &TransformationStep,
     prev_step: &str,
     last_cte: &HashMap<String, String>,
+    sources: &[SourceDef],
 ) -> Result<String, String> {
     match step {
         TransformationStep::LoadCsv { path } => Ok(format!(
             "SELECT * FROM read_csv_auto('{}')",
             escape_sql_string(path)
         )),
-        TransformationStep::LoadParquet { path, .. } => {
-            Ok(format!("SELECT * FROM {}", read_parquet_call(path)))
+        TransformationStep::LoadParquet {
+            path,
+            connection_id,
+        } => {
+            let hive = parquet_hive_partitioning(sources, path, connection_id.as_deref());
+            Ok(format!(
+                "SELECT * FROM {}",
+                read_parquet_call_opts(path, hive)
+            ))
         }
         TransformationStep::LoadDuckdb {
             path,

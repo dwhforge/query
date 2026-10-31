@@ -2,10 +2,12 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ColumnMetadata,
   ConnectionDef,
+  SourceDef,
   Workspace,
 } from "../types/pipeline";
 import {
   blameUnmatchedKey,
+  describeWorkspace,
   explainJoinKey,
   joinKeyNearMiss,
   previewWorkspace,
@@ -367,6 +369,7 @@ export type JoinLensProps = {
   leftOn: string[];
   rightOn: string[];
   connections: ConnectionDef[];
+  sources?: SourceDef[];
   columns: ColumnMetadata[];
   rows: unknown[][];
   /** Opposite-probe candidates (unmatched samples). */
@@ -396,6 +399,7 @@ function JoinLensImpl({
   leftOn,
   rightOn,
   connections,
+  sources = [],
   columns,
   rows,
   joinDiag,
@@ -404,13 +408,15 @@ function JoinLensImpl({
   onApplyNearMiss,
   onMapKey,
 }: JoinLensProps) {
-  /** Linked-mode parent lookup (preview of left/right inputs). */
+  /** Linked-mode: schema on open; sample rows only after explicit Load sample. */
   const [parentLeftCols, setParentLeftCols] = useState<ColumnMetadata[]>([]);
   const [parentRightCols, setParentRightCols] = useState<ColumnMetadata[]>([]);
   const [parentLeftRows, setParentLeftRows] = useState<unknown[][]>([]);
   const [parentRightRows, setParentRightRows] = useState<unknown[][]>([]);
   const [leftSideLoading, setLeftSideLoading] = useState(false);
   const [rightSideLoading, setRightSideLoading] = useState(false);
+  const [samplesLoaded, setSamplesLoaded] = useState(false);
+  const [samplesLoading, setSamplesLoading] = useState(false);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
   const [searchLeft, setSearchLeft] = useState("");
@@ -452,16 +458,9 @@ function JoinLensImpl({
     setRightSel(null);
   }, [forceProbeNonce]);
 
-  useEffect(() => {
-    if (!enabled || !hostQueryId || joinStepIndex < 1 || !rightQueryId) return;
-    let cancelled = false;
-    setLeftSideLoading(true);
-    setRightSideLoading(true);
-    setParentLeftCols([]);
-    setParentLeftRows([]);
-    setParentRightCols([]);
-    setParentRightRows([]);
-    const leftWs: Workspace = {
+  const leftInputWs = useMemo((): Workspace | null => {
+    if (!hostQueryId || joinStepIndex < 1) return null;
+    return {
       ...workspace,
       focus_query_id: hostQueryId,
       queries: workspace.queries.map((q) =>
@@ -470,33 +469,42 @@ function JoinLensImpl({
           : q,
       ),
     };
-    const rightWs: Workspace = {
-      ...workspace,
-      focus_query_id: rightQueryId,
-    };
-    // Sequential: one DuckDB session; show LEFT as soon as it returns (RIGHT may be heavy).
+  }, [workspace, hostQueryId, joinStepIndex]);
+
+  const rightInputWs = useMemo((): Workspace | null => {
+    if (!rightQueryId) return null;
+    return { ...workspace, focus_query_id: rightQueryId };
+  }, [workspace, rightQueryId]);
+
+  // Open Lens → schema only (LIMIT 0). Sample rows require Load sample.
+  useEffect(() => {
+    if (!enabled || !leftInputWs || !rightInputWs) return;
+    let cancelled = false;
+    setLeftSideLoading(true);
+    setRightSideLoading(true);
+    setSamplesLoaded(false);
+    setParentLeftRows([]);
+    setParentRightRows([]);
     void (async () => {
       try {
-        const left = await previewWorkspace(leftWs, connections);
+        const left = await describeWorkspace(leftInputWs, connections, sources);
         if (cancelled) return;
         setParentLeftCols(left.columns);
-        setParentLeftRows(left.rows);
       } catch {
-        if (cancelled) return;
-        setParentLeftCols([]);
-        setParentLeftRows([]);
+        if (!cancelled) setParentLeftCols([]);
       } finally {
         if (!cancelled) setLeftSideLoading(false);
       }
       try {
-        const right = await previewWorkspace(rightWs, connections);
+        const right = await describeWorkspace(
+          rightInputWs,
+          connections,
+          sources,
+        );
         if (cancelled) return;
         setParentRightCols(right.columns);
-        setParentRightRows(right.rows);
       } catch {
-        if (cancelled) return;
-        setParentRightCols([]);
-        setParentRightRows([]);
+        if (!cancelled) setParentRightCols([]);
       } finally {
         if (!cancelled) setRightSideLoading(false);
       }
@@ -504,14 +512,56 @@ function JoinLensImpl({
     return () => {
       cancelled = true;
     };
-  }, [
-    enabled,
-    workspace,
-    hostQueryId,
-    joinStepIndex,
-    rightQueryId,
-    connections,
-  ]);
+  }, [enabled, leftInputWs, rightInputWs, connections, sources]);
+
+  function loadLinkedSamples() {
+    if (!leftInputWs || !rightInputWs || samplesLoading) return;
+    setSamplesLoading(true);
+    setLeftSideLoading(true);
+    setRightSideLoading(true);
+    void (async () => {
+      try {
+        const left = await previewWorkspace(leftInputWs, connections, sources);
+        setParentLeftCols(left.columns);
+        setParentLeftRows(left.rows);
+      } catch {
+        setParentLeftRows([]);
+      } finally {
+        setLeftSideLoading(false);
+      }
+      try {
+        const right = await previewWorkspace(
+          rightInputWs,
+          connections,
+          sources,
+        );
+        setParentRightCols(right.columns);
+        setParentRightRows(right.rows);
+      } catch {
+        setParentRightRows([]);
+      } finally {
+        setRightSideLoading(false);
+        setSamplesLoading(false);
+        setSamplesLoaded(true);
+      }
+    })();
+  }
+
+  function runNearMiss() {
+    if (!hostQueryId || joinStepIndex < 1 || nearMissLoading) return;
+    setNearMissLoading(true);
+    setNearMissOpen(true);
+    void joinKeyNearMiss(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      connections,
+      sources,
+    )
+      .then((r) => setNearMiss(r))
+      .catch(() => setNearMiss(null))
+      .finally(() => setNearMissLoading(false));
+  }
 
   useEffect(() => {
     setLeftSel(null);
@@ -525,26 +575,9 @@ function JoinLensImpl({
     setKeyBlame(null);
     setKeyExplainError(null);
     setNearMiss(null);
+    setNearMissOpen(false);
+    setSamplesLoaded(false);
   }, [hostQueryId, joinStepIndex, leftOn.join("\0"), rightOn.join("\0")]);
-
-  useEffect(() => {
-    if (!enabled || !hostQueryId || joinStepIndex < 1) return;
-    let cancelled = false;
-    setNearMissLoading(true);
-    void joinKeyNearMiss(workspace, hostQueryId, joinStepIndex, connections)
-      .then((r) => {
-        if (!cancelled) setNearMiss(r);
-      })
-      .catch(() => {
-        if (!cancelled) setNearMiss(null);
-      })
-      .finally(() => {
-        if (!cancelled) setNearMissLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, workspace, hostQueryId, joinStepIndex, connections]);
 
   const unmatchedLeft = joinDiag?.unmatched_left ?? null;
   const unmatchedRight = joinDiag?.unmatched_right ?? null;
@@ -610,6 +643,7 @@ function JoinLensImpl({
       side,
       keys,
       connections,
+      sources,
     )
       .then(async (ex) => {
         if (cancelled) return;
@@ -624,6 +658,7 @@ function JoinLensImpl({
               side,
               keys,
               connections,
+              sources,
             );
             if (!cancelled) setKeyBlame(blame);
           } catch (e) {
@@ -976,25 +1011,33 @@ function JoinLensImpl({
 
   const leftEmpty =
     sideMode === "linked"
-      ? "No parent for this result row."
-      : joinDiagLoading || !joinDiag
+      ? samplesLoaded
+        ? "No parent for this result row."
+        : "Schema ready — Load sample for preview rows."
+      : joinDiagLoading
         ? "Waiting for diagnostics…"
-        : searchLeft.trim()
-          ? "No sample rows match filter."
-          : unmatchedLeft && unmatchedLeft.total_count === 0
-            ? "No unmatched left (full input)."
-            : "No unmatched left in sample.";
+        : !joinDiag
+          ? "Run Join diagnostics to list unmatched keys."
+          : searchLeft.trim()
+            ? "No sample rows match filter."
+            : unmatchedLeft && unmatchedLeft.total_count === 0
+              ? "No unmatched left (full input)."
+              : "No unmatched left in sample.";
 
   const rightEmpty =
     sideMode === "linked"
-      ? "No parent for this result row."
-      : joinDiagLoading || !joinDiag
+      ? samplesLoaded
+        ? "No parent for this result row."
+        : "Schema ready — Load sample for preview rows."
+      : joinDiagLoading
         ? "Waiting for diagnostics…"
-        : searchRight.trim()
-          ? "No sample rows match filter."
-          : unmatchedRight && unmatchedRight.total_count === 0
-            ? "No unmatched right (full input)."
-            : "No unmatched right in sample.";
+        : !joinDiag
+          ? "Run Join diagnostics to list unmatched keys."
+          : searchRight.trim()
+            ? "No sample rows match filter."
+            : unmatchedRight && unmatchedRight.total_count === 0
+              ? "No unmatched right (full input)."
+              : "No unmatched right in sample.";
 
   const leftStatus = useMemo(() => {
     if (!sideProbe) return null;
@@ -1194,8 +1237,7 @@ function JoinLensImpl({
     sideMode === "linked" ? rightSideLoading : probeLoading;
 
   const nearMissCount = nearMiss?.hypotheses.length ?? 0;
-  const showNearMissChrome =
-    nearMissLoading || nearMissCount > 0;
+  const showNearMissChrome = nearMissOpen;
 
   return (
     <div className="relative flex h-full min-h-0 gap-2 p-1">
@@ -1374,6 +1416,20 @@ function JoinLensImpl({
           <span className="text-[9px] text-teal-300/80">join</span>
           <span className="text-[9px] text-sky-300/80">left</span>
           <span className="text-[9px] text-amber-300/80">right</span>
+          {sideMode === "linked" && (
+            <button
+              type="button"
+              disabled={samplesLoading}
+              onClick={() => loadLinkedSamples()}
+              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
+            >
+              {samplesLoading
+                ? "Loading sample…"
+                : samplesLoaded
+                  ? "Reload sample"
+                  : "Load sample"}
+            </button>
+          )}
           {sideProbe &&
             (keyExplain
               ? keyExplain.result_match_count > 0
@@ -1404,18 +1460,24 @@ function JoinLensImpl({
               Clear
             </button>
           )}
-          {showNearMissChrome && (
-            <button
-              type="button"
-              onClick={() => setNearMissOpen((v) => !v)}
-              className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10"
-            >
-              {nearMissLoading
-                ? "Near-miss…"
-                : `${nearMissCount} near-miss hypothes${nearMissCount === 1 ? "is" : "es"}`}
-              {nearMissOpen ? " ▾" : " ▸"}
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={nearMissLoading}
+            onClick={() => {
+              if (!nearMiss && !nearMissLoading) {
+                runNearMiss();
+              } else {
+                setNearMissOpen((v) => !v);
+              }
+            }}
+            className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
+          >
+            {nearMissLoading
+              ? "Near-miss…"
+              : nearMiss
+                ? `${nearMissCount} near-miss · ${nearMissOpen ? "▾" : "▸"}`
+                : "Find near-miss"}
+          </button>
         </div>
 
         {showNearMissChrome && nearMissOpen && (

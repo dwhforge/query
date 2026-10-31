@@ -1,7 +1,6 @@
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
 use crate::session::DbSession;
-use crate::session_limits::map_engine_error;
-use dwh_pipeline::{ConnectionDef, GraphCompiler, TransformationStep, Workspace};
+use dwh_pipeline::{ConnectionDef, GraphCompiler, SourceDef, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -21,13 +20,10 @@ pub struct PreviewResult {
 }
 
 fn run_sql(db: &DbSession, sql: String) -> Result<PreviewResult, String> {
+    // Errors are mapped once in DbSession::with_conn — do not wrap again here.
     db.with_conn(|conn| {
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| map_engine_error(&e.to_string()))?;
-        let arrow = stmt
-            .query_arrow([])
-            .map_err(|e| map_engine_error(&e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let arrow = stmt.query_arrow([]).map_err(|e| e.to_string())?;
         let schema = arrow.get_schema();
         let batches: Vec<RecordBatch> = arrow.collect();
         let columns = schema
@@ -50,9 +46,12 @@ pub fn preview_workspace(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[SourceDef],
 ) -> Result<PreviewResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let sql = GraphCompiler::new(&resolved).to_sql(true)?;
+    let sql = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .to_sql(true)?;
     run_sql(db, sql)
 }
 
@@ -65,6 +64,32 @@ pub fn preview_pipeline(
     let resolved = db.prepare_workspace(&ws, connections)?;
     let sql = GraphCompiler::new(&resolved).to_sql(true)?;
     run_sql(db, sql)
+}
+
+/// Schema only (`LIMIT 0`) — no sample rows. Prefer this for Join column pickers / Lens open.
+pub fn describe_workspace(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+) -> Result<PreviewResult, String> {
+    let resolved = db.prepare_workspace(workspace, connections)?;
+    let compiled = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .compile_ctes()?;
+    let focus_last = compiled
+        .last_by_query
+        .get(&resolved.focus_query_id)
+        .ok_or_else(|| {
+            format!(
+                "focus query '{}' produced no CTE",
+                resolved.focus_query_id
+            )
+        })?;
+    let sql = compiled.select_sql(focus_last, Some(0));
+    let mut out = run_sql(db, sql)?;
+    out.rows.clear();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -135,7 +160,7 @@ mod tests {
         };
 
         let db = DbSession::new().expect("duckdb");
-        let result = preview_workspace(&db, &ws, &[]).expect("preview");
+        let result = preview_workspace(&db, &ws, &[], &[]).expect("preview");
         assert!(!result.rows.is_empty());
         let qty_i = result
             .columns
@@ -226,7 +251,7 @@ mod tests {
             key_maps: vec![],
         };
         let db = DbSession::new().expect("duckdb");
-        let out = preview_workspace(&db, &ws, &[]).expect("preview");
+        let out = preview_workspace(&db, &ws, &[], &[]).expect("preview");
         assert!(out.columns.iter().any(|c| c.name == "channel_name"));
         assert!(out.columns.iter().any(|c| c.name == "region_name"));
         assert!(
@@ -270,7 +295,7 @@ mod tests {
         };
 
         let db = DbSession::new().expect("duckdb");
-        let out = preview_workspace(&db, &ws, &[]).expect("preview");
+        let out = preview_workspace(&db, &ws, &[], &[]).expect("preview");
         let day_i = out
             .columns
             .iter()
@@ -309,7 +334,7 @@ mod tests {
             focus_query_id: "commercial_catalog".into(),
             key_maps: vec![],
         };
-        let out = preview_workspace(&db, &ws, &[]).expect("preview catalog");
+        let out = preview_workspace(&db, &ws, &[], &[]).expect("preview catalog");
         assert!(!out.columns.is_empty());
         assert!(out.rows.len() <= 50);
         assert!(out.sql.contains("LIMIT 50"));

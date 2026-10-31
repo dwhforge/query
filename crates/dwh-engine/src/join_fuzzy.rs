@@ -106,6 +106,7 @@ pub fn join_key_fuzzy_suggest(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Result<JoinKeyFuzzySuggest, String> {
@@ -143,7 +144,9 @@ pub fn join_key_fuzzy_suggest(
     }
     let left_cte = cte_name(host_query_id, join_step_index - 1);
     let right_cte = cte_name(right_query_id, rq.steps.len() - 1);
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    let compiled = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .compile_ctes_from(host_query_id)?;
     let left_query_name = host.name.clone();
     let right_query_name = rq.name.clone();
     let right_query_id = right_query_id.clone();
@@ -701,7 +704,7 @@ mod tests {
             focus_query_id: "fact".into(),
             key_maps: vec![],
         };
-        let out = join_key_fuzzy_suggest(&db, &ws, &[], "fact", 1).unwrap();
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], &[], "fact", 1).unwrap();
         let froms: Vec<_> = out
             .suggestions
             .iter()
@@ -784,7 +787,7 @@ mod tests {
             focus_query_id: "fact".into(),
             key_maps: vec![],
         };
-        let out = join_key_fuzzy_suggest(&db, &ws, &[], "fact", 1).unwrap();
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], &[], "fact", 1).unwrap();
         assert!(out.suggestions.is_empty());
         assert!(out
             .disabled_reason

@@ -36,7 +36,7 @@ struct RpcRequest {
 fn main() {
     configure_paths();
     let state = match HostState::new() {
-        Ok(s) => Arc::new(s),
+        Ok(s) => s,
         Err(e) => {
             eprintln!("[dwh-host] failed to start DuckDB session: {e}");
             std::process::exit(1);
@@ -194,13 +194,11 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
             }
         };
         let id = rpc.id;
-        // Previews + join diagnostics share one DuckDB session (Mutex). Run them on a
-        // worker so the accept loop stays responsive. Do NOT interrupt on each new
-        // preview: Join Lens / column pickers fire LEFT∥RIGHT and would cancel each other.
+        // Heavy DuckDB jobs + LLM: keep the accept loop free. Heavy RPCs share a
+        // bounded queue inside HostState (1 pending; stale pending → superseded).
         let async_cmd = rpc.cmd == "llm_chat"
             || rpc.cmd == "key_map_fuzzy_suggest"
-            || HostState::is_preemptible_preview(&rpc.cmd)
-            || rpc.cmd == "join_diagnostics";
+            || HostState::is_heavy_rpc(&rpc.cmd);
         if async_cmd {
             let st = Arc::clone(&state);
             let w = Arc::clone(&writer);

@@ -13,6 +13,8 @@ pub const ENV_TEMP: &str = "DWH_DUCKDB_TEMP";
 /// Fraction of system RAM reserved for DuckDB when env is unset.
 const DEFAULT_RAM_FRACTION: f64 = 0.55;
 const MIN_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+/// Fallback when RAM cannot be detected (non-Linux / no cgroup).
+const FALLBACK_MEMORY: &str = "4GB";
 
 /// Resolve memory_limit string for DuckDB.
 pub fn resolve_memory_limit() -> String {
@@ -22,13 +24,15 @@ pub fn resolve_memory_limit() -> String {
             return t.to_string();
         }
     }
-    match system_ram_bytes() {
+    match available_ram_bytes() {
         Some(total) => {
             let capped = ((total as f64) * DEFAULT_RAM_FRACTION) as u64;
-            let bytes = capped.max(MIN_MEMORY_BYTES).min(total.saturating_sub(1024 * 1024 * 1024));
-            format_memory_bytes(bytes)
+            let bytes = capped
+                .max(MIN_MEMORY_BYTES.min(total.saturating_sub(256 * 1024 * 1024)))
+                .min(total.saturating_sub(1024 * 1024 * 1024));
+            format_memory_bytes(bytes.max(512 * 1024 * 1024))
         }
-        None => "8GB".into(),
+        None => FALLBACK_MEMORY.into(),
     }
 }
 
@@ -74,18 +78,58 @@ fn format_memory_bytes(bytes: u64) -> String {
     }
 }
 
+/// Prefer the tighter of host MemTotal and cgroup memory.max (containers).
+fn available_ram_bytes() -> Option<u64> {
+    let host = system_ram_bytes();
+    let cgroup = cgroup_memory_limit_bytes();
+    match (host, cgroup) {
+        (Some(h), Some(c)) => Some(h.min(c)),
+        (Some(h), None) => Some(h),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    }
+}
+
 fn system_ram_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
         for line in raw.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .next()?
-                    .parse()
-                    .ok()?;
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
                 return Some(kb.saturating_mul(1024));
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// cgroup v2 `memory.max` or cgroup v1 `memory.limit_in_bytes`.
+fn cgroup_memory_limit_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        const HUGE: u64 = 1u64 << 62; // treat "max" / host-sized limits as unset
+        let candidates = [
+            "/sys/fs/cgroup/memory.max",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        ];
+        for path in candidates {
+            let raw = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let t = raw.trim();
+            if t.is_empty() || t.eq_ignore_ascii_case("max") {
+                continue;
+            }
+            if let Ok(n) = t.parse::<u64>() {
+                if n > 0 && n < HUGE {
+                    return Some(n);
+                }
             }
         }
         None
@@ -123,8 +167,15 @@ fn escape_sql_path(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "''")
 }
 
-/// Rewrite DuckDB/engine errors into actionable UI copy.
+const OOM_PREFIX: &str = "DuckDB hit its memory_limit";
+const CANCEL_MSG: &str = "Preview cancelled.";
+const SPILL_PREFIX: &str = "DuckDB could not spill to temp_directory";
+
+/// Rewrite DuckDB/engine errors into actionable UI copy (idempotent).
 pub fn map_engine_error(err: &str) -> String {
+    if err.starts_with(OOM_PREFIX) || err == CANCEL_MSG || err.starts_with(SPILL_PREFIX) {
+        return err.to_string();
+    }
     let lower = err.to_lowercase();
     if lower.contains("out of memory")
         || lower.contains("memory limit")
@@ -132,24 +183,23 @@ pub fn map_engine_error(err: &str) -> String {
         || lower.contains("could not allocate")
     {
         return format!(
-            "DuckDB hit its memory_limit while computing preview (LIMIT applies only to the final rows; Join/GroupBy still scan full inputs). \
+            "{OOM_PREFIX} while computing preview (LIMIT applies only to the final rows; Join/GroupBy still scan full inputs). \
 Raise {ENV_MEMORY} (e.g. 16GB), free disk under ~/.dwhforge-query/duckdb-tmp for spill, or close other apps. Detail: {err}"
         );
     }
-    if lower.contains("interrupt")
+    // Exact DuckDB interrupt markers only — do not match paths like /data/cancelled/...
+    if lower.contains("interrupt error")
+        || lower.contains("query interrupted")
         || lower.contains("interrupted")
-        || lower.contains("cancel")
         || lower.contains("query cancelled")
         || lower.contains("query canceled")
     {
-        return "Preview cancelled.".into();
+        return CANCEL_MSG.into();
     }
     if lower.contains("temp_directory")
         || (lower.contains("cannot open file") && lower.contains("temp"))
     {
-        return format!(
-            "DuckDB could not spill to temp_directory. Free disk or set {ENV_TEMP}. Detail: {err}"
-        );
+        return format!("{SPILL_PREFIX}. Free disk or set {ENV_TEMP}. Detail: {err}");
     }
     err.to_string()
 }
@@ -176,6 +226,24 @@ mod tests {
         let m = map_engine_error("Out of Memory Error: failed to allocate");
         assert!(m.contains(ENV_MEMORY));
         assert!(m.contains("memory_limit"));
+        // Idempotent — no double wrap.
+        let again = map_engine_error(&m);
+        assert_eq!(again, m);
+    }
+
+    #[test]
+    fn map_cancel_does_not_match_path() {
+        let m = map_engine_error("IO Error: No such file or directory: /data/cancelled/sales.parquet");
+        assert!(!m.contains("Preview cancelled"));
+        assert!(m.contains("/data/cancelled"));
+    }
+
+    #[test]
+    fn map_interrupt_is_cancel() {
+        assert_eq!(
+            map_engine_error("INTERRUPT Error: Interrupted!"),
+            CANCEL_MSG
+        );
     }
 
     #[test]

@@ -1,11 +1,16 @@
 use crate::sql_escape::escape_sql_string;
 
-/// `read_parquet(...)` for a single file, a glob, or a Hive table directory.
+/// `read_parquet(...)` for a single file, a glob, or a directory.
 ///
-/// A directory path is expanded to `/**/*.parquet`. Hive partition folders
-/// (`key=value`) become columns. A path that already ends in `.parquet` and
-/// has no wildcard stays a single-file scan.
+/// - Single `*.parquet` file → plain `read_parquet('…')`.
+/// - Glob → plain `read_parquet('glob')` (DuckDB auto-detects partitions when safe).
+/// - Directory → `…/**/*.parquet`. With `hive_partitioning`, adds
+///   `hive_partitioning = true` (Hive table roots from the Hive Parquet UI).
 pub fn read_parquet_call(path: &str) -> String {
+    read_parquet_call_opts(path, false)
+}
+
+pub fn read_parquet_call_opts(path: &str, hive_partitioning: bool) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return "read_parquet('')".into();
@@ -25,10 +30,14 @@ pub fn read_parquet_call(path: &str) -> String {
     } else {
         format!("{bare}/**/*.parquet")
     };
-    format!(
-        "read_parquet('{}', hive_partitioning = true)",
-        escape_sql_string(&scan)
-    )
+    if hive_partitioning {
+        format!(
+            "read_parquet('{}', hive_partitioning = true)",
+            escape_sql_string(&scan)
+        )
+    } else {
+        format!("read_parquet('{}')", escape_sql_string(&scan))
+    }
 }
 
 #[cfg(test)]
@@ -41,28 +50,36 @@ mod tests {
             read_parquet_call("/data/sales.parquet"),
             "read_parquet('/data/sales.parquet')"
         );
+    }
+
+    #[test]
+    fn plain_glob_has_no_forced_hive() {
         assert_eq!(
-            read_parquet_call("/data/Sales.PARQUET/"),
-            "read_parquet('/data/Sales.PARQUET')"
+            read_parquet_call("/data/sales/*.parquet"),
+            "read_parquet('/data/sales/*.parquet')"
+        );
+        assert_eq!(
+            read_parquet_call_opts("/data/sales/*.parquet", false),
+            "read_parquet('/data/sales/*.parquet')"
         );
     }
 
     #[test]
-    fn hive_directory_globs_and_enables_partitions() {
+    fn directory_expands_glob() {
         assert_eq!(
             read_parquet_call("/data/hive/warehouse/sales"),
-            "read_parquet('/data/hive/warehouse/sales/**/*.parquet', hive_partitioning = true)"
-        );
-        assert_eq!(
-            read_parquet_call("/data/hive/warehouse/sales/"),
-            "read_parquet('/data/hive/warehouse/sales/**/*.parquet', hive_partitioning = true)"
+            "read_parquet('/data/hive/warehouse/sales/**/*.parquet')"
         );
     }
 
     #[test]
-    fn explicit_glob_is_kept() {
+    fn hive_opt_in_enables_partitions() {
         assert_eq!(
-            read_parquet_call("/data/hive/sales/**/*.parquet"),
+            read_parquet_call_opts("/data/hive/warehouse/sales", true),
+            "read_parquet('/data/hive/warehouse/sales/**/*.parquet', hive_partitioning = true)"
+        );
+        assert_eq!(
+            read_parquet_call_opts("/data/hive/sales/**/*.parquet", true),
             "read_parquet('/data/hive/sales/**/*.parquet', hive_partitioning = true)"
         );
     }
@@ -70,7 +87,7 @@ mod tests {
     #[test]
     fn quotes_are_escaped() {
         assert_eq!(
-            read_parquet_call("/data/o'brien"),
+            read_parquet_call_opts("/data/o'brien", true),
             "read_parquet('/data/o''brien/**/*.parquet', hive_partitioning = true)"
         );
     }

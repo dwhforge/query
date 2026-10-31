@@ -66,12 +66,15 @@ def attach_postgres(con, dsn: str) -> None:
 
 
 def pg_count(con, schema: str, table: str) -> int | None:
+    # Remote query already returns one row with column c — do not COUNT(*) that result
+    # (that always yields 1 and breaks resume).
     q = f"""
-    SELECT COUNT(*)::BIGINT FROM postgres_query('pg',
+    SELECT c FROM postgres_query('pg',
       {sqlstr(f'SELECT COUNT(*)::BIGINT AS c FROM "{schema}"."{table}"')})
     """
     try:
-        return int(con.execute(q).fetchone()[0])
+        row = con.execute(q).fetchone()
+        return int(row[0]) if row is not None else None
     except Exception:
         return None
 

@@ -3,7 +3,10 @@
 use crate::postgres_catalog::describe_postgres_object;
 use crate::session::DbSession;
 use dwh_pipeline::sql_escape::escape_sql_string;
-use dwh_pipeline::{read_parquet_call, ConnectionDef, TransformationStep, Workspace};
+use dwh_pipeline::{
+    parquet_hive_partitioning, read_parquet_call_opts, ConnectionDef, SourceDef,
+    TransformationStep, Workspace,
+};
 use duckdb::params;
 use std::collections::HashMap;
 
@@ -13,6 +16,7 @@ pub fn collect_load_seeds(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[SourceDef],
 ) -> Result<HashMap<String, Vec<String>>, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
     let mut seeds = HashMap::new();
@@ -47,9 +51,13 @@ pub fn collect_load_seeds(
                     }
                 }
             }
-            TransformationStep::LoadParquet { path, .. } => {
-                match describe_file_relation(db, &read_parquet_call(path))
-                {
+            TransformationStep::LoadParquet {
+                path,
+                connection_id,
+            } => {
+                let hive =
+                    parquet_hive_partitioning(sources, path, connection_id.as_deref());
+                match describe_file_relation(db, &read_parquet_call_opts(path, hive)) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!(

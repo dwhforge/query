@@ -55,6 +55,7 @@ pub fn join_diagnostics(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
 ) -> Result<JoinDiagnostics, String> {
@@ -62,6 +63,7 @@ pub fn join_diagnostics(
         db,
         workspace,
         connections,
+        sources,
         host_query_id,
         join_step_index,
         JOIN_DIAG_SAMPLE_LIMIT,
@@ -72,6 +74,7 @@ pub fn join_diagnostics_with_limit(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
     host_query_id: &str,
     join_step_index: usize,
     sample_limit: u64,
@@ -115,7 +118,9 @@ pub fn join_diagnostics_with_limit(
         rq.steps.len() - 1
     });
 
-    let compiled = GraphCompiler::new(&resolved).compile_ctes_from(host_query_id)?;
+    let compiled = GraphCompiler::new(&resolved)
+        .with_sources(sources)
+        .compile_ctes_from(host_query_id)?;
     let on_sql = join_on_sql(left_on, right_on);
     let left_keys_sql = left_on
         .iter()
@@ -348,7 +353,7 @@ mod tests {
         };
 
         let db = DbSession::new().expect("duckdb");
-        let diag = join_diagnostics(&db, &ws, &[], "fact", 1).expect("diag");
+        let diag = join_diagnostics(&db, &ws, &[], &[], "fact", 1).expect("diag");
         assert!(diag.left_count > 0);
         assert_eq!(diag.right_count, 3);
         assert_eq!(diag.output_count, diag.left_count); // all regions match
@@ -394,7 +399,7 @@ mod tests {
         };
 
         let db = DbSession::new().expect("duckdb");
-        let diag = join_diagnostics(&db, &ws, &[], "left", 1).expect("diag");
+        let diag = join_diagnostics(&db, &ws, &[], &[], "left", 1).expect("diag");
         assert_eq!(diag.left_count, 2);
         assert_eq!(diag.right_count, 3);
         assert_eq!(diag.unmatched_left_count, 1); // id=3

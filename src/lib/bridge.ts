@@ -2,6 +2,7 @@ import type {
   ConnectionDef,
   PreviewResult,
   Project,
+  SourceDef,
   TransformationStep,
   WarehouseDialect,
   Workspace,
@@ -27,8 +28,31 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 export function previewWorkspace(
   workspace: Workspace,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<PreviewResult> {
-  return invoke<PreviewResult>("preview_workspace", { workspace, connections });
+  return invoke<PreviewResult>("preview_workspace", {
+    workspace,
+    connections,
+    sources,
+  });
+}
+
+/** Schema only (`LIMIT 0`) — no sample rows. */
+export function describeWorkspace(
+  workspace: Workspace,
+  connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
+): Promise<PreviewResult> {
+  return invoke<PreviewResult>("describe_workspace", {
+    workspace,
+    connections,
+    sources,
+  });
+}
+
+/** Interrupt the DuckDB query currently running on the host. */
+export function cancelRunningQuery(): Promise<boolean> {
+  return invoke<boolean>("cancel_running_query", {});
 }
 
 export type PreviewDbtModel = {
@@ -91,12 +115,14 @@ export function joinDiagnostics(
   hostQueryId: string,
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<JoinDiagnostics> {
   return invoke<JoinDiagnostics>("join_diagnostics", {
     workspace,
     hostQueryId,
     joinStepIndex,
     connections,
+    sources,
   });
 }
 
@@ -132,6 +158,7 @@ export function explainJoinRows(
     previewOffsets?: number[];
   },
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<ExplainJoinRowsResult> {
   return invoke<ExplainJoinRowsResult>("explain_join_rows", {
     workspace,
@@ -140,6 +167,7 @@ export function explainJoinRows(
     keys: opts.keys ?? [],
     previewOffsets: opts.previewOffsets ?? null,
     connections,
+    sources,
   });
 }
 
@@ -189,6 +217,7 @@ export function explainJoinKey(
   side: JoinKeySide,
   keyValues: unknown[],
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<ExplainJoinKeyResult> {
   return invoke<ExplainJoinKeyResult>("explain_join_key", {
     workspace,
@@ -197,6 +226,7 @@ export function explainJoinKey(
     side,
     keyValues,
     connections,
+    sources,
   });
 }
 
@@ -207,6 +237,7 @@ export function blameUnmatchedKey(
   side: JoinKeySide,
   keyValues: unknown[],
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<BlameUnmatchedKeyResult> {
   return invoke<BlameUnmatchedKeyResult>("blame_unmatched_key", {
     workspace,
@@ -215,6 +246,7 @@ export function blameUnmatchedKey(
     side,
     keyValues,
     connections,
+    sources,
   });
 }
 
@@ -243,12 +275,14 @@ export function joinKeyNearMiss(
   hostQueryId: string,
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<JoinKeyNearMiss> {
   return invoke<JoinKeyNearMiss>("join_key_near_miss", {
     workspace,
     hostQueryId,
     joinStepIndex,
     connections,
+    sources,
   });
 }
 
@@ -319,12 +353,14 @@ export function joinKeyFuzzySuggest(
   hostQueryId: string,
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
+  sources: SourceDef[] = [],
 ): Promise<JoinKeyFuzzySuggest> {
   return invoke<JoinKeyFuzzySuggest>("join_key_fuzzy_suggest", {
     workspace,
     hostQueryId,
     joinStepIndex,
     connections,
+    sources,
   });
 }
 

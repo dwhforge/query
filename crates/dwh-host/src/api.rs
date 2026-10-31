@@ -6,8 +6,9 @@ use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
     blame_unmatched_key as run_blame_unmatched_key, collect_load_seeds, QueryCancelHandle,
     describe_postgres_object as run_describe_postgres_object,
-    explain_join_key as run_explain_join_key, explain_join_rows as run_explain_join_rows,
-    join_diagnostics as run_join_diagnostics, join_key_fuzzy_suggest as run_join_key_fuzzy_suggest,
+    describe_workspace as run_describe_workspace, explain_join_key as run_explain_join_key,
+    explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
+    join_key_fuzzy_suggest as run_join_key_fuzzy_suggest,
     join_key_near_miss as run_join_key_near_miss,
     list_postgres_objects as run_list_postgres_objects,
     preview_pipeline as run_preview_steps, preview_workspace as run_preview_workspace,
@@ -15,9 +16,8 @@ use dwh_engine::{
     test_postgres_connection as run_test_postgres_connection,
     write_key_map_with_expected as run_write_key_map_with_expected, BlameUnmatchedKeyResult,
     DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyFuzzySuggest,
-    JoinKeyNearMiss,
-    JoinKeySide, JoinKeyTuple, KeyMapReadResult, KeyMapWriteResult, PostgresColumn, PostgresObject,
-    PreviewResult,
+    JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, KeyMapReadResult, KeyMapWriteResult,
+    PostgresColumn, PostgresObject, PreviewResult,
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
@@ -34,7 +34,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::thread;
 
 static FIXTURES_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -761,6 +763,9 @@ struct PreviewArgs {
     workspace: Option<Workspace>,
     steps: Option<Vec<TransformationStep>>,
     connections: Option<Vec<ConnectionDef>>,
+    /// Project sources — Hive partitioning and other source-specific scan opts.
+    #[serde(default)]
+    sources: Option<Vec<dwh_pipeline::SourceDef>>,
 }
 
 /// Read-only matching inputs; accepting proposals uses existing KeyMap editing.
@@ -783,6 +788,8 @@ struct JoinDiagArgs {
     host_query_id: String,
     join_step_index: usize,
     connections: Option<Vec<ConnectionDef>>,
+    #[serde(default)]
+    sources: Option<Vec<dwh_pipeline::SourceDef>>,
 }
 
 #[derive(Deserialize)]
@@ -831,6 +838,8 @@ struct ExplainArgs {
     keys: Option<Vec<JoinKeyTuple>>,
     preview_offsets: Option<Vec<u64>>,
     connections: Option<Vec<ConnectionDef>>,
+    #[serde(default)]
+    sources: Option<Vec<dwh_pipeline::SourceDef>>,
 }
 
 #[derive(Deserialize)]
@@ -842,6 +851,8 @@ struct ExplainKeyArgs {
     side: String,
     key_values: Vec<serde_json::Value>,
     connections: Option<Vec<ConnectionDef>>,
+    #[serde(default)]
+    sources: Option<Vec<dwh_pipeline::SourceDef>>,
 }
 
 #[derive(Deserialize)]
@@ -853,6 +864,8 @@ struct BlameKeyArgs {
     side: String,
     key_values: Vec<serde_json::Value>,
     connections: Option<Vec<ConnectionDef>>,
+    #[serde(default)]
+    sources: Option<Vec<dwh_pipeline::SourceDef>>,
 }
 
 fn parse_join_side(side: &str) -> Result<JoinKeySide, String> {
@@ -1031,23 +1044,44 @@ fn fingerprint_json(parts: &[&Value]) -> u64 {
     h.finish()
 }
 
+/// One pending heavy job + one running worker. Newer submits supersede the pending slot.
+struct HeavyJob {
+    cmd: String,
+    args: Value,
+    reply: SyncSender<Result<Value, String>>,
+}
+
 pub struct HostState {
     pub db: Mutex<DbSession>,
     /// Outside `db` so a new preview can cancel without waiting on the conn lock.
     preview_cancel: QueryCancelHandle,
     preview_cache: Mutex<PreviewCache>,
+    /// Bounded queue: at most one pending heavy job; worker runs one at a time.
+    heavy_pending: Mutex<Option<HeavyJob>>,
+    heavy_cv: Condvar,
+    /// Fingerprint of the job currently executing (for coalesce).
+    heavy_running_fp: Mutex<Option<u64>>,
 }
 
 impl HostState {
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Arc<Self>, String> {
         configure_paths();
         let db = DbSession::new()?;
         let preview_cancel = db.cancel_handle();
-        Ok(Self {
+        let state = Arc::new(Self {
             db: Mutex::new(db),
             preview_cancel,
             preview_cache: Mutex::new(PreviewCache::new(8)),
-        })
+            heavy_pending: Mutex::new(None),
+            heavy_cv: Condvar::new(),
+            heavy_running_fp: Mutex::new(None),
+        });
+        let worker = Arc::clone(&state);
+        thread::Builder::new()
+            .name("dwh-heavy".into())
+            .spawn(move || worker.heavy_worker_loop())
+            .map_err(|e| format!("spawn heavy worker: {e}"))?;
+        Ok(state)
     }
 
     /// Cancel the DuckDB query currently running (preview / diagnostics).
@@ -1055,21 +1089,134 @@ impl HostState {
         self.preview_cancel.interrupt();
     }
 
-    /// True for RPCs that run DuckDB preview SQL and should preempt the previous one.
-    pub fn is_preemptible_preview(cmd: &str) -> bool {
-        matches!(cmd, "preview_workspace" | "preview_pipeline")
+    /// Heavy DuckDB RPCs: queued (1 pending), coalesced by fingerprint, async-safe.
+    pub fn is_heavy_rpc(cmd: &str) -> bool {
+        matches!(
+            cmd,
+            "preview_workspace"
+                | "preview_pipeline"
+                | "describe_workspace"
+                | "join_diagnostics"
+                | "join_key_near_miss"
+                | "explain_join_key"
+                | "explain_join_rows"
+                | "blame_unmatched_key"
+                | "join_key_fuzzy_suggest"
+        )
     }
 
-    pub fn dispatch(&self, cmd: &str, args: Value) -> Result<Value, String> {
+    /// True for RPCs that run DuckDB preview SQL and should preempt the previous one.
+    pub fn is_preemptible_preview(cmd: &str) -> bool {
+        Self::is_heavy_rpc(cmd)
+    }
+
+    /// Enqueue a heavy job. Drops any waiting pending job (superseded). Blocks until result.
+    pub fn enqueue_heavy(&self, cmd: &str, args: Value) -> Result<Value, String> {
+        // Fast path: preview cache hit without queue.
+        if let Some(hit) = self.preview_cache_lookup(cmd, &args) {
+            return Ok(hit);
+        }
+        let (tx, rx) = mpsc::sync_channel(1);
+        {
+            let mut slot = self
+                .heavy_pending
+                .lock()
+                .map_err(|e| e.to_string())?;
+            if let Some(old) = slot.take() {
+                let _ = old.reply.send(Err("Preview superseded.".into()));
+            }
+            *slot = Some(HeavyJob {
+                cmd: cmd.to_string(),
+                args,
+                reply: tx,
+            });
+            self.heavy_cv.notify_one();
+        }
+        rx.recv().map_err(|_| "heavy worker disconnected".to_string())?
+    }
+
+    fn preview_cache_lookup(&self, cmd: &str, args: &Value) -> Option<Value> {
+        let a: PreviewArgs = serde_json::from_value(args.clone()).ok()?;
+        let key = match cmd {
+            "preview_pipeline" => {
+                let steps = a.steps.as_ref()?;
+                let conns = a.connections.clone().unwrap_or_default();
+                let steps_v = serde_json::to_value(steps).ok()?;
+                let conns_v = serde_json::to_value(&conns).ok()?;
+                fingerprint_json(&[
+                    &Value::String("pipeline".into()),
+                    &steps_v,
+                    &conns_v,
+                ])
+            }
+            "preview_workspace" | "describe_workspace" => {
+                let ws = a.workspace.as_ref()?;
+                let conns = a.connections.clone().unwrap_or_default();
+                let sources = a.sources.clone().unwrap_or_default();
+                let ws_v = serde_json::to_value(ws).ok()?;
+                let conns_v = serde_json::to_value(&conns).ok()?;
+                let sources_v = serde_json::to_value(&sources).ok()?;
+                let kind = if cmd == "describe_workspace" {
+                    "describe"
+                } else {
+                    "workspace"
+                };
+                fingerprint_json(&[
+                    &Value::String(kind.into()),
+                    &ws_v,
+                    &conns_v,
+                    &sources_v,
+                ])
+            }
+            _ => return None,
+        };
+        self.preview_cache.lock().ok()?.get(key)
+    }
+
+    fn heavy_worker_loop(self: &Arc<Self>) {
+        loop {
+            let job = {
+                let mut g = match self.heavy_pending.lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                while g.is_none() {
+                    g = match self.heavy_cv.wait(g) {
+                        Ok(g) => g,
+                        Err(e) => e.into_inner(),
+                    };
+                }
+                g.take().expect("pending present")
+            };
+            let fp = fingerprint_json(&[
+                &Value::String(job.cmd.clone()),
+                &job.args,
+            ]);
+            if let Ok(mut running) = self.heavy_running_fp.lock() {
+                *running = Some(fp);
+            }
+            let result = self.dispatch_heavy_job(&job.cmd, job.args);
+            if let Ok(mut running) = self.heavy_running_fp.lock() {
+                *running = None;
+            }
+            let _ = job.reply.send(result);
+        }
+    }
+
+    fn dispatch_heavy_job(&self, cmd: &str, args: Value) -> Result<Value, String> {
         match cmd {
             "preview_pipeline" => {
                 let a: PreviewArgs =
-                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let steps = a.steps.ok_or("preview_pipeline: missing steps")?;
                 let conns = a.connections.unwrap_or_default();
                 let steps_v = serde_json::to_value(&steps).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
-                let key = fingerprint_json(&[&Value::String("pipeline".into()), &steps_v, &conns_v]);
+                let key = fingerprint_json(&[
+                    &Value::String("pipeline".into()),
+                    &steps_v,
+                    &conns_v,
+                ]);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     if let Some(hit) = cache.get(key) {
                         return Ok(hit);
@@ -1086,25 +1233,74 @@ impl HostState {
             }
             "preview_workspace" => {
                 let a: PreviewArgs =
-                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let ws = a.workspace.ok_or("preview_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
-                let key = fingerprint_json(&[&Value::String("workspace".into()), &ws_v, &conns_v]);
+                let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
+                let key = fingerprint_json(&[
+                    &Value::String("workspace".into()),
+                    &ws_v,
+                    &conns_v,
+                    &sources_v,
+                ]);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     if let Some(hit) = cache.get(key) {
                         return Ok(hit);
                     }
                 }
                 let db = self.db.lock().map_err(|e| e.to_string())?;
-                let out = run_preview_workspace(&db, &ws, &conns)?;
+                let out = run_preview_workspace(&db, &ws, &conns, &sources)?;
                 let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
                 drop(db);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     cache.insert(key, val.clone());
                 }
                 Ok(val)
+            }
+            "describe_workspace" => {
+                let a: PreviewArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let ws = a.workspace.ok_or("describe_workspace: missing workspace")?;
+                let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
+                let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
+                let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
+                let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
+                let key = fingerprint_json(&[
+                    &Value::String("describe".into()),
+                    &ws_v,
+                    &conns_v,
+                    &sources_v,
+                ]);
+                if let Ok(mut cache) = self.preview_cache.lock() {
+                    if let Some(hit) = cache.get(key) {
+                        return Ok(hit);
+                    }
+                }
+                let db = self.db.lock().map_err(|e| e.to_string())?;
+                let out = run_describe_workspace(&db, &ws, &conns, &sources)?;
+                let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
+                drop(db);
+                if let Ok(mut cache) = self.preview_cache.lock() {
+                    cache.insert(key, val.clone());
+                }
+                Ok(val)
+            }
+            other => self.dispatch_locked(other, args),
+        }
+    }
+
+    pub fn dispatch(&self, cmd: &str, args: Value) -> Result<Value, String> {
+        if Self::is_heavy_rpc(cmd) {
+            return self.enqueue_heavy(cmd, args);
+        }
+        match cmd {
+            "cancel_running_query" => {
+                self.interrupt_running_query();
+                Ok(Value::Bool(true))
             }
             "get_llm_config" => {
                 let settings = settings_io::load_settings()?;
@@ -1146,10 +1342,12 @@ impl HostState {
             "join_diagnostics" => {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let out: JoinDiagnostics = run_join_diagnostics(
                     &db,
                     &a.workspace,
                     &conns,
+                    &sources,
                     &a.host_query_id,
                     a.join_step_index,
                 )?;
@@ -1158,11 +1356,13 @@ impl HostState {
             "explain_join_rows" => {
                 let a: ExplainArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let keys = a.keys.unwrap_or_default();
                 let out: ExplainJoinRowsResult = run_explain_join_rows(
                     &db,
                     &a.workspace,
                     &conns,
+                    &sources,
                     &a.host_query_id,
                     a.join_step_index,
                     &keys,
@@ -1173,11 +1373,13 @@ impl HostState {
             "explain_join_key" => {
                 let a: ExplainKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let side = parse_join_side(&a.side)?;
                 let out: ExplainJoinKeyResult = run_explain_join_key(
                     &db,
                     &a.workspace,
                     &conns,
+                    &sources,
                     &a.host_query_id,
                     a.join_step_index,
                     side,
@@ -1188,11 +1390,13 @@ impl HostState {
             "blame_unmatched_key" => {
                 let a: BlameKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let side = parse_join_side(&a.side)?;
                 let out: BlameUnmatchedKeyResult = run_blame_unmatched_key(
                     &db,
                     &a.workspace,
                     &conns,
+                    &sources,
                     &a.host_query_id,
                     a.join_step_index,
                     side,
@@ -1203,10 +1407,12 @@ impl HostState {
             "join_key_near_miss" => {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let out: JoinKeyNearMiss = run_join_key_near_miss(
                     &db,
                     &a.workspace,
                     &conns,
+                    &sources,
                     &a.host_query_id,
                     a.join_step_index,
                 )?;
@@ -1215,10 +1421,12 @@ impl HostState {
             "join_key_fuzzy_suggest" => {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
+                let sources = a.sources.unwrap_or_default();
                 let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest(
                     &db,
                     &a.workspace,
                     &conns,
+                    &sources,
                     &a.host_query_id,
                     a.join_step_index,
                 )?;
@@ -1277,7 +1485,8 @@ impl HostState {
                 let a: PreviewDbtArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
-                let seeds = collect_load_seeds(&db, &a.workspace, &conns).unwrap_or_default();
+                let seeds =
+                    collect_load_seeds(&db, &a.workspace, &conns, &[]).unwrap_or_default();
                 let out: PreviewDbtModel = if seeds.is_empty() {
                     preview_dbt_model_sql(&a.workspace, &a.query_id, dialect)?
                 } else {
@@ -1290,7 +1499,8 @@ impl HostState {
                 let target = a.dbt_target.unwrap_or(DbtTarget::V1);
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
-                let seeds = collect_load_seeds(&db, &a.workspace, &conns).unwrap_or_default();
+                let seeds =
+                    collect_load_seeds(&db, &a.workspace, &conns, &[]).unwrap_or_default();
                 let pg_schema = a
                     .destination_schema
                     .as_deref()

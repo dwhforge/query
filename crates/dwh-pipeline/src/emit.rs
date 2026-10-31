@@ -300,6 +300,17 @@ pub fn normalize_column_expr(col_sql: &str, ops: &[NormalizeOp]) -> String {
     normalize_expr(col_sql, ops)
 }
 
+/// Cast to VARCHAR first, then apply normalize ops.
+/// Required for numeric join keys: DuckDB rejects `trim(BIGINT)`.
+pub fn normalize_key_column_expr(col_sql: &str, ops: &[NormalizeOp]) -> String {
+    let as_text = format!("CAST({col_sql} AS VARCHAR)");
+    if ops.is_empty() {
+        as_text
+    } else {
+        normalize_expr(&as_text, ops)
+    }
+}
+
 fn normalize_expr(col_sql: &str, ops: &[NormalizeOp]) -> String {
     let mut e = col_sql.to_string();
     for op in ops {
@@ -385,7 +396,7 @@ fn emit_normalize_key(
         .iter()
         .map(|c| {
             let q = quote_ident(c);
-            (c.clone(), normalize_expr(&q, ops))
+            (c.clone(), normalize_key_column_expr(&q, ops))
         })
         .collect();
     emit_overwrite_columns(dialect, prev, &overwrites, prev_columns)
@@ -1334,6 +1345,11 @@ mod tests {
         let sql = emit_transform_step(&step, "s0", &HashMap::new(), WarehouseDialect::Duckdb)
             .unwrap();
         assert!(sql.contains("EXCLUDE"));
+        assert!(
+            sql.contains("CAST(\"region\" AS VARCHAR)")
+                || sql.contains("cast(\"region\" as varchar)"),
+            "NormalizeKey must cast before trim/lower: {sql}"
+        );
         assert!(sql.contains("trim(lower(") || sql.contains("lower(trim("));
         assert!(sql.contains("\"region\""));
     }

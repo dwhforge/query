@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import type { AppSettings } from "../lib/bridge";
-import { openDialog } from "../lib/bridge";
+import type { AppSettings, DbtSetupStatus } from "../lib/bridge";
+import { dbtInstallScript, dbtSetupStatus, openDialog } from "../lib/bridge";
 import type { DestinationKind, ExecutionEngine } from "../types/pipeline";
+import { DbtSetupDialog } from "./DbtSetupDialog";
 
 export interface OptionsDialogProps {
   open: boolean;
@@ -39,6 +40,9 @@ export function OptionsDialog({
   const [dest, setDest] = useState<DestinationKind>("duckdb");
   const [dbtTarget, setDbtTarget] = useState<"v1" | "v2">("v1");
   const [saving, setSaving] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupStatus, setSetupStatus] = useState<DbtSetupStatus | null>(null);
+  const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -143,6 +147,45 @@ export function OptionsDialog({
               </button>
             </div>
             <p className="mt-1.5 text-[11px] text-slate-500">{dbtHint(dbtVenv)}</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setCopyMsg(null);
+                  void dbtSetupStatus()
+                    .then((s) => {
+                      setSetupStatus(s);
+                      setSetupOpen(true);
+                    })
+                    .catch((e) =>
+                      setCopyMsg(typeof e === "string" ? e : String(e)),
+                    );
+                }}
+                className="rounded border border-teal-900/60 px-2.5 py-1.5 text-xs text-teal-200/90 hover:border-teal-700 hover:bg-teal-950/40"
+              >
+                Install dbt…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      const s = await dbtInstallScript();
+                      await navigator.clipboard.writeText(s.script);
+                      setCopyMsg("Install script copied to clipboard");
+                    } catch (e) {
+                      setCopyMsg(typeof e === "string" ? e : String(e));
+                    }
+                  })();
+                }}
+                className="rounded border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:border-slate-500 hover:bg-slate-900"
+              >
+                Copy install script
+              </button>
+            </div>
+            {copyMsg && (
+              <p className="mt-1.5 text-[11px] text-slate-500">{copyMsg}</p>
+            )}
           </section>
 
           <section>
@@ -215,6 +258,30 @@ export function OptionsDialog({
           </button>
         </footer>
       </div>
+
+      <DbtSetupDialog
+        open={setupOpen}
+        status={setupStatus}
+        variant="options"
+        onClose={() => setSetupOpen(false)}
+        onInstalled={async (venvPath) => {
+          setDbtVenv(venvPath);
+          setSetupOpen(false);
+          setCopyMsg(`Installed — venv set to ${venvPath}`);
+          await onSave({
+            ...settings,
+            dbt_venv_path: venvPath,
+            dbt_setup_dismissed: true,
+            default_execution_engine: engine,
+            default_destination_kind: dest,
+            default_target_dialect: engine,
+            default_dbt_target: dbtTarget,
+          });
+        }}
+        onDismiss={async () => {
+          /* Options repeat — no dismiss flag change required */
+        }}
+      />
     </div>
   );
 }

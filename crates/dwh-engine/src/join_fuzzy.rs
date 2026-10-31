@@ -146,6 +146,7 @@ pub fn join_key_fuzzy_suggest(
     let right_cte = cte_name(right_query_id, rq.steps.len() - 1);
     let compiled = GraphCompiler::new(&resolved)
         .with_sources(sources)
+        .with_connections(connections)
         .compile_ctes_from(host_query_id)?;
     let left_query_name = host.name.clone();
     let right_query_name = rq.name.clone();

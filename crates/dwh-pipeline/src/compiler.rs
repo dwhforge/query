@@ -1,7 +1,8 @@
+use crate::connection::ConnectionDef;
 use crate::dialect::WarehouseDialect;
-use crate::emit::{emit_transform_step, substitute_query_placeholders};
+use crate::emit::{emit_transform_step, emit_transform_step_ex, substitute_query_placeholders, EmitSchemaOpts};
 use crate::graph::{cte_name, topo_queries_from};
-use crate::model::{TransformationStep, Workspace};
+use crate::model::{KeyMapStorage, TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
 use crate::parquet_scan::read_parquet_call_opts;
 use crate::project::{parquet_hive_partitioning, SourceDef};
@@ -12,6 +13,8 @@ pub struct GraphCompiler<'a> {
     workspace: &'a Workspace,
     /// Catalog for source-specific scan options (e.g. Hive partitioning).
     sources: &'a [SourceDef],
+    /// Connections — used to resolve source KeyMap ATTACH relations (ADR-0022).
+    connections: &'a [ConnectionDef],
 }
 
 /// Shared WITH … CTE list for a workspace (Join diagnostics, custom selects).
@@ -44,11 +47,17 @@ impl<'a> GraphCompiler<'a> {
         Self {
             workspace,
             sources: &[],
+            connections: &[],
         }
     }
 
     pub fn with_sources(mut self, sources: &'a [SourceDef]) -> Self {
         self.sources = sources;
+        self
+    }
+
+    pub fn with_connections(mut self, connections: &'a [ConnectionDef]) -> Self {
+        self.connections = connections;
         self
     }
 
@@ -63,6 +72,7 @@ impl<'a> GraphCompiler<'a> {
             return Err("Workspace is empty".into());
         }
 
+        let (km_rels, km_cols) = preview_key_map_opts(self.workspace, self.connections)?;
         let order = topo_queries_from(self.workspace, root_id)?;
         let mut last_cte: HashMap<String, String> = HashMap::new();
         let mut parts: Vec<String> = Vec::new();
@@ -83,7 +93,14 @@ impl<'a> GraphCompiler<'a> {
                 } else {
                     String::new()
                 };
-                let body = compile_step(step, &prev, &last_cte, self.sources)?;
+                let body = compile_step(
+                    step,
+                    &prev,
+                    &last_cte,
+                    self.sources,
+                    &km_rels,
+                    &km_cols,
+                )?;
                 parts.push(format!("  {name} AS ({body})"));
                 if idx == query.steps.len() - 1 {
                     last_cte.insert(qid.clone(), name);
@@ -128,11 +145,51 @@ impl<'a> PipelineCompiler<'a> {
     }
 }
 
+/// Preview ApplyKeyMap: source maps → ATTACH relation; seed/ref → absent (VALUES / identity).
+fn preview_key_map_opts(
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+) -> Result<
+    (
+        HashMap<String, String>,
+        HashMap<String, (String, String)>,
+    ),
+    String,
+> {
+    let dsns = workspace.source_key_map_dsns(connections)?;
+    let mut relations = HashMap::new();
+    let mut columns = HashMap::new();
+    for km in &workspace.key_maps {
+        let from = if km.from_column.trim().is_empty() {
+            "from".into()
+        } else {
+            km.from_column.clone()
+        };
+        let to = if km.to_column.trim().is_empty() {
+            "to".into()
+        } else {
+            km.to_column.clone()
+        };
+        columns.insert(km.id.clone(), (from, to));
+        if let KeyMapStorage::Source { source, table, .. } = &km.storage {
+            if let Some(dsn) = dsns.get(&km.id) {
+                relations.insert(
+                    km.id.clone(),
+                    duckdb_postgres_relation(dsn, source, table),
+                );
+            }
+        }
+    }
+    Ok((relations, columns))
+}
+
 fn compile_step(
     step: &TransformationStep,
     prev_step: &str,
     last_cte: &HashMap<String, String>,
     sources: &[SourceDef],
+    key_map_relations: &HashMap<String, String>,
+    key_map_columns: &HashMap<String, (String, String)>,
 ) -> Result<String, String> {
     match step {
         TransformationStep::LoadCsv { path } => Ok(format!(
@@ -190,6 +247,17 @@ fn compile_step(
             }
             Ok(substitute_query_placeholders(raw_sql, last_cte))
         }
+        TransformationStep::ApplyKeyMap { .. } => emit_transform_step_ex(
+            step,
+            prev_step,
+            last_cte,
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_relations: Some(key_map_relations),
+                key_map_columns: Some(key_map_columns),
+                ..Default::default()
+            },
+        ),
         other => emit_transform_step(other, prev_step, last_cte, WarehouseDialect::Duckdb),
     }
 }
@@ -197,7 +265,68 @@ fn compile_step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{JoinType, QueryDef, TransformationStep};
+    use crate::connection::{ConnectionDef, ConnectionKind, PostgresParams};
+    use crate::model::{
+        JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, QueryDef, TransformationStep,
+    };
+
+    #[test]
+    fn apply_key_map_source_uses_attach_relation_not_values() {
+        let mut km = KeyMapDef::new("map_x", "X");
+        km.storage = KeyMapStorage::Source {
+            source: "public".into(),
+            table: "channel_map".into(),
+            connection_id: Some("pg1".into()),
+        };
+        km.from_column = "alias".into();
+        km.to_column = "canon".into();
+        // Large cache must not appear as VALUES when source relation is used.
+        km.entries = (0..100)
+            .map(|i| KeyMapEntry::pair(format!("a{i}"), format!("b{i}")))
+            .collect();
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "q1".into(),
+                name: "q1".into(),
+                steps: vec![
+                    TransformationStep::LoadCsv {
+                        path: "/tmp/t.csv".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: "channel".into(),
+                        map_id: "map_x".into(),
+                        entries: vec![],
+                    },
+                ],
+                execution: Default::default(),
+            }],
+            focus_query_id: "q1".into(),
+            key_maps: vec![km],
+        };
+        let conns = vec![ConnectionDef {
+            id: "pg1".into(),
+            name: "pg".into(),
+            kind: ConnectionKind::Postgres,
+            postgres: Some(PostgresParams {
+                connection_string: "postgresql://u:p@localhost/db".into(),
+            }),
+            s3: None,
+            duckdb: None,
+        }];
+        let sql = GraphCompiler::new(&ws)
+            .with_connections(&conns)
+            .to_sql(true)
+            .unwrap();
+        assert!(
+            sql.contains("channel_map") && sql.contains("dwh_pg_"),
+            "expected ATTACH relation, got {sql}"
+        );
+        assert!(
+            !sql.contains("VALUES"),
+            "must not embed dictionary as VALUES: {sql}"
+        );
+        assert!(sql.contains("alias") && sql.contains("canon"));
+    }
 
     #[test]
     fn linear_load_filter_preview() {

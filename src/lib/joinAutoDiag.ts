@@ -13,12 +13,36 @@ const EXPENSIVE = new Set([
   "DeriveColumn",
 ]);
 
+/** Loads whose size is unknown — never treat as a tiny fixture. */
+const HEAVY_OR_UNKNOWN_LOAD = new Set([
+  "LoadParquet",
+  "LoadPostgres",
+  "LoadDuckdb",
+]);
+
+/** Cheap mid-pipeline / local CSV steps OK for fixture auto-diag. */
+const FIXTURE_OK = new Set([
+  "LoadCsv",
+  "FromQuery",
+  "Filter",
+  "SelectColumns",
+  "RenameColumn",
+  "SortBy",
+  "Limit",
+  "NormalizeKey",
+  "ApplyKeyMap",
+]);
+
 function stepExpensive(step: TransformationStep): boolean {
   return EXPENSIVE.has(step.type);
 }
 
-function stepHasHeavyFile(step: TransformationStep): boolean {
-  return step.type === "LoadParquet";
+function stepHeavyLoad(step: TransformationStep): boolean {
+  return HEAVY_OR_UNKNOWN_LOAD.has(step.type);
+}
+
+function stepFixtureOk(step: TransformationStep): boolean {
+  return FIXTURE_OK.has(step.type);
 }
 
 function directDeps(steps: TransformationStep[]): string[] {
@@ -72,8 +96,9 @@ function joinSideSteps(
 }
 
 /**
- * Graph looks like a tiny CSV fixture (known local files).
- * Do NOT treat LoadPostgres / LoadDuckdb as small — row counts are unknown.
+ * Graph looks like a tiny local CSV fixture (demo / keymap playground).
+ * Allows FromQuery + cheap transforms — only `LoadCsv` as leaf loads.
+ * Do NOT treat LoadPostgres / LoadDuckdb / Parquet as small — row counts unknown.
  */
 export function joinLooksFixtureSmall(
   workspace: Workspace,
@@ -84,14 +109,15 @@ export function joinLooksFixtureSmall(
   if (!sides) return false;
   const all = [...sides.left, ...sides.right];
   if (all.length === 0) return false;
-  if (all.some(stepExpensive) || all.some(stepHasHeavyFile)) return false;
-  // Only local CSV — PG/DuckDB tables may be huge with no size hint.
-  return all.every((s) => s.type === "LoadCsv");
+  if (all.some(stepExpensive) || all.some(stepHeavyLoad)) return false;
+  if (!all.every(stepFixtureOk)) return false;
+  // Need at least one real CSV leaf (FromQuery-only graph is incomplete).
+  return all.some((s) => s.type === "LoadCsv");
 }
 
 /**
  * Whether Probe may auto-run diagnostics without a multi-minute scan.
- * Prefer prepared TEMP row counts; fall back to CSV-shaped fixture graphs.
+ * Prefer known side row counts from prepare; fall back to CSV-shaped fixture graphs.
  */
 export function shouldAutoRunJoinDiagnostics(
   workspace: Workspace,
@@ -106,14 +132,13 @@ export function shouldAutoRunJoinDiagnostics(
     | "right_materialized"
   > | null,
 ): boolean {
-  if (
-    prepare?.prepared &&
-    prepare.left_materialized &&
-    prepare.right_materialized
-  ) {
-    const L = Number(prepare.left_rows ?? 0);
-    const R = Number(prepare.right_rows ?? 0);
-    return L <= AUTO_DIAG_MAX_SIDE_ROWS && R <= AUTO_DIAG_MAX_SIDE_ROWS;
+  if (prepare?.prepared) {
+    const L = Number(prepare.left_rows ?? NaN);
+    const R = Number(prepare.right_rows ?? NaN);
+    // Row counts known (materialized TEMP or counted cheap sides).
+    if (Number.isFinite(L) && Number.isFinite(R) && L >= 0 && R >= 0) {
+      return L <= AUTO_DIAG_MAX_SIDE_ROWS && R <= AUTO_DIAG_MAX_SIDE_ROWS;
+    }
   }
   return joinLooksFixtureSmall(workspace, hostQueryId, joinStepIndex);
 }

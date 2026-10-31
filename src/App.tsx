@@ -47,6 +47,7 @@ import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
 import { OptionsDialog } from "./components/OptionsDialog";
+import { DbtSetupDialog } from "./components/DbtSetupDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
 import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
@@ -107,7 +108,9 @@ import {
   joinPrepareProgress,
   joinPrepareStatus,
   listExportTree,
+  dbtSetupStatus,
   getAppSettings,
+  type DbtSetupStatus,
   getGlobalConnections,
   getLastProjectPath,
   loadProject,
@@ -174,6 +177,9 @@ type KeyMapTabSession = {
   map: KeyMapDef;
   /** Optimistic concurrency token from last warehouse read (source storage). */
   contentHash?: string;
+  /** ADR-0022 dirty delta for source Save. */
+  dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
+  totalCount?: number | null;
   pickTo?: string[];
   suggestedFrom?: string[];
   joinCtx?: {
@@ -364,6 +370,9 @@ function App() {
   const [connEditorOpen, setConnEditorOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [dbtSetupOpen, setDbtSetupOpen] = useState(false);
+  const [dbtSetupStatusState, setDbtSetupStatusState] =
+    useState<DbtSetupStatus | null>(null);
   const [connEditorKind, setConnEditorKind] =
     useState<ConnectionKind>("postgres");
   const [editingConnection, setEditingConnection] =
@@ -2298,9 +2307,12 @@ function App() {
 
   async function saveKeyMapToProject(map: KeyMapDef): Promise<KeyMapSaveResult> {
     // Persist to project AST first (local). External sync reports separately.
+    // ADR-0022: source maps keep WH as SoT — do not stash full dictionary in project.
+    const forAst: KeyMapDef =
+      map.storage?.kind === "source" ? { ...map, entries: [] } : map;
     setProject((p) => {
-      const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], map);
-      const queries = syncApplyKeyMapEntries(p.workspace.queries, map);
+      const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], forAst);
+      const queries = syncApplyKeyMapEntries(p.workspace.queries, forAst);
       return {
         ...p,
         workspace: { ...p.workspace, key_maps, queries },
@@ -2374,17 +2386,35 @@ function App() {
         setExportMsg("KeyMap saved in project · warehouse write skipped");
         return result;
       }
-      const expectedHash = keyMapTabs.find((t) => t.map.id === map.id)?.contentHash;
+      const tab = keyMapTabs.find((t) => t.map.id === map.id);
+      const expectedHash = tab?.contentHash;
+      const delta = tab?.dirtyDelta ?? null;
+      const hasDelta =
+        !!delta &&
+        (delta.upserts.length > 0 || delta.deletedFroms.length > 0);
+      if (!hasDelta) {
+        // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message:
+            "KeyMap saved in project · no dirty rows — warehouse unchanged",
+        };
+        setExportMsg(result.message);
+        setError(null);
+        return result;
+      }
       try {
-        const r = await writeKeyMap(map, resolved.dsn, expectedHash);
+        const r = await writeKeyMap(map, resolved.dsn, expectedHash, delta);
         patchKeyMapTab(map.id, (s) => ({
           ...s,
           contentHash: r.content_hash,
+          dirtyDelta: null,
         }));
         const result: KeyMapSaveResult = {
           local: "saved",
           external: "synced",
-          message: `KeyMap saved in project · write-back → ${r.schema}.${r.table} (${r.rows_written} rows)`,
+          message: `KeyMap saved in project · upsert → ${r.schema}.${r.table} (${r.rows_written} dirty rows)`,
           contentHash: r.content_hash,
         };
         setExportMsg(result.message);
@@ -2671,6 +2701,7 @@ function App() {
       } catch {
         // First run / missing connections.json.
       }
+      let restored = false;
       try {
         const path = await getLastProjectPath();
         if (cancelled) return;
@@ -2687,16 +2718,27 @@ function App() {
           } catch {
             /* ignore MRU persist on restore */
           }
-          return;
+          restored = true;
         }
       } catch {
         // Missing/corrupt session — fall through to Untitled.
       }
-      if (!cancelled) {
+      if (!cancelled && !restored) {
         setProject({
           ...emptyProject("Untitled", settings),
           connections: globalConns,
         });
+      }
+      // ADR-0023: offer dbt setup when CLI missing and not dismissed.
+      try {
+        const st = await dbtSetupStatus();
+        if (cancelled) return;
+        setDbtSetupStatusState(st);
+        if (!st.found && !st.dismissed && !settings.dbt_setup_dismissed) {
+          setDbtSetupOpen(true);
+        }
+      } catch {
+        /* host too old / offline — skip */
       }
     })();
     return () => {
@@ -3290,6 +3332,28 @@ function App() {
         onClose={() => setOptionsOpen(false)}
         onSave={(next) => persistAppSettings(next)}
       />
+      <DbtSetupDialog
+        open={dbtSetupOpen}
+        status={dbtSetupStatusState}
+        variant="first-run"
+        onClose={() => setDbtSetupOpen(false)}
+        onInstalled={async (venvPath) => {
+          const next = {
+            ...appSettings,
+            dbt_venv_path: venvPath,
+            dbt_setup_dismissed: true,
+          };
+          await persistAppSettings(next);
+          setDbtSetupOpen(false);
+          setExportMsg(`dbt installed → ${venvPath}`);
+        }}
+        onDismiss={async () => {
+          await persistAppSettings({
+            ...appSettings,
+            dbt_setup_dismissed: true,
+          });
+        }}
+      />
       {opProgress && <OpProgress state={opProgress} />}
 
       {mapPickPending && (
@@ -3789,10 +3853,17 @@ function App() {
                       map: { ...map, id: keyMapEditor.map.id },
                     }))
                   }
-                  onWarehouseRead={(contentHash) =>
+                  onWarehouseRead={(contentHash, totalCount) =>
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({
                       ...s,
                       contentHash,
+                      totalCount,
+                    }))
+                  }
+                  onDirtyChange={(dirtyDelta) =>
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
+                      ...s,
+                      dirtyDelta,
                     }))
                   }
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}

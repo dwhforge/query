@@ -238,6 +238,72 @@
     });
   }
 
+  /* —— Feature shots (any image size; optional data-full for the expanded file) —— */
+  const shotButtons = document.querySelectorAll(".feature-shot");
+  if (shotButtons.length && "HTMLDialogElement" in window) {
+    const dialog = document.createElement("dialog");
+    dialog.className = "shot-lightbox";
+    dialog.innerHTML = [
+      '<div class="shot-stage">',
+      '<div class="shot-glow" aria-hidden="true"></div>',
+      '<div class="shot-frame">',
+      "<img alt=\"\" />",
+      '<div class="shot-scan" aria-hidden="true"></div>',
+      '<button type="button" class="shot-close">Close</button>',
+      "</div>",
+      '<p class="shot-caption"></p>',
+      "</div>",
+    ].join("");
+    document.body.appendChild(dialog);
+
+    const frame = dialog.querySelector(".shot-frame");
+    const frameImg = frame.querySelector("img");
+    const caption = dialog.querySelector(".shot-caption");
+    const closeBtn = dialog.querySelector(".shot-close");
+    let opener = null;
+
+    const revealShot = () => {
+      if (reduceMotion) dialog.classList.add("is-in");
+      else requestAnimationFrame(() => dialog.classList.add("is-in"));
+    };
+
+    const openShot = (btn) => {
+      const img = btn.querySelector("img");
+      if (!img) return;
+      const full = img.getAttribute("data-full") || img.currentSrc || img.src;
+      opener = btn;
+      caption.textContent = img.alt || "";
+      frameImg.alt = img.alt || "";
+      dialog.classList.remove("is-in");
+      frameImg.onload = () => revealShot();
+      frameImg.src = full;
+      if (!dialog.open) dialog.showModal();
+      if (frameImg.complete) revealShot();
+    };
+
+    shotButtons.forEach((btn) => {
+      btn.setAttribute("aria-haspopup", "dialog");
+      btn.addEventListener("click", () => openShot(btn));
+    });
+
+    closeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      dialog.close();
+    });
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) dialog.close();
+    });
+    dialog.addEventListener("close", () => {
+      dialog.classList.remove("is-in");
+      frameImg.removeAttribute("src");
+      frameImg.onload = null;
+      if (opener) {
+        opener.focus();
+        opener = null;
+      }
+    });
+  }
+
   /* —— Scroll reveals —— */
   const revealEls = document.querySelectorAll(
     ".feature-list li, .steps li, .section-head, .download-panel, .demo-points li, .doc-links li, .matrix, [data-reveal]",

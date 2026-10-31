@@ -635,10 +635,18 @@ section {
 
 .feature-list li {
   display: grid;
-  gap: 0.35rem;
-  padding: 1.35rem 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.85rem 1.5rem;
+  align-items: center;
+  padding: 1.2rem 0;
   border-bottom: 1px solid var(--line);
   position: relative;
+}
+
+.feature-body {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
 .feature-list li::after {
@@ -672,6 +680,254 @@ section {
   margin: 0;
   color: var(--muted);
   max-width: 40rem;
+}
+
+/* Mini slot stays fixed. The file can be any pixel size — contain fits it.
+   Set data-full on the img when the expanded file should differ from src.
+   Override the slot per shot with --shot-w / --shot-h. */
+.feature-shot {
+  --shot-w: 228px;
+  --shot-h: 140px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--shot-w);
+  height: var(--shot-h);
+  margin: 0;
+  padding: 6px;
+  border: 1px solid rgba(45, 212, 191, 0.28);
+  border-radius: 8px;
+  background: #0c141c;
+  color: inherit;
+  font: inherit;
+  line-height: 0;
+  cursor: zoom-in;
+  overflow: hidden;
+  justify-self: end;
+  box-shadow:
+    0 0 0 1px rgba(45, 212, 191, 0.05),
+    0 16px 36px -26px rgba(0, 0, 0, 0.85);
+  transition:
+    transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 0.3s ease,
+    box-shadow 0.35s ease;
+}
+
+.feature-shot img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.feature-shot::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 42%;
+  top: -45%;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(45, 212, 191, 0.2),
+    transparent
+  );
+  pointer-events: none;
+  opacity: 0;
+  z-index: 1;
+}
+
+.feature-shot::after {
+  content: "Expand";
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 0.22rem 0.5rem;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 999px;
+  background: rgba(8, 14, 20, 0.78);
+  color: var(--fg);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+
+.feature-shot:hover,
+.feature-shot:focus-visible {
+  transform: translateY(-3px);
+  border-color: rgba(45, 212, 191, 0.7);
+  box-shadow:
+    0 0 0 1px rgba(45, 212, 191, 0.16),
+    0 0 28px -6px rgba(45, 212, 191, 0.65),
+    0 18px 36px -18px rgba(0, 0, 0, 0.8);
+  outline: none;
+}
+
+.feature-shot:hover::before,
+.feature-shot:focus-visible::before {
+  opacity: 1;
+  animation: scan-y 1.5s ease-in-out infinite;
+}
+
+.feature-shot:hover::after,
+.feature-shot:focus-visible::after {
+  opacity: 1;
+  transform: none;
+}
+
+.shot-lightbox {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: var(--fg);
+  max-width: none;
+  max-height: none;
+}
+
+.shot-lightbox[open] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100vh;
+  padding: clamp(1rem, 4vh, 2.5rem);
+}
+
+.shot-lightbox::backdrop {
+  background: rgba(5, 9, 14, 0.78);
+  backdrop-filter: blur(14px);
+}
+
+.shot-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+  max-width: 100%;
+}
+
+.shot-glow {
+  position: absolute;
+  inset: 8% -10% 12%;
+  z-index: -1;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(45, 212, 191, 0.38),
+    transparent 68%
+  );
+  filter: blur(6px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.55s ease;
+}
+
+.shot-lightbox.is-in .shot-glow {
+  opacity: 1;
+}
+
+.shot-frame {
+  position: relative;
+  opacity: 0;
+  transform: perspective(1100px) rotateX(7deg) translateY(18px) scale(0.94);
+  filter: blur(8px);
+  transition:
+    transform 0.55s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.4s ease,
+    filter 0.45s ease;
+}
+
+.shot-lightbox.is-in .shot-frame {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+.shot-frame img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(1080px, calc(100vw - 3rem));
+  max-height: min(78vh, 860px);
+  border-radius: 10px;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  background: #0b1219;
+  box-shadow:
+    0 0 0 1px rgba(45, 212, 191, 0.1),
+    0 36px 90px -28px rgba(0, 0, 0, 0.88),
+    0 0 72px -18px rgba(45, 212, 191, 0.55);
+}
+
+.shot-scan {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+.shot-lightbox.is-in .shot-scan::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 32%;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(45, 212, 191, 0.2),
+    transparent
+  );
+  animation: scan-y 1.15s ease-in-out 1;
+}
+
+.shot-caption {
+  margin: 0;
+  max-width: min(40rem, calc(100vw - 3rem));
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.shot-caption:empty {
+  display: none;
+}
+
+.shot-close {
+  position: absolute;
+  top: 0.65rem;
+  right: 0.65rem;
+  z-index: 2;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 999px;
+  background: rgba(8, 14, 20, 0.82);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+.shot-close:hover,
+.shot-close:focus-visible {
+  border-color: var(--teal);
+  color: var(--teal);
+  outline: none;
 }
 
 .feature-list code,
@@ -1180,8 +1436,31 @@ section {
 
   .btn:hover,
   .btn-primary,
-  .nav-cta {
+  .nav-cta,
+  .feature-shot,
+  .feature-shot:hover,
+  .feature-shot:focus-visible {
     transform: none !important;
+  }
+
+  .feature-shot::before,
+  .shot-scan::before,
+  .shot-frame,
+  .shot-glow {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .shot-frame,
+  .shot-lightbox.is-in .shot-frame {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+
+  .shot-glow,
+  .shot-lightbox.is-in .shot-glow {
+    opacity: 1 !important;
   }
 }
 
@@ -1240,5 +1519,16 @@ section {
   .matrix {
     display: block;
     overflow-x: auto;
+  }
+
+  .feature-list li {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+
+  .feature-shot {
+    --shot-w: min(100%, 420px);
+    --shot-h: 200px;
+    justify-self: start;
   }
 }

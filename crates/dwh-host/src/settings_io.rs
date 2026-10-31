@@ -1,5 +1,6 @@
 //! App preferences: `~/.dwhforge-query/settings.json`.
-//! See [ADR-0021](../../../docs/adr/0021-app-options-recent-projects.md).
+//! See [ADR-0021](../../../docs/adr/0021-app-options-recent-projects.md),
+//! [ADR-0023](../../../docs/adr/0023-dbt-setup-onboarding.md).
 
 use crate::secrets_io::dwh_home_dir;
 use dwh_pipeline::{DbtTarget, DestinationKind, ExecutionEngine, WarehouseDialect};
@@ -53,6 +54,9 @@ pub struct AppSettings {
     /// Absolute path to a Python venv root that contains `bin/dbt` (or Windows `Scripts`).
     #[serde(default)]
     pub dbt_venv_path: String,
+    /// User dismissed first-run dbt setup (ADR-0023). Absent → false.
+    #[serde(default)]
+    pub dbt_setup_dismissed: bool,
     #[serde(default)]
     pub recent_projects: Vec<String>,
     #[serde(default = "default_explorer_width")]
@@ -79,6 +83,7 @@ impl Default for AppSettings {
             default_execution_engine: Some(ExecutionEngine::Duckdb),
             default_destination_kind: Some(DestinationKind::Duckdb),
             dbt_venv_path: String::new(),
+            dbt_setup_dismissed: false,
             recent_projects: Vec::new(),
             explorer_width_px: default_explorer_width(),
             inspector_width_px: default_inspector_width(),

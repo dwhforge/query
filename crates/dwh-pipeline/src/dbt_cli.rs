@@ -470,10 +470,12 @@ mod tests {
             KeyMapEntry {
                 from: "001".into(),
                 to: "online".into(),
+                ..Default::default()
             },
             KeyMapEntry {
                 from: "1".into(),
                 to: "offline".into(),
+                ..Default::default()
             },
         ];
         let ws = Workspace {

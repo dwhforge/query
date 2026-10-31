@@ -48,9 +48,10 @@ pub use join_prepare::{
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use key_map_write::{
-    key_map_content_hash, read_key_map, read_key_map_from_postgres, read_key_map_with_hash,
-    write_key_map, write_key_map_to_postgres, write_key_map_with_expected, KeyMapReadResult,
-    KeyMapWriteResult,
+    key_map_content_hash, read_key_map, read_key_map_from_postgres, read_key_map_paged,
+    read_key_map_with_hash, write_key_map, write_key_map_delta_to_postgres,
+    write_key_map_to_postgres, write_key_map_with_delta, write_key_map_with_expected,
+    KeyMapDirtyDelta, KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
 };
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{

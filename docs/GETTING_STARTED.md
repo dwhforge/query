@@ -41,7 +41,9 @@ From the **repository root** (or the unpacked portable tree that contains `scrip
 ./scripts/fetch-dbt-venv.sh
 ```
 
-This creates **`./dbt-venv/`** with:
+Or from the app (**ADR-0023**): first launch offers **Install for me** / **Copy install script** into `~/.dwhforge-query/dbt-venv`; repeat via **File → Options…**.
+
+Dev script creates **`./dbt-venv/`** (or `DWH_DBT_VENV=…`) with:
 
 - `dbt-core` 1.x  
 - `dbt-duckdb`  

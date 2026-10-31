@@ -102,52 +102,113 @@
               where you build—then ship code you can run in your own infra.
             </p>
           </div>
+          <!-- Shots accept any image size. Replace the file or edit src. data-full on the img is optional and used only when the expanded file differs. -->
           <ul class="feature-list">
             <li>
-              <h3>See the data behind the graph</h3>
-              <p>
-                Select a query or an applied step and inspect its intermediate
-                result before you publish.
-              </p>
+              <div class="feature-body">
+                <h3>See the data behind the graph</h3>
+                <p>
+                  Select a query or an applied step and inspect its intermediate
+                  result before you publish.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/preview.png"
+                  alt="Data preview of the rows behind the selected join key"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Investigate joins where you build them</h3>
-              <p>
-                Join Lens, near-miss normalize, and From→To KeyMaps turn dirty
-                keys into inspectable steps—and dbt seeds you keep in Git.
-                <a href="#mapping">See the mapping toolkit →</a>
-              </p>
+              <div class="feature-body">
+                <h3>Investigate joins where you build them</h3>
+                <p>
+                  Join Lens, near-miss normalize, and From→To KeyMaps turn dirty
+                  keys into inspectable steps—and dbt seeds you keep in Git.
+                  <a href="#mapping">See the mapping toolkit →</a>
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/edit-join.png"
+                  alt="Join editor with the right query, join type, keys, and diagnostics"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Compute where it makes sense</h3>
-              <p>
-                DuckDB for files and prep; PostgreSQL when the warehouse should
-                own execution. Engine and destination are separate choices.
-              </p>
+              <div class="feature-body">
+                <h3>Compute where it makes sense</h3>
+                <p>
+                  DuckDB for files and prep; PostgreSQL when the warehouse should
+                  own execution. Engine and destination are separate choices.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/publish.png"
+                  alt="Publish to destination, with local or target preview and a DuckDB export engine"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Keep the result as code</h3>
-              <p>
-                Export SQL models, sources, dependencies, and mapping seeds.
-                Run them with dbt outside the app—in Git, CI, or your existing
-                automation.
-              </p>
+              <div class="feature-body">
+                <h3>Keep the result as code</h3>
+                <p>
+                  Export SQL models, sources, dependencies, and mapping seeds.
+                  Run them with dbt outside the app—in Git, CI, or your existing
+                  automation.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/export.png"
+                  alt="dbt export in the project tree, including the seeds folder"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Come back and change it</h3>
-              <p>
-                Edit the workspace and re-export. Hash checks detect hand-edits
-                to generator-owned files before overwrite.
-              </p>
+              <div class="feature-body">
+                <h3>Come back and change it</h3>
+                <p>
+                  Edit the workspace and re-export. Hash checks detect hand-edits
+                  to generator-owned files before overwrite.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/steps.png"
+                  alt="Applied steps on a query, with the join step selected"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Optional LLM—local data stays local</h3>
-              <p>
-                Join Lens can call an OpenAI-compatible API for Suggest all and
-                chat on hard aliases. Schema and step context only; raw rows
-                never leave the machine.
-                <a href="#mapping">Mapping toolkit →</a>
-              </p>
+              <div class="feature-body">
+                <h3>Optional LLM—local data stays local</h3>
+                <p>
+                  Join Lens can call an OpenAI-compatible API for Suggest all and
+                  chat on hard aliases. Schema and step context only; raw rows
+                  never leave the machine.
+                  <a href="#mapping">Mapping toolkit →</a>
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/suggest.png"
+                  alt="Suggest a mapping for the unmatched company Coca Cola Co"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
           </ul>
         </div>
@@ -168,68 +229,138 @@
           </div>
           <ul class="feature-list mapping-toolkit">
             <li>
-              <h3>Join Lens</h3>
-              <p>
-                Probe matched and unmatched keys on the Join you are editing.
-                Inspect “this row,” no-match samples, and frequency—without
-                leaving the canvas.
-              </p>
+              <div class="feature-body">
+                <h3>Join Lens</h3>
+                <p>
+                  Probe matched and unmatched keys on the Join you are editing.
+                  Inspect “this row,” no-match samples, and frequency—without
+                  leaving the canvas.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/join-lens.png"
+                  alt="Join Lens with unmatched keys on both sides and the rows for the selected key"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Near-miss → NormalizeKey</h3>
-              <p>
-                When trim, case, or leading zeros would recover matches, apply
-                an explicit <strong>NormalizeKey</strong> step before the Join.
-                Suggestions require acceptance; automatic fuzzy merge stays off.
-              </p>
+              <div class="feature-body">
+                <h3>Near-miss → NormalizeKey</h3>
+                <p>
+                  When trim, case, or leading zeros would recover matches, apply
+                  an explicit <strong>NormalizeKey</strong> step before the Join.
+                  Suggestions require acceptance; automatic fuzzy merge stays off.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/cleanup.png"
+                  alt="Try cleanup on a join, the step before an explicit NormalizeKey"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>From→To KeyMap editor</h3>
-              <p>
-                First-class tab next to the pipeline. Maintain alias → canonical
-                ID like a dimension table. Add unmatched values from Lens with
-                one gesture; apply left, right, or both into the graph.
-              </p>
+              <div class="feature-body">
+                <h3>From→To KeyMap editor</h3>
+                <p>
+                  First-class tab next to the pipeline. Maintain alias → canonical
+                  ID like a dimension table. Add unmatched values from Lens with
+                  one gesture; apply left, right, or both into the graph.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/add-to-map.png"
+                  alt="Unmatched company names in Join Lens, with Save mapping for the selected value"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Reuse across queries</h3>
-              <p>
-                One map cleans sales and spend (or any feed) via
-                <strong>ApplyKeyMap</strong> steps. The same dictionary ships as
-                <code>seeds/map_*.csv</code> with typed varchar columns so
-                leading zeros survive <code>dbt seed</code>.
-              </p>
+              <div class="feature-body">
+                <h3>Reuse across queries</h3>
+                <p>
+                  One map cleans sales and spend (or any feed) via
+                  <strong>ApplyKeyMap</strong> steps. The same dictionary ships as
+                  <code>seeds/map_*.csv</code> with typed varchar columns so
+                  leading zeros survive <code>dbt seed</code>.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/apply-keymap.png"
+                  alt="ApplyKeyMap steps on sales and spending before the later queries"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Seed as source of truth after export</h3>
-              <p>
-                After the first export, edit the seed in Git or sync it back into
-                the editor. Re-export detects hand-edits instead of silently
-                wiping your aliases.
-              </p>
+              <div class="feature-body">
+                <h3>Seed as source of truth after export</h3>
+                <p>
+                  After the first export, edit the seed in Git or sync it back into
+                  the editor. Re-export detects hand-edits instead of silently
+                  wiping your aliases.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/export.png"
+                  alt="Exported dbt project with a seeds folder for KeyMap files"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>When fuzzy cannot invent the answer</h3>
-              <p>
-                Tickers, legacy IDs, and historical names that never appear in
-                the dimension stay human-owned in the KeyMap—not guessed into the
-                Join ON.
-              </p>
+              <div class="feature-body">
+                <h3>When fuzzy cannot invent the answer</h3>
+                <p>
+                  Tickers, legacy IDs, and historical names that never appear in
+                  the dimension stay human-owned in the KeyMap—not guessed into the
+                  Join ON.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/no-match.png"
+                  alt="Dimension keys with no match, including tickers such as MCD and KO"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
             <li>
-              <h3>Optional LLM assist (Join Lens Auto)</h3>
-              <p>
-                Connect an OpenAI-compatible endpoint
-                (<code>llm.base_url</code> / <code>model</code> /
-                <code>api_key</code> in
-                <code>~/.dwhforge-query/settings.json</code>). Use
-                <strong>Suggest all</strong> for similar-name proposals you
-                Accept into a KeyMap, then chat about leftovers with
-                lineage, schemas, and neighbor fields as context.
-                <strong>Raw preview rows never leave the machine</strong>—only
-                structured schema / step / prompt payloads. The model narrates
-                and suggests; it does not rewrite Join keys or invent counts.
-              </p>
+              <div class="feature-body">
+                <h3>Optional LLM assist (Join Lens Auto)</h3>
+                <p>
+                  Connect an OpenAI-compatible endpoint
+                  (<code>llm.base_url</code> / <code>model</code> /
+                  <code>api_key</code> in
+                  <code>~/.dwhforge-query/settings.json</code>). Use
+                  <strong>Suggest all</strong> for similar-name proposals you
+                  Accept into a KeyMap, then chat about leftovers with
+                  lineage, schemas, and neighbor fields as context.
+                  <strong>Raw preview rows never leave the machine</strong>—only
+                  structured schema / step / prompt payloads. The model narrates
+                  and suggests; it does not rewrite Join keys or invent counts.
+                </p>
+              </div>
+              <button type="button" class="feature-shot">
+                <img
+                  src="assets/features/suggest.png"
+                  alt="Suggest and save a mapping for an unmatched company name"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
             </li>
           </ul>
           <div class="cta-row" style="margin-top: 2rem">

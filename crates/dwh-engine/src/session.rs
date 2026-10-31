@@ -177,6 +177,13 @@ impl DbSession {
                     }
                 }
             }
+            // ADR-0022: ATTACH DSNs used by source KeyMaps for ApplyKeyMap preview join.
+            for dsn in resolved.source_key_map_dsns(connections)?.values() {
+                let d = dsn.trim();
+                if !d.is_empty() {
+                    dsns.insert(d.to_string());
+                }
+            }
             self.with_conn(|conn| {
                 for dsn in &dsns {
                     ensure_pg_attached(conn, dsn)?;

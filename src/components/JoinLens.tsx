@@ -417,7 +417,12 @@ export type JoinLensProps = {
   onMapKey?: (
     side: JoinKeySide,
     fromValues: string[],
-    opts?: { toValues?: string[]; fromParts?: string[][] },
+    opts?: {
+      toValues?: string[];
+      fromParts?: string[][];
+      applyColumns?: string[];
+      outputColumn?: string;
+    },
   ) => void;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
   onPrepareBusy?: (busy: boolean) => void;
@@ -1750,6 +1755,8 @@ function JoinLensImpl({
                     onMapKey("left", fromValues, {
                       toValues,
                       fromParts: opts?.fromParts,
+                      applyColumns: opts?.applyColumns,
+                      outputColumn: opts?.outputColumn,
                     });
                     const toast = `Opened KeyMap · ${fromValues.length} auto pair${fromValues.length === 1 ? "" : "s"}`;
                     setMapToast(toast);

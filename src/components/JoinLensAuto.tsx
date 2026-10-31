@@ -15,6 +15,38 @@ import {
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
 
+/** Preserve Auto mode selection into ApplyKeyMap columns / output (ADR-0024). */
+function acceptApplyOpts(
+  leftOn: string[],
+  keyIndex: number | null,
+  compositeMode: boolean,
+  compositeFuzzySlot: number,
+): { applyColumns?: string[]; outputColumn?: string } {
+  if (compositeMode && leftOn.length > 1) {
+    const fuzzy = Math.min(
+      compositeFuzzySlot,
+      Math.max(0, leftOn.length - 1),
+    );
+    return {
+      applyColumns: [...leftOn],
+      outputColumn: leftOn[fuzzy],
+    };
+  }
+  if (keyIndex != null && leftOn[keyIndex]) {
+    return {
+      applyColumns: [leftOn[keyIndex]!],
+      outputColumn: leftOn[keyIndex]!,
+    };
+  }
+  if (leftOn.length === 1) {
+    return {
+      applyColumns: [leftOn[0]!],
+      outputColumn: leftOn[0]!,
+    };
+  }
+  return {};
+}
+
 /** Split assistant reply: keep prose visible; tuck fenced JSON behind a toggle. */
 function splitAssistantContent(content: string): {
   prose: string;
@@ -75,7 +107,13 @@ export function JoinLensAuto({
   onAccept?: (
     fromValues: string[],
     toValues: string[],
-    opts?: { fromParts?: string[][] },
+    opts?: {
+      fromParts?: string[][];
+      /** Fact columns for ApplyKeyMap (ADR-0024 selected Join keys). */
+      applyColumns?: string[];
+      /** Column overwritten / written by Apply (per-column or fuzzy slot). */
+      outputColumn?: string;
+    },
   ) => void;
 }) {
   const [report, setReport] = useState<JoinKeyFuzzySuggest | null>(null);
@@ -395,6 +433,12 @@ export function JoinLensAuto({
                   fromParts: selected.map((p) =>
                     p.from_parts?.length ? p.from_parts : [p.from_key],
                   ),
+                  ...acceptApplyOpts(
+                    report?.left_on ?? [],
+                    keyIndex,
+                    compositeMode,
+                    compositeFuzzySlot,
+                  ),
                 },
               )
             }
@@ -559,6 +603,12 @@ export function JoinLensAuto({
                     onAccept?.(
                       chatPairs.map((p) => p.from),
                       chatPairs.map((p) => p.to),
+                      acceptApplyOpts(
+                        report.left_on,
+                        keyIndex,
+                        compositeMode,
+                        compositeFuzzySlot,
+                      ),
                     )
                   }
                   className="mt-1 rounded border border-amber-600/80 px-2 py-0.5 text-[10px] text-amber-50 disabled:opacity-40"

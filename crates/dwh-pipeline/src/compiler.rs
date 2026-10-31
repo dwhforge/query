@@ -6,6 +6,7 @@ use crate::model::{KeyMapStorage, TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
 use crate::parquet_scan::read_parquet_call_opts;
 use crate::project::{parquet_hive_partitioning, SourceDef};
+use crate::schema::WorkspaceSchemas;
 use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::HashMap;
 
@@ -15,6 +16,8 @@ pub struct GraphCompiler<'a> {
     sources: &'a [SourceDef],
     /// Connections — used to resolve source KeyMap ATTACH relations (ADR-0022).
     connections: &'a [ConnectionDef],
+    /// Inferred per-step schemas (from Load* seeds) — required for ApplyKeyMap output_column.
+    schemas: Option<&'a WorkspaceSchemas>,
 }
 
 /// Shared WITH … CTE list for a workspace (Join diagnostics, custom selects).
@@ -48,6 +51,7 @@ impl<'a> GraphCompiler<'a> {
             workspace,
             sources: &[],
             connections: &[],
+            schemas: None,
         }
     }
 
@@ -58,6 +62,11 @@ impl<'a> GraphCompiler<'a> {
 
     pub fn with_connections(mut self, connections: &'a [ConnectionDef]) -> Self {
         self.connections = connections;
+        self
+    }
+
+    pub fn with_schemas(mut self, schemas: &'a WorkspaceSchemas) -> Self {
+        self.schemas = Some(schemas);
         self
     }
 
@@ -93,6 +102,15 @@ impl<'a> GraphCompiler<'a> {
                 } else {
                     String::new()
                 };
+                let prev_columns = if idx > 0 {
+                    self.schemas
+                        .and_then(|s| s.steps.get(qid))
+                        .and_then(|v| v.get(idx - 1))
+                        .and_then(|opt| opt.as_ref())
+                        .map(|c| c.as_slice())
+                } else {
+                    None
+                };
                 let body = compile_step(
                     step,
                     &prev,
@@ -100,6 +118,7 @@ impl<'a> GraphCompiler<'a> {
                     self.sources,
                     &km_rels,
                     &km_cols,
+                    prev_columns,
                 )?;
                 parts.push(format!("  {name} AS ({body})"));
                 if idx == query.steps.len() - 1 {
@@ -186,6 +205,7 @@ fn compile_step(
     sources: &[SourceDef],
     key_map_relations: &HashMap<String, String>,
     key_map_columns: &HashMap<String, (Vec<String>, String)>,
+    prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
     match step {
         TransformationStep::LoadCsv { path } => Ok(format!(
@@ -251,10 +271,20 @@ fn compile_step(
             EmitSchemaOpts {
                 key_map_relations: Some(key_map_relations),
                 key_map_columns: Some(key_map_columns),
+                prev_columns,
                 ..Default::default()
             },
         ),
-        other => emit_transform_step(other, prev_step, last_cte, WarehouseDialect::Duckdb),
+        other => emit_transform_step_ex(
+            other,
+            prev_step,
+            last_cte,
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                prev_columns,
+                ..Default::default()
+            },
+        ),
     }
 }
 

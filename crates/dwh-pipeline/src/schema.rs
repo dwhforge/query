@@ -5,7 +5,7 @@
 
 use crate::emit::{ascii_fold_name, union_column_names, validate_unambiguous_ascii_names};
 use crate::graph::topo_queries;
-use crate::model::{TransformationStep, Workspace};
+use crate::model::{apply_keymap_columns, TransformationStep, Workspace};
 use std::collections::HashMap;
 
 /// Ordered column names after a step, or unknown.
@@ -95,8 +95,36 @@ pub fn apply_step_schema(
         TransformationStep::Filter { .. }
         | TransformationStep::SortBy { .. }
         | TransformationStep::Limit { .. }
-        | TransformationStep::NormalizeKey { .. }
-        | TransformationStep::ApplyKeyMap { .. } => Ok(prev.map(|p| p.to_vec())),
+        | TransformationStep::NormalizeKey { .. } => Ok(prev.map(|p| p.to_vec())),
+        TransformationStep::ApplyKeyMap {
+            column,
+            columns,
+            output_column,
+            ..
+        } => {
+            // ADR-0024: new output_column is appended; overwrite keeps the same list.
+            let Some(cols) = prev else {
+                return Ok(None);
+            };
+            let fact = apply_keymap_columns(column, columns);
+            let out = output_column
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| fact.first().map(|s| s.as_str()))
+                .unwrap_or("");
+            if out.is_empty() {
+                return Ok(Some(cols.to_vec()));
+            }
+            let fold = ascii_fold_name(out);
+            if cols.iter().any(|c| ascii_fold_name(c) == fold) {
+                Ok(Some(cols.to_vec()))
+            } else {
+                let mut next = cols.to_vec();
+                next.push(out.to_string());
+                Ok(Some(next))
+            }
+        }
         TransformationStep::SelectColumns { columns } => {
             if columns.is_empty() {
                 return Err("SelectColumns: empty columns".into());
@@ -325,5 +353,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(out, vec!["id", "amt", "region"]);
+    }
+
+    #[test]
+    fn apply_keymap_appends_new_output_column() {
+        let prev = vec!["ext".into(), "region".into()];
+        let step = TransformationStep::ApplyKeyMap {
+            column: "ext".into(),
+            columns: vec!["ext".into()],
+            output_column: Some("canonical".into()),
+            map_id: "m".into(),
+            entries: vec![],
+        };
+        let next = apply_step_schema(
+            &step,
+            Some(&prev),
+            &HashMap::new(),
+            &HashMap::new(),
+            "q",
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next, vec!["ext", "region", "canonical"]);
+    }
+
+    #[test]
+    fn apply_keymap_keeps_schema_when_overwriting() {
+        let prev = vec!["ext".into(), "canonical".into()];
+        let step = TransformationStep::ApplyKeyMap {
+            column: "ext".into(),
+            columns: vec!["ext".into()],
+            output_column: Some("canonical".into()),
+            map_id: "m".into(),
+            entries: vec![],
+        };
+        let next = apply_step_schema(
+            &step,
+            Some(&prev),
+            &HashMap::new(),
+            &HashMap::new(),
+            "q",
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next, vec!["ext", "canonical"]);
     }
 }

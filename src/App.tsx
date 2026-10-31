@@ -193,6 +193,11 @@ type KeyMapTabSession = {
     rightOn: string[];
     /** Side whose unmatched key opened Add to map… */
     probeSide?: "left" | "right";
+    /** Fact columns for ApplyKeyMap (selected Join keys, ADR-0024). */
+    applyLeftOn?: string[];
+    applyRightOn?: string[];
+    /** Output column for ApplyKeyMap (overwrite or new). */
+    outputColumn?: string;
   };
 };
 
@@ -2229,14 +2234,7 @@ function App() {
       pickTo?: string[];
       suggestedFrom?: string[];
       suggestedFromParts?: string[][];
-      joinCtx?: {
-        hostQueryId: string;
-        joinStepIndex: number;
-        rightQueryId: string;
-        leftOn: string[];
-        rightOn: string[];
-        probeSide?: "left" | "right";
-      };
+      joinCtx?: NonNullable<KeyMapTabSession["joinCtx"]>;
     },
   ) {
     const normalized: KeyMapDef = {
@@ -2588,17 +2586,20 @@ function App() {
     });
     const arity = Math.max(
       map.from_columns?.length ?? 0,
+      joinCtx.applyLeftOn?.length ?? 0,
       fromParts?.find((p) => p.length)?.length ?? 1,
       1,
     );
     const from_columns =
       map.from_columns?.length === arity
         ? map.from_columns
-        : arity > 1 && joinCtx.leftOn.length >= arity
-          ? joinCtx.leftOn.slice(0, arity)
-          : map.from_columns?.length
-            ? map.from_columns
-            : [map.from_column ?? "from"];
+        : joinCtx.applyLeftOn && joinCtx.applyLeftOn.length === arity
+          ? joinCtx.applyLeftOn
+          : arity > 1 && joinCtx.leftOn.length >= arity
+            ? joinCtx.leftOn.slice(0, arity)
+            : map.from_columns?.length
+              ? map.from_columns
+              : [map.from_column ?? "from"];
     const merged = {
       ...map,
       from_columns,
@@ -2624,19 +2625,60 @@ function App() {
   function handleMapKeyFromLens(
     side: "left" | "right",
     fromValues: string[],
-    opts?: { toValues?: string[]; fromParts?: string[][] },
+    opts?: {
+      toValues?: string[];
+      fromParts?: string[][];
+      applyColumns?: string[];
+      outputColumn?: string;
+    },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
+    const {
+      leftOn: lensLeftOn,
+      rightOn: lensRightOn,
+      hostQueryId,
+      joinStepIndex,
+      rightQueryId,
+    } = joinLensTarget;
     const maps = project.workspace.key_maps ?? [];
     const toValues = opts?.toValues;
     const fromParts = opts?.fromParts;
-    const joinCtx = { ...joinLensTarget, probeSide: side };
+    const tupleArity = fromParts?.find((p) => p.length)?.length ?? 0;
+    const applyCols = (
+      opts?.applyColumns?.filter((c) => c.trim()) ??
+      (tupleArity > 1
+        ? (side === "left" ? lensLeftOn : lensRightOn).slice(0, tupleArity)
+        : undefined)
+    )?.filter(Boolean);
+    const outputColumn =
+      opts?.outputColumn?.trim() ||
+      applyCols?.[0] ||
+      (side === "left" ? lensLeftOn[0] : lensRightOn[0]);
+
+    const applyLeftOn =
+      applyCols?.length ? applyCols : [lensLeftOn[0] ?? "key"];
+    const applyRightOn = applyLeftOn.map((lc) => {
+      const idx = lensLeftOn.findIndex(
+        (c) => c.toLowerCase() === lc.toLowerCase(),
+      );
+      return lensRightOn[idx >= 0 ? idx : 0] ?? lc;
+    });
+
+    const joinCtx = {
+      hostQueryId,
+      joinStepIndex,
+      rightQueryId,
+      leftOn: lensLeftOn,
+      rightOn: lensRightOn,
+      probeSide: side,
+      applyLeftOn,
+      applyRightOn,
+      outputColumn,
+    };
     if (maps.length === 0) {
-      const arity = fromParts?.find((p) => p.length)?.length ?? 1;
+      const arity = applyLeftOn.length;
       const from_columns =
-        arity > 1 && joinCtx.leftOn.length >= arity
-          ? joinCtx.leftOn.slice(0, arity)
-          : ["from"];
+        arity > 1 ? applyLeftOn : ["from"];
       openMapWithFromValues(
         {
           ...emptyKeyMap("join aliases"),
@@ -4018,18 +4060,31 @@ function App() {
                               );
                               return;
                             }
-                            const arity = Math.max(
-                              map.from_columns?.length ?? 0,
-                              1,
-                            );
                             const leftCols =
-                              arity > 1 && ctx.leftOn.length >= arity
-                                ? ctx.leftOn.slice(0, arity)
-                                : [ctx.leftOn[0] ?? "key"];
+                              ctx.applyLeftOn?.length
+                                ? ctx.applyLeftOn
+                                : map.from_columns &&
+                                    map.from_columns.length > 1 &&
+                                    ctx.leftOn.length >= map.from_columns.length
+                                  ? ctx.leftOn.slice(
+                                      0,
+                                      map.from_columns.length,
+                                    )
+                                  : [ctx.leftOn[0] ?? "key"];
                             const rightCols =
-                              arity > 1 && ctx.rightOn.length >= arity
-                                ? ctx.rightOn.slice(0, arity)
-                                : [ctx.rightOn[0] ?? "key"];
+                              ctx.applyRightOn?.length
+                                ? ctx.applyRightOn
+                                : map.from_columns &&
+                                    map.from_columns.length > 1 &&
+                                    ctx.rightOn.length >=
+                                      map.from_columns.length
+                                  ? ctx.rightOn.slice(
+                                      0,
+                                      map.from_columns.length,
+                                    )
+                                  : [ctx.rightOn[0] ?? "key"];
+                            const outputColumn =
+                              ctx.outputColumn?.trim() || leftCols[0];
                             setProject((p) => ({
                               ...p,
                               workspace: applyKeyMapToWorkspace(
@@ -4049,6 +4104,7 @@ function App() {
                                 map,
                                 leftCols,
                                 rightCols,
+                                outputColumn,
                               ),
                             }));
                             closeKeyMapTab(map.id);

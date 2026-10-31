@@ -1613,6 +1613,39 @@ mod tests {
     }
 
     #[test]
+    fn apply_key_map_existing_output_not_in_from_uses_exclude() {
+        use crate::model::KeyMapEntry;
+        // output_column exists on prev but is not a From fact col → overwrite, not duplicate.
+        let step = TransformationStep::ApplyKeyMap {
+            column: "ext".into(),
+            columns: vec!["ext".into()],
+            output_column: Some("canonical".into()),
+            map_id: "m".into(),
+            entries: vec![KeyMapEntry::pair("OLD", "NEW")],
+        };
+        let prev_cols = vec!["ext".into(), "canonical".into()];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                prev_columns: Some(&prev_cols),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            sql.contains("EXCLUDE") && sql.contains("\"canonical\""),
+            "must overwrite existing canonical: {sql}"
+        );
+        assert!(
+            !sql.contains("t.*,"),
+            "must not append duplicate: {sql}"
+        );
+    }
+
+    #[test]
     fn apply_key_map_new_output_column_no_exclude() {
         use crate::model::KeyMapEntry;
         // ADR-0024: output_column not on the fact → add column, do not EXCLUDE.

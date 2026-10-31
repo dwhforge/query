@@ -345,26 +345,23 @@ pub fn build_export_plan_routed(
         seeds_cfg.push_str(&format!("  {pipeline_name}:\n"));
         for map_id in key_maps.keys() {
             let seed = key_map_seed_name(map_id);
-            let (from_col, to_col) = workspace
+            let (from_cols, to_col) = workspace
                 .key_map(map_id)
                 .map(|m| {
-                    (
-                        if m.from_column.trim().is_empty() {
-                            "from".to_string()
-                        } else {
-                            m.from_column.clone()
-                        },
-                        if m.to_column.trim().is_empty() {
-                            "to".to_string()
-                        } else {
-                            m.to_column.clone()
-                        },
-                    )
+                    let froms = m.from_columns_eff();
+                    let to = if m.to_column.trim().is_empty() {
+                        "to".to_string()
+                    } else {
+                        m.to_column.clone()
+                    };
+                    (froms, to)
                 })
-                .unwrap_or_else(|| ("from".into(), "to".into()));
-            seeds_cfg.push_str(&format!(
-                "    {seed}:\n      +column_types:\n        {from_col}: varchar\n        {to_col}: varchar\n"
-            ));
+                .unwrap_or_else(|| (vec!["from".into()], "to".into()));
+            seeds_cfg.push_str(&format!("    {seed}:\n      +column_types:\n"));
+            for fc in &from_cols {
+                seeds_cfg.push_str(&format!("        {fc}: varchar\n"));
+            }
+            seeds_cfg.push_str(&format!("        {to_col}: varchar\n"));
         }
     }
     let pg_schema_raw = postgres_schema.trim();
@@ -1359,6 +1356,53 @@ mod tests {
     }
 
     #[test]
+    fn keymap_composite_seed_column_types_all_froms() {
+        use crate::model::{KeyMapDef, KeyMapEntry};
+        let mut map = KeyMapDef::new("offer_day", "offer");
+        map.from_columns = vec!["ext_offer_id".into(), "as_of_day".into()];
+        map.to_column = "offer_sk".into();
+        map.entries = vec![KeyMapEntry::parts(
+            vec!["001".into(), "2024-06-01".into()],
+            "SK-1",
+        )];
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "q".into(),
+                name: "events".into(),
+                steps: vec![
+                    TransformationStep::LoadCsv {
+                        path: "x.csv".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: String::new(),
+                        columns: vec!["ext_offer_id".into(), "day".into()],
+                        output_column: Some("offer_sk".into()),
+                        map_id: map.id.clone(),
+                        entries: map.entries.clone(),
+                    },
+                ],
+                execution: Default::default(),
+            }],
+            focus_query_id: "q".into(),
+            key_maps: vec![map],
+        };
+        let plan = build_export_plan(
+            "comp",
+            &ws,
+            DbtTarget::V1,
+            WarehouseDialect::Duckdb,
+            &HashMap::new(),
+        )
+        .unwrap();
+        let yml = &plan["dbt_project.yml"];
+        assert!(
+            yml.contains("ext_offer_id: varchar") && yml.contains("as_of_day: varchar"),
+            "all From columns need varchar: {yml}"
+        );
+        assert!(yml.contains("offer_sk: varchar"), "{yml}");
+    }
+
+    #[test]
     fn keymap_export_writes_seed_and_ref() {
         use crate::model::{KeyMapDef, KeyMapEntry};
         let mut map = KeyMapDef::new("channel_alias", "channel");
@@ -1408,6 +1452,7 @@ mod tests {
             plan["dbt_project.yml"]
         );
         assert!(plan["dbt_project.yml"].contains("from: varchar"));
+        assert!(plan["dbt_project.yml"].contains("to: varchar"));
         let seed = &plan["seeds/map_channel_alias.csv"];
         assert!(seed.contains("www") && seed.contains("web"));
         let model = plan

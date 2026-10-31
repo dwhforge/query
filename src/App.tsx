@@ -120,7 +120,6 @@ import {
   previewWorkspace,
   pushKeyMapToExport,
   pushRecentProject,
-  readKeyMap,
   removeKeyMapFromExport,
   saveProject,
   setAppSettings,
@@ -2288,7 +2287,8 @@ function App() {
       return next;
     });
     setCenterTab(normalized.id);
-    // Source-backed: load live rows from WH into the editor.
+    // Source-backed: KeyMapEditor loads paged rows (ADR-0022). Do not full-read here —
+    // a late unbounded read would replace the page and drop dirty overlays.
     const sourceStorage =
       normalized.storage?.kind === "source" ? normalized.storage : null;
     if (sourceStorage) {
@@ -2303,8 +2303,6 @@ function App() {
         } catch {
           /* keep project.connections */
         }
-        // Read may resolve a DSN via Explorer source match, but never write that
-        // into storage.connection_id — assignment must be an explicit user choice.
         const resolved = resolveKeyMapConnection(
           project,
           normalized,
@@ -2313,21 +2311,6 @@ function App() {
         );
         if (!resolved.ok) {
           setError(resolved.error);
-          return;
-        }
-        try {
-          const r = await readKeyMap(normalized, resolved.dsn);
-          patchKeyMapTab(normalized.id, (s) => ({
-            ...s,
-            map: { ...s.map, entries: r.entries },
-            contentHash: r.content_hash,
-          }));
-        } catch (e) {
-          setError(
-            typeof e === "string"
-              ? e
-              : `Could not load KeyMap from warehouse: ${String(e)}`,
-          );
         }
       })();
     }
@@ -2419,7 +2402,9 @@ function App() {
       const delta = tab?.dirtyDelta ?? null;
       const hasDelta =
         !!delta &&
-        (delta.upserts.length > 0 || delta.deletedFroms.length > 0);
+        (delta.upserts.length > 0 ||
+          delta.deletedFroms.length > 0 ||
+          (delta.deletedFromParts?.length ?? 0) > 0);
       if (!hasDelta) {
         // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
         const result: KeyMapSaveResult = {

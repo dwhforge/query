@@ -539,10 +539,10 @@ export function KeyMapEditor({
     }
     if (kind === "ref") {
       return {
-        label: "SoT · dbt ref",
+        label: "SoT · dbt ref (export only)",
         detail: refStorage?.model?.trim()
-          ? `{{ ref('${refStorage.model}') }} · project cache only (no write-back)`
-          : "set model name · project cache only",
+          ? `{{ ref('${refStorage.model}') }} · DuckDB preview cannot resolve this model; local rows are a draft cache, not the relation`
+          : "set model name · local cache is not the dbt model",
       };
     }
     if (exportPath) {
@@ -601,28 +601,38 @@ export function KeyMapEditor({
         </select>
       </label>
       {refStorage && (
-        <label className={labelClass}>
-          Model
-          <input
-            list="keymap-ref-models"
-            value={refStorage.model}
-            onChange={(e) =>
-              onChange({
-                ...map,
-                storage: { kind: "ref", model: e.target.value },
-              })
-            }
-            placeholder="stg_channel_map"
-            className={`${fieldClass} font-mono`}
-          />
-          {refOptions.length > 0 && (
-            <datalist id="keymap-ref-models">
-              {refOptions.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-          )}
-        </label>
+        <>
+          <p className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[10px] leading-snug text-amber-100/90">
+            Export joins{" "}
+            <span className="font-mono">
+              {`{{ ref('${refStorage.model?.trim() || "…"}') }}`}
+            </span>
+            . Preview will refuse ApplyKeyMap for this map — local rows below are
+            a draft cache only (not write-back, not live preview).
+          </p>
+          <label className={labelClass}>
+            Model
+            <input
+              list="keymap-ref-models"
+              value={refStorage.model}
+              onChange={(e) =>
+                onChange({
+                  ...map,
+                  storage: { kind: "ref", model: e.target.value },
+                })
+              }
+              placeholder="stg_channel_map"
+              className={`${fieldClass} font-mono`}
+            />
+            {refOptions.length > 0 && (
+              <datalist id="keymap-ref-models">
+                {refOptions.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            )}
+          </label>
+        </>
       )}
       {sourceStorage && (
         <div className="space-y-3">
@@ -1201,7 +1211,11 @@ export function KeyMapEditor({
             key={map.id}
             workspace={workspace}
             connections={connections}
-            onAccept={(suggestions) => setEntries(mergeKeyMapProposals(map.entries, suggestions))}
+            onAccept={(suggestions) =>
+              setEntries(mergeKeyMapProposals(map.entries, suggestions), {
+                trackAll: true,
+              })
+            }
           />}
           {pasteOpen && (
             <div className="shrink-0 space-y-2 border-b border-slate-800 px-4 py-3">

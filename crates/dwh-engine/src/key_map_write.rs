@@ -418,7 +418,27 @@ pub fn write_key_map_delta_to_postgres(
                 &alias,
                 &format!("SELECT pg_advisory_xact_lock({lock_key})"),
             )?;
-            let _ = expected_content_hash;
+            if let Some(expected) = expected_content_hash
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let (current, _) = read_entries_on_conn(
+                    conn,
+                    &alias,
+                    schema,
+                    table,
+                    &from_columns,
+                    to_column,
+                    &editable,
+                    &KeyMapReadQuery::default(),
+                )?;
+                let got = key_map_content_hash(&current);
+                if got != expected {
+                    return Err(format!(
+                        "refused: KeyMap changed concurrently (content hash mismatch)"
+                    ));
+                }
+            }
 
             let mut written = 0usize;
 
@@ -541,12 +561,26 @@ pub fn write_key_map_delta_to_postgres(
             Ok(rows_written) => {
                 conn.execute_batch("COMMIT")
                     .map_err(|e| format!("COMMIT: {e}"))?;
+                // Fresh full-table hash after commit (same token shape as read).
+                let content_hash = match read_entries_on_conn(
+                    conn,
+                    &alias,
+                    schema,
+                    table,
+                    &from_columns,
+                    to_column,
+                    &editable,
+                    &KeyMapReadQuery::default(),
+                ) {
+                    Ok((rows, _)) => key_map_content_hash(&rows),
+                    Err(_) => key_map_content_hash(&delta.upserts),
+                };
                 Ok(KeyMapWriteResult {
                     schema: schema.to_string(),
                     table: table.to_string(),
                     rows_written,
                     created_table: false,
-                    content_hash: key_map_content_hash(&delta.upserts),
+                    content_hash,
                 })
             }
             Err(e) => {
@@ -674,7 +708,8 @@ pub fn read_key_map_from_postgres_ex(
 
     db.with_conn(|conn| {
         let alias = ensure_pg_attached(conn, connection_string)?;
-        let (entries, total_count) = read_entries_on_conn(
+        // Concurrency token = full table (unfiltered), not the current page.
+        let (all_rows, _) = read_entries_on_conn(
             conn,
             &alias,
             schema,
@@ -682,9 +717,32 @@ pub fn read_key_map_from_postgres_ex(
             from_columns,
             to_column,
             editable,
-            query,
+            &KeyMapReadQuery::default(),
         )?;
-        let content_hash = key_map_content_hash(&entries);
+        let content_hash = key_map_content_hash(&all_rows);
+        let full_count = all_rows.len() as u64;
+        let (entries, total_count) = if query.limit.is_none()
+            && query.offset.is_none()
+            && query
+                .from_prefix
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
+            (all_rows, Some(full_count))
+        } else {
+            read_entries_on_conn(
+                conn,
+                &alias,
+                schema,
+                table,
+                from_columns,
+                to_column,
+                editable,
+                query,
+            )?
+        };
         Ok(KeyMapReadResult {
             entries,
             content_hash,
@@ -797,6 +855,20 @@ pub fn read_key_map_paged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_tuples_prefers_from_parts() {
+        let delta = KeyMapDirtyDelta {
+            upserts: vec![],
+            deleted_froms: vec![],
+            deleted_from_parts: vec![vec!["SKU123".into(), "2024-06-01".into()]],
+        };
+        let dels = deleted_tuples(&delta);
+        assert_eq!(
+            dels,
+            vec![vec!["SKU123".to_string(), "2024-06-01".to_string()]]
+        );
+    }
 
     #[test]
     fn content_hash_order_independent() {

@@ -127,9 +127,13 @@ jobs:
         shell: bash
         run: |
           npm install --no-audit --no-fund
-          # npm optional-deps bug: Linux lockfile often omits win32 Rollup native
-          # binding (npm/cli#4828). Force the platform package used by vite build.
-          npm install --no-save --no-audit --no-fund @rollup/rollup-win32-x64-msvc@4.65.0
+          # npm optional-deps bug: Linux lockfile often omits win32 native
+          # bindings (npm/cli#4828). Force packages used by vite/tailwind build.
+          npm install --no-save --no-audit --no-fund \
+            @rollup/rollup-win32-x64-msvc@4.65.0 \
+            lightningcss-win32-x64-msvc@1.32.0 \
+            @tailwindcss/oxide-win32-x64-msvc@4.3.3 \
+            @esbuild/win32-x64@0.25.12
 
       - name: Fetch DuckDB extensions
         shell: bash

@@ -20,6 +20,10 @@ export interface AppMenuProps {
   canCopySql: boolean;
   sqlCopied: boolean;
   onOpen: () => void;
+  recentProjects?: string[];
+  onOpenRecent: (path: string) => void;
+  onClearRecent: () => void;
+  onOptions: () => void;
   onSave: () => void;
   onSaveAs: () => void;
   onExport: () => void;
@@ -42,6 +46,11 @@ export interface AppMenuProps {
   onToggleFullscreen?: () => void;
   onCloseWindow?: () => void;
   routeBadge: string;
+}
+
+function recentLabel(path: string): string {
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
 }
 
 type MenuId = "file" | "view" | "project" | "help";
@@ -124,6 +133,71 @@ function SubLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+function OpenRecentSubmenu({
+  paths,
+  onOpenRecent,
+  onClearRecent,
+  run,
+}: {
+  paths: string[];
+  onOpenRecent: (path: string) => void;
+  onClearRecent: () => void;
+  run: (fn: () => void) => void;
+}) {
+  const [fly, setFly] = useState(false);
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => setFly(true)}
+      onMouseLeave={() => setFly(false)}
+    >
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-4 px-3 py-1.5 text-left text-[12px] text-slate-200 hover:bg-slate-800"
+        onClick={(e) => {
+          e.stopPropagation();
+          setFly((v) => !v);
+        }}
+      >
+        <span>Open Recent</span>
+        <span className="text-[10px] text-slate-500">▸</span>
+      </button>
+      {fly && (
+        <div className="absolute left-full top-0 z-50 ml-0.5 min-w-[260px] max-w-[360px] rounded-md border border-slate-700 bg-slate-900 py-1 shadow-xl">
+          {paths.length === 0 ? (
+            <div className="px-3 py-1.5 text-[12px] text-slate-500">
+              No recent projects
+            </div>
+          ) : (
+            paths.map((p) => (
+              <button
+                key={p}
+                type="button"
+                title={p}
+                className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-slate-800"
+                onClick={() => run(() => onOpenRecent(p))}
+              >
+                <span className="text-[12px] text-slate-200">
+                  {recentLabel(p)}
+                </span>
+                <span className="max-w-full truncate text-[10px] text-slate-500">
+                  {p}
+                </span>
+              </button>
+            ))
+          )}
+          <Sep />
+          <Item
+            label="Clear recently opened"
+            disabled={paths.length === 0}
+            onClick={() => run(onClearRecent)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AppMenu({
   projectName,
   projectPath,
@@ -135,6 +209,10 @@ export function AppMenu({
   canCopySql,
   sqlCopied,
   onOpen,
+  recentProjects = [],
+  onOpenRecent,
+  onClearRecent,
+  onOptions,
   onSave,
   onSaveAs,
   onExport,
@@ -191,6 +269,12 @@ export function AppMenu({
           onHoverOpen={() => setOpenMenu("file")}
         >
           <Item label="Open…" hint="⌘O" onClick={() => run(onOpen)} />
+          <OpenRecentSubmenu
+            paths={recentProjects}
+            onOpenRecent={onOpenRecent}
+            onClearRecent={onClearRecent}
+            run={run}
+          />
           <Item label="Save" hint="⌘S" onClick={() => run(onSave)} />
           <Item label="Save as…" onClick={() => run(onSaveAs)} />
           <Sep />
@@ -214,8 +298,12 @@ export function AppMenu({
             />
           )}
           <Sep />
+          <Item label="Options…" onClick={() => run(onOptions)} />
           {onCloseWindow && (
-            <Item label="Close window" onClick={() => run(onCloseWindow)} />
+            <>
+              <Sep />
+              <Item label="Close window" onClick={() => run(onCloseWindow)} />
+            </>
           )}
         </MenuBarItem>
 

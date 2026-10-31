@@ -46,6 +46,7 @@ import { ConnectionEditor } from "./components/ConnectionEditor";
 import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
+import { OptionsDialog } from "./components/OptionsDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
 import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
@@ -115,6 +116,7 @@ import {
   previewDbtModel,
   previewWorkspace,
   pushKeyMapToExport,
+  pushRecentProject,
   readKeyMap,
   removeKeyMapFromExport,
   saveProject,
@@ -190,6 +192,10 @@ function App() {
   const [appSettings, setAppSettingsState] = useState<AppSettings>({
     default_target_dialect: "duckdb",
     default_dbt_target: "v1",
+    default_execution_engine: "duckdb",
+    default_destination_kind: "duckdb",
+    dbt_venv_path: "",
+    recent_projects: [],
     explorer_width_px: 240,
     inspector_width_px: 300,
     llm: {
@@ -357,6 +363,7 @@ function App() {
   const [pickerIntent, setPickerIntent] = useState<"source" | "query">("query");
   const [connEditorOpen, setConnEditorOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [connEditorKind, setConnEditorKind] =
     useState<ConnectionKind>("postgres");
   const [editingConnection, setEditingConnection] =
@@ -479,6 +486,7 @@ function App() {
   const overlayOpen =
     connEditorOpen ||
     helpOpen ||
+    optionsOpen ||
     showPgPicker ||
     showS3Dialog ||
     showHiveDialog ||
@@ -1394,8 +1402,9 @@ function App() {
     });
   }
 
-  async function handleSetTargetDialect(d: WarehouseDialect) {
-    // Legacy: set both engine and destination to the same kind.
+  function handleSetTargetDialect(d: WarehouseDialect) {
+    // Legacy: set both engine and destination on the *current* project only.
+    // App defaults live in File → Options… (ADR-0021).
     setProject((p) =>
       migrateProject({
         ...p,
@@ -1411,10 +1420,32 @@ function App() {
         target_dialect: d,
       }),
     );
-    await persistAppSettings({
+  }
+
+  async function rememberRecentProject(path: string) {
+    const next = {
       ...appSettings,
-      default_target_dialect: d,
-    });
+      recent_projects: pushRecentProject(appSettings.recent_projects, path),
+    };
+    await persistAppSettings(next);
+  }
+
+  async function handleClearRecent() {
+    await persistAppSettings({ ...appSettings, recent_projects: [] });
+  }
+
+  async function handleOpenRecentProject(path: string) {
+    try {
+      const loaded = await loadProject(path);
+      applyLoadedProject(loaded, path);
+      setExportMsg(`Opened ${path}`);
+      await rememberRecentProject(path);
+    } catch (e) {
+      const msg = typeof e === "string" ? e : String(e);
+      setError(msg || `Could not open ${path}`);
+      const pruned = (appSettings.recent_projects ?? []).filter((p) => p !== path);
+      await persistAppSettings({ ...appSettings, recent_projects: pruned });
+    }
   }
 
   function handleSetExecutionEngine(e: ExecutionEngine) {
@@ -1493,8 +1524,13 @@ function App() {
           workspace: ws,
           canvas: { positions: {} },
           dbt_target: appSettings.default_dbt_target,
-          execution_engine: appSettings.default_target_dialect ?? "duckdb",
-          target_dialect: appSettings.default_target_dialect,
+          execution_engine:
+            appSettings.default_execution_engine ??
+            appSettings.default_target_dialect ??
+            "duckdb",
+          target_dialect:
+            appSettings.default_execution_engine ??
+            appSettings.default_target_dialect,
         }),
       );
       setActiveQueryId(ws.focus_query_id);
@@ -2078,6 +2114,7 @@ function App() {
       setProject((p) => ({ ...p, root_path: path, name: base }));
       setExportMsg(`Project saved → ${path}`);
       setError(null);
+      await rememberRecentProject(path);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     }
@@ -2589,6 +2626,7 @@ function App() {
       const loaded = await loadProject(path);
       applyLoadedProject(loaded, path);
       setExportMsg(`Opened ${path}`);
+      await rememberRecentProject(path);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     }
@@ -2601,6 +2639,10 @@ function App() {
       let settings: AppSettings = {
         default_target_dialect: "duckdb",
         default_dbt_target: "v1",
+        default_execution_engine: "duckdb",
+        default_destination_kind: "duckdb",
+        dbt_venv_path: "",
+        recent_projects: [],
         explorer_width_px: 240,
         inspector_width_px: 300,
         llm: {
@@ -2637,6 +2679,14 @@ function App() {
           if (cancelled) return;
           applyLoadedProject(loaded, path);
           setExportMsg(`Restored ${path}`);
+          const nextRecent = pushRecentProject(settings.recent_projects, path);
+          const withRecent = { ...settings, recent_projects: nextRecent };
+          setAppSettingsState(withRecent);
+          try {
+            await setAppSettings(withRecent);
+          } catch {
+            /* ignore MRU persist on restore */
+          }
           return;
         }
       } catch {
@@ -3201,6 +3251,10 @@ function App() {
         canCopySql={canCopySql}
         sqlCopied={sqlCopied}
         onOpen={() => void handleOpenProject()}
+        recentProjects={appSettings.recent_projects ?? []}
+        onOpenRecent={(p) => void handleOpenRecentProject(p)}
+        onClearRecent={() => void handleClearRecent()}
+        onOptions={() => setOptionsOpen(true)}
         onSave={() => void handleSaveProject()}
         onSaveAs={() => void handleSaveProjectAs()}
         onExport={() => void handleExportDbt()}
@@ -3218,7 +3272,7 @@ function App() {
         onSetDestinationKind={handleSetDestinationKind}
         onSetDestinationConnection={handleSetDestinationConnection}
         onSetTargetDialect={(d: WarehouseDialect) =>
-          void handleSetTargetDialect(d)
+          handleSetTargetDialect(d)
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
         onOpenHelp={() => setHelpOpen(true)}
@@ -3230,6 +3284,12 @@ function App() {
       />
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <OptionsDialog
+        open={optionsOpen}
+        settings={appSettings}
+        onClose={() => setOptionsOpen(false)}
+        onSave={(next) => persistAppSettings(next)}
+      />
       {opProgress && <OpProgress state={opProgress} />}
 
       {mapPickPending && (

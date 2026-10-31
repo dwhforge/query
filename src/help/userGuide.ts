@@ -28,6 +28,17 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Export dbt → project folder with staging / intermediate / marts (progress: write → parse).",
       "File → Build export runs `dbt build` (seeds + models); DSN comes from destination Postgres connection when needed.",
       "Publish to destination (inspector) marks marts; see docs/GETTING_STARTED.md.",
+      "File → Open Recent reopens recent .dwhproj.json paths; File → Options… sets dbt venv path and defaults for new projects.",
+    ],
+  },
+  {
+    id: "options",
+    title: "Options & recent projects",
+    bullets: [
+      "File → Options… writes ~/.dwhforge-query/settings.json (app-global, not the open project).",
+      "dbt virtualenv: absolute path to a venv root with bin/dbt; empty = auto-discovery (ADR-0021).",
+      "Default execution engine + destination seed Untitled / new projects only; Project menu edits the current project.",
+      "File → Open Recent: last 10 paths; Clear recently opened empties the list.",
     ],
   },
   {
@@ -36,7 +47,7 @@ export const HELP_SECTIONS: HelpSection[] = [
     bullets: [
       "CSV and Parquet files (local paths; S3 with a connection).",
       "PostgreSQL — first-class: connection + catalog object picker.",
-      "Warehouse dialect (menu Project → Export warehouse): DuckDB or Postgres for dbt emit.",
+      "Execution engine / destination: Project menu (current project) or File → Options… (defaults for new projects).",
       "Preview defaults to local DuckDB. Per-query execution=target is for warehouse-native checks (advanced).",
     ],
   },

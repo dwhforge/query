@@ -674,6 +674,30 @@ section {
   max-width: 40rem;
 }
 
+.feature-list code,
+.section-lede code,
+.demo-points code {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.88em;
+  color: var(--teal);
+}
+
+.mapping-toolkit li h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+#mapping {
+  border-block: 1px solid var(--line);
+  background: linear-gradient(
+    180deg,
+    rgba(15, 118, 110, 0.07),
+    transparent 40%,
+    transparent 100%
+  );
+}
+
 /* Workflow steps */
 .steps {
   counter-reset: step;

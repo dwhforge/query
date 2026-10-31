@@ -33,7 +33,7 @@ Secrets (Postgres DSN, S3 keys) live in `~/.dwhforge-query/secrets.json`, not in
 
 ---
 
-## 3. Install dbt next to the app (required for Parse / Build)
+## 3. Install dbt (required for Parse / Build)
 
 From the **repository root** (or the unpacked portable tree that contains `scripts/`):
 
@@ -47,12 +47,17 @@ This creates **`./dbt-venv/`** with:
 - `dbt-duckdb`  
 - `dbt-postgres`
 
-The host looks for dbt in this order:
+**You do not put dbt inside Electron `node_modules`.**
 
-1. `./dbt-venv/bin/dbt` (cwd / repo next to the app)  
-2. `dbt` on your `PATH`
+The host looks for dbt in this order ([ADR-0021](adr/0021-app-options-recent-projects.md)):
 
-**You do not put dbt inside Electron `node_modules`.** Keep the venv at the project/portable root so upgrades are `./scripts/fetch-dbt-venv.sh` again.
+1. **File → Options… → dbt virtualenv** (absolute path to a venv root that contains `bin/dbt`), when set  
+2. `./dbt-venv/bin/dbt` next to the app / cwd / `~/.dwhforge-query/dbt-venv`  
+3. `dbt` on your `PATH`
+
+Use Options when the venv lives somewhere other than the portable tree. Defaults for **new** projects (execution engine + destination) are also under Options; they do not change an already-open project.
+
+**File → Open Recent** keeps the last 10 project paths in `~/.dwhforge-query/settings.json`.
 
 Verify:
 

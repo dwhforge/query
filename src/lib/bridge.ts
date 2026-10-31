@@ -760,9 +760,29 @@ export interface LlmSettings {
 export interface AppSettings {
   default_target_dialect: WarehouseDialect;
   default_dbt_target: DbtTarget;
+  /** New-project seed (ADR-0021). Absent → fall back to default_target_dialect. */
+  default_execution_engine?: WarehouseDialect;
+  default_destination_kind?: WarehouseDialect;
+  /** Absolute path to a Python venv root (`bin/dbt`). Empty = auto-discovery. */
+  dbt_venv_path?: string;
+  /** MRU absolute project paths, max 10. */
+  recent_projects?: string[];
   explorer_width_px?: number;
   inspector_width_px?: number;
   llm?: LlmSettings;
+}
+
+export const RECENT_PROJECTS_MAX = 10;
+
+/** Move `path` to front of MRU (deduped, capped). */
+export function pushRecentProject(
+  recent: string[] | undefined,
+  path: string,
+): string[] {
+  const abs = path.trim();
+  if (!abs) return recent ?? [];
+  const rest = (recent ?? []).filter((p) => p !== abs);
+  return [abs, ...rest].slice(0, RECENT_PROJECTS_MAX);
 }
 
 export function getAppSettings(): Promise<AppSettings> {

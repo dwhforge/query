@@ -44,6 +44,7 @@
         </button>
         <nav class="nav" id="site-nav">
           <a href="#features">Features</a>
+          <a href="#mapping">Key mapping</a>
           <a href="#workflow">Workflow</a>
           <a href="#demo">Demo</a>
           <a href="docs.html">Docs</a>
@@ -112,8 +113,9 @@
             <li>
               <h3>Investigate joins where you build them</h3>
               <p>
-                Join Lens shows matched and unmatched keys. Turn corrections into
-                reusable KeyMaps that export as dbt seeds.
+                Join Lens, near-miss normalize, and From→To KeyMaps turn dirty
+                keys into inspectable steps—and dbt seeds you keep in Git.
+                <a href="#mapping">See the mapping toolkit →</a>
               </p>
             </li>
             <li>
@@ -138,7 +140,116 @@
                 to generator-owned files before overwrite.
               </p>
             </li>
+            <li>
+              <h3>Optional LLM—local data stays local</h3>
+              <p>
+                Join Lens can call an OpenAI-compatible API for Suggest all and
+                chat on hard aliases. Schema and step context only; raw rows
+                never leave the machine.
+                <a href="#mapping">Mapping toolkit →</a>
+              </p>
+            </li>
           </ul>
+        </div>
+      </section>
+
+      <section id="mapping">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="section-kicker">Key mapping toolkit</p>
+            <h2 class="section-title">
+              Advanced tools for dirty join keys—not a black-box fuzzy merge
+            </h2>
+            <p class="section-lede">
+              When sales says <code>SBUX</code> and the dimension says
+              <code>STARBUCKS CORP</code>, you need diagnosis, an editable
+              From→To table, and a seed in the export—not silent fuzzy ON.
+            </p>
+          </div>
+          <ul class="feature-list mapping-toolkit">
+            <li>
+              <h3>Join Lens</h3>
+              <p>
+                Probe matched and unmatched keys on the Join you are editing.
+                Inspect “this row,” no-match samples, and frequency—without
+                leaving the canvas.
+              </p>
+            </li>
+            <li>
+              <h3>Near-miss → NormalizeKey</h3>
+              <p>
+                When trim, case, or leading zeros would recover matches, apply
+                an explicit <strong>NormalizeKey</strong> step before the Join.
+                Suggestions require acceptance; automatic fuzzy merge stays off.
+              </p>
+            </li>
+            <li>
+              <h3>From→To KeyMap editor</h3>
+              <p>
+                First-class tab next to the pipeline. Maintain alias → canonical
+                ID like a dimension table. Add unmatched values from Lens with
+                one gesture; apply left, right, or both into the graph.
+              </p>
+            </li>
+            <li>
+              <h3>Reuse across queries</h3>
+              <p>
+                One map cleans sales and spend (or any feed) via
+                <strong>ApplyKeyMap</strong> steps. The same dictionary ships as
+                <code>seeds/map_*.csv</code> with typed varchar columns so
+                leading zeros survive <code>dbt seed</code>.
+              </p>
+            </li>
+            <li>
+              <h3>Seed as source of truth after export</h3>
+              <p>
+                After the first export, edit the seed in Git or sync it back into
+                the editor. Re-export detects hand-edits instead of silently
+                wiping your aliases.
+              </p>
+            </li>
+            <li>
+              <h3>When fuzzy cannot invent the answer</h3>
+              <p>
+                Tickers, legacy IDs, and historical names that never appear in
+                the dimension stay human-owned in the KeyMap—not guessed into the
+                Join ON.
+              </p>
+            </li>
+            <li>
+              <h3>Optional LLM assist (Join Lens Auto)</h3>
+              <p>
+                Connect an OpenAI-compatible endpoint
+                (<code>llm.base_url</code> / <code>model</code> /
+                <code>api_key</code> in
+                <code>~/.dwhforge-query/settings.json</code>). Use
+                <strong>Suggest all</strong> for similar-name proposals you
+                Accept into a KeyMap, then chat about leftovers with
+                lineage, schemas, and neighbor fields as context.
+                <strong>Raw preview rows never leave the machine</strong>—only
+                structured schema / step / prompt payloads. The model narrates
+                and suggests; it does not rewrite Join keys or invent counts.
+              </p>
+            </li>
+          </ul>
+          <div class="cta-row" style="margin-top: 2rem">
+            <a
+              class="btn btn-primary"
+              href="https://github.com/dwhforge/query/blob/main/docs/keymap-workflows.md"
+              >KeyMap walkthrough</a
+            >
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/dwhforge/query/blob/main/docs/adr/0020-join-key-mapping.md"
+              >ADR-0020 decision</a
+            >
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/dwhforge/query/blob/main/docs/adr/0019-join-lens-ai-narrator.md"
+              >ADR-0019 AI narrator</a
+            >
+            <a class="btn btn-ghost" href="#demo">Try the demo story</a>
+          </div>
         </div>
       </section>
 
@@ -244,7 +355,8 @@
             <h2 class="section-title">Company aliases → PostgreSQL</h2>
             <p class="section-lede">
               The bundled Key mapping demo follows sales and spending across 15
-              companies and 60 days—same businesses, different names.
+              companies and 60 days—same businesses, different names. Use the
+              full <a href="#mapping">mapping toolkit</a> end to end.
             </p>
             <div class="cta-row" style="margin-top: 1.5rem">
               <a
@@ -252,25 +364,32 @@
                 href="https://github.com/dwhforge/query/blob/main/docs/keymap-workflows.md"
                 >Mapping walkthrough</a
               >
+              <a class="btn btn-ghost" href="#mapping">Toolkit overview</a>
               <a class="btn btn-ghost" href="docs.html">All docs</a>
             </div>
           </div>
           <ol class="demo-points">
             <li>
               <strong style="color: var(--fg)">Open the problem.</strong> Help →
-              Load demo → Key mapping; inspect the dirty join.
+              Load demo → Key mapping; inspect <code>dirty_join</code> without a
+              map.
             </li>
             <li>
-              <strong style="color: var(--fg)">Investigate and map.</strong> Join
-              Lens + KeyMap editor connect aliases to canonical IDs.
+              <strong style="color: var(--fg)">Diagnose in Join Lens.</strong>
+              Probe unmatched keys; try near-miss NormalizeKey where trim/case
+              helps; Add to map… for true aliases.
             </li>
             <li>
-              <strong style="color: var(--fg)">Inspect intermediates.</strong>
-              Follow daily combine into monthly rollup; read generated SQL.
+              <strong style="color: var(--fg)">Edit the KeyMap.</strong> Fill
+              From→To (including non-lexical leftovers like tickers). Optional:
+              Connect LLM in Join Lens Auto for Suggest all / chat on hard
+              aliases—then Accept into the map. Apply left on sales and spend
+              with one shared map.
             </li>
             <li>
-              <strong style="color: var(--fg)">Publish and build.</strong>
-              Engine DuckDB, destination PostgreSQL, then Export and Build.
+              <strong style="color: var(--fg)">Ship the seed.</strong> Follow
+              daily → monthly; Export dbt; the map lands as
+              <code>seeds/map_*.csv</code>. Build to PostgreSQL when ready.
             </li>
           </ol>
         </div>

@@ -157,6 +157,13 @@ fn find_fixtures_dir() -> Result<PathBuf, String> {
 
 fn dbt_bin_candidates() -> Vec<PathBuf> {
     let mut extra = Vec::new();
+    // ADR-0021: custom venv from Options first when set.
+    if let Ok(settings) = settings_io::load_settings() {
+        let venv = settings.dbt_venv_path.trim();
+        if !venv.is_empty() {
+            extra.push(settings_io::dbt_bin_in_venv(Path::new(venv)));
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             extra.push(parent.join("dbt-venv/bin/dbt"));
@@ -1826,10 +1833,11 @@ impl HostState {
                 let settings_val = args.get("settings").cloned().unwrap_or(Value::Null);
                 let mut settings: AppSettings =
                     serde_json::from_value(settings_val).map_err(|e| e.to_string())?;
-                // Panel-width saves must not clobber llm (base URL, model, key).
+                // Panel-width / Options / Recent saves must not clobber llm (base URL, model, key).
                 if let Ok(prev) = settings_io::load_settings() {
                     settings.llm = prev.llm;
                 }
+                settings.normalize_for_save();
                 settings_io::save_settings(&settings)?;
                 Ok(Value::Null)
             }

@@ -22,5 +22,6 @@ Active changes:
 
 - [`changes/return-and-edit-foundation/`](changes/return-and-edit-foundation/) — seeds → safe re-export → e2e
 - [`changes/join-key-mapping/`](changes/join-key-mapping/) — KeyMap / NormalizeKey / near-miss ([ADR-0020](../docs/adr/0020-join-key-mapping.md))
+- [`changes/app-options-recent/`](changes/app-options-recent/) — Options + Open Recent ([ADR-0021](../docs/adr/0021-app-options-recent-projects.md))
 
 Review order: proposal → specs → design → tasks. Implement only after that review (`openspec apply` / agent apply).

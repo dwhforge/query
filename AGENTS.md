@@ -33,3 +33,4 @@ Product decisions and behavior contracts are not optional context.
 
 - `openspec/changes/return-and-edit-foundation/` — ADR-0018 foundation
 - `openspec/changes/join-key-mapping/` — ADR-0020 KeyMap / near-miss
+- `openspec/changes/app-options-recent/` — ADR-0021 Options + Open Recent

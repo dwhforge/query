@@ -84,7 +84,16 @@ echo "== full-refresh =="
 "$DBT" run --full-refresh --profiles-dir . --project-dir .
 
 # Leading-zero check in DuckDB seed + row present in Postgres public.mart_codes
-python3 - <<PY
+# Prefer dbt-venv Python (has duckdb); system python3 often does not.
+PY="${ROOT}/dbt-venv/bin/python3"
+if [[ ! -x "$PY" ]]; then
+  PY="${ROOT}/dbt-venv/bin/python"
+fi
+if [[ ! -x "$PY" ]]; then
+  echo "dbt-venv python missing — run ./scripts/fetch-dbt-venv.sh" >&2
+  exit 1
+fi
+"$PY" - <<PY
 import duckdb, os
 dsn = os.environ["DWH_PG_DSN"]
 con = duckdb.connect("$OUT/local.duckdb")

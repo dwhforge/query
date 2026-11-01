@@ -942,7 +942,41 @@ function App() {
     [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
 
-  function closeKeyMapTab(mapId: string) {
+  /**
+   * After ApplyKeyMap insert, Join may shift; find the same Join by right + ON.
+   */
+  function resolveJoinStepFromCtx(
+    ws: Workspace,
+    ctx: NonNullable<KeyMapTabSession["joinCtx"]>,
+  ): number | null {
+    const q = ws.queries.find((x) => x.id === ctx.hostQueryId);
+    if (!q) return null;
+    const leftKey = ctx.leftOn.join("\0");
+    const rightKey = ctx.rightOn.join("\0");
+    const at = q.steps[ctx.joinStepIndex];
+    if (
+      at?.type === "Join" &&
+      at.payload.right_query_id === ctx.rightQueryId &&
+      at.payload.left_on.join("\0") === leftKey &&
+      at.payload.right_on.join("\0") === rightKey
+    ) {
+      return ctx.joinStepIndex;
+    }
+    for (let i = 0; i < q.steps.length; i++) {
+      const s = q.steps[i];
+      if (s?.type !== "Join") continue;
+      if (s.payload.right_query_id !== ctx.rightQueryId) continue;
+      if (s.payload.left_on.join("\0") !== leftKey) continue;
+      if (s.payload.right_on.join("\0") !== rightKey) continue;
+      return i;
+    }
+    return null;
+  }
+
+  /** Close map tab; if opened from Join Lens, restore Join + Lens No match. */
+  function closeKeyMapTab(mapId: string, wsForJoin?: Workspace) {
+    const closing = keyMapTabs.find((t) => t.map.id === mapId);
+    const joinCtx = closing?.joinCtx;
     setKeyMapTabs((tabs) => {
       const idx = tabs.findIndex((t) => t.map.id === mapId);
       const next = tabs.filter((t) => t.map.id !== mapId);
@@ -955,6 +989,21 @@ function App() {
       return next;
     });
     setSelectedKeyMapId((id) => (id === mapId ? null : id));
+    if (!joinCtx) return;
+    const ws = wsForJoin ?? project.workspace;
+    setActiveQueryId(joinCtx.hostQueryId);
+    setBottomTab("data");
+    setJoinLensOn(true);
+    setDiagView(null);
+    const idx = resolveJoinStepFromCtx(ws, joinCtx);
+    if (idx != null) {
+      setSelectedStepIndex(idx);
+      const q = ws.queries.find((x) => x.id === joinCtx.hostQueryId);
+      const step = q?.steps[idx];
+      if (step) loadStepIntoEditor(step);
+    }
+    // Re-enter No match (map was opened from Lens unmatched / Suggest flow).
+    setForceProbeNonce((n) => n + 1);
   }
 
   function patchKeyMapTab(mapId: string, patch: Partial<KeyMapTabSession> | ((t: KeyMapTabSession) => KeyMapTabSession)) {
@@ -4152,31 +4201,28 @@ function App() {
                               ctx.outputColumnRight?.trim() ||
                               rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
                               rightCols[0];
-                            setProject((p) => ({
-                              ...p,
-                              workspace: applyKeyMapToWorkspace(
-                                {
-                                  ...p.workspace,
-                                  key_maps: upsertKeyMapList(
-                                    p.workspace.key_maps ?? [],
-                                    map,
-                                  ),
-                                },
-                                ctx.hostQueryId,
-                                ctx.joinStepIndex,
-                                ctx.rightQueryId,
-                                side,
-                                leftCols[0]!,
-                                rightCols[0]!,
-                                map,
-                                leftCols,
-                                rightCols,
-                                outputColumnLeft,
-                                outputColumnRight,
-                              ),
-                            }));
-                            closeKeyMapTab(map.id);
-                            setCenterTab("canvas");
+                            const workspace = applyKeyMapToWorkspace(
+                              {
+                                ...project.workspace,
+                                key_maps: upsertKeyMapList(
+                                  project.workspace.key_maps ?? [],
+                                  map,
+                                ),
+                              },
+                              ctx.hostQueryId,
+                              ctx.joinStepIndex,
+                              ctx.rightQueryId,
+                              side,
+                              leftCols[0]!,
+                              rightCols[0]!,
+                              map,
+                              leftCols,
+                              rightCols,
+                              outputColumnLeft,
+                              outputColumnRight,
+                            );
+                            setProject((p) => ({ ...p, workspace }));
+                            closeKeyMapTab(map.id, workspace);
                           });
                         }
                       : undefined

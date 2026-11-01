@@ -1,11 +1,14 @@
 /**
- * Join Lens: mappings that exist but do not affect this Join
- * (not applied, or To missing on the right input).
+ * Join Lens: mappings wired to this Join via ApplyKeyMap that still do not
+ * produce a join match (To missing on the right input).
+ *
+ * A KeyMap that merely exists in the project is not "mapped on this node" —
+ * only ApplyKeyMap counts.
  */
 import type { KeyMapDef, Workspace } from "../types/pipeline";
 import { findApplyKeyMapIdForJoin } from "./keyMap";
 
-export type IneffectiveMapReason = "not_applied" | "to_missing_on_right";
+export type IneffectiveMapReason = "to_missing_on_right";
 
 export type IneffectiveMapEntry = {
   mapId: string;
@@ -82,6 +85,26 @@ export function keyLabelsFromRows(
   return keyLabelsFromSample({ columns, rows }, keyCols);
 }
 
+/** From/To labels from the ApplyKeyMap wired to this Join (if any). */
+export function wiredMapKeyLabels(
+  workspace: Workspace,
+  ctx: JoinMapEffectCtx,
+): { from: Set<string>; to: Set<string>; mapId: string | null } {
+  const from = new Set<string>();
+  const to = new Set<string>();
+  const mapId = findApplyKeyMapIdForJoin(workspace, ctx);
+  if (!mapId) return { from, to, mapId: null };
+  const map = (workspace.key_maps ?? []).find((m) => m.id === mapId);
+  if (!map) return { from, to, mapId };
+  for (const e of map.entries) {
+    const f = mapEntryFromLabel(e);
+    const t = foldKey(e.to);
+    if (f) from.add(f);
+    if (t) to.add(t);
+  }
+  return { from, to, mapId };
+}
+
 function pushEntry(
   out: IneffectiveMapEntry[],
   map: KeyMapDef,
@@ -108,19 +131,15 @@ function pushEntry(
 }
 
 /**
- * Map entries tied to this Join that currently have no join effect.
- *
- * - No ApplyKeyMap on this Join's key → entries whose From is still in
- *   `leftUnmatchedKeys` (`not_applied`).
- * - ApplyKeyMap wired → entries whose To is absent from `rightKeys`
- *   (`to_missing_on_right`). Requires `rightKeys`; otherwise skipped.
+ * Entries on the ApplyKeyMap wired to this Join whose To is not a right
+ * join key — remap has no join effect. No ApplyKeyMap → empty (a project
+ * KeyMap alone is not assigned to this node).
  */
 export function findIneffectiveMapEntries(
   workspace: Workspace,
   ctx: JoinMapEffectCtx,
   opts?: {
     rightKeys?: Set<string> | null;
-    leftUnmatchedKeys?: Set<string> | null;
     limit?: number;
   },
 ): IneffectiveMapEntry[] {
@@ -131,39 +150,18 @@ export function findIneffectiveMapEntries(
   const seen = new Set<string>();
 
   const wiredId = findApplyKeyMapIdForJoin(workspace, ctx);
+  if (!wiredId) return out;
 
-  if (wiredId) {
-    const map = maps.find((m) => m.id === wiredId);
-    const rightKeys = opts?.rightKeys;
-    if (!map || !rightKeys) return out;
-    for (const e of map.entries) {
-      const from = mapEntryFromLabel(e);
-      const to = foldKey(e.to);
-      if (!to || rightKeys.has(to)) continue;
-      pushEntry(out, map, from, to, "to_missing_on_right", limit, seen);
-      if (out.length >= limit) break;
-    }
-    return out;
-  }
+  const map = maps.find((m) => m.id === wiredId);
+  const rightKeys = opts?.rightKeys;
+  if (!map || !rightKeys) return out;
 
-  const leftUnmatched = opts?.leftUnmatchedKeys;
-  if (!leftUnmatched || leftUnmatched.size === 0) return out;
-
-  for (const map of maps) {
-    for (const e of map.entries) {
-      const from = mapEntryFromLabel(e);
-      if (!from || !leftUnmatched.has(from)) continue;
-      pushEntry(
-        out,
-        map,
-        from,
-        foldKey(e.to),
-        "not_applied",
-        limit,
-        seen,
-      );
-      if (out.length >= limit) return out;
-    }
+  for (const e of map.entries) {
+    const from = mapEntryFromLabel(e);
+    const to = foldKey(e.to);
+    if (!to || rightKeys.has(to)) continue;
+    pushEntry(out, map, from, to, "to_missing_on_right", limit, seen);
+    if (out.length >= limit) break;
   }
   return out;
 }

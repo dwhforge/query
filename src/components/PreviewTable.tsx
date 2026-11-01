@@ -35,6 +35,8 @@ interface PreviewTableProps {
   onScrollParentRef?: (el: HTMLDivElement | null) => void;
   /** Result rows matching a side-probe selection (Join Lens). */
   matchedRowIndices?: number[];
+  /** Join Lens No match: result rows with no right partner (∅ on right cols). */
+  gapRowIndices?: number[];
   /**
    * When true (default), pointer hover updates the active row.
    * Set false for sticky click selection (e.g. Join Lens No match → Suggest).
@@ -102,6 +104,7 @@ function PreviewTableImpl({
   onActiveRowElement,
   onScrollParentRef,
   matchedRowIndices,
+  gapRowIndices,
   selectOnHover = true,
 }: PreviewTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -115,6 +118,10 @@ function PreviewTableImpl({
   const matched = useMemo(
     () => new Set(matchedRowIndices ?? []),
     [matchedRowIndices],
+  );
+  const gaps = useMemo(
+    () => new Set(gapRowIndices ?? []),
+    [gapRowIndices],
   );
 
   useEffect(() => {
@@ -262,6 +269,7 @@ function PreviewTableImpl({
             const row = rowModel[virtualRow.index];
             const active = activeRowIndex === virtualRow.index;
             const isMatch = matched.has(virtualRow.index);
+            const isGap = gaps.has(virtualRow.index);
             const dimUnmatched =
               matched.size > 0 && !isMatch && !active;
             return (
@@ -288,13 +296,17 @@ function PreviewTableImpl({
                   onActiveRowChange?.(virtualRow.index);
                 }}
                 className={`absolute left-0 flex cursor-pointer border-b border-slate-800/80 ${
-                  active
-                    ? "bg-teal-500/15 ring-1 ring-inset ring-teal-500/40"
-                    : isMatch
-                      ? "bg-teal-500/10 ring-1 ring-inset ring-teal-600/30"
-                      : dimUnmatched
-                        ? "opacity-35 hover:opacity-70 hover:bg-slate-800/40"
-                        : "hover:bg-slate-800/40"
+                  active && isGap
+                    ? "bg-amber-500/20 ring-1 ring-inset ring-amber-500/50"
+                    : active
+                      ? "bg-teal-500/15 ring-1 ring-inset ring-teal-500/40"
+                      : isGap
+                        ? "border-l-2 border-l-amber-500/70 bg-amber-950/20 hover:bg-amber-950/35"
+                        : isMatch
+                          ? "bg-teal-500/10 ring-1 ring-inset ring-teal-600/30"
+                          : dimUnmatched
+                            ? "opacity-35 hover:opacity-70 hover:bg-slate-800/40"
+                            : "hover:bg-slate-800/40"
                 }`}
                 style={{
                   height: `${virtualRow.size}px`,

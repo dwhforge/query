@@ -312,6 +312,9 @@ pub fn join_key_fuzzy_suggest_on(
     let truncated = unmatched_left_total > left_keys.len() as u64
         || unmatched_right_total > unmatched_right_keys.len() as u64;
 
+    // Fuzzy JoinKeyTypos already refuses pairs with min_len < 3 (noise). Still keep
+    // short right keys (tickers like KO, GE) in the To universe / leftover for LLM
+    // and manual pick — only drop overlong keys.
     let mut leftover_left = Vec::new();
     left_keys.retain(|k| {
         let n = k.trim().chars().count();
@@ -322,14 +325,8 @@ pub fn join_key_fuzzy_suggest_on(
             false
         }
     });
-    right_to_candidates.retain(|k| {
-        let n = k.trim().chars().count();
-        (3..MAX_KEY_CHARS).contains(&n)
-    });
-    unmatched_right_keys.retain(|k| {
-        let n = k.trim().chars().count();
-        (3..MAX_KEY_CHARS).contains(&n)
-    });
+    right_to_candidates.retain(|k| k.trim().chars().count() < MAX_KEY_CHARS);
+    unmatched_right_keys.retain(|k| k.trim().chars().count() < MAX_KEY_CHARS);
 
     let scanned_left = left_keys.len() as u64;
     let scanned_right = right_to_candidates.len() as u64;
@@ -1030,6 +1027,71 @@ mod tests {
                 .any(|k| k == "Acme Corp" || k == "widget"),
             "right universe should include matched/all right keys: {:?}",
             out.chat_context.right_to_universe
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn short_right_tickers_stay_in_universe() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("dwh-fuzzy-short-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        let left_path = dir.join("left.csv");
+        let right_path = dir.join("right.csv");
+        fs::write(&left_path, "name\nCoca Cola Co\nDanone Group\n").unwrap();
+        fs::write(&right_path, "code\nKO\nDANO\nPEP\n").unwrap();
+        let db = DbSession::new().unwrap();
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: left_path.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "dim".into(),
+                            join_type: JoinType::Full,
+                            left_on: vec!["name".into()],
+                            right_on: vec!["code".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "dim".into(),
+                    name: "dim".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: right_path.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "fact".into(),
+            key_maps: vec![],
+        };
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], &[], "fact", 1).unwrap();
+        assert!(
+            out.chat_context
+                .right_to_universe
+                .iter()
+                .any(|k| k == "KO"),
+            "2-char ticker must stay pickable: {:?}",
+            out.chat_context.right_to_universe
+        );
+        assert!(
+            out.leftover_right.iter().any(|k| k == "KO"),
+            "unmatched short ticker in leftover_right: {:?}",
+            out.leftover_right
+        );
+        assert!(
+            !out.suggestions.iter().any(|p| p.to_key == "KO"),
+            "JoinKeyTypos must not fuzzy-propose short abbreviations: {:?}",
+            out.suggestions
         );
         let _ = fs::remove_dir_all(&dir);
     }

@@ -70,12 +70,7 @@
             <p class="status" data-release-status>Loading latest release…</p>
             <div class="download-actions" data-release-actions></div>
             <p class="meta-line">
-              After unpacking, run the app binary from the portable tree. For
-              Parse / Build inside the app, set up a local dbt venv—see
-              <a
-                href="https://github.com/dwhforge/query/blob/main/docs/GETTING_STARTED.md"
-                >Getting started</a
-              >.
+              After unpacking, run the app binary from the portable tree.
             </p>
           </div>
         </div>
@@ -84,19 +79,39 @@
       <section>
         <div class="wrap split split-2">
           <div>
+            <p class="section-kicker">First launch · dbt</p>
+            <h2 class="section-title" style="font-size: 1.5rem">
+              Install dbt from inside the app
+            </h2>
+            <p class="section-lede">
+              Parse / Build need a local dbt. On first launch the app offers
+              <strong>Install for me</strong> (creates
+              <code>~/.dwhforge-query/dbt-venv</code>). You can repeat or change
+              the path anytime under <strong>File → Options…</strong>.
+            </p>
+            <p class="meta-line" style="margin-top: 1rem">
+              Prefer a hand-rolled venv?
+              <a
+                href="https://github.com/dwhforge/query/blob/main/docs/GETTING_STARTED.md"
+                >Getting started</a
+              >
+              covers the script alternative.
+            </p>
+          </div>
+          <div>
             <p class="section-kicker">From source</p>
             <h2 class="section-title" style="font-size: 1.5rem">
               Build the desktop app locally
             </h2>
             <p class="section-lede">
               Prerequisites: Git, Node.js 20+, npm, stable Rust, and Python 3
-              with venv support.
+              with venv support. For a local dbt tree while developing, run the
+              fetch script—or use <strong>Install for me</strong> after first
+              launch.
             </p>
-          </div>
-          <div>
             <pre
               style="
-                margin: 0;
+                margin: 1rem 0 0;
                 padding: 1.25rem 1.35rem;
                 border: 1px solid var(--line);
                 border-radius: 6px;
@@ -110,7 +125,7 @@
             ><code style="color: var(--fg)">git clone https://github.com/dwhforge/query.git
 cd query
 ./scripts/fetch-duckdb-extensions.sh
-./scripts/fetch-dbt-venv.sh
+# optional: ./scripts/fetch-dbt-venv.sh
 npm install
 npm run electron:dev</code></pre>
             <p class="meta-line">

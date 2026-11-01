@@ -127,7 +127,7 @@ function summarize(store: KeyMapEditStore) {
   const store = new KeyMapEditStore();
   const slot = loadA(store);
   store.updateDraft(slot.id, { to: "Y" }, slot.loaded);
-  const cap = store.captureSave();
+  const cap = store.captureSave()!;
   assert(cap.delta?.upserts[0]?.to === "Y", "captured Y");
   store.updateDraft(slot.id, { to: "Z" }, slot.loaded); // during save
   store.confirmSave(cap.token);
@@ -142,7 +142,7 @@ function summarize(store: KeyMapEditStore) {
   const store = new KeyMapEditStore();
   const slot = loadA(store); // A→X
   store.updateDraft(slot.id, { to: "Y" }, slot.loaded);
-  const cap = store.captureSave();
+  const cap = store.captureSave()!;
   assert(cap.delta?.upserts[0]?.to === "Y", "sent Y");
   store.updateDraft(slot.id, { to: "X" }, slot.loaded); // revert while in flight
   assert(!!store.get(slot.id), "pinned — not pruned against old X baseline");
@@ -158,7 +158,7 @@ function summarize(store: KeyMapEditStore) {
   store.setSchema({ arity: 1, editable: [] });
   const filled = store.addRow({ fromParts: ["A"], to: "B" });
   const empty = store.addRow({ fromParts: [""], to: "" });
-  const cap = store.captureSave();
+  const cap = store.captureSave()!;
   assert(cap.sent.has(filled), "filled is sent");
   assert(!cap.sent.has(empty), "empty draft not sent");
   assert(cap.delta?.upserts.length === 1, "only filled in delta");
@@ -173,7 +173,7 @@ function summarize(store: KeyMapEditStore) {
   const store = new KeyMapEditStore();
   store.setSchema({ arity: 1, editable: [] });
   const id = store.addRow({ fromParts: ["N"], to: "Y" });
-  const cap = store.captureSave();
+  const cap = store.captureSave()!;
   assert(cap.delta?.upserts[0]?.from === "N", "insert N sent");
   store.deleteRow(id); // removes from store (was insert)
   store.confirmSave(cap.token);
@@ -182,14 +182,35 @@ function summarize(store: KeyMapEditStore) {
   assert(s.baselines.some((b) => b.startsWith("WH:N:")), "baseline existed for N");
 }
 
-// --- conflict path: no confirm → dirty intact ---
+// --- conflict path: abortSave keeps draft, releases in-flight ---
 {
   const store = new KeyMapEditStore();
   const slot = loadA(store);
   store.updateDraft(slot.id, { to: "Y" }, slot.loaded);
-  store.captureSave();
-  // pretend conflict — skip confirm
-  assert(summarize(store).upserts.join() === "A→Y", "still dirty");
+  const cap = store.captureSave()!;
+  assert(store.isSaveInFlight(), "in flight after capture");
+  store.abortSave(cap.token);
+  assert(!store.isSaveInFlight(), "abort clears capture");
+  assert(summarize(store).upserts.join() === "A→Y", "draft kept after abort");
+}
+
+// --- second capture rejected while first in flight ---
+{
+  const store = new KeyMapEditStore();
+  const slot = loadA(store);
+  store.updateDraft(slot.id, { to: "Y" }, slot.loaded);
+  const cap1 = store.captureSave()!;
+  store.updateDraft(slot.id, { to: "Z" }, slot.loaded);
+  assert(store.captureSave() === null, "second capture rejected");
+  assert(store.isSaveInFlight(), "still first capture");
+  // Wrong token must not confirm
+  store.confirmSave(cap1.token + 99);
+  assert(store.isSaveInFlight(), "wrong token ignored");
+  assert(summarize(store).upserts.join() === "A→Z", "Z still draft");
+  store.confirmSave(cap1.token);
+  assert(!store.isSaveInFlight(), "confirmed");
+  assert(summarize(store).upserts.join() === "A→Z", "Z kept vs sent Y");
+  assert(store.get(slot.id)?.original?.to === "Y", "baseline = sent Y");
 }
 
 // --- fuzzy batch 100K: timing ---

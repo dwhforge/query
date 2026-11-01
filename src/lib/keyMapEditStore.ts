@@ -487,11 +487,18 @@ export class KeyMapEditStore {
     };
   }
 
+  /** True while a warehouse Save capture is outstanding. */
+  isSaveInFlight(): boolean {
+    return this.lastCapture != null;
+  }
+
   /**
-   * Freeze only rows that will be sent. Invalid drafts stay dirty and are
-   * untouched by confirmSave.
+   * Freeze only rows that will be sent. Rejects if a Save is already in flight
+   * (one capture per mapping). Invalid drafts stay dirty and are untouched by
+   * confirmSave.
    */
-  captureSave(): SaveCapture {
+  captureSave(): SaveCapture | null {
+    if (this.lastCapture) return null;
     const token = ++this.captureToken;
     const sent = new Map<RowId, RowEdit>();
     for (const [id, e] of this.rows) {
@@ -504,9 +511,18 @@ export class KeyMapEditStore {
   }
 
   /**
-   * After successful WH write: for every sent row, baseline becomes the sent
-   * value; the user's *latest* draft (pinned during Save) is compared to it.
-   * Unsent drafts are untouched.
+   * End an in-flight Save without rebasing (error / conflict / cancel).
+   * Drafts stay; pin is released so prune can run against the pre-save baseline.
+   */
+  abortSave(token: number) {
+    if (this.lastCapture?.token === token) {
+      this.lastCapture = null;
+    }
+  }
+
+  /**
+   * After successful WH write for this exact capture token: baseline becomes the
+   * sent value; the user's *latest* draft is compared to it.
    */
   confirmSave(token: number) {
     if (!this.lastCapture || this.lastCapture.token !== token) return;

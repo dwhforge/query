@@ -65,17 +65,18 @@ export type KeyMapEditorProps = {
   /** Dirty delta for source Save (ADR-0022). */
   onDirtyChange?: (delta: KeyMapDirtyDelta | null) => void;
   /**
-   * Save lifecycle for the RowId store: capture freezes the delta; confirm
-   * rebases originals after a successful WH write (mid-save edits kept).
-   * Bumped `dirtyResetSeq` still means confirm (legacy App path).
+   * Save lifecycle: one in-flight capture per map. `captureSave` returns
+   * `{ token, delta }` or `null` if already saving; confirm/abort take that token.
    */
   onSaveApi?: (api: {
-    captureSave: () => KeyMapDirtyDelta | null;
-    confirmSave: () => void;
+    captureSave: () => { token: number; delta: KeyMapDirtyDelta | null } | null;
+    confirmSave: (token: number) => void;
+    abortSave: (token: number) => void;
+    isSaving: () => boolean;
   }) => void;
-  /**
-   * Bumped by App after a successful warehouse Save → confirmSave (rebase).
-   */
+  /** When true, Save button is disabled (App tracks in-flight WH write). */
+  saveInFlight?: boolean;
+  /** Bumped by App after WH Save when saveApi was absent (legacy clear). */
   dirtyResetSeq?: number;
   onApply?: (side: ApplySide) => void;
   onClose?: () => void;
@@ -126,6 +127,7 @@ export function KeyMapEditor({
   onDirtyChange,
   onSaveApi,
   dirtyResetSeq,
+  saveInFlight = false,
   onApply,
   onClose,
   onSave,
@@ -158,13 +160,13 @@ export function KeyMapEditor({
   const storeRef = useRef(new KeyMapEditStore());
   const pageRef = useRef<PageSlot[]>([]);
   const newIdsRef = useRef<RowId[]>([]);
-  const saveTokenRef = useRef<number | null>(null);
   const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
   const editableCols = map.editable_columns ?? [];
   const fromCols = fromColumnsEff(map);
   const arity = fromCols.length;
+  const saving = saveInFlight || storeRef.current.isSaveInFlight();
 
   useEffect(() => {
     storeRef.current.setSchema({ arity, editable: editableCols });
@@ -184,51 +186,47 @@ export function KeyMapEditor({
     setDirtyTick((n) => n + 1);
   }
 
-  useEffect(() => {
-    if (!onSaveApi) return;
-    onSaveApi({
-      captureSave: () => {
-        const cap = storeRef.current.captureSave();
-        saveTokenRef.current = cap.token;
-        onDirtyChange?.(cap.delta);
-        return cap.delta;
-      },
-      confirmSave: () => {
-        const token = saveTokenRef.current;
-        if (token != null) storeRef.current.confirmSave(token);
-        saveTokenRef.current = null;
-        // Drop confirmed new ids that are no longer dirty
-        newIdsRef.current = newIdsRef.current.filter((id) =>
-          storeRef.current.get(id),
-        );
-        onDirtyChange?.(storeRef.current.toDelta());
-        publishView();
-        setDirtyTick((n) => n + 1);
-      },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable API registration
-  }, [onSaveApi, map.id]);
-
-  // Legacy path when Save succeeds without saveApi (editor remount / no capture).
-  useEffect(() => {
-    if (dirtyResetSeq === undefined) return;
-    if (dirtyResetSeen.current === dirtyResetSeq) return;
-    dirtyResetSeen.current = dirtyResetSeq;
-    const token = saveTokenRef.current;
-    if (token != null) {
-      storeRef.current.confirmSave(token);
-      saveTokenRef.current = null;
-    } else {
-      storeRef.current.clear();
-      pageRef.current = [];
-      newIdsRef.current = [];
-    }
+  function afterSaveSettle() {
     newIdsRef.current = newIdsRef.current.filter((id) =>
       storeRef.current.get(id),
     );
     onDirtyChange?.(storeRef.current.toDelta());
     publishView();
     setDirtyTick((n) => n + 1);
+  }
+
+  useEffect(() => {
+    if (!onSaveApi) return;
+    onSaveApi({
+      captureSave: () => {
+        const cap = storeRef.current.captureSave();
+        if (!cap) return null;
+        onDirtyChange?.(cap.delta);
+        setDirtyTick((n) => n + 1);
+        return { token: cap.token, delta: cap.delta };
+      },
+      confirmSave: (token: number) => {
+        storeRef.current.confirmSave(token);
+        afterSaveSettle();
+      },
+      abortSave: (token: number) => {
+        storeRef.current.abortSave(token);
+        afterSaveSettle();
+      },
+      isSaving: () => storeRef.current.isSaveInFlight(),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable API registration
+  }, [onSaveApi, map.id]);
+
+  // Legacy path when Save succeeds without saveApi (editor not mounted).
+  useEffect(() => {
+    if (dirtyResetSeq === undefined) return;
+    if (dirtyResetSeen.current === dirtyResetSeq) return;
+    dirtyResetSeen.current = dirtyResetSeq;
+    storeRef.current.clear();
+    pageRef.current = [];
+    newIdsRef.current = [];
+    afterSaveSettle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirtyResetSeq]);
 
@@ -1560,14 +1558,16 @@ export function KeyMapEditor({
               {onSave && (
                 <button
                   type="button"
+                  disabled={saving}
+                  title={saving ? "Save in progress…" : undefined}
                   onClick={onSave}
                   className={
                     onApply
-                      ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700"
-                      : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                      ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
                   }
                 >
-                  {saveLabel}
+                  {saving ? "Saving…" : saveLabel}
                 </button>
               )}
               {onDelete && (

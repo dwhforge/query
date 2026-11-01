@@ -178,12 +178,19 @@ type KeyMapTabSession = {
   contentHash?: string;
   /** ADR-0022 dirty delta for source Save. */
   dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
-  /** Editor store Save API (capture freezes delta; confirm rebases after WH write). */
+  /** Editor store Save API — one in-flight capture; confirm/abort take its token. */
   saveApi?: {
-    captureSave: () => import("./lib/bridge").KeyMapDirtyDelta | null;
-    confirmSave: () => void;
+    captureSave: () => {
+      token: number;
+      delta: import("./lib/bridge").KeyMapDirtyDelta | null;
+    } | null;
+    confirmSave: (token: number) => void;
+    abortSave: (token: number) => void;
+    isSaving: () => boolean;
   };
-  /** Bumped after successful WH Save so KeyMapEditor confirms the capture. */
+  /** True while a warehouse write for this tab is awaiting a response. */
+  saveInFlight?: boolean;
+  /** Bumped after successful WH Save when editor saveApi is absent. */
   dirtyResetSeq?: number;
   totalCount?: number | null;
   pickTo?: string[];
@@ -2404,14 +2411,35 @@ function App() {
       }
       const tab = keyMapTabs.find((t) => t.map.id === map.id);
       const expectedHash = tab?.contentHash;
-      // Freeze draft snapshot for this Save; mid-save edits stay in the store.
-      const delta = tab?.saveApi?.captureSave() ?? tab?.dirtyDelta ?? null;
+      // One in-flight WH Save per mapping.
+      if (tab?.saveInFlight || tab?.saveApi?.isSaving()) {
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message: "KeyMap save already in progress",
+        };
+        setExportMsg(result.message);
+        return result;
+      }
+      const captured = tab?.saveApi?.captureSave() ?? null;
+      if (tab?.saveApi && !captured) {
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message: "KeyMap save already in progress",
+        };
+        setExportMsg(result.message);
+        return result;
+      }
+      const saveToken = captured?.token;
+      const delta = captured?.delta ?? tab?.dirtyDelta ?? null;
       const hasDelta =
         !!delta &&
         (delta.upserts.length > 0 ||
           delta.deletedFroms.length > 0 ||
           (delta.deletedFromParts?.length ?? 0) > 0);
       if (!hasDelta) {
+        if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
         // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
         const result: KeyMapSaveResult = {
           local: "saved",
@@ -2423,21 +2451,23 @@ function App() {
         setError(null);
         return result;
       }
+      patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: true }));
       try {
         const r = await writeKeyMap(map, resolved.dsn, expectedHash, delta);
-        if (tab?.saveApi) {
-          tab.saveApi.confirmSave();
+        if (tab?.saveApi && saveToken != null) {
+          tab.saveApi.confirmSave(saveToken);
           patchKeyMapTab(map.id, (s) => ({
             ...s,
             contentHash: r.content_hash,
+            saveInFlight: false,
           }));
         } else {
-          // Editor not mounted — drop stale delta.
           patchKeyMapTab(map.id, (s) => ({
             ...s,
             contentHash: r.content_hash,
             dirtyDelta: null,
             dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
+            saveInFlight: false,
           }));
         }
         const result: KeyMapSaveResult = {
@@ -2450,9 +2480,11 @@ function App() {
         setError(null);
         return result;
       } catch (e) {
+        if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
+        patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: false }));
         const msg = typeof e === "string" ? e : String(e);
         const isConflict = /refused|concurrently|hash/i.test(msg);
-        // Conflict/error: do not confirm or clear — drafts + capture stay.
+        // Conflict/error: abort capture, keep drafts for retry.
         const result: KeyMapSaveResult = {
           local: "saved",
           external: isConflict ? "conflict" : "error",
@@ -4027,6 +4059,7 @@ function App() {
                       dirtyDelta,
                     }))
                   }
+                  saveInFlight={keyMapEditor.saveInFlight}
                   onSaveApi={(saveApi) =>
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({
                       ...s,

@@ -26,7 +26,7 @@ import {
   type ApplySide,
 } from "../lib/keyMap";
 import {
-  applyDirtyToPage,
+  adoptWarehousePage,
   KeyMapDirtyBuffer,
   KEYMAP_PAGE_SIZE,
   withLocalId,
@@ -274,7 +274,11 @@ export function KeyMapEditor({
     )
       .then((r) => {
         if (cancelled) return;
-        const entries = applyDirtyToPage(r.entries, dirtyRef.current);
+        const entries = adoptWarehousePage(
+          r.entries,
+          map.entries,
+          dirtyRef.current,
+        );
         onChange({ ...map, entries });
         onWarehouseRead?.(r.content_hash, r.total_count);
         setTotalCount(r.total_count ?? null);
@@ -385,9 +389,14 @@ export function KeyMapEditor({
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
-    const prev = map.entries[index] as EditorKeyMapEntry | undefined;
-    if (!prev) return;
-    const localId = prev.__dwhLocalId;
+    const raw = map.entries[index] as EditorKeyMapEntry | undefined;
+    if (!raw) return;
+    // Every editor row (including WH-loaded) gets a stable local id.
+    const prev = withLocalId(raw);
+    const localId = prev.__dwhLocalId!;
+    if (isSource && !dirtyRef.current.isInsert(localId)) {
+      dirtyRef.current.bindOrigin(localId, raw);
+    }
     const merged: EditorKeyMapEntry = {
       ...prev,
       ...patch,
@@ -395,7 +404,7 @@ export function KeyMapEditor({
         patch.attrs !== undefined
           ? patch.attrs
           : prev.attrs,
-      ...(localId ? { __dwhLocalId: localId } : {}),
+      __dwhLocalId: localId,
     };
     if (patch.attrs === undefined && prev.attrs) {
       merged.attrs = { ...prev.attrs };
@@ -455,13 +464,14 @@ export function KeyMapEditor({
   }
 
   function deleteRow(index: number) {
-    const prev = map.entries[index] as EditorKeyMapEntry | undefined;
-    if (isSource && prev) {
-      dirtyRef.current.noteDelete(
-        fromPartsEff(prev),
-        prev,
-        prev.__dwhLocalId,
-      );
+    const raw = map.entries[index] as EditorKeyMapEntry | undefined;
+    if (isSource && raw) {
+      const prev = withLocalId(raw);
+      const localId = prev.__dwhLocalId!;
+      if (!dirtyRef.current.isInsert(localId)) {
+        dirtyRef.current.bindOrigin(localId, raw);
+      }
+      dirtyRef.current.noteDelete(fromPartsEff(prev), prev, localId);
       bumpDirty();
     }
     setEntries(map.entries.filter((_, j) => j !== index));

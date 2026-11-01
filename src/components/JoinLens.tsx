@@ -31,7 +31,17 @@ import {
   pinSideIndicesToResult,
   type JoinColumnOrigin,
 } from "../lib/joinColumnOrigin";
-import { shouldAutoRunJoinDiagnostics } from "../lib/joinAutoDiag";
+import {
+  shouldAutoLoadJoinParents,
+  shouldAutoRunJoinDiagnostics,
+} from "../lib/joinAutoDiag";
+import {
+  findIneffectiveMapEntries,
+  keyLabelsFromRows,
+  keyLabelsFromSample,
+  mapEntryFromLabel,
+  type IneffectiveMapEntry,
+} from "../lib/joinMapEffect";
 import { FindRightDialog } from "./FindRightDialog";
 import { JoinLensAuto } from "./JoinLensAuto";
 import { PreviewTable } from "./PreviewTable";
@@ -532,7 +542,10 @@ function JoinLensImpl({
     return { ...workspace, focus_query_id: rightQueryId };
   }, [workspace, rightQueryId]);
 
-  // Open Lens → schema only (cheap). Sample rows: prepared TEMPs or explicit Show rows.
+  // Schema refresh only when the Join identity changes — not on every workspace
+  // object churn (that wiped samples and blocked auto Show rows via attempted ref).
+  const joinParentsKey = `${hostQueryId}#${joinStepIndex}#${rightQueryId}#${leftOn.join("\0")}#${rightOn.join("\0")}`;
+
   useEffect(() => {
     if (!enabled || !leftInputWs || !rightInputWs) return;
     let cancelled = false;
@@ -541,6 +554,8 @@ function JoinLensImpl({
     setSamplesLoaded(false);
     setParentLeftRows([]);
     setParentRightRows([]);
+    // Allow small-join auto-load to run again after this wipe.
+    autoSamplesAttemptedRef.current = "";
     void (async () => {
       try {
         const left = await describeWorkspace(
@@ -572,7 +587,8 @@ function JoinLensImpl({
     return () => {
       cancelled = true;
     };
-  }, [enabled, leftInputWs, rightInputWs, connections, sources]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- joinParentsKey pins identity; ws from that render
+  }, [enabled, joinParentsKey, connections, sources]);
 
   function refreshPrepareStatus() {
     if (!hostQueryId || joinStepIndex < 1) return;
@@ -622,10 +638,10 @@ function JoinLensImpl({
     if (!enabled || sideMode !== "linked") return;
     if (!hostQueryId || joinStepIndex < 1) return;
     if (samplesLoaded || samplesLoading) return;
-    const id = `${hostQueryId}#${joinStepIndex}`;
+    const id = joinParentsKey;
     if (autoSamplesAttemptedRef.current === id) return;
     if (
-      !shouldAutoRunJoinDiagnostics(
+      !shouldAutoLoadJoinParents(
         workspace,
         hostQueryId,
         joinStepIndex,
@@ -640,8 +656,7 @@ function JoinLensImpl({
   }, [
     enabled,
     sideMode,
-    hostQueryId,
-    joinStepIndex,
+    joinParentsKey,
     workspace,
     prepareStatus,
     samplesLoaded,
@@ -715,6 +730,7 @@ function JoinLensImpl({
     setLeftSideLoading(true);
     setRightSideLoading(true);
     void (async () => {
+      let ok = false;
       try {
         if (usePrepared) {
           const left = await previewPreparedJoinSide("left", 50);
@@ -724,6 +740,7 @@ function JoinLensImpl({
           const right = await previewPreparedJoinSide("right", 50);
           setParentRightCols(right.columns);
           setParentRightRows(right.rows);
+          ok = true;
         } else if (leftInputWs && rightInputWs) {
           const left = await previewWorkspace(
             leftInputWs,
@@ -740,15 +757,18 @@ function JoinLensImpl({
           );
           setParentRightCols(right.columns);
           setParentRightRows(right.rows);
+          ok = true;
         }
       } catch {
         setParentLeftRows([]);
         setParentRightRows([]);
+        // Failed attempt must not stick — allow auto Show rows to retry.
+        autoSamplesAttemptedRef.current = "";
       } finally {
         setLeftSideLoading(false);
         setRightSideLoading(false);
         setSamplesLoading(false);
-        setSamplesLoaded(true);
+        if (ok) setSamplesLoaded(true);
       }
     })();
   }
@@ -794,13 +814,13 @@ function JoinLensImpl({
   const unmatchedLeft = joinDiag?.unmatched_left ?? null;
   const unmatchedRight = joinDiag?.unmatched_right ?? null;
 
-  /** Keys already in a KeyMap — hide from No match lists (left From / right To|From). */
+  /** Keys already in a KeyMap — hide effective From/To from No match lists. */
   const mappedKeys = useMemo(() => {
     const from = new Set<string>();
     const to = new Set<string>();
     for (const m of workspace.key_maps ?? []) {
       for (const e of m.entries) {
-        const f = e.from.trim();
+        const f = mapEntryFromLabel(e);
         const t = e.to.trim();
         if (f) from.add(f);
         if (t) to.add(t);
@@ -808,6 +828,43 @@ function JoinLensImpl({
     }
     return { from, to };
   }, [workspace.key_maps]);
+
+  /** Mapped pairs that do not affect this Join (not applied / To missing on right). */
+  const ineffectiveMaps = useMemo((): IneffectiveMapEntry[] => {
+    const leftUnmatchedKeys = keyLabelsFromSample(unmatchedLeft, leftOn);
+    const rightReady =
+      (samplesLoaded || prepared) && parentRightRows.length > 0;
+    const rightKeys = rightReady
+      ? keyLabelsFromRows(parentRightCols, parentRightRows, rightOn)
+      : null;
+    return findIneffectiveMapEntries(
+      workspace,
+      {
+        hostQueryId,
+        joinStepIndex,
+        rightQueryId,
+        leftOn,
+        rightOn,
+      },
+      {
+        leftUnmatchedKeys:
+          leftUnmatchedKeys.size > 0 ? leftUnmatchedKeys : null,
+        rightKeys: rightKeys && rightKeys.size > 0 ? rightKeys : null,
+      },
+    );
+  }, [
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    rightQueryId,
+    leftOn,
+    rightOn,
+    unmatchedLeft,
+    samplesLoaded,
+    prepared,
+    parentRightCols,
+    parentRightRows,
+  ]);
 
   const probeLeftCols = useMemo(
     () => asColumns(unmatchedLeft),
@@ -1304,7 +1361,7 @@ function JoinLensImpl({
             joinDiagLoading,
           );
 
-  const autoLoadParents = shouldAutoRunJoinDiagnostics(
+  const autoLoadParents = shouldAutoLoadJoinParents(
     workspace,
     hostQueryId,
     joinStepIndex,
@@ -1823,6 +1880,54 @@ function JoinLensImpl({
           </div>
         )}
 
+        {sideMode === "probe" && ineffectiveMaps.length > 0 && (
+          <div className="shrink-0 border-b border-rose-900/40 bg-rose-950/25 px-2 py-2">
+            <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-rose-200/90">
+              Mapped · no join effect · {ineffectiveMaps.length}
+            </div>
+            <ul className="max-h-28 space-y-1 overflow-auto">
+              {ineffectiveMaps.map((e) => (
+                <li
+                  key={`${e.mapId}:${e.from}→${e.to}:${e.reason}`}
+                  className="flex flex-wrap items-center gap-2 text-[11px]"
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono text-rose-50">
+                    {e.from}
+                    <span className="text-slate-500"> → </span>
+                    {e.to || "∅"}
+                  </span>
+                  <span
+                    className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] text-rose-200/90"
+                    title={
+                      e.reason === "not_applied"
+                        ? "In a mapping, but ApplyKeyMap is not on this Join"
+                        : "ApplyKeyMap To value is not a right join key"
+                    }
+                  >
+                    {e.reason === "not_applied"
+                      ? "not applied"
+                      : "To missing on right"}
+                  </span>
+                  {onMapKey && (
+                    <button
+                      type="button"
+                      className="shrink-0 rounded border border-amber-700/70 bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-50 hover:bg-amber-500/25"
+                      title={`Open mapping “${e.mapName}” to change this pair`}
+                      onClick={() =>
+                        onMapKey("left", [e.from], {
+                          toValues: e.to ? [e.to] : undefined,
+                        })
+                      }
+                    >
+                      Change…
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {sideMode === "auto" ? (
           <JoinLensAuto
             workspace={workspace}
@@ -2180,8 +2285,8 @@ function JoinLensImpl({
               </div>
             ) : unmatchedTotal > 0 ? (
               <div className="text-[11px] text-amber-100/80">
-                Select a result row, or a value on Left/Right → Suggest… / Save
-                mapping…
+                Click a result row (selection sticks), or a value on Left/Right →
+                Suggest… / Save mapping…
               </div>
             ) : null}
           </div>
@@ -2194,6 +2299,9 @@ function JoinLensImpl({
             highlightKeys={leftOn}
             columnOrigins={displayOrigins}
             activeRowIndex={displayActive}
+            // No match: click sticks the row so Suggest/Save stay aimed while
+            // the pointer moves to the action strip (hover would steal focus).
+            selectOnHover={sideMode !== "probe"}
             onActiveRowChange={(i) => {
               if (showingExplainSample) return;
               if (matchesOnly && matchedIndices.length > 0) {

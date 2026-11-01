@@ -142,3 +142,28 @@ export function shouldAutoRunJoinDiagnostics(
   }
   return joinLooksFixtureSmall(workspace, hostQueryId, joinStepIndex);
 }
+
+/**
+ * This-row parent preview: same caps as auto-diag, plus unprepared cheap
+ * CSV/fixture graphs (preview is still bounded). Skip PG/parquet/unknown size.
+ */
+export function shouldAutoLoadJoinParents(
+  workspace: Workspace,
+  hostQueryId: string,
+  joinStepIndex: number,
+  prepare: Pick<
+    JoinPrepareStatus,
+    | "prepared"
+    | "left_rows"
+    | "right_rows"
+    | "left_materialized"
+    | "right_materialized"
+  > | null,
+): boolean {
+  return shouldAutoRunJoinDiagnostics(
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    prepare,
+  );
+}

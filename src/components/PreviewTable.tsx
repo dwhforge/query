@@ -35,6 +35,11 @@ interface PreviewTableProps {
   onScrollParentRef?: (el: HTMLDivElement | null) => void;
   /** Result rows matching a side-probe selection (Join Lens). */
   matchedRowIndices?: number[];
+  /**
+   * When true (default), pointer hover updates the active row.
+   * Set false for sticky click selection (e.g. Join Lens No match → Suggest).
+   */
+  selectOnHover?: boolean;
 }
 
 function foldKey(s: string): string {
@@ -97,6 +102,7 @@ function PreviewTableImpl({
   onActiveRowElement,
   onScrollParentRef,
   matchedRowIndices,
+  selectOnHover = true,
 }: PreviewTableProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const rowEls = useRef<Map<number, HTMLElement>>(new Map());
@@ -267,13 +273,21 @@ function PreviewTableImpl({
                 }}
                 role="row"
                 tabIndex={0}
-                onPointerMove={(e) => onRowPointerMove(virtualRow.index, e)}
-                onFocus={() => queueHoverRow(virtualRow.index)}
+                onPointerMove={
+                  selectOnHover
+                    ? (e) => onRowPointerMove(virtualRow.index, e)
+                    : undefined
+                }
+                onFocus={
+                  selectOnHover
+                    ? () => queueHoverRow(virtualRow.index)
+                    : undefined
+                }
                 onClick={() => {
                   lastHoverIndex.current = virtualRow.index;
                   onActiveRowChange?.(virtualRow.index);
                 }}
-                className={`absolute left-0 flex border-b border-slate-800/80 ${
+                className={`absolute left-0 flex cursor-pointer border-b border-slate-800/80 ${
                   active
                     ? "bg-teal-500/15 ring-1 ring-inset ring-teal-500/40"
                     : isMatch

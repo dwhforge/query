@@ -512,11 +512,15 @@ export class KeyMapEditStore {
 
   /**
    * End an in-flight Save without rebasing (error / conflict / cancel).
-   * Drafts stay; pin is released so prune can run against the pre-save baseline.
+   * Releases the pin, then prunes sent rows that again match the pre-save
+   * baseline (e.g. user reverted Y→X while Save of Y was in flight).
    */
   abortSave(token: number) {
-    if (this.lastCapture?.token === token) {
-      this.lastCapture = null;
+    if (!this.lastCapture || this.lastCapture.token !== token) return;
+    const sentIds = [...this.lastCapture.sent.keys()];
+    this.lastCapture = null;
+    for (const id of sentIds) {
+      this.pruneIfPristine(id);
     }
   }
 

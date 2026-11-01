@@ -194,6 +194,21 @@ function summarize(store: KeyMapEditStore) {
   assert(summarize(store).upserts.join() === "A→Y", "draft kept after abort");
 }
 
+// --- abort after revert to baseline: no false dirty ---
+{
+  const store = new KeyMapEditStore();
+  const slot = loadA(store); // A→X
+  store.updateDraft(slot.id, { to: "Y" }, slot.loaded);
+  const cap = store.captureSave()!;
+  store.updateDraft(slot.id, { to: "X" }, slot.loaded); // revert while pinned
+  assert(!!store.get(slot.id), "pinned during flight");
+  assert(store.dirtyCount() === 1, "still present while pinned");
+  store.abortSave(cap.token);
+  assert(store.toDelta() === null, "nothing sendable");
+  assert(store.dirtyCount() === 0, "no false dirty after abort");
+  assert(store.isEmpty(), "pruned against pre-save baseline");
+}
+
 // --- second capture rejected while first in flight ---
 {
   const store = new KeyMapEditStore();

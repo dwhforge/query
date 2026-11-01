@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -172,6 +180,25 @@ import {
   type Workspace,
 } from "./types/pipeline";
 
+type KeyMapJoinCtx = {
+  hostQueryId: string;
+  joinStepIndex: number;
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+  /** Join type at open time — LEFT→INNER during Save must abort Apply. */
+  joinType: JoinType;
+  /** Side whose unmatched key opened Add to map… */
+  probeSide?: "left" | "right";
+  /** Fact columns for ApplyKeyMap (selected Join keys, ADR-0024). */
+  applyLeftOn?: string[];
+  applyRightOn?: string[];
+  /** Output column on the left (host) ApplyKeyMap. */
+  outputColumnLeft?: string;
+  /** Output column on the right ApplyKeyMap (may differ, e.g. sku vs item_code). */
+  outputColumnRight?: string;
+};
+
 type KeyMapTabSession = {
   map: KeyMapDef;
   /** Optimistic concurrency token from last warehouse read (source storage). */
@@ -196,26 +223,130 @@ type KeyMapTabSession = {
   pickTo?: string[];
   suggestedFrom?: string[];
   suggestedFromParts?: string[][];
-  joinCtx?: {
-    hostQueryId: string;
-    joinStepIndex: number;
-    rightQueryId: string;
-    leftOn: string[];
-    rightOn: string[];
-    /** Side whose unmatched key opened Add to map… */
-    probeSide?: "left" | "right";
-    /** Fact columns for ApplyKeyMap (selected Join keys, ADR-0024). */
-    applyLeftOn?: string[];
-    applyRightOn?: string[];
-    /** Output column on the left (host) ApplyKeyMap. */
-    outputColumnLeft?: string;
-    /** Output column on the right ApplyKeyMap (may differ, e.g. sku vs item_code). */
-    outputColumnRight?: string;
-  };
+  joinCtx?: KeyMapJoinCtx;
 };
 
+/** Intent to insert ApplyKeyMap after a successful KeyMap Save. */
+type KeyMapApplyIntent = {
+  map: KeyMapDef;
+  ctx: KeyMapJoinCtx;
+  side: ApplySide;
+  leftCols: string[];
+  rightCols: string[];
+  outputColumnLeft: string;
+  outputColumnRight: string;
+};
+
+type KeyMapApplyResult =
+  | { status: "ok"; mapId: string; workspace: Workspace }
+  | { status: "join_gone"; mapId: string };
+
+/**
+ * After ApplyKeyMap insert, Join may shift; find the same Join by right + ON + type.
+ */
+function resolveJoinStepFromCtx(
+  ws: Workspace,
+  ctx: KeyMapJoinCtx,
+): number | null {
+  const q = ws.queries.find((x) => x.id === ctx.hostQueryId);
+  if (!q) return null;
+  const leftKey = ctx.leftOn.join("\0");
+  const rightKey = ctx.rightOn.join("\0");
+  const matches = (
+    s: TransformationStep | undefined,
+  ): s is TransformationStep & { type: "Join" } =>
+    s?.type === "Join" &&
+    s.payload.right_query_id === ctx.rightQueryId &&
+    s.payload.left_on.join("\0") === leftKey &&
+    s.payload.right_on.join("\0") === rightKey &&
+    s.payload.join_type === ctx.joinType;
+  const at = q.steps[ctx.joinStepIndex];
+  if (matches(at)) return ctx.joinStepIndex;
+  for (let i = 0; i < q.steps.length; i++) {
+    if (matches(q.steps[i])) return i;
+  }
+  return null;
+}
+
+/** Pure: fold ApplyKeyMap into the latest project workspace. */
+function applyKeyMapOntoProject(
+  project: Project,
+  intent: KeyMapApplyIntent,
+): { project: Project; result: KeyMapApplyResult } {
+  const joinIdx = resolveJoinStepFromCtx(project.workspace, intent.ctx);
+  if (joinIdx == null) {
+    return {
+      project,
+      result: { status: "join_gone", mapId: intent.map.id },
+    };
+  }
+  const workspace = applyKeyMapToWorkspace(
+    {
+      ...project.workspace,
+      key_maps: upsertKeyMapList(project.workspace.key_maps ?? [], intent.map),
+    },
+    intent.ctx.hostQueryId,
+    joinIdx,
+    intent.ctx.rightQueryId,
+    intent.side,
+    intent.leftCols[0]!,
+    intent.rightCols[0]!,
+    intent.map,
+    intent.leftCols,
+    intent.rightCols,
+    intent.outputColumnLeft,
+    intent.outputColumnRight,
+  );
+  return {
+    project: { ...project, workspace },
+    result: { status: "ok", mapId: intent.map.id, workspace },
+  };
+}
+
+type ProjectBag = {
+  project: Project;
+  /** Set by apply_keymap; cleared after UI handles close/error. */
+  keyMapApplyResult: KeyMapApplyResult | null;
+};
+
+type ProjectBagAction =
+  | { type: "set"; updater: (p: Project) => Project }
+  | { type: "apply_keymap"; intent: KeyMapApplyIntent }
+  | { type: "clear_keymap_apply_result" };
+
+function projectBagReducer(
+  state: ProjectBag,
+  action: ProjectBagAction,
+): ProjectBag {
+  switch (action.type) {
+    case "set":
+      return { ...state, project: action.updater(state.project) };
+    case "apply_keymap": {
+      const { project, result } = applyKeyMapOntoProject(
+        state.project,
+        action.intent,
+      );
+      return { project, keyMapApplyResult: result };
+    }
+    case "clear_keymap_apply_result":
+      return { ...state, keyMapApplyResult: null };
+    default:
+      return state;
+  }
+}
+
 function App() {
-  const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
+  const [projectBag, dispatchProject] = useReducer(projectBagReducer, {
+    project: emptyProject("Untitled"),
+    keyMapApplyResult: null,
+  });
+  const project = projectBag.project;
+  const setProject = useCallback((update: SetStateAction<Project>) => {
+    dispatchProject({
+      type: "set",
+      updater: typeof update === "function" ? update : () => update,
+    });
+  }, []);
   const [appSettings, setAppSettingsState] = useState<AppSettings>({
     default_target_dialect: "duckdb",
     default_dbt_target: "v1",
@@ -942,37 +1073,6 @@ function App() {
     [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
 
-  /**
-   * After ApplyKeyMap insert, Join may shift; find the same Join by right + ON.
-   */
-  function resolveJoinStepFromCtx(
-    ws: Workspace,
-    ctx: NonNullable<KeyMapTabSession["joinCtx"]>,
-  ): number | null {
-    const q = ws.queries.find((x) => x.id === ctx.hostQueryId);
-    if (!q) return null;
-    const leftKey = ctx.leftOn.join("\0");
-    const rightKey = ctx.rightOn.join("\0");
-    const at = q.steps[ctx.joinStepIndex];
-    if (
-      at?.type === "Join" &&
-      at.payload.right_query_id === ctx.rightQueryId &&
-      at.payload.left_on.join("\0") === leftKey &&
-      at.payload.right_on.join("\0") === rightKey
-    ) {
-      return ctx.joinStepIndex;
-    }
-    for (let i = 0; i < q.steps.length; i++) {
-      const s = q.steps[i];
-      if (s?.type !== "Join") continue;
-      if (s.payload.right_query_id !== ctx.rightQueryId) continue;
-      if (s.payload.left_on.join("\0") !== leftKey) continue;
-      if (s.payload.right_on.join("\0") !== rightKey) continue;
-      return i;
-    }
-    return null;
-  }
-
   /** Close map tab; if opened from Join Lens, restore Join + Lens No match. */
   function closeKeyMapTab(mapId: string, wsForJoin?: Workspace) {
     const closing = keyMapTabs.find((t) => t.map.id === mapId);
@@ -1014,6 +1114,22 @@ function App() {
       }),
     );
   }
+
+  // After apply_keymap commits into projectBag — close tab or show error (never
+  // read apply outcome from impure setProject locals).
+  useEffect(() => {
+    const result = projectBag.keyMapApplyResult;
+    if (!result) return;
+    dispatchProject({ type: "clear_keymap_apply_result" });
+    if (result.status === "join_gone") {
+      setError(
+        "Join was removed or changed while Save was pending — mapping was saved, but Apply was skipped. Re-open the Join and Apply again.",
+      );
+      return;
+    }
+    closeKeyMapTab(result.mapId, result.workspace);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- closeKeyMapTab closes over latest tabs/project
+  }, [projectBag.keyMapApplyResult]);
 
   // Keep forms in sync when steps change; clamp selected step index.
   useEffect(() => {
@@ -2723,6 +2839,7 @@ function App() {
       hostQueryId,
       joinStepIndex,
       rightQueryId,
+      joinType,
     } = joinLensTarget;
     const maps = project.workspace.key_maps ?? [];
     const toValues = opts?.toValues;
@@ -2753,12 +2870,13 @@ function App() {
       lensRightOn[0] ??
       "key";
 
-    const joinCtx = {
+    const joinCtx: KeyMapJoinCtx = {
       hostQueryId,
       joinStepIndex,
       rightQueryId,
       leftOn: lensLeftOn,
       rightOn: lensRightOn,
+      joinType,
       probeSide: side,
       applyLeftOn,
       applyRightOn,
@@ -3201,6 +3319,7 @@ function App() {
           rightQueryId: selectedStep.payload.right_query_id,
           leftOn: selectedStep.payload.left_on,
           rightOn: selectedStep.payload.right_on,
+          joinType: selectedStep.payload.join_type,
         }
       : null;
 
@@ -4201,7 +4320,7 @@ function App() {
                                     )
                                   : [ctx.rightOn[0] ?? "key"];
                             const outputColumnLeft =
-                              ctx.outputColumnLeft?.trim() || leftCols[0];
+                              ctx.outputColumnLeft?.trim() || leftCols[0]!;
                             const outLeftIdx = leftCols.findIndex(
                               (c) =>
                                 c.toLowerCase() ===
@@ -4210,52 +4329,21 @@ function App() {
                             const outputColumnRight =
                               ctx.outputColumnRight?.trim() ||
                               rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
-                              rightCols[0];
-                            // Functional update: merge Apply into latest workspace
-                            // (edits concurrent with Save must survive). Pure updater.
-                            let appliedWs: Workspace | null = null;
-                            let joinGone = false;
-                            setProject((p) => {
-                              const joinIdx = resolveJoinStepFromCtx(
-                                p.workspace,
-                                ctx,
-                              );
-                              if (joinIdx == null) {
-                                joinGone = true;
-                                return p;
-                              }
-                              const workspace = applyKeyMapToWorkspace(
-                                {
-                                  ...p.workspace,
-                                  key_maps: upsertKeyMapList(
-                                    p.workspace.key_maps ?? [],
-                                    map,
-                                  ),
-                                },
-                                ctx.hostQueryId,
-                                joinIdx,
-                                ctx.rightQueryId,
-                                side,
-                                leftCols[0]!,
-                                rightCols[0]!,
+                              rightCols[0]!;
+                            // Commit Apply via reducer — outcome lives in
+                            // keyMapApplyResult and is handled after commit.
+                            dispatchProject({
+                              type: "apply_keymap",
+                              intent: {
                                 map,
+                                ctx,
+                                side,
                                 leftCols,
                                 rightCols,
                                 outputColumnLeft,
                                 outputColumnRight,
-                              );
-                              appliedWs = workspace;
-                              return { ...p, workspace };
+                              },
                             });
-                            if (joinGone) {
-                              setError(
-                                "Join was removed or changed while Save was pending — mapping was saved, but Apply was skipped. Re-open the Join and Apply again.",
-                              );
-                              return;
-                            }
-                            if (appliedWs) {
-                              closeKeyMapTab(map.id, appliedWs);
-                            }
                           });
                         }
                       : undefined

@@ -13,6 +13,8 @@ function clampPanelWidth(px: number, min: number, max: number): number {
 }
 
 const BOTTOM_DOCK_HEIGHT_KEY = "dwh.bottomDockHeightPx";
+const EXPLORER_COLLAPSED_KEY = "dwh.explorerCollapsed";
+const INSPECTOR_COLLAPSED_KEY = "dwh.inspectorCollapsed";
 /**
  * Minimum canvas strip when Join Lens / Data is maximized.
  * Intentionally tiny — drag the splitter up to give almost all height to the dock.
@@ -20,6 +22,24 @@ const BOTTOM_DOCK_HEIGHT_KEY = "dwh.bottomDockHeightPx";
 const MIN_CANVAS_ABOVE_DOCK = 28;
 const BOTTOM_DOCK_MIN = 160;
 const BOTTOM_DOCK_HANDLE = 8;
+/** Drag side panel below this width → fully collapse (VS Code sash snap). */
+const SIDE_PANEL_COLLAPSE_SNAP = 96;
+
+function loadCollapsedFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistCollapsedFlag(key: string, collapsed: boolean) {
+  try {
+    localStorage.setItem(key, collapsed ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
 
 function loadBottomDockHeight(): number {
   try {
@@ -371,10 +391,51 @@ function App() {
   /** Height before last “maximize Join Lens / Data” double-click. */
   const bottomDockRestoreRef = useRef<number | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(300);
+  const [explorerCollapsed, setExplorerCollapsed] = useState(() =>
+    loadCollapsedFlag(EXPLORER_COLLAPSED_KEY),
+  );
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(() =>
+    loadCollapsedFlag(INSPECTOR_COLLAPSED_KEY),
+  );
   const explorerWidthRef = useRef(explorerWidth);
   const inspectorWidthRef = useRef(inspectorWidth);
   explorerWidthRef.current = explorerWidth;
   inspectorWidthRef.current = inspectorWidth;
+
+  function setExplorerCollapsedPersist(next: boolean) {
+    setExplorerCollapsed(next);
+    persistCollapsedFlag(EXPLORER_COLLAPSED_KEY, next);
+  }
+  function setInspectorCollapsedPersist(next: boolean) {
+    setInspectorCollapsed(next);
+    persistCollapsedFlag(INSPECTOR_COLLAPSED_KEY, next);
+  }
+
+  function maximizeBottomDock() {
+    const stackH = canvasDockStackRef.current?.clientHeight ?? 0;
+    if (stackH <= 0) return;
+    const maxH = clampBottomDockHeight(stackH, stackH);
+    setBottomDockHeight((h) => {
+      if (h < maxH - 12) bottomDockRestoreRef.current = h;
+      bottomDockHeightRef.current = maxH;
+      try {
+        localStorage.setItem(BOTTOM_DOCK_HEIGHT_KEY, String(maxH));
+      } catch {
+        /* ignore */
+      }
+      return maxH;
+    });
+  }
+
+  function focusJoinLensLayout() {
+    setExplorerCollapsedPersist(true);
+    setInspectorCollapsedPersist(true);
+    setJoinLensOn(true);
+    setBottomTab("data");
+    setCenterTab("canvas");
+    maximizeBottomDock();
+  }
+
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
     null,
@@ -3641,6 +3702,15 @@ function App() {
         }
         onViewData={() => setBottomTab("data")}
         onViewModel={() => setBottomTab("model")}
+        explorerVisible={!explorerCollapsed}
+        inspectorVisible={!inspectorCollapsed}
+        onToggleExplorer={() =>
+          setExplorerCollapsedPersist(!explorerCollapsed)
+        }
+        onToggleInspector={() =>
+          setInspectorCollapsedPersist(!inspectorCollapsed)
+        }
+        onFocusJoinLens={focusJoinLensLayout}
         onCopySql={() => void copySql()}
         onNewConnection={() => openNewConnection("postgres")}
         onSetExecutionEngine={handleSetExecutionEngine}
@@ -3962,68 +4032,98 @@ function App() {
         />
       ) : (
         <div className="flex min-h-0 flex-1">
-          {/* Explorer */}
-          <aside
-            className="min-h-0 shrink-0 overflow-hidden bg-[#050b12]"
-            style={{ width: explorerWidth }}
-          >
-            <ExplorerTree
-              project={project}
-              activeQueryId={activeQueryId}
-              selectedSourceId={selectedSourceId}
-              selectedKeyMapId={selectedKeyMapId}
-              expanded={treeExpanded}
-              onToggle={(key) =>
-                setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
-              }
-              onSelectQuery={selectQuery}
-              onSelectSource={onSelectSource}
-              onSelectConnection={(c) => {
-                setEditingConnection(c);
-                setConnEditorKind(c.kind);
-                setConnEditorOpen(true);
-              }}
-              onExport={() => void handleExportDbt()}
-              onRevealExport={() => void handleRevealExport()}
-              exportFiles={exportFiles}
-              onAddConnection={() => openNewConnection("postgres")}
-              onAddSourceCsv={() => void addSourceOnlyCsv()}
-              onAddSourceParquet={() => void addSourceOnlyParquet()}
-              onAddSourceHiveParquet={() => openHiveDialog("source")}
-              onAddSourceS3={() => openS3Dialog("source")}
-              onAddSourcePostgres={() => openPgPicker("source")}
-              onNewQueryCsv={() => void addCsvQuery()}
-              onNewQueryParquet={() => void addParquetQuery()}
-              onNewQueryHiveParquet={() => openHiveDialog("query")}
-              onNewQueryS3={() => openS3Dialog("query")}
-              onNewQueryPostgres={() => openPgPicker("query")}
-              onNewQueryFromSource={addQueryFromSource}
-              onNewSqlModel={addSqlModelQuery}
-              onRenameQuery={renameQuery}
-              onRenameSource={renameSource}
-              onSelectKeyMap={(map) => {
-                setSelectedKeyMapId(map.id);
-                openKeyMapEditor(map);
-              }}
-              onAddKeyMap={handleAddKeyMap}
-              onRenameKeyMap={handleRenameKeyMap}
-              onDeleteKeyMap={handleDeleteKeyMap}
-            />
-          </aside>
+          {/* Explorer — fully collapsible like a VS Code side bar */}
+          {!explorerCollapsed && (
+            <aside
+              className="min-h-0 shrink-0 overflow-hidden bg-[#050b12]"
+              style={{ width: explorerWidth }}
+            >
+              <ExplorerTree
+                project={project}
+                activeQueryId={activeQueryId}
+                selectedSourceId={selectedSourceId}
+                selectedKeyMapId={selectedKeyMapId}
+                expanded={treeExpanded}
+                onToggle={(key) =>
+                  setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
+                }
+                onSelectQuery={selectQuery}
+                onSelectSource={onSelectSource}
+                onSelectConnection={(c) => {
+                  setEditingConnection(c);
+                  setConnEditorKind(c.kind);
+                  setConnEditorOpen(true);
+                }}
+                onExport={() => void handleExportDbt()}
+                onRevealExport={() => void handleRevealExport()}
+                exportFiles={exportFiles}
+                onAddConnection={() => openNewConnection("postgres")}
+                onAddSourceCsv={() => void addSourceOnlyCsv()}
+                onAddSourceParquet={() => void addSourceOnlyParquet()}
+                onAddSourceHiveParquet={() => openHiveDialog("source")}
+                onAddSourceS3={() => openS3Dialog("source")}
+                onAddSourcePostgres={() => openPgPicker("source")}
+                onNewQueryCsv={() => void addCsvQuery()}
+                onNewQueryParquet={() => void addParquetQuery()}
+                onNewQueryHiveParquet={() => openHiveDialog("query")}
+                onNewQueryS3={() => openS3Dialog("query")}
+                onNewQueryPostgres={() => openPgPicker("query")}
+                onNewQueryFromSource={addQueryFromSource}
+                onNewSqlModel={addSqlModelQuery}
+                onRenameQuery={renameQuery}
+                onRenameSource={renameSource}
+                onSelectKeyMap={(map) => {
+                  setSelectedKeyMapId(map.id);
+                  openKeyMapEditor(map);
+                }}
+                onAddKeyMap={handleAddKeyMap}
+                onRenameKeyMap={handleRenameKeyMap}
+                onDeleteKeyMap={handleDeleteKeyMap}
+              />
+            </aside>
+          )}
           <PanelResizeHandle
-            aria-label="Resize explorer"
-            onDelta={(dx) =>
-              setExplorerWidth((w) => {
-                const next = clampPanelWidth(w + dx, 160, 480);
-                explorerWidthRef.current = next;
-                return next;
-              })
+            collapsedRail={explorerCollapsed}
+            aria-label={
+              explorerCollapsed ? "Show explorer" : "Resize explorer"
             }
-            onDragEnd={() =>
+            title={
+              explorerCollapsed
+                ? "Drag right or double-click to show Explorer"
+                : "Drag to resize · drag past the edge or double-click to hide Explorer"
+            }
+            onDelta={(dx) => {
+              if (explorerCollapsed) {
+                if (dx > 0) {
+                  setExplorerCollapsedPersist(false);
+                  const next = clampPanelWidth(
+                    Math.max(explorerWidthRef.current, 160) + dx,
+                    160,
+                    480,
+                  );
+                  explorerWidthRef.current = next;
+                  setExplorerWidth(next);
+                }
+                return;
+              }
+              const raw = explorerWidthRef.current + dx;
+              if (raw < SIDE_PANEL_COLLAPSE_SNAP) {
+                setExplorerCollapsedPersist(true);
+                return;
+              }
+              const next = clampPanelWidth(raw, 160, 480);
+              explorerWidthRef.current = next;
+              setExplorerWidth(next);
+            }}
+            onDragEnd={() => {
+              if (explorerCollapsed) return;
               persistPanelWidths(
                 explorerWidthRef.current,
                 inspectorWidthRef.current,
-              )
+              );
+            }}
+            onDoubleClick={() =>
+              setExplorerCollapsedPersist(!explorerCollapsed)
             }
           />
 
@@ -4642,23 +4742,52 @@ function App() {
           </section>
 
           <PanelResizeHandle
-            aria-label="Resize inspector"
-            onDelta={(dx) =>
-              setInspectorWidth((w) => {
-                const next = clampPanelWidth(w - dx, 220, 560);
-                inspectorWidthRef.current = next;
-                return next;
-              })
+            collapsedRail={inspectorCollapsed}
+            aria-label={
+              inspectorCollapsed ? "Show inspector" : "Resize inspector"
             }
-            onDragEnd={() =>
+            title={
+              inspectorCollapsed
+                ? "Drag left or double-click to show Inspector"
+                : "Drag to resize · drag past the edge or double-click to hide Inspector"
+            }
+            onDelta={(dx) => {
+              if (inspectorCollapsed) {
+                if (dx < 0) {
+                  setInspectorCollapsedPersist(false);
+                  const next = clampPanelWidth(
+                    Math.max(inspectorWidthRef.current, 220) - dx,
+                    220,
+                    560,
+                  );
+                  inspectorWidthRef.current = next;
+                  setInspectorWidth(next);
+                }
+                return;
+              }
+              const raw = inspectorWidthRef.current - dx;
+              if (raw < SIDE_PANEL_COLLAPSE_SNAP) {
+                setInspectorCollapsedPersist(true);
+                return;
+              }
+              const next = clampPanelWidth(raw, 220, 560);
+              inspectorWidthRef.current = next;
+              setInspectorWidth(next);
+            }}
+            onDragEnd={() => {
+              if (inspectorCollapsed) return;
               persistPanelWidths(
                 explorerWidthRef.current,
                 inspectorWidthRef.current,
-              )
+              );
+            }}
+            onDoubleClick={() =>
+              setInspectorCollapsedPersist(!inspectorCollapsed)
             }
           />
 
-          {/* Inspector: top = step order, bottom = edit selected step */}
+          {/* Inspector — fully collapsible like a VS Code side bar */}
+          {!inspectorCollapsed && (
           <aside
             className="flex min-h-0 shrink-0 flex-col overflow-hidden bg-[#050b12]"
             style={{ width: inspectorWidth }}
@@ -5600,6 +5729,7 @@ function App() {
               </div>
             </div>
           </aside>
+          )}
         </div>
       )}
     </div>

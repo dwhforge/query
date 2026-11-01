@@ -100,6 +100,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Clean up join keys…: near-miss trim/case/zeros → Apply cleanup (NormalizeKey step) before Join",
       "Suggest all…: similar-name proposals for unmatched keys → Add selected to mapping. Leftovers can use the LLM chat (lineage, schemas, neighbor fields). Connection: llm.base_url / llm.model / llm.api_key in ~/.dwhforge-query/settings.json",
       "Collapse the graph for Join Lens: drag the horizontal splitter up (canvas shrinks to a thin strip) or double-click the splitter to maximize the dock / restore",
+      "Hide Explorer / Inspector like VS Code side bars: drag a side splitter past the edge, double-click it, or View → Hide Explorer / Hide Inspector. View → Focus Join Lens hides both and maximizes the dock",
       "Save mapping…: from the Inspector unmatched banner, or Join Lens → No match → left/right. Several mappings → pick target; one mapping → opens it",
       "Data preview while a Join is selected is truncated through that Join",
       "Inspector: unmatched / rows with multiple matches still available",

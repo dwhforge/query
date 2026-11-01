@@ -31,6 +31,12 @@ export interface AppMenuProps {
   onBuildExport?: () => void;
   onViewData: () => void;
   onViewModel: () => void;
+  explorerVisible?: boolean;
+  inspectorVisible?: boolean;
+  onToggleExplorer?: () => void;
+  onToggleInspector?: () => void;
+  /** Collapse side panels + maximize Join Lens / Data dock. */
+  onFocusJoinLens?: () => void;
   onCopySql: () => void;
   onNewConnection: () => void;
   onSetExecutionEngine: (e: ExecutionEngine) => void;
@@ -220,6 +226,11 @@ export function AppMenu({
   onBuildExport,
   onViewData,
   onViewModel,
+  explorerVisible = true,
+  inspectorVisible = true,
+  onToggleExplorer,
+  onToggleInspector,
+  onFocusJoinLens,
   onCopySql,
   onNewConnection,
   onSetExecutionEngine,
@@ -321,6 +332,33 @@ export function AppMenu({
             disabled={!canCopySql}
             onClick={() => run(onCopySql)}
           />
+          {(onToggleExplorer || onToggleInspector || onFocusJoinLens) && (
+            <>
+              <Sep />
+              {onToggleExplorer && (
+                <Item
+                  label={
+                    explorerVisible ? "Hide Explorer" : "Show Explorer"
+                  }
+                  onClick={() => run(onToggleExplorer)}
+                />
+              )}
+              {onToggleInspector && (
+                <Item
+                  label={
+                    inspectorVisible ? "Hide Inspector" : "Show Inspector"
+                  }
+                  onClick={() => run(onToggleInspector)}
+                />
+              )}
+              {onFocusJoinLens && (
+                <Item
+                  label="Focus Join Lens"
+                  onClick={() => run(onFocusJoinLens)}
+                />
+              )}
+            </>
+          )}
           {(onZoomIn || onZoomOut || onZoomReset || onToggleFullscreen) && (
             <>
               <Sep />

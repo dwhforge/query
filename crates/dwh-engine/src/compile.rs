@@ -3,6 +3,9 @@
 //!
 //! Always attach [`WorkspaceSchemas`] so ApplyKeyMap `output_column` overwrite vs append matches
 //! across consumers. Strict emit still refuses unknown prior schema when output is not a fact col.
+//!
+//! Prefer [`prepare_workspace`] once per request — Load seeds and SqlModel probes are not
+//! re-collected independently; probe failures land in [`PreparedWorkspace::warnings`].
 
 use crate::load_seeds::collect_load_seeds;
 use crate::session::DbSession;
@@ -13,6 +16,47 @@ use dwh_pipeline::{
 use duckdb::arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 
+/// One-shot compile prep: seeds, SqlModel column maps, inferred schemas, and probe warnings.
+#[derive(Debug, Clone, Default)]
+pub struct PreparedWorkspace {
+    pub schemas: WorkspaceSchemas,
+    pub sql_models: HashMap<String, Vec<String>>,
+    /// Human-readable reasons a SqlModel/Load schema probe failed (not silent unknowns).
+    pub warnings: Vec<String>,
+}
+
+/// Resolve connections/sources schemas once for preview, Lens, and export.
+pub fn prepare_workspace(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+) -> PreparedWorkspace {
+    let mut warnings = Vec::new();
+    let seeds = match collect_load_seeds(db, workspace, connections, sources) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(format!("load seeds: {e}"));
+            HashMap::new()
+        }
+    };
+    let (sql_models, mut probe_warn) =
+        collect_sql_model_schemas_inner(db, workspace, connections, sources, &seeds);
+    warnings.append(&mut probe_warn);
+    let schemas = match infer_workspace_schemas_ex(workspace, &seeds, &sql_models) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(format!("infer schemas: {e}"));
+            WorkspaceSchemas::default()
+        }
+    };
+    PreparedWorkspace {
+        schemas,
+        sql_models,
+        warnings,
+    }
+}
+
 /// Infer schemas from Load* seeds, then fill SqlModel holes via compile + `LIMIT 0` describe.
 pub fn workspace_schemas(
     db: &DbSession,
@@ -20,9 +64,7 @@ pub fn workspace_schemas(
     connections: &[ConnectionDef],
     sources: &[SourceDef],
 ) -> WorkspaceSchemas {
-    let seeds = collect_load_seeds(db, workspace, connections, sources).unwrap_or_default();
-    let sql_models = collect_sql_model_schemas(db, workspace, connections, sources);
-    infer_workspace_schemas_ex(workspace, &seeds, &sql_models).unwrap_or_default()
+    prepare_workspace(db, workspace, connections, sources).schemas
 }
 
 /// Live-described SqlModel column lists (query_id → columns). Shared by preview and dbt export.
@@ -33,10 +75,25 @@ pub fn collect_sql_model_schemas(
     sources: &[SourceDef],
 ) -> HashMap<String, Vec<String>> {
     let seeds = collect_load_seeds(db, workspace, connections, sources).unwrap_or_default();
+    collect_sql_model_schemas_inner(db, workspace, connections, sources, &seeds).0
+}
+
+fn collect_sql_model_schemas_inner(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+    seeds: &HashMap<String, Vec<String>>,
+) -> (HashMap<String, Vec<String>>, Vec<String>) {
     let mut sql_models = HashMap::new();
-    let order = topo_queries(workspace).unwrap_or_else(|_| {
-        workspace.queries.iter().map(|q| q.id.clone()).collect()
-    });
+    let mut warnings = Vec::new();
+    let order = match topo_queries(workspace) {
+        Ok(o) => o,
+        Err(e) => {
+            warnings.push(format!("topo_queries: {e}"));
+            workspace.queries.iter().map(|q| q.id.clone()).collect()
+        }
+    };
 
     for qid in order {
         let Some(query) = workspace.query(&qid) else {
@@ -45,26 +102,41 @@ pub fn collect_sql_model_schemas(
         if !matches!(query.steps.first(), Some(TransformationStep::SqlModel { .. })) {
             continue;
         }
-        let Ok(prefix_ws) = workspace_sql_model_prefix(workspace, &qid) else {
-            continue;
+        let prefix_ws = match workspace_sql_model_prefix(workspace, &qid) {
+            Ok(ws) => ws,
+            Err(e) => {
+                warnings.push(format!("SqlModel {qid}: {e}"));
+                continue;
+            }
         };
         // Known SqlModel schemas so far + Load seeds; this query is truncated to SqlModel only
         // so ApplyKeyMap later in the same query cannot block the probe.
-        let schemas =
-            infer_workspace_schemas_ex(&prefix_ws, &seeds, &sql_models).unwrap_or_default();
-        let Ok(compiled) =
-            graph_compiler(&prefix_ws, connections, sources, &schemas).compile_ctes_from(&qid)
-        else {
-            continue;
+        let schemas = match infer_workspace_schemas_ex(&prefix_ws, seeds, &sql_models) {
+            Ok(s) => s,
+            Err(e) => {
+                warnings.push(format!("SqlModel {qid} infer: {e}"));
+                continue;
+            }
         };
+        let compiled =
+            match graph_compiler(&prefix_ws, connections, sources, &schemas).compile_ctes_from(&qid)
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    warnings.push(format!("SqlModel {qid} compile: {e}"));
+                    continue;
+                }
+            };
         let cte = cte_name(&qid, 0);
-        if let Ok(cols) = describe_compiled_cte(db, &compiled, &cte) {
-            if !cols.is_empty() {
+        match describe_compiled_cte(db, &compiled, &cte) {
+            Ok(cols) if !cols.is_empty() => {
                 sql_models.insert(qid, cols);
             }
+            Ok(_) => warnings.push(format!("SqlModel {qid}: describe returned no columns")),
+            Err(e) => warnings.push(format!("SqlModel {qid} describe: {e}")),
         }
     }
-    sql_models
+    (sql_models, warnings)
 }
 
 /// GraphCompiler with sources, connections, and inferred schemas attached.

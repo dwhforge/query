@@ -7,6 +7,7 @@ mod join_fuzzy;
 mod join_lens;
 mod join_near_miss;
 mod join_prepare;
+mod key_map_delta;
 mod key_map_fuzzy;
 mod key_map_write;
 mod key_match;
@@ -49,13 +50,16 @@ pub use join_prepare::{
 };
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
+pub use key_map_delta::{
+    validate_mapping_delta, KeyMapDirtyBaseline, KeyMapDirtyDelta, ValidatedMappingDelta,
+};
 pub use key_map_write::{
     key_map_content_hash, read_key_map, read_key_map_from_postgres, read_key_map_paged,
     read_key_map_with_hash, write_key_map, write_key_map_delta_to_postgres,
     write_key_map_to_postgres, write_key_map_with_delta, write_key_map_with_expected,
-    KeyMapDirtyDelta, KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
+    KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
 };
-pub use compile::collect_sql_model_schemas;
+pub use compile::{collect_sql_model_schemas, prepare_workspace, PreparedWorkspace};
 pub use load_seeds::collect_load_seeds;
 pub use postgres_catalog::{
     describe_postgres_object, list_postgres_objects, test_postgres_connection,

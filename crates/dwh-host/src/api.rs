@@ -36,7 +36,7 @@ use dwh_pipeline::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -1112,6 +1112,11 @@ impl PreviewCache {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
 }
 
 fn fingerprint_json(parts: &[&Value]) -> u64 {
@@ -1124,7 +1129,7 @@ fn fingerprint_json(parts: &[&Value]) -> u64 {
     h.finish()
 }
 
-/// One pending heavy job + one running worker. Newer submits supersede the same lane only.
+/// One pending heavy job + one running worker.
 struct HeavyJob {
     cmd: String,
     args: Value,
@@ -1135,19 +1140,27 @@ struct HeavyJob {
 enum HeavyLane {
     /// Debounced preview / describe — may be superseded by a newer preview.
     Preview,
-    /// Join prepare / diagnostics / lens — never dropped by a preview.
+    /// Join prepare / diagnostics / lens — replace pending of same lane only.
     Analysis,
+    /// KeyMap / warehouse mutations — FIFO, never superseded.
+    Mutation,
 }
 
 #[derive(Default)]
 struct HeavyPending {
     preview: Option<HeavyJob>,
     analysis: Option<HeavyJob>,
+    /// Ordered warehouse / KeyMap jobs (read + write). No replace.
+    mutations: VecDeque<HeavyJob>,
 }
 
 impl HeavyPending {
+    /// Prefer mutations (FIFO), then analysis, then preview.
     fn take_next(&mut self) -> Option<HeavyJob> {
-        self.analysis.take().or_else(|| self.preview.take())
+        self.mutations
+            .pop_front()
+            .or_else(|| self.analysis.take())
+            .or_else(|| self.preview.take())
     }
 }
 
@@ -1192,7 +1205,8 @@ impl HostState {
         self.preview_cancel.interrupt();
     }
 
-    /// Heavy DuckDB RPCs: queued (1 pending), coalesced by fingerprint, async-safe.
+    /// Heavy DuckDB RPCs: worker-threaded. Preview/analysis replace pending peers;
+    /// mutations (KeyMap R/W) are FIFO and never superseded.
     pub fn is_heavy_rpc(cmd: &str) -> bool {
         matches!(
             cmd,
@@ -1208,6 +1222,8 @@ impl HostState {
                 | "prepare_join_inputs"
                 | "preview_prepared_join_side"
                 | "install_dbt_venv"
+                | "read_key_map"
+                | "write_key_map"
         )
     }
 
@@ -1216,6 +1232,7 @@ impl HostState {
             "preview_workspace" | "preview_pipeline" | "describe_workspace" => {
                 HeavyLane::Preview
             }
+            "read_key_map" | "write_key_map" => HeavyLane::Mutation,
             _ => HeavyLane::Analysis,
         }
     }
@@ -1225,7 +1242,25 @@ impl HostState {
         Self::heavy_lane(cmd) == HeavyLane::Preview
     }
 
-    /// Enqueue a heavy job. Supersedes only the same lane (preview ↛ prepare).
+    /// After KeyMap/warehouse writes: drop stale preview + join-prepare caches.
+    fn invalidate_caches_after_mutation(&self, cmd: &str) {
+        if cmd != "write_key_map" {
+            return;
+        }
+        if let Ok(mut cache) = self.preview_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(db) = self.db.lock() {
+            let _ = run_clear_join_prepare(&db);
+        }
+        if let Ok(mut g) = self.join_prep_progress.lock() {
+            *g = JoinPrepareProgress::default();
+        }
+    }
+
+    /// Enqueue a heavy job.
+    /// Preview/analysis: supersede only the same lane.
+    /// Mutation: append FIFO (never replace).
     pub fn enqueue_heavy(&self, cmd: &str, args: Value) -> Result<Value, String> {
         // Fast path: preview cache hit without queue.
         if let Some(hit) = self.preview_cache_lookup(cmd, &args) {
@@ -1267,6 +1302,9 @@ impl HostState {
                         let _ = old.reply.send(Err("Preview superseded.".into()));
                     }
                     slot.analysis = Some(job);
+                }
+                HeavyLane::Mutation => {
+                    slot.mutations.push_back(job);
                 }
             }
             self.heavy_cv.notify_one();
@@ -1336,7 +1374,10 @@ impl HostState {
             if let Ok(mut running) = self.heavy_running_fp.lock() {
                 *running = Some(fp);
             }
-            let result = self.dispatch_heavy_job(&job.cmd, job.args);
+            let result = self.dispatch_heavy_job(&job.cmd, job.args.clone());
+            if result.is_ok() {
+                self.invalidate_caches_after_mutation(&job.cmd);
+            }
             if let Ok(mut running) = self.heavy_running_fp.lock() {
                 *running = None;
             }

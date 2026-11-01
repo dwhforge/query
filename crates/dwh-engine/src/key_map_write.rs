@@ -1,5 +1,6 @@
 //! Read/write KeyMap rows against a Postgres source table (ADR-0020 / ADR-0022).
 
+use crate::key_map_delta::{validate_mapping_delta, ValidatedMappingDelta};
 use crate::postgres_catalog::{ensure_pg_attached, ensure_pg_attached_rw};
 use crate::session::DbSession;
 use dwh_pipeline::{escape_sql_string, quote_ident, KeyMapDef, KeyMapEntry, KeyMapStorage};
@@ -10,6 +11,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
+pub use crate::key_map_delta::{KeyMapDirtyBaseline, KeyMapDirtyDelta};
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KeyMapWriteResult {
     pub schema: String,
@@ -18,36 +21,6 @@ pub struct KeyMapWriteResult {
     pub created_table: bool,
     /// SHA-256 of sorted typed field lines after write (optimistic concurrency token).
     pub content_hash: String,
-}
-
-/// Warehouse row snapshot at first local edit of a From key (row-level concurrency).
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyMapDirtyBaseline {
-    pub from_parts: Vec<String>,
-    /// false → row must be absent (insert).
-    #[serde(default)]
-    pub existed: bool,
-    #[serde(default)]
-    pub to: String,
-    /// Editable attrs: JSON `null` ≡ SQL NULL; string (incl. `""`) ≡ that value.
-    #[serde(default)]
-    pub attrs: BTreeMap<String, Option<String>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyMapDirtyDelta {
-    pub upserts: Vec<KeyMapEntry>,
-    /// Arity-1 deletes (soft-migrated into `deleted_from_parts` when empty parts).
-    #[serde(default)]
-    pub deleted_froms: Vec<String>,
-    /// From-tuple deletes ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
-    #[serde(default)]
-    pub deleted_from_parts: Vec<Vec<String>>,
-    /// Per-From baselines frozen for the dirty session (preferred over table content_hash).
-    #[serde(default)]
-    pub baselines: Vec<KeyMapDirtyBaseline>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -138,25 +111,6 @@ fn validate_entries(entries: &[KeyMapEntry]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn deleted_tuples(delta: &KeyMapDirtyDelta) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = delta
-        .deleted_from_parts
-        .iter()
-        .map(|p| p.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-        .filter(|p: &Vec<String>| !p.is_empty())
-        .collect();
-    if out.is_empty() {
-        out = delta
-            .deleted_froms
-            .iter()
-            .map(|f| f.trim().to_string())
-            .filter(|f| !f.is_empty())
-            .map(|f| vec![f])
-            .collect();
-    }
-    out
 }
 
 /// Compare `to` + every editable attr.
@@ -573,17 +527,32 @@ pub fn write_key_map_delta_to_postgres(
     if from_columns.iter().any(|c| c == to_column) {
         return Err("from_columns and to_column must differ".into());
     }
-    validate_entries(&delta.upserts)?;
-    for e in &delta.upserts {
-        if e.from_parts_eff().len() != from_columns.len() {
-            return Err(format!(
-                "upsert from_parts len {} != from_columns arity {}",
-                e.from_parts_eff().len(),
-                from_columns.len()
-            ));
-        }
-    }
+    let arity = from_columns.len();
+    let validated = validate_mapping_delta(delta, arity)?;
+    apply_validated_delta_to_postgres(
+        db,
+        connection_string,
+        schema,
+        table,
+        &from_columns,
+        to_column,
+        editable,
+        &validated,
+        expected_content_hash,
+    )
+}
 
+fn apply_validated_delta_to_postgres(
+    db: &DbSession,
+    connection_string: &str,
+    schema: &str,
+    table: &str,
+    from_columns: &[String],
+    to_column: &str,
+    editable: &[String],
+    delta: &ValidatedMappingDelta,
+    expected_content_hash: Option<&str>,
+) -> Result<KeyMapWriteResult, String> {
     db.ensure_postgres()?;
     let q_froms: Vec<String> = from_columns.iter().map(|c| quote_ident(c)).collect();
     let q_to = quote_ident(to_column);
@@ -614,7 +583,8 @@ pub fn write_key_map_delta_to_postgres(
         .map(|c| type_map.get(c).map(|s| s.as_str()).unwrap_or("text"))
         .collect();
 
-    let dels = deleted_tuples(delta);
+    let dels = &delta.deletes;
+    let baseline_list = delta.baseline_list();
 
     db.with_conn(|conn| {
         let alias = ensure_pg_attached_rw(conn, connection_string)?;
@@ -630,16 +600,16 @@ pub fn write_key_map_delta_to_postgres(
             )?;
             // Prefer row-level baselines (scale-safe). Fall back to full-table hash only
             // when baselines are absent and expected_content_hash is provided.
-            if !delta.baselines.is_empty() {
+            if !baseline_list.is_empty() {
                 verify_baselines_on_conn(
                     conn,
                     &alias,
                     schema,
                     table,
-                    &from_columns,
+                    from_columns,
                     to_column,
                     &editable,
-                    &delta.baselines,
+                    &baseline_list,
                 )?;
             } else if let Some(expected) = expected_content_hash
                 .map(str::trim)
@@ -650,7 +620,7 @@ pub fn write_key_map_delta_to_postgres(
                     &alias,
                     schema,
                     table,
-                    &from_columns,
+                    from_columns,
                     to_column,
                     &editable,
                     &KeyMapReadQuery::default(),
@@ -1046,16 +1016,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deleted_tuples_prefers_from_parts() {
+    fn validated_delta_prefers_from_parts() {
         let delta = KeyMapDirtyDelta {
             upserts: vec![],
-            deleted_froms: vec![],
+            deleted_froms: vec!["ignored".into()],
             deleted_from_parts: vec![vec!["SKU123".into(), "2024-06-01".into()]],
-            baselines: vec![],
+            baselines: vec![KeyMapDirtyBaseline {
+                from_parts: vec!["SKU123".into(), "2024-06-01".into()],
+                existed: true,
+                to: "x".into(),
+                attrs: BTreeMap::new(),
+            }],
         };
-        let dels = deleted_tuples(&delta);
+        let v = validate_mapping_delta(&delta, 2).unwrap();
         assert_eq!(
-            dels,
+            v.deletes,
             vec![vec!["SKU123".to_string(), "2024-06-01".to_string()]]
         );
     }

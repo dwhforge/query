@@ -191,14 +191,18 @@ export function JoinDiagnosticsPanel({
             }
           />
           <Row
-            label="Fan-out left rows"
+            label="Rows with multiple matches"
             count={diag.fanout_left_count}
-            hint="Left rows matching >1 right"
+            hint="Left rows matching more than one right row"
             muted={diag.fanout_left_count === 0}
             onClick={
               diag.fanout_left_count > 0
                 ? () =>
-                    onOpen("fanout", diag.fanout_pairs, "Fan-out pairs")
+                    onOpen(
+                      "fanout",
+                      diag.fanout_pairs,
+                      "Rows with multiple matches",
+                    )
                 : undefined
             }
           />

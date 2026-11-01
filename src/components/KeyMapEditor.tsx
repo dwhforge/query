@@ -976,7 +976,7 @@ export function KeyMapEditor({
       )}
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-2">
-          <span className={labelClass}>From columns</span>
+          <span className={labelClass}>Match by columns</span>
           <button
             type="button"
             onClick={() => {
@@ -998,12 +998,12 @@ export function KeyMapEditor({
             }}
             className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
           >
-            + From
+            + Column
           </button>
         </div>
         {fromCols.map((col, i) => (
           <label key={`from-col-${i}`} className={labelClass}>
-            From[{i + 1}]
+            Match[{i + 1}]
             <div className="mt-1 flex gap-1">
               <input
                 value={col}
@@ -1038,7 +1038,7 @@ export function KeyMapEditor({
                     });
                   }}
                   className="rounded border border-slate-700 px-2 text-slate-500 hover:text-rose-300"
-                  aria-label="Remove From column"
+                  aria-label="Remove match column"
                 >
                   ×
                 </button>
@@ -1047,7 +1047,7 @@ export function KeyMapEditor({
           </label>
         ))}
         <label className={labelClass}>
-          To column
+          Target value column
           <input
             value={map.to_column ?? "to"}
             onChange={(e) => onChange({ ...map, to_column: e.target.value })}
@@ -1056,8 +1056,8 @@ export function KeyMapEditor({
         </label>
       </div>
       <p className="text-[11px] leading-snug text-slate-500">
-        Map relation column names. Arity {arity}: uniqueness is the From{" "}
-        <span className="font-mono text-slate-400">tuple</span> (ADR-0024).
+        Mapping relation column names. Arity {arity}: uniqueness is the match{" "}
+        <span className="font-mono text-slate-400">key</span> (ADR-0024).
         Default seed header is{" "}
         <span className="font-mono text-slate-400">
           {fromCols.join(",")},{map.to_column ?? "to"}
@@ -1183,24 +1183,16 @@ export function KeyMapEditor({
           compact ? "text-[11px]" : "text-[13px]"
         }`}
       >
-        <thead className="sticky top-0 z-10 bg-[#0a1520] text-[10px] uppercase tracking-wide text-slate-500">
+        <thead className="sticky top-0 z-10 bg-[#0a1520] text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="w-10 px-3 py-2 font-semibold">#</th>
             {fromCols.map((col, fi) => (
-              <th key={`fh-${fi}`} className="px-3 py-2 font-semibold">
-                From
-                <span className="ml-1 font-mono normal-case text-slate-600">
-                  ({col})
-                </span>
+              <th key={`fh-${fi}`} className="px-3 py-2 font-semibold font-mono normal-case text-slate-300">
+                {col || `match_${fi + 1}`}
               </th>
             ))}
-            <th className="px-3 py-2 font-semibold">
-              To
-              {map.to_column && map.to_column !== "to" ? (
-                <span className="ml-1 font-mono normal-case text-slate-600">
-                  ({map.to_column})
-                </span>
-              ) : null}
+            <th className="px-3 py-2 font-semibold font-mono normal-case text-slate-300">
+              {map.to_column?.trim() || "to"}
             </th>
             {editableCols.map((c) => (
               <th key={c} className="px-3 py-2 font-semibold font-mono normal-case">
@@ -1357,7 +1349,7 @@ export function KeyMapEditor({
                 onClick={onChooseOtherMap}
                 className="shrink-0 text-[11px] text-slate-500 underline-offset-2 hover:text-slate-300 hover:underline"
               >
-                Use a different KeyMap…
+                Use a different mapping…
               </button>
             )}
           </div>

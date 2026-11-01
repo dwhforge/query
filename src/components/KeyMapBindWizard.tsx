@@ -195,15 +195,15 @@ export function KeyMapBindWizard({
     }
     const cleanedFrom = fromCols.map((c) => c.trim()).filter(Boolean);
     if (!cleanedFrom.length || !toCol.trim()) {
-      setError("From and To columns are required");
+      setError("Match-by and target columns are required");
       return;
     }
     if (cleanedFrom.includes(toCol.trim())) {
-      setError("From and To must differ");
+      setError("Match-by and target columns must differ");
       return;
     }
     if (new Set(cleanedFrom).size !== cleanedFrom.length) {
-      setError("From columns must be unique");
+      setError("Match-by columns must be unique");
       return;
     }
     const fromSet = new Set(cleanedFrom);
@@ -228,10 +228,11 @@ export function KeyMapBindWizard({
       <div className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-teal-900/50 bg-[#071018] shadow-2xl">
         <div className="border-b border-slate-800 px-4 py-3">
           <h2 className="text-base font-semibold text-slate-100">
-            Bind KeyMap to Postgres
+            Bind mapping to Postgres
           </h2>
           <p className="mt-0.5 text-[11px] text-slate-500">
-            Connection → table → From/To → editable columns (ADR-0022)
+            Connection → table → match/target columns → editable attrs
+            (ADR-0022)
           </p>
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
@@ -303,7 +304,7 @@ export function KeyMapBindWizard({
             <>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className={labelClass}>From columns (tuple)</span>
+                  <span className={labelClass}>Match by columns</span>
                   <button
                     type="button"
                     onClick={() => {
@@ -315,7 +316,7 @@ export function KeyMapBindWizard({
                     }}
                     className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
                   >
-                    + From
+                    + Column
                   </button>
                 </div>
                 {fromCols.map((fc, i) => (
@@ -350,7 +351,7 @@ export function KeyMapBindWizard({
                   </div>
                 ))}
                 <label className={labelClass}>
-                  To column
+                  Target value column
                   <select
                     value={toCol}
                     onChange={(e) => setToCol(e.target.value)}
@@ -398,7 +399,7 @@ export function KeyMapBindWizard({
                     (c) => !fromCols.includes(c.name) && c.name !== toCol,
                   ).length === 0 && (
                     <p className="text-[11px] text-slate-600">
-                      No extra columns — From/To only
+                      No extra columns — match/target only
                     </p>
                   )}
                 </div>

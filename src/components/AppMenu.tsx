@@ -438,7 +438,7 @@ export function AppMenu({
             onClick={() => run(() => onLoadDemo("right"))}
           />
           <Sep />
-          <SubLabel>KeyMap labs</SubLabel>
+          <SubLabel>Mapping labs</SubLabel>
           <Item
             label="F&B hub — seed · daily → month"
             onClick={() => run(() => onLoadDemo("keymap"))}

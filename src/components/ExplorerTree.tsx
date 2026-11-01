@@ -636,12 +636,12 @@ export function ExplorerTree({
 
         <div className="px-1">
           <SectionHeader
-            title="KeyMaps"
+            title="Mappings"
             open={keyMapsOpen}
             count={keyMaps.length}
             onToggle={() => onToggle("keyMaps")}
             actions={
-              <IconBtn title="New KeyMap" onClick={onAddKeyMap}>
+              <IconBtn title="New mapping" onClick={onAddKeyMap}>
                 +
               </IconBtn>
             }

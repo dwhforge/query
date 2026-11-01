@@ -315,20 +315,20 @@ export function JoinLensAuto({
         aria-label="Fuzzy similar names"
       >
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-950/40 bg-amber-950/20 px-2 py-1.5">
-          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200/95">
-            Fuzzy
+          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-200/95">
+            Suggestions
           </span>
-          <span className="text-[10px] text-slate-400">
+          <span className="text-[11px] text-slate-400">
             {loading
               ? "Scoring unmatched keys…"
               : report?.disabled_reason
                 ? "Suggestions unavailable for this join"
                 : report
-                  ? `${report.suggestions.length} similar name${report.suggestions.length === 1 ? "" : "s"} · score ≥ ${report.score_cutoff}`
+                  ? `${report.suggestions.length} similar name${report.suggestions.length === 1 ? "" : "s"} · min similarity ${report.score_cutoff}`
                   : "Similar-name proposals"}
           </span>
           {report?.truncated && !report.disabled_reason && (
-            <span className="text-[10px] text-amber-300/90">
+            <span className="text-[11px] text-amber-300/90">
               scan capped at {report.scanned_left}+{report.scanned_right}
             </span>
           )}
@@ -339,8 +339,8 @@ export function JoinLensAuto({
             <p>{report.disabled_reason}</p>
             {report.left_on.length > 1 && (
               <div className="flex flex-wrap gap-1">
-                <span className="w-full text-[9px] text-amber-200/70">
-                  Per-column — remap which Join key:
+                <span className="w-full text-[11px] text-amber-200/70">
+                  Per-column — remap which join key:
                 </span>
                 {report.left_on.map((col, i) => (
                   <button
@@ -350,13 +350,14 @@ export function JoinLensAuto({
                       setCompositeMode(false);
                       setKeyIndex(i);
                     }}
-                    className="rounded border border-amber-800/80 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[9px] text-amber-50 hover:border-teal-700"
+                    className="rounded border border-amber-800/80 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[11px] text-amber-50 hover:border-teal-700"
                   >
                     {col} ↔ {report.right_on[i] ?? "?"}
                   </button>
                 ))}
-                <span className="mt-1 w-full text-[9px] text-amber-200/70">
-                  Or composite map — From tuple (exact on other cols + fuzzy on):
+                <span className="mt-1 w-full text-[11px] text-amber-200/70">
+                  Or composite — match using these join keys (exact on others +
+                  fuzzy on):
                 </span>
                 {report.left_on.map((col, i) => (
                   <button
@@ -367,7 +368,7 @@ export function JoinLensAuto({
                       setCompositeFuzzySlot(i);
                       setCompositeMode(true);
                     }}
-                    className="rounded border border-teal-800/80 bg-teal-950/40 px-1.5 py-0.5 font-mono text-[9px] text-teal-50 hover:border-teal-500"
+                    className="rounded border border-teal-800/80 bg-teal-950/40 px-1.5 py-0.5 font-mono text-[11px] text-teal-50 hover:border-teal-500"
                   >
                     fuzzy {col}
                   </button>
@@ -442,9 +443,9 @@ export function JoinLensAuto({
                 },
               )
             }
-            className="rounded border border-amber-600/80 bg-amber-500/25 px-2 py-1 text-[10px] font-semibold text-amber-50 disabled:opacity-40"
+            className="rounded border border-amber-600/80 bg-amber-500/25 px-2 py-1.5 text-[11px] font-semibold text-amber-50 disabled:opacity-40"
           >
-            Accept {selected.length} fuzzy into KeyMap…
+            Add {selected.length} selected to mapping…
           </button>
           {!chatOpen && (
             <button
@@ -554,7 +555,7 @@ export function JoinLensAuto({
               <div className="text-[10px] leading-relaxed text-slate-500">
                 {report.leftover_left.length + report.leftover_right.length === 0
                   ? "No leftover keys. Fuzzy covered the unmatched sample, or both sides already match."
-                  : `${report.leftover_left.length} left and ${report.leftover_right.length} right keys have no fuzzy pair. Ask the model; accepted pairs still go through KeyMap.`}
+                  : `${report.leftover_left.length} left and ${report.leftover_right.length} right keys have no fuzzy pair. Ask the model; accepted pairs still go into a mapping.`}
               </div>
             )}
             {chat.map((m, i) => (
@@ -613,7 +614,7 @@ export function JoinLensAuto({
                   }
                   className="mt-1 rounded border border-amber-600/80 px-2 py-0.5 text-[10px] text-amber-50 disabled:opacity-40"
                 >
-                  Accept these into KeyMap…
+                  Add these to mapping…
                 </button>
               </div>
             )}

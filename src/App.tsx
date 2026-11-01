@@ -2514,7 +2514,7 @@ function App() {
   }
 
   function handleAddKeyMap() {
-    const map = emptyKeyMap("Key map");
+    const map = emptyKeyMap("Mapping");
     void saveKeyMapToProject(map);
     openKeyMapEditor(map);
     setTreeExpanded((e) => ({ ...e, keyMaps: true }));

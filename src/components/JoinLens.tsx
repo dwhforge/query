@@ -272,7 +272,7 @@ function SidePanel({
     >
       <div className="shrink-0 space-y-1.5 border-b border-slate-800 px-2 py-1.5">
         <div
-          className={`text-[10px] font-semibold uppercase tracking-wide ${
+          className={`text-[11px] font-semibold uppercase tracking-wide ${
             title === "Left" ? "text-sky-300/90" : "text-amber-300/90"
           }`}
         >
@@ -284,13 +284,13 @@ function SidePanel({
             value={search}
             onChange={(e) => onSearch(e.target.value)}
             placeholder="Filter…"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[10px] text-slate-200 outline-none placeholder:text-slate-600 focus:ring-1 focus:ring-teal-700"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:ring-1 focus:ring-teal-700"
           />
         )}
-        <div className="min-w-0 text-[10px] leading-snug text-slate-500">
+        <div className="min-w-0 text-[11px] leading-snug text-slate-500">
           {loading ? "loading…" : listModeLabel}
           {statusHint && (
-            <span className="mt-0.5 block text-[10px] text-slate-400">
+            <span className="mt-0.5 block text-[11px] text-slate-400">
               {statusHint}
             </span>
           )}
@@ -298,7 +298,7 @@ function SidePanel({
       </div>
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto p-1.5">
         {visibleIndices.length === 0 ? (
-          <p className="px-1 py-2 text-[10px] leading-relaxed text-slate-600">
+          <p className="px-1 py-2 text-[11px] leading-relaxed text-slate-600">
             {loading ? "Loading…" : emptyHint}
           </p>
         ) : (
@@ -326,7 +326,7 @@ function SidePanel({
                   return (
                     <div
                       key={c.name}
-                      className={`flex gap-1 truncate rounded px-0.5 text-[10px] leading-snug ${
+                      className={`flex gap-1 truncate rounded px-0.5 text-[11px] leading-snug ${
                         isKey ? "bg-teal-500/15 text-teal-50" : ""
                       }`}
                     >
@@ -352,11 +352,11 @@ function SidePanel({
         (onAddToMap || onFindRight) &&
         selectedIndex != null && (
         <div className="shrink-0 space-y-1.5 border-t border-amber-900/50 bg-amber-950/35 px-2 py-2">
-          <div className="text-[9px] uppercase tracking-wide text-amber-200/80">
+          <div className="text-[11px] uppercase tracking-wide text-amber-200/80">
             This key
           </div>
           <div
-            className="truncate font-mono text-[11px] text-amber-50"
+            className="truncate font-mono text-xs text-amber-50"
             title={selectedKeyLabel ?? undefined}
           >
             {selectedKeyLabel || "∅"}
@@ -365,9 +365,9 @@ function SidePanel({
             {onFindRight && (
               <button
                 type="button"
-                title="Fuzzy / LLM suggestions for To"
+                title="Suggest a target value for this key"
                 onClick={onFindRight}
-                className="w-full rounded border border-teal-700/70 bg-teal-500/15 px-2 py-1 text-[10px] font-semibold text-teal-50 hover:bg-teal-500/25"
+                className="w-full rounded border border-teal-700/70 bg-teal-500/15 px-2 py-1.5 text-[11px] font-semibold text-teal-50 hover:bg-teal-500/25"
               >
                 Suggest…
               </button>
@@ -377,7 +377,7 @@ function SidePanel({
                 type="button"
                 title={mapButtonLabel}
                 onClick={onAddToMap}
-                className="w-full rounded border border-amber-600/70 bg-amber-500/20 px-2 py-1 text-[10px] font-semibold text-amber-50 hover:bg-amber-500/30"
+                className="w-full rounded border border-amber-600/70 bg-amber-500/20 px-2 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/30"
               >
                 {mapButtonLabel}
               </button>
@@ -469,6 +469,8 @@ function JoinLensImpl({
   const [preparePhase, setPreparePhase] = useState<string | null>(null);
   /** Avoid re-firing auto-diag after cancel for the same Join. */
   const autoDiagAttemptedRef = useRef<string>("");
+  /** Avoid re-firing auto Show rows for the same Join. */
+  const autoSamplesAttemptedRef = useRef<string>("");
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
   const [searchLeft, setSearchLeft] = useState("");
@@ -612,7 +614,39 @@ function JoinLensImpl({
 
   useEffect(() => {
     autoDiagAttemptedRef.current = "";
+    autoSamplesAttemptedRef.current = "";
   }, [hostQueryId, joinStepIndex]);
+
+  // Small joins: auto-load This-row parent samples (same size heuristic as auto-diag).
+  useEffect(() => {
+    if (!enabled || sideMode !== "linked") return;
+    if (!hostQueryId || joinStepIndex < 1) return;
+    if (samplesLoaded || samplesLoading) return;
+    const id = `${hostQueryId}#${joinStepIndex}`;
+    if (autoSamplesAttemptedRef.current === id) return;
+    if (
+      !shouldAutoRunJoinDiagnostics(
+        workspace,
+        hostQueryId,
+        joinStepIndex,
+        prepareStatus,
+      )
+    ) {
+      return;
+    }
+    autoSamplesAttemptedRef.current = id;
+    void loadLinkedSamples({ forcePrepared: !!prepareStatus?.prepared });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadLinkedSamples closes over latest prepared/inputs
+  }, [
+    enabled,
+    sideMode,
+    hostQueryId,
+    joinStepIndex,
+    workspace,
+    prepareStatus,
+    samplesLoaded,
+    samplesLoading,
+  ]);
 
   function runPrepare(force = false) {
     if (!hostQueryId || joinStepIndex < 1 || prepareLoading) return;
@@ -1270,15 +1304,25 @@ function JoinLensImpl({
             joinDiagLoading,
           );
 
+  const autoLoadParents = shouldAutoRunJoinDiagnostics(
+    workspace,
+    hostQueryId,
+    joinStepIndex,
+    prepareStatus,
+  );
+  const parentsPendingHint = prepared
+    ? "Prepared — loading parents…"
+    : autoLoadParents
+      ? "Loading parents…"
+      : "Large join — Show rows or Load sides for parents";
+
   const leftEmpty =
     sideMode === "linked"
       ? samplesLoading
         ? "Loading left parents…"
         : samplesLoaded
           ? "Nothing on the left for this result row."
-          : prepared
-            ? "Prepared — loading parents…"
-            : "Schema ready — Show rows (or Load sides) for parents."
+          : parentsPendingHint
       : joinDiagLoading
         ? "Looking for values that didn’t match…"
         : !joinDiag
@@ -1295,9 +1339,7 @@ function JoinLensImpl({
         ? "Loading right parents…"
         : samplesLoaded
           ? "Nothing on the right for this result row."
-          : prepared
-            ? "Prepared — loading parents…"
-            : "Schema ready — Show rows (or Load sides) for parents."
+          : parentsPendingHint
       : joinDiagLoading
         ? "Looking for values that didn’t match…"
         : !joinDiag
@@ -1406,7 +1448,7 @@ function JoinLensImpl({
       .join(" · ");
     if (side === "left") pinCenterToFromKey(fromLabel);
     onMapKey(side, vals);
-    const toast = `Opened KeyMap · from=${fromLabel}`;
+    const toast = `Opened mapping · ${fromLabel}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1424,7 +1466,7 @@ function JoinLensImpl({
     const fromLabel = fromVals.map((v) => v.trim() || "∅").join(" · ");
     pinCenterToFromKey(fromLabel);
     onMapKey("left", fromVals, { toValues: toVals });
-    const toast = `Opened KeyMap · ${fromLabel} → ${toVals.map((v) => v.trim() || "∅").join(" · ")}`;
+    const toast = `Opened mapping · ${fromLabel} → ${toVals.map((v) => v.trim() || "∅").join(" · ")}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1464,7 +1506,7 @@ function JoinLensImpl({
       applyColumns: opts?.applyColumns,
       outputColumn: opts?.outputColumn,
     });
-    const toast = `Opened KeyMap · ${fromLabel} → ${to}`;
+    const toast = `Opened mapping · ${fromLabel} → ${to}`;
     setMapToast(toast);
     window.setTimeout(() => {
       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1530,12 +1572,11 @@ function JoinLensImpl({
     }
   };
 
-  // Prefer live visible lists (mapped keys already hidden) over stale diag totals.
+  // Badge = full diagnostic totals (stable across mode switches). Probe lists
+  // are samples (± mapped-key hide / search) — their length must not drive this.
   const unmatchedTotal =
-    sideMode === "probe" && joinDiag
-      ? visibleLeft.length + visibleRight.length
-      : (joinDiag?.unmatched_left_count ?? 0) +
-        (joinDiag?.unmatched_right_count ?? 0);
+    (joinDiag?.unmatched_left_count ?? 0) +
+    (joinDiag?.unmatched_right_count ?? 0);
 
   const selectedProbeSide: JoinKeySide | null =
     sideMode === "probe"
@@ -1674,17 +1715,21 @@ function JoinLensImpl({
       />
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-800/80">
-        {/* Layer 1: title + mode */}
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/95 px-2 py-1.5">
-          <span className="text-[9px] font-semibold uppercase tracking-wide text-teal-300/90">
+        {/* Layer 1: investigate modes + Suggest all action */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/95 px-2 py-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-teal-300/90">
             Join Lens
           </span>
-          <div className="flex overflow-hidden rounded border border-slate-700">
+          <div
+            className="flex overflow-hidden rounded border border-slate-700"
+            role="group"
+            aria-label="Investigate"
+          >
             <button
               type="button"
               onClick={() => switchMode("linked")}
               title="Which left/right rows built this result row?"
-              className={`px-1.5 py-0.5 text-[9px] ${
+              className={`px-2 py-1 text-[11px] ${
                 sideMode === "linked"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
@@ -1696,7 +1741,7 @@ function JoinLensImpl({
               type="button"
               onClick={() => switchMode("probe")}
               title="Values that didn’t find a partner in the join"
-              className={`px-1.5 py-0.5 text-[9px] ${
+              className={`px-2 py-1 text-[11px] ${
                 sideMode === "probe"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
@@ -1707,64 +1752,64 @@ function JoinLensImpl({
                 <span className="ml-1 text-amber-300/90">·{unmatchedTotal}</span>
               )}
             </button>
-            <button
-              type="button"
-              onClick={() => switchMode("auto")}
-              title="Propose renames for all unmatched keys (similar names + optional AI)"
-              className={`px-1.5 py-0.5 text-[9px] ${
-                sideMode === "auto"
-                  ? "bg-teal-500/20 text-teal-200"
-                  : "text-slate-500 hover:text-slate-300"
-              }`}
-            >
-              Suggest all
-            </button>
           </div>
+          <button
+            type="button"
+            onClick={() => switchMode("auto")}
+            title="Action: propose renames for unmatched keys, then add to a mapping"
+            className={`rounded border px-2 py-1 text-[11px] font-medium ${
+              sideMode === "auto"
+                ? "border-amber-600/80 bg-amber-500/20 text-amber-50"
+                : "border-slate-700 text-slate-400 hover:border-amber-800/70 hover:text-amber-100"
+            }`}
+          >
+            Suggest all…
+          </button>
           <span
-            className="min-w-0 flex-1 truncate text-[10px] text-slate-500"
+            className="min-w-0 flex-1 text-[11px] leading-snug text-slate-400"
             title={
               sideMode === "linked"
                 ? "Which left/right rows built this result row?"
                 : sideMode === "auto"
-                  ? "Propose renames for all unmatched → save into a key map"
+                  ? "Propose renames for unmatched keys → add selected to a mapping"
                   : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
               ? "Where this result came from"
               : sideMode === "auto"
-                ? "Propose renames for all unmatched keys"
+                ? "Batch suggestions — pick pairs, then add to a mapping"
                 : "Values that didn’t join"}
           </span>
         </div>
 
         {showFirstUseHint && (
-          <div className="shrink-0 border-b border-teal-950/50 bg-teal-950/25 px-2 py-1.5 text-[10px] leading-relaxed text-teal-100/90">
+          <div className="shrink-0 border-b border-teal-950/50 bg-teal-950/25 px-2 py-2 text-[11px] leading-relaxed text-teal-100/90">
             <div className="flex items-start justify-between gap-2">
-              <ol className="list-decimal space-y-0.5 pl-3.5">
+              <ol className="list-decimal space-y-1 pl-3.5">
                 <li>
                   <span className="font-semibold text-teal-200">This row</span> —
                   see which left/right rows made the selected result
                 </li>
                 <li>
                   <span className="font-semibold text-teal-200">No match</span> —
-                  list values that didn’t find a partner
-                </li>
-                <li>
-                  Pick left (+ right) →{" "}
+                  list values that didn’t find a partner; pick left (+ right) →{" "}
                   <span className="font-semibold text-amber-200">
                     Save mapping…
                   </span>
                 </li>
                 <li>
-                  <span className="font-semibold text-teal-200">Suggest all</span>{" "}
-                  — get rename ideas for many keys at once
+                  Then{" "}
+                  <span className="font-semibold text-amber-200">
+                    Suggest all…
+                  </span>{" "}
+                  for batch rename ideas (action, not a third investigate mode)
                 </li>
               </ol>
               <button
                 type="button"
                 onClick={dismissFirstUseHint}
-                className="shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+                className="shrink-0 rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200"
               >
                 Got it
               </button>
@@ -1773,7 +1818,7 @@ function JoinLensImpl({
         )}
 
         {mapToast && (
-          <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-100/90">
+          <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-100/90">
             {mapToast}
           </div>
         )}
@@ -1793,7 +1838,7 @@ function JoinLensImpl({
                       applyColumns: opts?.applyColumns,
                       outputColumn: opts?.outputColumn,
                     });
-                    const toast = `Opened KeyMap · ${fromValues.length} auto pair${fromValues.length === 1 ? "" : "s"}`;
+                    const toast = `Opened mapping · ${fromValues.length} suggestion${fromValues.length === 1 ? "" : "s"}`;
                     setMapToast(toast);
                     window.setTimeout(() => {
                       setMapToast((cur) => (cur === toast ? null : cur));
@@ -1805,26 +1850,26 @@ function JoinLensImpl({
         ) : (
           <>
         {/* Layer 2: status */}
-        <div className="h-6 shrink-0 truncate border-b border-slate-800/60 bg-slate-950/50 px-2 py-1 text-[10px] leading-snug text-slate-400">
+        <div className="min-h-6 shrink-0 border-b border-slate-800/60 bg-slate-950/50 px-2 py-1.5 text-[11px] leading-snug text-slate-400">
           {statusLine}
         </div>
 
         {/* Layer 3: secondary controls */}
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/80 px-2 py-1">
-          <span className="text-[9px] text-teal-300/80" title="Result columns">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800/80 bg-[#071018]/80 px-2 py-1.5">
+          <span className="text-[11px] text-teal-300/80" title="Result columns">
             result
           </span>
-          <span className="text-[9px] text-sky-300/80" title="Left table">
+          <span className="text-[11px] text-sky-300/80" title="Left table">
             left
           </span>
-          <span className="text-[9px] text-amber-300/80" title="Right table">
+          <span className="text-[11px] text-amber-300/80" title="Right table">
             right
           </span>
           <button
             type="button"
             disabled={prepareLoading}
             onClick={() => runPrepare(!!prepared)}
-            className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
+            className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
             title={
               prepared
                 ? "Force rebuild prepared sides (picks up file/data changes)"
@@ -1838,7 +1883,7 @@ function JoinLensImpl({
                 : "Load sides"}
           </button>
           {prepareHint && !prepareLoading && (
-            <span className="text-[9px] text-slate-500">{prepareHint}</span>
+            <span className="text-[11px] text-slate-500">{prepareHint}</span>
           )}
           {(prepareLoading || joinDiagLoading) && (
             <div
@@ -1846,7 +1891,7 @@ function JoinLensImpl({
               role="status"
               aria-live="polite"
             >
-              <div className="flex items-baseline justify-between gap-2 text-[9px] text-slate-400">
+              <div className="flex items-baseline justify-between gap-2 text-[11px] text-slate-400">
                 <span className="truncate">
                   {prepareLoading
                     ? (preparePhase ?? "Loading sides…")
@@ -1888,7 +1933,7 @@ function JoinLensImpl({
                 }
                 onRunDiagnostics();
               }}
-              className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200 hover:bg-teal-500/10"
+              className="rounded border border-teal-800/70 px-2 py-1 text-[11px] text-teal-200 hover:bg-teal-500/10"
               title="List values that didn’t join — runs automatically on small joins"
             >
               Find gaps
@@ -1899,14 +1944,20 @@ function JoinLensImpl({
               type="button"
               disabled={samplesLoading}
               onClick={() => loadLinkedSamples()}
-              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
-              title="Load or reload left/right parent sample for This row"
+              className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
+              title={
+                autoLoadParents
+                  ? "Reload left/right parent sample (auto on small joins)"
+                  : "Load left/right parent sample for This row"
+              }
             >
               {samplesLoading
                 ? "Loading rows…"
                 : samplesLoaded
                   ? "Reload rows"
-                  : "Show rows"}
+                  : autoLoadParents
+                    ? "Loading rows…"
+                    : "Show rows"}
             </button>
           )}
           {(samplesLoading ||
@@ -1916,7 +1967,7 @@ function JoinLensImpl({
             <button
               type="button"
               onClick={() => cancelHeavy()}
-              className="rounded border border-amber-800/70 px-1.5 py-0.5 text-[9px] text-amber-200/90 hover:bg-amber-500/10"
+              className="rounded border border-amber-800/70 px-2 py-1 text-[11px] text-amber-200/90 hover:bg-amber-500/10"
             >
               Cancel
             </button>
@@ -1928,7 +1979,7 @@ function JoinLensImpl({
               <button
                 type="button"
                 onClick={() => setMatchesOnly((v) => !v)}
-                className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
+                className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
               >
                 {matchesOnly || showingExplainSample
                   ? "Show all rows"
@@ -1946,7 +1997,7 @@ function JoinLensImpl({
                 setKeyBlame(null);
                 setKeyExplainError(null);
               }}
-              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-500 hover:text-slate-300"
+              className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-500 hover:text-slate-300"
             >
               Clear selection
             </button>
@@ -1961,26 +2012,29 @@ function JoinLensImpl({
                 setNearMissOpen((v) => !v);
               }
             }}
-            className="rounded border border-teal-800/70 px-1.5 py-0.5 text-[9px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
+            className="rounded border border-teal-800/70 px-2 py-1 text-[11px] font-medium text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
             title="Near-miss: try trim/case/zeros → insert NormalizeKey before Join"
           >
             {nearMissLoading
-              ? "Checking NormalizeKey…"
+              ? "Checking cleanup…"
               : nearMiss
-                ? `NormalizeKey · ${nearMissCount} · ${nearMissOpen ? "▾" : "▸"}`
-                : "NormalizeKey…"}
+                ? `Clean up join keys · ${nearMissCount} · ${nearMissOpen ? "▾" : "▸"}`
+                : "Clean up join keys…"}
           </button>
         </div>
 
         {showNearMissChrome && nearMissOpen && (
-          <div className="shrink-0 space-y-1 border-b border-teal-950/60 bg-teal-950/20 px-2 py-1">
-            <div className="text-[9px] font-semibold uppercase tracking-wide text-teal-400/85">
-              NormalizeKey ideas
+          <div className="shrink-0 space-y-1.5 border-b border-teal-950/60 bg-teal-950/20 px-2 py-2">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-teal-400/85">
+              Cleanup ideas
+              <span className="ml-1.5 font-mono text-[10px] normal-case tracking-normal text-slate-500">
+                NormalizeKey
+              </span>
             </div>
             {(nearMiss?.hypotheses ?? []).slice(0, 3).map((h, i) => (
               <div
                 key={i}
-                className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-300"
+                className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-300"
               >
                 <span className="font-mono text-teal-200/90">
                   {h.ops.join("→")}
@@ -1991,15 +2045,15 @@ function JoinLensImpl({
                   <button
                     type="button"
                     onClick={() => onApplyNearMiss(h)}
-                    className="rounded border border-teal-800/80 px-1 py-0.5 text-[9px] text-teal-200 hover:bg-teal-500/10"
+                    className="rounded border border-teal-800/80 px-1.5 py-0.5 text-[11px] text-teal-200 hover:bg-teal-500/10"
                   >
-                    Apply NormalizeKey
+                    Apply cleanup
                   </button>
                 )}
               </div>
             ))}
             {!nearMissLoading && nearMissCount === 0 && (
-              <div className="text-[10px] text-slate-500">
+              <div className="text-[11px] text-slate-500">
                 No trim/case/zeros cleanup would add matches on this Join
               </div>
             )}
@@ -2011,14 +2065,14 @@ function JoinLensImpl({
           <div className="shrink-0 border-b border-amber-950/40 bg-gradient-to-r from-amber-950/35 via-slate-950/40 to-amber-950/20 px-2 py-2">
             <div className="flex flex-wrap items-center gap-3">
               <div className="min-w-0 flex-1">
-                <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
+                <div className="text-[11px] uppercase tracking-wide text-amber-200/70">
                   Mapping · left → right
                 </div>
-                <div className="truncate font-mono text-[12px] text-amber-50">
-                  From: {pairFromLabel}
+                <div className="truncate font-mono text-xs text-amber-50">
+                  {pairFromLabel}
                 </div>
-                <div className="truncate font-mono text-[12px] text-teal-100/90">
-                  To: {pairToLabel}
+                <div className="truncate font-mono text-xs text-teal-100/90">
+                  → {pairToLabel}
                 </div>
               </div>
               {onMapKey && (
@@ -2040,16 +2094,15 @@ function JoinLensImpl({
             <div className="shrink-0 border-b border-amber-950/40 bg-gradient-to-r from-amber-950/30 via-slate-950/40 to-slate-950/20 px-2 py-2">
               <div className="flex flex-wrap items-center gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
+                  <div className="text-[11px] uppercase tracking-wide text-amber-200/70">
                     Selected · {selectedProbeSide}
                   </div>
-                  <div className="truncate font-mono text-[12px] text-amber-50">
-                    From: {selectedKeyDisplay || "∅"}
+                  <div className="truncate font-mono text-xs text-amber-50">
+                    {selectedKeyDisplay || "∅"}
                   </div>
-                  <div className="text-[10px] text-slate-500">
-                    To:{" "}
+                  <div className="text-[11px] text-slate-500">
                     <span className="italic text-slate-600">
-                      (pick a partner on the other side, or Suggest Right)
+                      Pick a partner on the other side, or Suggest…
                     </span>
                   </div>
                 </div>
@@ -2089,13 +2142,13 @@ function JoinLensImpl({
             {centerFromKey ? (
               <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
                 <div className="min-w-0 flex-1">
-                  <div className="text-[9px] uppercase tracking-wide text-amber-200/70">
+                  <div className="text-[11px] uppercase tracking-wide text-amber-200/70">
                     Selected result row
                   </div>
-                  <div className="truncate font-mono text-[12px] text-amber-50">
-                    From: {centerFromKey}
+                  <div className="truncate font-mono text-xs text-amber-50">
+                    {centerFromKey}
                   </div>
-                  <div className="truncate text-[10px] text-slate-500">
+                  <div className="truncate text-[11px] text-slate-500">
                     Suggest a right-side partner, or pick rows on Left/Right
                   </div>
                 </div>
@@ -2113,7 +2166,7 @@ function JoinLensImpl({
                     onClick={() => {
                       pinCenterToFromKey(centerFromKey);
                       onMapKey("left", [centerFromKey]);
-                      const toast = `Opened KeyMap · from=${centerFromKey}`;
+                      const toast = `Opened mapping · ${centerFromKey}`;
                       setMapToast(toast);
                       window.setTimeout(() => {
                         setMapToast((cur) => (cur === toast ? null : cur));
@@ -2126,7 +2179,7 @@ function JoinLensImpl({
                 </div>
               </div>
             ) : unmatchedTotal > 0 ? (
-              <div className="text-[10px] text-amber-100/80">
+              <div className="text-[11px] text-amber-100/80">
                 Select a result row, or a value on Left/Right → Suggest… / Save
                 mapping…
               </div>

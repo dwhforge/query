@@ -74,10 +74,10 @@ export function KeyMapFuzzyPanel({ workspace, connections, onAccept }: Props) {
         Up to 250,000 unique, trimmed keys per side; key/label length ≤512 characters.
         Candidate search is bounded; some matches may be missed. Existing filled mappings are kept.
       </p>
-      {[{ title: "From", source: left, setSource: setLeft },
-        { title: "To", source: right, setSource: setRight }].map(({ title, source, setSource }) =>
+      {[{ title: "Alias", source: left, setSource: setLeft },
+        { title: "Canonical", source: right, setSource: setRight }].map(({ title, source, setSource }) =>
         <div key={title} className="flex flex-wrap items-center gap-2">
-          <span className="w-12 text-slate-400">{title}</span>
+          <span className="w-20 text-slate-400">{title}</span>
           <select aria-label={`${title} query`} disabled={busy} value={source.query_id}
             onChange={(e) => { invalidate(); setSource({ ...emptySource(), query_id: e.target.value }); }}
             className="bg-slate-900 p-1">
@@ -93,13 +93,19 @@ export function KeyMapFuzzyPanel({ workspace, connections, onAccept }: Props) {
               invalidate(); setSource({ ...source, label_column: e.target.value });
             }} className="w-44 bg-slate-900 p-1" />
         </div>)}
-      <div className="flex items-center gap-2">
-        <label>Score cutoff <input aria-label="Score cutoff" type="number" min="0" max="1" step="0.01"
-          value={cutoff} disabled={busy} onChange={(e) => { invalidate(); setCutoff(e.target.value); }}
-          className="w-20 bg-slate-900 p-1" /></label>
-        <label>Ambiguity gap <input aria-label="Ambiguity gap" type="number" min="0" max="1" step="0.01"
-          value={gap} disabled={busy} onChange={(e) => { invalidate(); setGap(e.target.value); }}
-          className="w-20 bg-slate-900 p-1" /></label>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-1.5" title="Minimum similarity score (0–1)">
+          Minimum similarity
+          <input aria-label="Minimum similarity" type="number" min="0" max="1" step="0.01"
+            value={cutoff} disabled={busy} onChange={(e) => { invalidate(); setCutoff(e.target.value); }}
+            className="w-20 bg-slate-900 p-1" />
+        </label>
+        <label className="flex items-center gap-1.5" title="Best match must beat the next candidate by at least this much">
+          Must beat next match by
+          <input aria-label="Must beat next match by" type="number" min="0" max="1" step="0.01"
+            value={gap} disabled={busy} onChange={(e) => { invalidate(); setGap(e.target.value); }}
+            className="w-20 bg-slate-900 p-1" />
+        </label>
         <button disabled={busy || !validSource(left) || !validSource(right) || !validOption(cutoff) || !validOption(gap)}
           onClick={() => void run()} className="rounded border border-teal-700 px-2 py-1 disabled:opacity-40">
           {busy ? "Matching…" : "Suggest mappings"}
@@ -107,14 +113,14 @@ export function KeyMapFuzzyPanel({ workspace, connections, onAccept }: Props) {
       </div>
       {error && <p role="alert" className="text-red-300">{error}</p>}
       {result && <div className="space-y-1">
-        <p>{result.left_rows.toLocaleString()} From · {result.right_rows.toLocaleString()} To · {result.suggestions.length.toLocaleString()} proposals · {result.ambiguous.toLocaleString()} ambiguous · {result.unmatched.toLocaleString()} without proposal · {result.seconds.toFixed(1)}s</p>
+        <p>{result.left_rows.toLocaleString()} alias · {result.right_rows.toLocaleString()} canonical · {result.suggestions.length.toLocaleString()} proposals · {result.ambiguous.toLocaleString()} ambiguous · {result.unmatched.toLocaleString()} without proposal · {result.seconds.toFixed(1)}s</p>
         <p className="text-slate-500">Sample: {result.suggestions.slice(0, 5).map((p) =>
           `${p.from_key} → ${p.to_key} (${p.score.toFixed(3)}${p.ambiguous ? `; alternative ${p.alt_to_key}` : ""})`).join("; ")}</p>
         <button onClick={() => { onAccept(result.suggestions); setResult(null); }}
           className="rounded border border-teal-700 px-2 py-1 text-teal-200">
-          Accept unambiguous proposals into draft
+          Add unambiguous suggestions to mapping
         </button>
-        <p className="text-slate-500">Use the existing Save map action to persist your changes.</p>
+        <p className="text-slate-500">Use Save map to persist your changes.</p>
       </div>}
     </div>}
   </div>;

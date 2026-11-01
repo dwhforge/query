@@ -328,7 +328,7 @@ export function FindRightDialog({
               Suggest Right
             </h2>
             <p className="mt-1 truncate font-mono text-xs text-amber-100/90">
-              From: {fromDisplay}
+              {fromDisplay}
             </p>
             <p className="mt-0.5 text-[10px] text-slate-500">
               Fuzzy first; if nothing matches, LLM runs automatically
@@ -386,7 +386,7 @@ export function FindRightDialog({
               {report.left_on.length > 1 && (
                 <div className="flex flex-wrap gap-1.5 rounded border border-slate-800 bg-slate-950/40 px-2 py-1.5">
                   <span className="w-full text-[10px] text-slate-500">
-                    Apply KeyMap on Join key:
+                    Apply mapping on join key:
                   </span>
                   {report.left_on.map((col, i) => {
                     const partEmpty = !(fromParts[i] ?? "").trim();
@@ -585,7 +585,7 @@ export function FindRightDialog({
             }}
             className="rounded border border-amber-600/80 bg-amber-500/25 px-3 py-1.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/35 disabled:opacity-40"
           >
-            Accept → KeyMap
+            Add to mapping
           </button>
         </footer>
       </div>

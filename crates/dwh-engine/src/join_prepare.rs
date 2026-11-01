@@ -882,7 +882,7 @@ pub fn prepared_join_with(
 
     // Right TEMP, left live (typical: allocations ⋈ batch_cost).
     let left_ws = left_prefix_workspace(workspace, host_query_id, join_step_index).ok()?;
-    let left_schemas = workspace_schemas(db, &left_ws, connections, sources);
+    let left_schemas = workspace_schemas(db, &left_ws, connections, sources).ok()?;
     let left_compiled =
         graph_compiler(&left_ws, connections, sources, &left_schemas)
             .compile_ctes_from(host_query_id)

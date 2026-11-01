@@ -31,8 +31,11 @@ export type EditorKeyMapEntry = KeyMapEntry & { __dwhRowId?: string };
 export type SaveCapture = {
   token: number;
   delta: KeyMapDirtyDelta | null;
-  /** Frozen edits used to build `delta` (for confirm rebase). */
-  edits: Map<RowId, RowEdit>;
+  /**
+   * Exact rows that produced wire ops in `delta` (invalid/unsent drafts excluded).
+   * confirmSave only rebases these; mid-save delete of a sent INSERT becomes DELETE.
+   */
+  sent: Map<RowId, RowEdit>;
 };
 
 function newRowId(): RowId {
@@ -370,6 +373,18 @@ export class KeyMapEditStore {
     return this.deltaFromEdits(this.rows);
   }
 
+  /** True when this edit contributes at least one wire op. */
+  private editIsSendable(edit: RowEdit): boolean {
+    if (edit.deleted) {
+      return edit.original !== null && validKey(edit.original.fromParts);
+    }
+    const draftParts = edit.draft.fromParts.map((p) => p.trim());
+    if (!validKey(draftParts) || !edit.draft.to) return false;
+    if (!edit.original) return true;
+    if (tupleKey(edit.original.fromParts) !== tupleKey(draftParts)) return true;
+    return !snapEqual(edit.original, edit.draft, this.editable);
+  }
+
   private deltaFromEdits(
     rows: Map<RowId, RowEdit>,
   ): KeyMapDirtyDelta | null {
@@ -446,37 +461,38 @@ export class KeyMapEditStore {
     };
   }
 
-  /** Freeze edits for Save. Mid-save drafts stay mutable in `rows`. */
+  /**
+   * Freeze only rows that will be sent. Invalid drafts stay dirty and are
+   * untouched by confirmSave.
+   */
   captureSave(): SaveCapture {
     const token = ++this.captureToken;
-    const edits = new Map<RowId, RowEdit>();
+    const sent = new Map<RowId, RowEdit>();
     for (const [id, e] of this.rows) {
-      edits.set(id, cloneEdit(e));
+      if (this.editIsSendable(e)) sent.set(id, cloneEdit(e));
     }
-    const delta = this.deltaFromEdits(edits);
-    const cap = { token, delta, edits };
+    const delta = this.deltaFromEdits(sent);
+    const cap = { token, delta, sent };
     this.lastCapture = cap;
     return cap;
   }
 
   /**
-   * After successful WH write: rebase originals to what was saved.
-   * Rows whose draft still matches the capture are dropped; further edits kept.
-   * No-op when token mismatches (stale) or on conflict (caller skips).
+   * After successful WH write: rebase only `sent` rows.
+   * - Unsent drafts (invalid / not in delta) stay as-is.
+   * - Sent INSERT then deleted mid-save → keep DELETE against the new WH row.
    */
   confirmSave(token: number) {
     if (!this.lastCapture || this.lastCapture.token !== token) return;
-    const { edits: saved } = this.lastCapture;
+    const { sent } = this.lastCapture;
     this.lastCapture = null;
 
-    for (const [id, savedEdit] of saved) {
+    for (const [id, savedEdit] of sent) {
       const cur = this.rows.get(id);
-      if (!cur) continue;
 
       if (savedEdit.deleted) {
-        if (cur.deleted) {
+        if (cur?.deleted) {
           this.rows.delete(id);
-          // Origin gone from WH
           const orig = savedEdit.original;
           if (orig && validKey(orig.fromParts)) {
             this.byOriginFrom.delete(tupleKey(orig.fromParts));
@@ -486,42 +502,66 @@ export class KeyMapEditStore {
         continue;
       }
 
-      if (savedEdit.original === null || !validKey(savedEdit.draft.fromParts)) {
-        // INSERT saved
-        if (
-          !cur.deleted &&
-          snapEqual(cur.draft, savedEdit.draft, this.editable)
-        ) {
-          // Become a loaded-like origin
-          this.origins.set(id, cloneSnap(savedEdit.draft));
-          this.byOriginFrom.set(tupleKey(savedEdit.draft.fromParts), id);
+      const savedWasInsert = savedEdit.original === null;
+      const savedDraft = savedEdit.draft;
+      if (!validKey(savedDraft.fromParts)) continue;
+
+      // INSERT landed in WH; user deleted the row while Save was in flight.
+      if (savedWasInsert && cur?.deleted) {
+        cur.original = cloneSnap(savedDraft);
+        cur.draft = cloneSnap(savedDraft);
+        cur.deleted = true;
+        this.origins.set(id, cloneSnap(savedDraft));
+        this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
+        continue;
+      }
+
+      // Row removed from store entirely mid-save after a sent INSERT —
+      // restore as pending DELETE of the just-inserted key.
+      if (savedWasInsert && !cur) {
+        this.rows.set(id, {
+          original: cloneSnap(savedDraft),
+          draft: cloneSnap(savedDraft),
+          deleted: true,
+        });
+        this.origins.set(id, cloneSnap(savedDraft));
+        this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
+        continue;
+      }
+
+      if (!cur) continue;
+
+      if (savedWasInsert) {
+        if (snapEqual(cur.draft, savedDraft, this.editable) && !cur.deleted) {
+          this.origins.set(id, cloneSnap(savedDraft));
+          this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
           this.rows.delete(id);
         } else if (!cur.deleted) {
-          cur.original = cloneSnap(savedEdit.draft);
-          this.origins.set(id, cloneSnap(savedEdit.draft));
-          this.byOriginFrom.set(tupleKey(savedEdit.draft.fromParts), id);
+          cur.original = cloneSnap(savedDraft);
+          this.origins.set(id, cloneSnap(savedDraft));
+          this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
           this.pruneIfPristine(id);
         }
         continue;
       }
 
       // UPDATE or rename saved
-      const savedDraft = savedEdit.draft;
       if (savedEdit.original) {
-        const oldKey = tupleKey(savedEdit.original.fromParts);
-        this.byOriginFrom.delete(oldKey);
+        this.byOriginFrom.delete(tupleKey(savedEdit.original.fromParts));
       }
-      if (validKey(savedDraft.fromParts)) {
-        this.origins.set(id, cloneSnap(savedDraft));
-        this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
+      this.origins.set(id, cloneSnap(savedDraft));
+      this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
+
+      if (cur.deleted) {
+        // Deleted after an update/rename was sent — WH now has savedDraft; keep DELETE.
+        cur.original = cloneSnap(savedDraft);
+        cur.draft = cloneSnap(savedDraft);
+        continue;
       }
 
-      if (
-        !cur.deleted &&
-        snapEqual(cur.draft, savedDraft, this.editable)
-      ) {
+      if (snapEqual(cur.draft, savedDraft, this.editable)) {
         this.rows.delete(id);
-      } else if (!cur.deleted) {
+      } else {
         cur.original = cloneSnap(savedDraft);
         this.pruneIfPristine(id);
       }

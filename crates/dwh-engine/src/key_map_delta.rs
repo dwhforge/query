@@ -38,16 +38,29 @@ pub struct KeyMapDirtyDelta {
 }
 
 /// Canonical, DB-ready mapping change set.
+/// Fields are private — construct only via [`validate_mapping_delta`].
 #[derive(Debug, Clone)]
 pub struct ValidatedMappingDelta {
-    pub upserts: Vec<KeyMapEntry>,
+    upserts: Vec<KeyMapEntry>,
     /// Normalized From tuples (arity-checked, trimmed, no empty parts).
-    pub deletes: Vec<Vec<String>>,
+    deletes: Vec<Vec<String>>,
     /// Baseline per From-tuple key (`parts.join("\0")`).
-    pub baselines: HashMap<String, KeyMapDirtyBaseline>,
+    baselines: HashMap<String, KeyMapDirtyBaseline>,
 }
 
 impl ValidatedMappingDelta {
+    pub fn upserts(&self) -> &[KeyMapEntry] {
+        &self.upserts
+    }
+
+    pub fn deletes(&self) -> &[Vec<String>] {
+        &self.deletes
+    }
+
+    pub fn baselines(&self) -> &HashMap<String, KeyMapDirtyBaseline> {
+        &self.baselines
+    }
+
     pub fn baseline_list(&self) -> Vec<KeyMapDirtyBaseline> {
         self.baselines.values().cloned().collect()
     }
@@ -166,8 +179,7 @@ pub fn validate_mapping_delta(
                 let parts: Vec<&str> = key.split('\0').collect();
                 format!("refused: missing baseline for from {parts:?}")
             })?;
-            let is_delete = deletes.iter().any(|d| tuple_key(d) == *key);
-            if is_delete && !b.existed {
+            if seen_del.contains(key) && !b.existed {
                 return Err(format!(
                     "refused: delete baseline for {:?} must have existed=true",
                     b.from_parts
@@ -246,7 +258,7 @@ mod tests {
             baselines: vec![baseline("A", true, "X")],
         };
         let v = validate_mapping_delta(&delta, 1).unwrap();
-        assert_eq!(v.deletes, vec![vec!["A".to_string()]]);
+        assert_eq!(v.deletes(), &[vec!["A".to_string()]]);
     }
 
     #[test]
@@ -258,8 +270,8 @@ mod tests {
             baselines: vec![baseline("A", true, "X"), baseline("B", false, "")],
         };
         let v = validate_mapping_delta(&delta, 1).unwrap();
-        assert_eq!(v.deletes.len(), 1);
-        assert_eq!(v.upserts.len(), 1);
+        assert_eq!(v.deletes().len(), 1);
+        assert_eq!(v.upserts().len(), 1);
     }
 
     #[test]

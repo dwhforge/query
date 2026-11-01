@@ -137,6 +137,36 @@ function summarize(store: KeyMapEditStore) {
   assert(b?.original?.to === "Y", "original rebased to saved Y");
 }
 
+// --- unsent empty draft survives confirm of a sibling insert ---
+{
+  const store = new KeyMapEditStore();
+  store.setSchema({ arity: 1, editable: [] });
+  const filled = store.addRow({ fromParts: ["A"], to: "B" });
+  const empty = store.addRow({ fromParts: [""], to: "" });
+  const cap = store.captureSave();
+  assert(cap.sent.has(filled), "filled is sent");
+  assert(!cap.sent.has(empty), "empty draft not sent");
+  assert(cap.delta?.upserts.length === 1, "only filled in delta");
+  store.confirmSave(cap.token);
+  assert(!store.get(filled), "filled confirmed away");
+  assert(!!store.get(empty), "empty draft still dirty");
+  assert(store.toDelta() === null, "empty still not sendable");
+}
+
+// --- delete sent INSERT mid-save → pending DELETE of new WH row ---
+{
+  const store = new KeyMapEditStore();
+  store.setSchema({ arity: 1, editable: [] });
+  const id = store.addRow({ fromParts: ["N"], to: "Y" });
+  const cap = store.captureSave();
+  assert(cap.delta?.upserts[0]?.from === "N", "insert N sent");
+  store.deleteRow(id); // removes from store (was insert)
+  store.confirmSave(cap.token);
+  const s = summarize(store);
+  assert(s.deletes.join() === "N", "pending DELETE N after insert confirmed");
+  assert(s.baselines.some((b) => b.startsWith("WH:N:")), "baseline existed for N");
+}
+
 // --- conflict path: no confirm → dirty intact ---
 {
   const store = new KeyMapEditStore();

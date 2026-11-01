@@ -1,5 +1,5 @@
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
-use crate::compile::{compile_focus_sql, graph_compiler, workspace_schemas};
+use crate::compile::{compile_focus_sql, graph_compiler, prepare_workspace};
 use crate::session::DbSession;
 use dwh_pipeline::{ConnectionDef, SourceDef, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
@@ -73,8 +73,12 @@ pub fn describe_workspace(
     sources: &[SourceDef],
 ) -> Result<PreviewResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let schemas = workspace_schemas(db, &resolved, connections, sources);
-    let compiled = graph_compiler(&resolved, connections, sources, &schemas).compile_ctes()?;
+    let prepared = prepare_workspace(db, &resolved, connections, sources)?;
+    for w in &prepared.warnings {
+        eprintln!("[dwh] prepare warning: {w}");
+    }
+    let compiled =
+        graph_compiler(&resolved, connections, sources, &prepared.schemas).compile_ctes()?;
     let focus_last = compiled
         .last_by_query
         .get(&resolved.focus_query_id)

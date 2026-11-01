@@ -5,7 +5,8 @@
 //! across consumers. Strict emit still refuses unknown prior schema when output is not a fact col.
 //!
 //! Prefer [`prepare_workspace`] once per request — Load seeds and SqlModel probes are not
-//! re-collected independently; probe failures land in [`PreparedWorkspace::warnings`].
+//! re-collected independently. Graph/topo/infer failures return [`Err`]; per-SqlModel probe
+//! failures land in [`PreparedWorkspace::warnings`].
 
 use crate::load_seeds::collect_load_seeds;
 use crate::session::DbSession;
@@ -16,22 +17,29 @@ use dwh_pipeline::{
 use duckdb::arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 
-/// One-shot compile prep: seeds, SqlModel column maps, inferred schemas, and probe warnings.
+/// One-shot compile prep for preview, Lens, and export.
 #[derive(Debug, Clone, Default)]
 pub struct PreparedWorkspace {
     pub schemas: WorkspaceSchemas,
+    pub seeds: HashMap<String, Vec<String>>,
     pub sql_models: HashMap<String, Vec<String>>,
-    /// Human-readable reasons a SqlModel/Load schema probe failed (not silent unknowns).
+    /// Soft probe failures (missing columns, describe errors) with reason.
     pub warnings: Vec<String>,
 }
 
-/// Resolve connections/sources schemas once for preview, Lens, and export.
+/// Resolve seeds + SqlModel columns + inferred schemas once.
+///
+/// - `Err` — graph structure / topo / workspace-wide inference failed.
+/// - `Ok` with `warnings` — individual Load/SqlModel probes failed but the graph is usable.
 pub fn prepare_workspace(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
     sources: &[SourceDef],
-) -> PreparedWorkspace {
+) -> Result<PreparedWorkspace, String> {
+    // Structural: bad dependency graph must not become an empty schema silently.
+    let _order = topo_queries(workspace)?;
+
     let mut warnings = Vec::new();
     let seeds = match collect_load_seeds(db, workspace, connections, sources) {
         Ok(s) => s,
@@ -43,39 +51,39 @@ pub fn prepare_workspace(
     let (sql_models, mut probe_warn) =
         collect_sql_model_schemas_inner(db, workspace, connections, sources, &seeds);
     warnings.append(&mut probe_warn);
-    let schemas = match infer_workspace_schemas_ex(workspace, &seeds, &sql_models) {
-        Ok(s) => s,
-        Err(e) => {
-            warnings.push(format!("infer schemas: {e}"));
-            WorkspaceSchemas::default()
-        }
-    };
-    PreparedWorkspace {
+
+    let schemas = infer_workspace_schemas_ex(workspace, &seeds, &sql_models).map_err(|e| {
+        format!("infer workspace schemas: {e}")
+    })?;
+
+    Ok(PreparedWorkspace {
         schemas,
+        seeds,
         sql_models,
         warnings,
-    }
+    })
 }
 
-/// Infer schemas from Load* seeds, then fill SqlModel holes via compile + `LIMIT 0` describe.
+/// Infer schemas (discards warnings — prefer [`prepare_workspace`] at call sites).
 pub fn workspace_schemas(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
     sources: &[SourceDef],
-) -> WorkspaceSchemas {
-    prepare_workspace(db, workspace, connections, sources).schemas
+) -> Result<WorkspaceSchemas, String> {
+    Ok(prepare_workspace(db, workspace, connections, sources)?.schemas)
 }
 
-/// Live-described SqlModel column lists (query_id → columns). Shared by preview and dbt export.
+/// Live-described SqlModel column lists (query_id → columns).
 pub fn collect_sql_model_schemas(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
     sources: &[SourceDef],
 ) -> HashMap<String, Vec<String>> {
-    let seeds = collect_load_seeds(db, workspace, connections, sources).unwrap_or_default();
-    collect_sql_model_schemas_inner(db, workspace, connections, sources, &seeds).0
+    prepare_workspace(db, workspace, connections, sources)
+        .map(|p| p.sql_models)
+        .unwrap_or_default()
 }
 
 fn collect_sql_model_schemas_inner(
@@ -87,6 +95,7 @@ fn collect_sql_model_schemas_inner(
 ) -> (HashMap<String, Vec<String>>, Vec<String>) {
     let mut sql_models = HashMap::new();
     let mut warnings = Vec::new();
+    // Caller already validated topo; fall back only if re-entry without prepare.
     let order = match topo_queries(workspace) {
         Ok(o) => o,
         Err(e) => {
@@ -109,8 +118,6 @@ fn collect_sql_model_schemas_inner(
                 continue;
             }
         };
-        // Known SqlModel schemas so far + Load seeds; this query is truncated to SqlModel only
-        // so ApplyKeyMap later in the same query cannot block the probe.
         let schemas = match infer_workspace_schemas_ex(&prefix_ws, seeds, &sql_models) {
             Ok(s) => s,
             Err(e) => {
@@ -160,8 +167,8 @@ pub fn compile_ctes_from(
     sources: &[SourceDef],
     root_id: &str,
 ) -> Result<CompiledCtes, String> {
-    let schemas = workspace_schemas(db, workspace, connections, sources);
-    graph_compiler(workspace, connections, sources, &schemas).compile_ctes_from(root_id)
+    let prepared = prepare_workspace(db, workspace, connections, sources)?;
+    graph_compiler(workspace, connections, sources, &prepared.schemas).compile_ctes_from(root_id)
 }
 
 /// Preview/export SQL for the focus query (schema-aware).
@@ -172,8 +179,8 @@ pub fn compile_focus_sql(
     sources: &[SourceDef],
     is_preview: bool,
 ) -> Result<String, String> {
-    let schemas = workspace_schemas(db, workspace, connections, sources);
-    graph_compiler(workspace, connections, sources, &schemas).to_sql(is_preview)
+    let prepared = prepare_workspace(db, workspace, connections, sources)?;
+    graph_compiler(workspace, connections, sources, &prepared.schemas).to_sql(is_preview)
 }
 
 /// Clone workspace with `qid` truncated to its SqlModel (step 0) so we can compile/describe
@@ -278,6 +285,30 @@ mod tests {
     }
 
     #[test]
+    fn prepare_workspace_returns_seeds_and_schemas() {
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "q".into(),
+                name: "q".into(),
+                steps: vec![TransformationStep::SqlModel {
+                    raw_sql: "select 1 as n".into(),
+                }],
+                execution: Default::default(),
+            }],
+            focus_query_id: "q".into(),
+            key_maps: vec![],
+        };
+        let db = DbSession::new().unwrap();
+        let prepared = prepare_workspace(&db, &ws, &[], &[]).unwrap();
+        assert!(prepared.sql_models.contains_key("q"), "{prepared:?}");
+        assert!(
+            prepared.schemas.query_out.contains_key("q"),
+            "{:?}",
+            prepared.schemas.query_out
+        );
+    }
+
+    #[test]
     fn preview_and_export_schemas_agree_on_sqlmodel_apply() {
         use dwh_pipeline::{
             build_export_plan_routed, DestinationKind, DbtTarget, ExecutionEngine,
@@ -306,10 +337,9 @@ mod tests {
             key_maps: vec![map],
         };
         let db = DbSession::new().unwrap();
-        let sql_models = collect_sql_model_schemas(&db, &ws, &[], &[]);
-        assert!(sql_models.get("q").is_some(), "{sql_models:?}");
+        let prepared = prepare_workspace(&db, &ws, &[], &[]).unwrap();
+        assert!(prepared.sql_models.get("q").is_some(), "{prepared:?}");
 
-        // Preview path
         let preview = crate::preview::preview_workspace(&db, &ws, &[], &[]).unwrap();
         assert!(
             !preview.columns.iter().any(|c| c.name == "canonical_1"),
@@ -317,7 +347,6 @@ mod tests {
             preview.columns
         );
 
-        // Export path with the same SqlModel schemas
         let plan = build_export_plan_routed(
             "pipe",
             &ws,
@@ -326,11 +355,11 @@ mod tests {
             DestinationKind::Duckdb,
             "public",
             &[],
-            &HashMap::new(),
+            &prepared.seeds,
             &[],
-            &sql_models,
+            &prepared.sql_models,
         )
-        .expect("export must succeed when SqlModel schemas are passed");
+        .expect("export must succeed when PreparedWorkspace schemas are passed");
         let model = plan
             .keys()
             .find(|k| k.ends_with(".sql") && k.contains("mart_"))

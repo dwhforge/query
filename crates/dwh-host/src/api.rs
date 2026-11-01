@@ -6,7 +6,7 @@ use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
     blame_unmatched_key as run_blame_unmatched_key, clear_join_prepare as run_clear_join_prepare,
-    collect_load_seeds, collect_sql_model_schemas,
+    prepare_workspace as run_prepare_workspace,
     describe_postgres_object as run_describe_postgres_object,
     describe_workspace as run_describe_workspace, explain_join_key as run_explain_join_key,
     explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
@@ -1782,17 +1782,17 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let seeds =
-                    collect_load_seeds(&db, &a.workspace, &conns, &sources).unwrap_or_default();
-                let sql_models =
-                    collect_sql_model_schemas(&db, &a.workspace, &conns, &sources);
+                let prepared = run_prepare_workspace(&db, &a.workspace, &conns, &sources)?;
+                for w in &prepared.warnings {
+                    eprintln!("[dwh] prepare warning: {w}");
+                }
                 let out: PreviewDbtModel = preview_dbt_model_sql_with_seeds_and_sources(
                     &a.workspace,
                     &a.query_id,
                     dialect,
-                    &seeds,
+                    &prepared.seeds,
                     &sources,
-                    &sql_models,
+                    &prepared.sql_models,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
@@ -1802,10 +1802,12 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let seeds =
-                    collect_load_seeds(&db, &a.workspace, &conns, &sources).unwrap_or_default();
-                let sql_models =
-                    collect_sql_model_schemas(&db, &a.workspace, &conns, &sources);
+                let prepared = run_prepare_workspace(&db, &a.workspace, &conns, &sources)?;
+                for w in &prepared.warnings {
+                    eprintln!("[dwh] prepare warning: {w}");
+                }
+                let seeds = &prepared.seeds;
+                let sql_models = &prepared.sql_models;
                 let pg_schema = a
                     .destination_schema
                     .as_deref()

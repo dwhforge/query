@@ -583,7 +583,7 @@ fn apply_validated_delta_to_postgres(
         .map(|c| type_map.get(c).map(|s| s.as_str()).unwrap_or("text"))
         .collect();
 
-    let dels = &delta.deletes;
+    let dels = delta.deletes();
     let baseline_list = delta.baseline_list();
 
     db.with_conn(|conn| {
@@ -677,10 +677,10 @@ fn apply_validated_delta_to_postgres(
                 }
             }
 
-            if !delta.upserts.is_empty() {
+            if !delta.upserts().is_empty() {
                 let vcols = values_alias_cols(arity, &editable);
                 let values = delta
-                    .upserts
+                    .upserts()
                     .iter()
                     .map(|e| values_row(e, arity, &editable))
                     .collect::<Vec<_>>()
@@ -744,7 +744,7 @@ fn apply_validated_delta_to_postgres(
                     sel = select_cols.join(", "),
                 );
                 pg_execute(conn, &alias, &ins).map_err(|e| format!("INSERT upserts: {e}"))?;
-                written = delta.upserts.len();
+                written = delta.upserts().len();
             }
 
             Ok(written)
@@ -760,7 +760,7 @@ fn apply_validated_delta_to_postgres(
                     table: table.to_string(),
                     rows_written,
                     created_table: false,
-                    content_hash: key_map_content_hash(&delta.upserts),
+                    content_hash: key_map_content_hash(delta.upserts()),
                 })
             }
             Err(e) => {
@@ -1030,8 +1030,8 @@ mod tests {
         };
         let v = validate_mapping_delta(&delta, 2).unwrap();
         assert_eq!(
-            v.deletes,
-            vec![vec!["SKU123".to_string(), "2024-06-01".to_string()]]
+            v.deletes(),
+            &[vec!["SKU123".to_string(), "2024-06-01".to_string()]]
         );
     }
 

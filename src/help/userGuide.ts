@@ -101,7 +101,6 @@ export const HELP_SECTIONS: HelpSection[] = [
       "Suggest all…: similar-name proposals for unmatched keys → Add selected to mapping. Leftovers can use the LLM chat (lineage, schemas, neighbor fields). Connection: llm.base_url / llm.model / llm.api_key in ~/.dwhforge-query/settings.json",
       "Collapse the graph for Join Lens: drag the horizontal splitter up (canvas shrinks to a thin strip) or double-click the splitter to maximize the dock / restore",
       "Save mapping…: from the Inspector unmatched banner, or Join Lens → No match → left/right. Several mappings → pick target; one mapping → opens it",
-      "Mapped · no join effect: only when ApplyKeyMap is on this Join and a To value is missing on the right. A KeyMap in the project alone is not assigned to the node — Change… opens the pair",
       "Data preview while a Join is selected is truncated through that Join",
       "Inspector: unmatched / rows with multiple matches still available",
       "Persisted Join expectations → dbt tests: not shipped yet",

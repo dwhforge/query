@@ -36,12 +36,9 @@ import {
   shouldAutoRunJoinDiagnostics,
 } from "../lib/joinAutoDiag";
 import {
-  findIneffectiveMapEntries,
-  keyLabelsFromRows,
   keyLabelsFromSample,
   mapEntryFromLabel,
   wiredMapKeyLabels,
-  type IneffectiveMapEntry,
 } from "../lib/joinMapEffect";
 import { FindRightDialog } from "./FindRightDialog";
 import { JoinLensAuto } from "./JoinLensAuto";
@@ -498,6 +495,7 @@ function JoinLensImpl({
   const [rightSideLoading, setRightSideLoading] = useState(false);
   const [samplesLoaded, setSamplesLoaded] = useState(false);
   const [samplesLoading, setSamplesLoading] = useState(false);
+  const [samplesError, setSamplesError] = useState<string | null>(null);
   const [prepareLoading, setPrepareLoading] = useState(false);
   const [prepared, setPrepared] = useState(false);
   const [prepareStatus, setPrepareStatus] = useState<JoinPrepareStatus | null>(
@@ -577,6 +575,7 @@ function JoinLensImpl({
     setRightSideLoading(true);
     setSamplesLoading(false);
     setSamplesLoaded(false);
+    setSamplesError(null);
     setParentLeftRows([]);
     setParentRightRows([]);
     // Allow small-join auto-load to run again after this wipe.
@@ -630,9 +629,18 @@ function JoinLensImpl({
         setPrepared(s.prepared);
         if (s.prepared) {
           setPrepareHint(formatJoinPrepareStatusHint(s));
-          // Cheap path: fill This-row samples from prepared TEMPs/live SQL.
-          if (!samplesLoaded && !samplesLoading) {
-            void loadLinkedSamples({ forcePrepared: true });
+          // One auto attempt per Join revision — do not retry on every status poll.
+          const id = joinParentsKey;
+          if (
+            !samplesLoaded &&
+            !samplesLoading &&
+            autoSamplesAttemptedRef.current !== id
+          ) {
+            autoSamplesAttemptedRef.current = id;
+            void loadLinkedSamples({
+              forcePrepared: true,
+              reason: "auto",
+            });
           }
         } else if (s.stale) {
           setPrepareHint("Outdated — Reload sides");
@@ -677,7 +685,10 @@ function JoinLensImpl({
       return;
     }
     autoSamplesAttemptedRef.current = id;
-    void loadLinkedSamples({ forcePrepared: !!prepareStatus?.prepared });
+    void loadLinkedSamples({
+      forcePrepared: !!prepareStatus?.prepared,
+      reason: "auto",
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadLinkedSamples closes over latest prepared/inputs
   }, [
     enabled,
@@ -733,8 +744,9 @@ function JoinLensImpl({
         });
         // Allow auto-diag again after a fresh prepare (sizes may now qualify).
         autoDiagAttemptedRef.current = "";
-        // Refresh This-row parents from prepared sides.
-        void loadLinkedSamples({ forcePrepared: true });
+        // Explicit prepare completion may refresh parents once.
+        autoSamplesAttemptedRef.current = joinParentsKey;
+        void loadLinkedSamples({ forcePrepared: true, reason: "prepare" });
       })
       .catch(() => {
         setPrepared(false);
@@ -748,16 +760,30 @@ function JoinLensImpl({
       });
   }
 
-  function loadLinkedSamples(opts?: { forcePrepared?: boolean }) {
-    // After Prepare, always refresh even if an open-load is in flight.
-    if (samplesLoading && !opts?.forcePrepared) return;
+  function loadLinkedSamples(opts?: {
+    forcePrepared?: boolean;
+    /** auto = effect; prepare = after Prepare; manual = Show rows / Retry. */
+    reason?: "auto" | "prepare" | "manual";
+  }) {
+    const reason = opts?.reason ?? "manual";
+    // After Prepare / manual Retry, refresh even if an open-load is in flight.
+    if (
+      samplesLoading &&
+      !opts?.forcePrepared &&
+      reason !== "manual" &&
+      reason !== "prepare"
+    ) {
+      return;
+    }
     const usePrepared = opts?.forcePrepared || prepared;
     const gen = ++samplesLoadGenRef.current;
+    setSamplesError(null);
     setSamplesLoading(true);
     setLeftSideLoading(true);
     setRightSideLoading(true);
     void (async () => {
       let ok = false;
+      let errMsg: string | null = null;
       try {
         let left: { columns: ColumnMetadata[]; rows: unknown[][] } | null =
           null;
@@ -780,21 +806,47 @@ function JoinLensImpl({
           setParentRightCols(right.columns);
           setParentRightRows(right.rows);
           ok = true;
+        } else {
+          errMsg = "Could not load left/right parent rows.";
         }
-      } catch {
+      } catch (e) {
         if (gen !== samplesLoadGenRef.current) return;
         setParentLeftRows([]);
         setParentRightRows([]);
-        // Failed attempt must not stick — allow auto Show rows to retry.
-        autoSamplesAttemptedRef.current = "";
+        errMsg =
+          typeof e === "string"
+            ? e
+            : e instanceof Error
+              ? e.message
+              : "Failed to load parent rows.";
+        // Keep autoSamplesAttemptedRef — one auto try per Join revision.
       } finally {
         if (gen !== samplesLoadGenRef.current) return;
         setLeftSideLoading(false);
         setRightSideLoading(false);
         setSamplesLoading(false);
-        if (ok) setSamplesLoaded(true);
+        if (ok) {
+          setSamplesLoaded(true);
+          setSamplesError(null);
+        } else if (errMsg) {
+          setSamplesLoaded(false);
+          setSamplesError(errMsg);
+        }
       }
     })();
+  }
+
+  function cancelHeavy() {
+    // Invalidate in-flight parent preview without clearing the auto-attempt
+    // gate (Cancel must not restart the same load).
+    samplesLoadGenRef.current += 1;
+    setSamplesLoading(false);
+    setLeftSideLoading(false);
+    setRightSideLoading(false);
+    if (!samplesLoaded) {
+      setSamplesError("Load cancelled. Use Retry to load parent rows.");
+    }
+    void cancelRunningQuery().catch(() => {});
   }
 
   function runNearMiss() {
@@ -813,10 +865,6 @@ function JoinLensImpl({
       .finally(() => setNearMissLoading(false));
   }
 
-  function cancelHeavy() {
-    void cancelRunningQuery().catch(() => {});
-  }
-
   useEffect(() => {
     samplesLoadGenRef.current += 1;
     setLeftSel(null);
@@ -833,6 +881,7 @@ function JoinLensImpl({
     setNearMissOpen(false);
     setSamplesLoading(false);
     setSamplesLoaded(false);
+    setSamplesError(null);
     setParentLeftRows([]);
     setParentRightRows([]);
     setPrepared(false);
@@ -872,28 +921,6 @@ function JoinLensImpl({
     () => wiredMapKeyLabels(workspace, joinMapCtx),
     [workspace, joinMapCtx],
   );
-
-  /** Wired ApplyKeyMap pairs whose To is missing on the right (no join effect). */
-  const ineffectiveMaps = useMemo((): IneffectiveMapEntry[] => {
-    if (!mappedKeys.mapId) return [];
-    const rightReady =
-      (samplesLoaded || prepared) && parentRightRows.length > 0;
-    const rightKeys = rightReady
-      ? keyLabelsFromRows(parentRightCols, parentRightRows, rightOn)
-      : null;
-    return findIneffectiveMapEntries(workspace, joinMapCtx, {
-      rightKeys: rightKeys && rightKeys.size > 0 ? rightKeys : null,
-    });
-  }, [
-    workspace,
-    joinMapCtx,
-    mappedKeys.mapId,
-    samplesLoaded,
-    prepared,
-    parentRightCols,
-    parentRightRows,
-    rightOn,
-  ]);
 
   const probeLeftCols = useMemo(
     () => asColumns(unmatchedLeft),
@@ -1983,48 +2010,6 @@ function JoinLensImpl({
           </div>
         )}
 
-        {sideMode === "probe" && ineffectiveMaps.length > 0 && (
-          <div className="shrink-0 border-b border-rose-900/40 bg-rose-950/25 px-2 py-2">
-            <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-rose-200/90">
-              Mapped · no join effect · {ineffectiveMaps.length}
-            </div>
-            <ul className="max-h-28 space-y-1 overflow-auto">
-              {ineffectiveMaps.map((e) => (
-                <li
-                  key={`${e.mapId}:${e.from}→${e.to}:${e.reason}`}
-                  className="flex flex-wrap items-center gap-2 text-[11px]"
-                >
-                  <span className="min-w-0 flex-1 truncate font-mono text-rose-50">
-                    {e.from}
-                    <span className="text-slate-500"> → </span>
-                    {e.to || "∅"}
-                  </span>
-                  <span
-                    className="shrink-0 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] text-rose-200/90"
-                    title="ApplyKeyMap To value is not a right join key"
-                  >
-                    To missing on right
-                  </span>
-                  {onMapKey && (
-                    <button
-                      type="button"
-                      className="shrink-0 rounded border border-amber-700/70 bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-50 hover:bg-amber-500/25"
-                      title={`Open mapping “${e.mapName}” to change this pair`}
-                      onClick={() =>
-                        onMapKey("left", [e.from], {
-                          toValues: e.to ? [e.to] : undefined,
-                        })
-                      }
-                    >
-                      Change…
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {sideMode === "auto" ? (
           <JoinLensAuto
             workspace={workspace}
@@ -2145,22 +2130,34 @@ function JoinLensImpl({
             <button
               type="button"
               disabled={samplesLoading}
-              onClick={() => loadLinkedSamples()}
+              onClick={() => loadLinkedSamples({ reason: "manual" })}
               className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-teal-800 hover:text-teal-200 disabled:opacity-40"
               title={
-                autoLoadParents
-                  ? "Reload left/right parent sample (auto on small joins)"
-                  : "Load left/right parent sample for This row"
+                samplesError
+                  ? "Retry loading left/right parent sample"
+                  : autoLoadParents
+                    ? "Reload left/right parent sample (auto on small joins)"
+                    : "Load left/right parent sample for This row"
               }
             >
               {samplesLoading
                 ? "Loading rows…"
-                : samplesLoaded
-                  ? "Reload rows"
-                  : autoLoadParents
-                    ? "Loading rows…"
-                    : "Show rows"}
+                : samplesError
+                  ? "Retry"
+                  : samplesLoaded
+                    ? "Reload rows"
+                    : autoLoadParents
+                      ? "Loading rows…"
+                      : "Show rows"}
             </button>
+          )}
+          {sideMode === "linked" && samplesError && !samplesLoading && (
+            <span
+              className="max-w-[14rem] truncate text-[11px] text-rose-300/90"
+              title={samplesError}
+            >
+              {samplesError}
+            </span>
           )}
           {(samplesLoading ||
             prepareLoading ||

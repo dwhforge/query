@@ -4167,6 +4167,16 @@ function App() {
                               );
                               return;
                             }
+                            // Duplicate / rejected Save is not this Apply's success.
+                            if (
+                              result.external === "skipped" &&
+                              /already in progress/i.test(result.message)
+                            ) {
+                              setError(
+                                "KeyMap save already in progress — wait for it to finish, then Apply again. Mapping drafts are unchanged.",
+                              );
+                              return;
+                            }
                             const leftCols =
                               ctx.applyLeftOn?.length
                                 ? ctx.applyLeftOn
@@ -4201,28 +4211,51 @@ function App() {
                               ctx.outputColumnRight?.trim() ||
                               rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
                               rightCols[0];
-                            const workspace = applyKeyMapToWorkspace(
-                              {
-                                ...project.workspace,
-                                key_maps: upsertKeyMapList(
-                                  project.workspace.key_maps ?? [],
-                                  map,
-                                ),
-                              },
-                              ctx.hostQueryId,
-                              ctx.joinStepIndex,
-                              ctx.rightQueryId,
-                              side,
-                              leftCols[0]!,
-                              rightCols[0]!,
-                              map,
-                              leftCols,
-                              rightCols,
-                              outputColumnLeft,
-                              outputColumnRight,
-                            );
-                            setProject((p) => ({ ...p, workspace }));
-                            closeKeyMapTab(map.id, workspace);
+                            // Functional update: merge Apply into latest workspace
+                            // (edits concurrent with Save must survive). Pure updater.
+                            let appliedWs: Workspace | null = null;
+                            let joinGone = false;
+                            setProject((p) => {
+                              const joinIdx = resolveJoinStepFromCtx(
+                                p.workspace,
+                                ctx,
+                              );
+                              if (joinIdx == null) {
+                                joinGone = true;
+                                return p;
+                              }
+                              const workspace = applyKeyMapToWorkspace(
+                                {
+                                  ...p.workspace,
+                                  key_maps: upsertKeyMapList(
+                                    p.workspace.key_maps ?? [],
+                                    map,
+                                  ),
+                                },
+                                ctx.hostQueryId,
+                                joinIdx,
+                                ctx.rightQueryId,
+                                side,
+                                leftCols[0]!,
+                                rightCols[0]!,
+                                map,
+                                leftCols,
+                                rightCols,
+                                outputColumnLeft,
+                                outputColumnRight,
+                              );
+                              appliedWs = workspace;
+                              return { ...p, workspace };
+                            });
+                            if (joinGone) {
+                              setError(
+                                "Join was removed or changed while Save was pending — mapping was saved, but Apply was skipped. Re-open the Join and Apply again.",
+                              );
+                              return;
+                            }
+                            if (appliedWs) {
+                              closeKeyMapTab(map.id, appliedWs);
+                            }
                           });
                         }
                       : undefined

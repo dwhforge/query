@@ -3,7 +3,6 @@
  */
 import type { Workspace } from "../types/pipeline";
 import {
-  findIneffectiveMapEntries,
   keyLabelsFromSample,
   mapEntryFromLabel,
   wiredMapKeyLabels,
@@ -71,16 +70,12 @@ function baseWs(over: Partial<Workspace> = {}): Workspace {
 
 // --- no ApplyKeyMap on Join → not "mapped" for this node ---
 {
-  const hit = findIneffectiveMapEntries(baseWs(), ctx, {
-    rightKeys: new Set(["PEP"]),
-  });
-  assert(hit.length === 0, "no ApplyKeyMap → empty ineffective list");
   const wired = wiredMapKeyLabels(baseWs(), ctx);
   assert(wired.mapId === null, "no wired map");
   assert(wired.from.size === 0, "do not hide Froms from unwired maps");
 }
 
-// --- Apply wired, To missing on right ---
+// --- Apply wired → expose From/To labels ---
 {
   const ws = baseWs();
   const host = ws.queries.find((q) => q.id === "dirty_join")!;
@@ -101,31 +96,9 @@ function baseWs(over: Partial<Workspace> = {}): Workspace {
     },
   ];
   const joinCtx = { ...ctx, joinStepIndex: 2 };
-  const hit = findIneffectiveMapEntries(ws, joinCtx, {
-    rightKeys: new Set(["PEP", "KO"]),
-  });
-  assert(
-    hit.some((e) => e.from === "Cocacola" && e.reason === "to_missing_on_right"),
-    "Cocacola→Danone missing on right",
-  );
-  assert(!hit.some((e) => e.from === "Pepsi"), "Pepsi→PEP present → skip");
   const wired = wiredMapKeyLabels(ws, joinCtx);
   assert(wired.mapId === "map_co", "wired map_co");
   assert(wired.from.has("Cocacola") && wired.to.has("PEP"), "hide labels");
-}
-
-// --- To present → empty ---
-{
-  const ws = baseWs();
-  const host = ws.queries.find((q) => q.id === "dirty_join")!;
-  host.steps.splice(1, 0, {
-    type: "ApplyKeyMap",
-    payload: { column: "company", map_id: "map_co", entries: [] },
-  });
-  const hit = findIneffectiveMapEntries(ws, { ...ctx, joinStepIndex: 2 }, {
-    rightKeys: new Set(["Danone", "PEP"]),
-  });
-  assert(hit.length === 0, "all Tos present → empty");
 }
 
 // --- helpers ---

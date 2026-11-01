@@ -14,7 +14,6 @@ import type {
 import { listPostgresObjects, readKeyMap, type KeyMapDirtyDelta } from "../lib/bridge";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
-import { mergeKeyMapProposals } from "../lib/keyMap";
 import type { Workspace } from "../types/pipeline";
 import {
   fromColumnsEff,
@@ -26,11 +25,11 @@ import {
   type ApplySide,
 } from "../lib/keyMap";
 import {
-  adoptWarehousePage,
-  KeyMapDirtyBuffer,
+  KeyMapEditStore,
   KEYMAP_PAGE_SIZE,
-  withLocalId,
   type EditorKeyMapEntry,
+  type PageSlot,
+  type RowId,
 } from "../lib/keyMapDirty";
 import {
   KeyMapBindWizard,
@@ -66,8 +65,16 @@ export type KeyMapEditorProps = {
   /** Dirty delta for source Save (ADR-0022). */
   onDirtyChange?: (delta: KeyMapDirtyDelta | null) => void;
   /**
-   * Bumped by App after a successful warehouse Save so the editor clears its
-   * internal dirty buffer (App alone clearing dirtyDelta is not enough).
+   * Save lifecycle for the RowId store: capture freezes the delta; confirm
+   * rebases originals after a successful WH write (mid-save edits kept).
+   * Bumped `dirtyResetSeq` still means confirm (legacy App path).
+   */
+  onSaveApi?: (api: {
+    captureSave: () => KeyMapDirtyDelta | null;
+    confirmSave: () => void;
+  }) => void;
+  /**
+   * Bumped by App after a successful warehouse Save → confirmSave (rebase).
    */
   dirtyResetSeq?: number;
   onApply?: (side: ApplySide) => void;
@@ -117,6 +124,7 @@ export function KeyMapEditor({
   onChange,
   onWarehouseRead,
   onDirtyChange,
+  onSaveApi,
   dirtyResetSeq,
   onApply,
   onClose,
@@ -147,7 +155,10 @@ export function KeyMapEditor({
   const [rebindOpen, setRebindOpen] = useState(false);
   const [dirtyTick, setDirtyTick] = useState(0);
   const loadedTableKey = useRef<string>("");
-  const dirtyRef = useRef(new KeyMapDirtyBuffer());
+  const storeRef = useRef(new KeyMapEditStore());
+  const pageRef = useRef<PageSlot[]>([]);
+  const newIdsRef = useRef<RowId[]>([]);
+  const saveTokenRef = useRef<number | null>(null);
   const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
@@ -155,18 +166,70 @@ export function KeyMapEditor({
   const fromCols = fromColumnsEff(map);
   const arity = fromCols.length;
 
+  useEffect(() => {
+    storeRef.current.setSchema({ arity, editable: editableCols });
+  }, [arity, editableCols]);
+
+  function publishView() {
+    if (!isSource) return;
+    const entries = storeRef.current.viewEntries(
+      pageRef.current,
+      newIdsRef.current,
+    );
+    onChange({ ...map, entries });
+  }
+
   function bumpDirty() {
-    onDirtyChange?.(dirtyRef.current.toDelta());
+    onDirtyChange?.(storeRef.current.toDelta());
     setDirtyTick((n) => n + 1);
   }
 
-  // App clears tab.dirtyDelta on Save; mirror that into the editor buffer.
+  useEffect(() => {
+    if (!onSaveApi) return;
+    onSaveApi({
+      captureSave: () => {
+        const cap = storeRef.current.captureSave();
+        saveTokenRef.current = cap.token;
+        onDirtyChange?.(cap.delta);
+        return cap.delta;
+      },
+      confirmSave: () => {
+        const token = saveTokenRef.current;
+        if (token != null) storeRef.current.confirmSave(token);
+        saveTokenRef.current = null;
+        // Drop confirmed new ids that are no longer dirty
+        newIdsRef.current = newIdsRef.current.filter((id) =>
+          storeRef.current.get(id),
+        );
+        onDirtyChange?.(storeRef.current.toDelta());
+        publishView();
+        setDirtyTick((n) => n + 1);
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable API registration
+  }, [onSaveApi, map.id]);
+
+  // Legacy path when Save succeeds without saveApi (editor remount / no capture).
   useEffect(() => {
     if (dirtyResetSeq === undefined) return;
     if (dirtyResetSeen.current === dirtyResetSeq) return;
     dirtyResetSeen.current = dirtyResetSeq;
-    dirtyRef.current.clear();
+    const token = saveTokenRef.current;
+    if (token != null) {
+      storeRef.current.confirmSave(token);
+      saveTokenRef.current = null;
+    } else {
+      storeRef.current.clear();
+      pageRef.current = [];
+      newIdsRef.current = [];
+    }
+    newIdsRef.current = newIdsRef.current.filter((id) =>
+      storeRef.current.get(id),
+    );
+    onDirtyChange?.(storeRef.current.toDelta());
+    publishView();
     setDirtyTick((n) => n + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirtyResetSeq]);
 
   // Never invent a connection_id — empty means "not assigned for write".
@@ -274,10 +337,17 @@ export function KeyMapEditor({
     )
       .then((r) => {
         if (cancelled) return;
-        const entries = adoptWarehousePage(
+        pageRef.current = storeRef.current.adoptPage(
           r.entries,
-          map.entries,
-          dirtyRef.current,
+          pageRef.current,
+        );
+        // Keep in-page inserts that are still dirty.
+        newIdsRef.current = newIdsRef.current.filter((id) =>
+          storeRef.current.get(id),
+        );
+        const entries = storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
         );
         onChange({ ...map, entries });
         onWarehouseRead?.(r.content_hash, r.total_count);
@@ -365,7 +435,7 @@ export function KeyMapEditor({
   });
   const virtualRows = virtualizer.getVirtualItems();
 
-  function setEntries(entries: KeyMapEntry[], opts?: { trackAll?: boolean }) {
+  function setEntries(entries: KeyMapEntry[]) {
     const v = validateKeyMapEntries(entries, arity);
     if (!v.ok) {
       setError(v.error);
@@ -373,43 +443,57 @@ export function KeyMapEditor({
       return;
     }
     setError(null);
-    if (isSource && opts?.trackAll) {
-      for (const e of v.entries) {
-        const key = tupleKey(fromPartsEff(e));
-        const old = map.entries.find(
-          (x) => tupleKey(fromPartsEff(x)) === key,
-        );
-        const localId = (e as EditorKeyMapEntry).__dwhLocalId;
-        const isNew = dirtyRef.current.isInsert(localId) || !old;
-        dirtyRef.current.noteUpsert(e, isNew ? null : old, localId);
-      }
-      bumpDirty();
-    }
     onChange({ ...map, entries: v.entries });
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
     const raw = map.entries[index] as EditorKeyMapEntry | undefined;
     if (!raw) return;
-    // Every editor row (including WH-loaded) gets a stable local id.
-    const prev = withLocalId(raw);
-    const localId = prev.__dwhLocalId!;
-    if (isSource && !dirtyRef.current.isInsert(localId)) {
-      dirtyRef.current.bindOrigin(localId, raw);
-    }
+    const rowId = raw.__dwhRowId;
     const merged: EditorKeyMapEntry = {
-      ...prev,
+      ...raw,
       ...patch,
       attrs:
         patch.attrs !== undefined
           ? patch.attrs
-          : prev.attrs,
-      __dwhLocalId: localId,
+          : raw.attrs,
+      ...(rowId ? { __dwhRowId: rowId } : {}),
     };
-    if (patch.attrs === undefined && prev.attrs) {
-      merged.attrs = { ...prev.attrs };
+    if (patch.attrs === undefined && raw.attrs) {
+      merged.attrs = { ...raw.attrs };
     }
     const next = map.entries.map((e, i) => (i === index ? merged : e));
+
+    if (isSource && rowId) {
+      const slot = pageRef.current.find((s) => s.id === rowId);
+      storeRef.current.updateDraft(
+        rowId,
+        {
+          fromParts: fromPartsEff(merged),
+          to: merged.to,
+          attrs: merged.attrs ?? {},
+        },
+        slot?.loaded ?? null,
+      );
+      bumpDirty();
+      // Allow temporarily invalid From/To in the view (draft store keeps them).
+      setError(null);
+      const v = validateKeyMapEntries(next, arity);
+      if (!v.ok) {
+        setError(v.error);
+        onChange({ ...map, entries: next });
+        return;
+      }
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
+    }
+
     const v = validateKeyMapEntries(next, arity);
     if (!v.ok) {
       setError(v.error);
@@ -417,17 +501,6 @@ export function KeyMapEditor({
       return;
     }
     setError(null);
-    if (isSource) {
-      const prevParts = fromPartsEff(prev);
-      const nextParts = fromPartsEff(merged);
-      const isNew = dirtyRef.current.isInsert(localId);
-      if (tupleKey(prevParts) !== tupleKey(nextParts)) {
-        dirtyRef.current.noteRename(prevParts, merged, prev, localId);
-      } else {
-        dirtyRef.current.noteUpsert(merged, isNew ? null : prev, localId);
-      }
-      bumpDirty();
-    }
     onChange({ ...map, entries: v.entries });
   }
 
@@ -446,7 +519,24 @@ export function KeyMapEditor({
         : from
           ? [from]
           : Array.from({ length: arity }, () => "");
-    let entry: EditorKeyMapEntry = {
+    if (isSource) {
+      const id = storeRef.current.addRow({
+        fromParts: parts,
+        to,
+        attrs: Object.fromEntries(editableCols.map((c) => [c, ""])),
+      });
+      newIdsRef.current = [...newIdsRef.current, id];
+      bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
+    }
+    const entry: KeyMapEntry = {
       from: parts[0] ?? "",
       from_parts: parts,
       to,
@@ -454,25 +544,25 @@ export function KeyMapEditor({
     if (editableCols.length) {
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
     }
-    if (isSource) {
-      entry = withLocalId(entry);
-      dirtyRef.current.markInsert(entry.__dwhLocalId!);
-      dirtyRef.current.noteUpsert(entry, null, entry.__dwhLocalId);
-      bumpDirty();
-    }
     setEntries([...map.entries, entry]);
   }
 
   function deleteRow(index: number) {
     const raw = map.entries[index] as EditorKeyMapEntry | undefined;
-    if (isSource && raw) {
-      const prev = withLocalId(raw);
-      const localId = prev.__dwhLocalId!;
-      if (!dirtyRef.current.isInsert(localId)) {
-        dirtyRef.current.bindOrigin(localId, raw);
-      }
-      dirtyRef.current.noteDelete(fromPartsEff(prev), prev, localId);
+    if (isSource && raw?.__dwhRowId) {
+      const id = raw.__dwhRowId;
+      const slot = pageRef.current.find((s) => s.id === id);
+      storeRef.current.deleteRow(id, slot?.loaded ?? null);
+      newIdsRef.current = newIdsRef.current.filter((x) => x !== id);
       bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
     }
     setEntries(map.entries.filter((_, j) => j !== index));
   }
@@ -483,25 +573,81 @@ export function KeyMapEditor({
       suggestedFromParts.length > 0
         ? suggestedFromParts
         : suggestedFrom.map((s) => [s.trim()]);
-    const extra = fromTuples
+    const proposals = fromTuples
       .map((parts) => parts.map((p) => p.trim()))
       .filter((parts) => parts.every(Boolean) && !have.has(tupleKey(parts)))
-      .map((parts) => {
-        const row = withLocalId({
-          from: parts[0]!,
-          from_parts: parts,
-          to: "",
-        });
-        if (isSource) dirtyRef.current.markInsert(row.__dwhLocalId!);
-        return row;
+      .map((parts) => ({ fromParts: parts, to: "" }));
+    if (!proposals.length) return;
+    if (isSource) {
+      const { newIds } = storeRef.current.applyProposals(
+        proposals,
+        pageRef.current,
+      );
+      if (newIds.length) {
+        newIdsRef.current = [...newIdsRef.current, ...newIds];
+      }
+      bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
       });
-    if (extra.length) setEntries([...map.entries, ...extra], { trackAll: true });
+      return;
+    }
+    const extra = proposals.map((p) => ({
+      from: p.fromParts[0]!,
+      from_parts: p.fromParts,
+      to: "",
+    }));
+    setEntries([...map.entries, ...extra]);
   }
 
   function applyPaste() {
     const parsed = parseFromToPaste(pasteText, arity);
     if (!parsed.length) {
       setError("Paste TSV/CSV with from,to columns");
+      return;
+    }
+    if (isSource) {
+      for (const e of parsed) {
+        const parts = fromPartsEff(e);
+        const key = tupleKey(parts);
+        const pageHit = pageRef.current.find(
+          (s) => tupleKey(s.loaded.fromParts) === key,
+        );
+        const existingId =
+          pageHit?.id ??
+          storeRef.current.rowIdByOriginFrom(parts) ??
+          (map.entries as EditorKeyMapEntry[]).find(
+            (x) => tupleKey(fromPartsEff(x)) === key,
+          )?.__dwhRowId;
+        if (existingId) {
+          storeRef.current.updateDraft(
+            existingId,
+            { fromParts: parts, to: e.to, attrs: e.attrs ?? {} },
+            pageHit?.loaded ?? null,
+          );
+        } else {
+          const id = storeRef.current.addRow({
+            fromParts: parts,
+            to: e.to,
+            attrs: e.attrs ?? {},
+          });
+          newIdsRef.current.push(id);
+        }
+      }
+      bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      setPasteOpen(false);
+      setPasteText("");
       return;
     }
     const merged = [...map.entries];
@@ -517,7 +663,7 @@ export function KeyMapEditor({
         merged[i] = e;
       }
     }
-    setEntries(merged, { trackAll: true });
+    setEntries(merged);
     setPasteOpen(false);
     setPasteText("");
   }
@@ -950,7 +1096,9 @@ export function KeyMapEditor({
           <button
             type="button"
             onClick={() => {
-              dirtyRef.current.clear();
+              storeRef.current.clear();
+              pageRef.current = [];
+              newIdsRef.current = [];
               bumpDirty();
               loadedTableKey.current = "";
               setRowsStatus(null);
@@ -988,8 +1136,8 @@ export function KeyMapEditor({
           : filter.trim()
             ? `${rows.length} / ${map.entries.length} rows`
             : `${map.entries.length} rows`}
-        {dirtyTick >= 0 && dirtyRef.current.dirtyCount() > 0
-          ? ` · ${dirtyRef.current.dirtyCount()} dirty`
+        {dirtyTick >= 0 && storeRef.current.dirtyCount() > 0
+          ? ` · ${storeRef.current.dirtyCount()} dirty`
           : ""}
       </span>
       {isSource && (
@@ -1244,11 +1392,66 @@ export function KeyMapEditor({
             key={map.id}
             workspace={workspace}
             connections={connections}
-            onAccept={(suggestions) =>
-              setEntries(mergeKeyMapProposals(map.entries, suggestions), {
-                trackAll: true,
-              })
-            }
+            onAccept={(suggestions) => {
+              if (!isSource) {
+                const merged = [...map.entries];
+                const byFrom = new Map(
+                  merged.map((e, i) => [tupleKey(fromPartsEff(e)), i] as const),
+                );
+                for (const s of suggestions) {
+                  if (s.ambiguous) continue;
+                  const parts =
+                    s.from_parts?.length
+                      ? s.from_parts
+                      : s.from_key.trim()
+                        ? [s.from_key]
+                        : [];
+                  if (!parts.length || !s.to_key.trim()) continue;
+                  const key = tupleKey(parts);
+                  const i = byFrom.get(key);
+                  if (i !== undefined && merged[i]!.to.trim()) continue;
+                  const entry = {
+                    from: parts[0]!,
+                    from_parts: parts,
+                    to: s.to_key,
+                  };
+                  if (i === undefined) {
+                    byFrom.set(key, merged.length);
+                    merged.push(entry);
+                  } else {
+                    merged[i] = entry;
+                  }
+                }
+                setEntries(merged);
+                return;
+              }
+              const proposals = suggestions
+                .filter((s) => !s.ambiguous)
+                .map((s) => ({
+                  fromParts: s.from_parts?.length
+                    ? s.from_parts
+                    : s.from_key.trim()
+                      ? [s.from_key]
+                      : [],
+                  to: s.to_key,
+                }))
+                .filter((p) => p.fromParts.every(Boolean) && p.to.trim());
+              const { newIds } = storeRef.current.applyProposals(
+                proposals,
+                pageRef.current,
+              );
+              if (newIds.length) {
+                newIdsRef.current = [...newIdsRef.current, ...newIds];
+              }
+              bumpDirty();
+              onChange({
+                ...map,
+                entries: storeRef.current.viewEntries(
+                  pageRef.current,
+                  newIdsRef.current,
+                ),
+              });
+            }}
           />}
           {pasteOpen && (
             <div className="shrink-0 space-y-2 border-b border-slate-800 px-4 py-3">
@@ -1463,7 +1666,9 @@ export function KeyMapEditor({
           }}
           onCancel={() => setRebindOpen(false)}
           onConfirm={(bind: KeyMapBindResult) => {
-            dirtyRef.current.clear();
+            storeRef.current.clear();
+            pageRef.current = [];
+            newIdsRef.current = [];
             bumpDirty();
             loadedTableKey.current = "";
             setPageOffset(0);

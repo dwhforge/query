@@ -178,7 +178,12 @@ type KeyMapTabSession = {
   contentHash?: string;
   /** ADR-0022 dirty delta for source Save. */
   dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
-  /** Bumped after successful WH Save so KeyMapEditor clears dirtyRef. */
+  /** Editor store Save API (capture freezes delta; confirm rebases after WH write). */
+  saveApi?: {
+    captureSave: () => import("./lib/bridge").KeyMapDirtyDelta | null;
+    confirmSave: () => void;
+  };
+  /** Bumped after successful WH Save so KeyMapEditor confirms the capture. */
   dirtyResetSeq?: number;
   totalCount?: number | null;
   pickTo?: string[];
@@ -2399,7 +2404,8 @@ function App() {
       }
       const tab = keyMapTabs.find((t) => t.map.id === map.id);
       const expectedHash = tab?.contentHash;
-      const delta = tab?.dirtyDelta ?? null;
+      // Freeze draft snapshot for this Save; mid-save edits stay in the store.
+      const delta = tab?.saveApi?.captureSave() ?? tab?.dirtyDelta ?? null;
       const hasDelta =
         !!delta &&
         (delta.upserts.length > 0 ||
@@ -2419,12 +2425,21 @@ function App() {
       }
       try {
         const r = await writeKeyMap(map, resolved.dsn, expectedHash, delta);
-        patchKeyMapTab(map.id, (s) => ({
-          ...s,
-          contentHash: r.content_hash,
-          dirtyDelta: null,
-          dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
-        }));
+        if (tab?.saveApi) {
+          tab.saveApi.confirmSave();
+          patchKeyMapTab(map.id, (s) => ({
+            ...s,
+            contentHash: r.content_hash,
+          }));
+        } else {
+          // Editor not mounted — drop stale delta.
+          patchKeyMapTab(map.id, (s) => ({
+            ...s,
+            contentHash: r.content_hash,
+            dirtyDelta: null,
+            dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
+          }));
+        }
         const result: KeyMapSaveResult = {
           local: "saved",
           external: "synced",
@@ -2437,6 +2452,7 @@ function App() {
       } catch (e) {
         const msg = typeof e === "string" ? e : String(e);
         const isConflict = /refused|concurrently|hash/i.test(msg);
+        // Conflict/error: do not confirm or clear — drafts + capture stay.
         const result: KeyMapSaveResult = {
           local: "saved",
           external: isConflict ? "conflict" : "error",
@@ -4009,6 +4025,12 @@ function App() {
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({
                       ...s,
                       dirtyDelta,
+                    }))
+                  }
+                  onSaveApi={(saveApi) =>
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
+                      ...s,
+                      saveApi,
                     }))
                   }
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}

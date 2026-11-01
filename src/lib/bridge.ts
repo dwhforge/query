@@ -579,7 +579,11 @@ export type KeyMapDirtyBaseline = {
   /** false = row must be absent (insert). */
   existed: boolean;
   to: string;
-  attrs?: Record<string, string>;
+  /**
+   * Editable attrs at baseline. `null` ≡ SQL NULL; `""` ≡ empty string.
+   * All editable columns should be present when known.
+   */
+  attrs?: Record<string, string | null>;
 };
 
 export type KeyMapDirtyDelta = {

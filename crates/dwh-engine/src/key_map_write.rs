@@ -30,8 +30,9 @@ pub struct KeyMapDirtyBaseline {
     pub existed: bool,
     #[serde(default)]
     pub to: String,
+    /// Editable attrs: JSON `null` ≡ SQL NULL; string (incl. `""`) ≡ that value.
     #[serde(default)]
-    pub attrs: BTreeMap<String, String>,
+    pub attrs: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -158,7 +159,9 @@ fn deleted_tuples(delta: &KeyMapDirtyDelta) -> Vec<Vec<String>> {
     out
 }
 
-/// Compare `to` + every editable attr. Missing attr key ≡ SQL NULL.
+/// Compare `to` + every editable attr.
+/// Baseline: missing key or `None` ≡ SQL NULL; `Some("")` ≡ empty string.
+/// Row map: missing key ≡ SQL NULL.
 fn entry_to_matches(
     baseline: &KeyMapDirtyBaseline,
     row: &KeyMapEntry,
@@ -168,7 +171,10 @@ fn entry_to_matches(
         return false;
     }
     for col in editable {
-        let expected = baseline.attrs.get(col).map(String::as_str);
+        let expected = match baseline.attrs.get(col) {
+            None => None,
+            Some(v) => v.as_deref(),
+        };
         let got = row.attrs.get(col).map(String::as_str);
         if expected != got {
             return false;
@@ -1072,12 +1078,13 @@ mod tests {
 
     #[test]
     fn baseline_null_attr_conflicts_when_filled() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("note".into(), None); // explicit SQL NULL
         let b = KeyMapDirtyBaseline {
             from_parts: vec!["A".into()],
             existed: true,
             to: "X".into(),
-            // Missing key ≡ SQL NULL at edit time.
-            attrs: BTreeMap::new(),
+            attrs,
         };
         let editable = vec!["note".into()];
         let mut row = KeyMapEntry::pair("A", "X");
@@ -1089,12 +1096,25 @@ mod tests {
         // Empty string is also not NULL.
         row.attrs.insert("note".into(), "".into());
         assert!(!entry_to_matches(&b, &row, &editable));
+        // Explicit empty-string baseline ≠ NULL row.
+        let mut empty_attrs = BTreeMap::new();
+        empty_attrs.insert("note".into(), Some("".into()));
+        let b_empty = KeyMapDirtyBaseline {
+            from_parts: vec!["A".into()],
+            existed: true,
+            to: "X".into(),
+            attrs: empty_attrs,
+        };
+        row.attrs.remove("note");
+        assert!(!entry_to_matches(&b_empty, &row, &editable));
+        row.attrs.insert("note".into(), "".into());
+        assert!(entry_to_matches(&b_empty, &row, &editable));
     }
 
     #[test]
     fn baseline_attr_value_must_match() {
         let mut attrs = BTreeMap::new();
-        attrs.insert("note".into(), "old".into());
+        attrs.insert("note".into(), Some("old".into()));
         let b = KeyMapDirtyBaseline {
             from_parts: vec!["A".into()],
             existed: true,

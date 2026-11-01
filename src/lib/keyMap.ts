@@ -177,14 +177,16 @@ export function validateKeyMapEntries(
       };
     }
     seen.add(key);
-    // Preserve editor-only insert marker across validate (not part of warehouse schema).
-    const localId = (e as { __dwhLocalId?: string }).__dwhLocalId;
+    // Preserve editor-only row id across validate (not part of warehouse schema).
+    const rowId =
+      (e as { __dwhRowId?: string; __dwhLocalId?: string }).__dwhRowId ??
+      (e as { __dwhLocalId?: string }).__dwhLocalId;
     cleaned.push({
       from: parts[0]!,
       from_parts: parts,
       to: e.to,
       ...(e.attrs && Object.keys(e.attrs).length ? { attrs: e.attrs } : {}),
-      ...(localId ? { __dwhLocalId: localId } : {}),
+      ...(rowId ? { __dwhRowId: rowId } : {}),
     } as KeyMapEntry);
   }
   return { ok: true, entries: cleaned };

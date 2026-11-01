@@ -55,12 +55,18 @@ export class KeyMapDirtyBuffer {
    * Prevents empty→filled drafts from being treated as warehouse baselines.
    */
   private insertIds = new Set<string>();
+  /**
+   * Last From key registered under a local editor row id.
+   * Survives empty/invalid From so delete/rename can retract prior upserts.
+   */
+  private keyByLocalId = new Map<string, string>();
 
   clear() {
     this.upserts.clear();
     this.deleted.clear();
     this.baselines.clear();
     this.insertIds.clear();
+    this.keyByLocalId.clear();
   }
 
   /** Call when the user adds a blank/suggested row that is not yet in the warehouse. */
@@ -70,6 +76,16 @@ export class KeyMapDirtyBuffer {
 
   isInsert(localId: string | undefined | null): boolean {
     return !!localId && this.insertIds.has(localId);
+  }
+
+  /** Drop upsert/baseline/delete for the last key tied to `localId` (if any). */
+  private retractLocalKey(localId: string) {
+    const tracked = this.keyByLocalId.get(localId);
+    if (!tracked) return;
+    this.upserts.delete(tracked);
+    this.baselines.delete(tracked);
+    this.deleted.delete(tracked);
+    this.keyByLocalId.delete(localId);
   }
 
   /**
@@ -86,6 +102,10 @@ export class KeyMapDirtyBuffer {
     const parts = fromPartsEff(entry).map((p) => p.trim());
     if (!parts.length || parts.some((p) => !p)) return;
     const key = tupleKey(parts);
+    // Same editor row moved/re-validated under a new From — drop prior key first.
+    if (localId && this.keyByLocalId.get(localId) !== key) {
+      this.retractLocalKey(localId);
+    }
     this.deleted.delete(key);
     const forceInsert = this.isInsert(localId);
     if (!this.baselines.has(key)) {
@@ -100,6 +120,7 @@ export class KeyMapDirtyBuffer {
       this.baselines.set(key, null);
     }
     this.upserts.set(key, snapshotEntry(entry));
+    if (localId) this.keyByLocalId.set(localId, key);
   }
 
   noteDelete(
@@ -110,29 +131,34 @@ export class KeyMapDirtyBuffer {
     const parts = (
       Array.isArray(partsOrFrom) ? partsOrFrom : [partsOrFrom]
     ).map((p) => p.trim());
-    if (this.isInsert(localId)) {
-      // Never existed in WH — drop local dirty only.
-      if (parts.length && parts.every(Boolean)) {
-        const key = tupleKey(parts);
-        this.upserts.delete(key);
-        this.baselines.delete(key);
-        this.deleted.delete(key);
-      }
-      this.insertIds.delete(localId!);
+    // Prefer last registered key for this editor row (survives cleared From).
+    const tracked = localId ? this.keyByLocalId.get(localId) : undefined;
+    const partsKey =
+      parts.length && parts.every(Boolean) ? tupleKey(parts) : undefined;
+    const key = tracked ?? partsKey;
+
+    if (localId && this.isInsert(localId)) {
+      // Never existed in WH — drop local dirty only (even if From is empty).
+      this.retractLocalKey(localId);
+      this.insertIds.delete(localId);
       return;
     }
-    if (!parts.length || parts.some((p) => !p)) return;
-    const key = tupleKey(parts);
+
+    if (!key) return;
+
     this.upserts.delete(key);
-    if (!this.baselines.has(key) && baseline) {
-      this.baselines.set(key, snapshotEntry(baseline));
-    } else if (!this.baselines.has(key)) {
-      // Delete without snapshot — still record key; server treats as "must exist".
-      this.baselines.set(key, {
-        from: parts[0]!,
-        from_parts: parts,
-        to: "",
-      });
+    if (localId) this.keyByLocalId.delete(localId);
+    if (!this.baselines.has(key)) {
+      if (baseline) {
+        this.baselines.set(key, snapshotEntry(baseline));
+      } else {
+        const keyParts = partsFromKey(key);
+        this.baselines.set(key, {
+          from: keyParts[0]!,
+          from_parts: keyParts,
+          to: "",
+        });
+      }
     }
     this.deleted.add(key);
   }
@@ -161,6 +187,9 @@ export class KeyMapDirtyBuffer {
         this.upserts.delete(oldKey);
         this.baselines.delete(oldKey);
         this.deleted.delete(oldKey);
+        if (localId && this.keyByLocalId.get(localId) === oldKey) {
+          this.keyByLocalId.delete(localId);
+        }
       } else {
         this.noteDelete(prev, oldRow, localId);
       }

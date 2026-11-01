@@ -137,6 +137,21 @@ function summarize(store: KeyMapEditStore) {
   assert(b?.original?.to === "Y", "original rebased to saved Y");
 }
 
+// --- revert to pre-save value during Save stays dirty against sent baseline ---
+{
+  const store = new KeyMapEditStore();
+  const slot = loadA(store); // A→X
+  store.updateDraft(slot.id, { to: "Y" }, slot.loaded);
+  const cap = store.captureSave();
+  assert(cap.delta?.upserts[0]?.to === "Y", "sent Y");
+  store.updateDraft(slot.id, { to: "X" }, slot.loaded); // revert while in flight
+  assert(!!store.get(slot.id), "pinned — not pruned against old X baseline");
+  store.confirmSave(cap.token);
+  const s = summarize(store);
+  assert(s.upserts.join() === "A→X", "must send X after WH has Y");
+  assert(store.get(slot.id)?.original?.to === "Y", "baseline is sent Y");
+}
+
 // --- unsent empty draft survives confirm of a sibling insert ---
 {
   const store = new KeyMapEditStore();

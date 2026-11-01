@@ -42,7 +42,12 @@ pub fn prepare_workspace(
 
     let mut warnings = Vec::new();
     let seeds = match collect_load_seeds(db, workspace, connections, sources) {
-        Ok(s) => s,
+        Ok(r) => {
+            for d in r.diagnostics {
+                warnings.push(format!("load seed {}: {}", d.query_id, d.message));
+            }
+            r.seeds
+        }
         Err(e) => {
             warnings.push(format!("load seeds: {e}"));
             HashMap::new()

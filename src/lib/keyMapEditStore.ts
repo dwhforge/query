@@ -252,12 +252,38 @@ export class KeyMapEditStore {
   }
 
   private pruneIfPristine(id: RowId) {
+    // In-flight Save: never drop a sent row — draft may match the *pre-save*
+    // original while WH is becoming the sent value (e.g. revert Y→X during Save of Y).
+    if (this.lastCapture?.sent.has(id)) return;
     const edit = this.rows.get(id);
     if (!edit || edit.deleted) return;
     if (edit.original === null) return; // new row stays until delete
     if (snapEqual(edit.original, edit.draft, this.editable)) {
       this.rows.delete(id);
     }
+  }
+
+  /** After WH accepted `saved`, rebase origins and keep the user's latest draft. */
+  private rebaseAfterSave(id: RowId, savedDraft: RowSnapshot, latest: RowEdit) {
+    if (validKey(savedDraft.fromParts)) {
+      this.origins.set(id, cloneSnap(savedDraft));
+      this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
+    }
+    if (latest.deleted) {
+      this.rows.set(id, {
+        original: cloneSnap(savedDraft),
+        draft: cloneSnap(savedDraft),
+        deleted: true,
+      });
+      return;
+    }
+    this.rows.set(id, {
+      original: cloneSnap(savedDraft),
+      draft: cloneSnap(latest.draft),
+      deleted: false,
+    });
+    // Compare against the *new* baseline (what was sent), not the pre-save one.
+    this.pruneIfPristine(id);
   }
 
   /** Patch draft fields. Creates a dirty entry on first edit of a loaded row. */
@@ -478,20 +504,33 @@ export class KeyMapEditStore {
   }
 
   /**
-   * After successful WH write: rebase only `sent` rows.
-   * - Unsent drafts (invalid / not in delta) stay as-is.
-   * - Sent INSERT then deleted mid-save → keep DELETE against the new WH row.
+   * After successful WH write: for every sent row, baseline becomes the sent
+   * value; the user's *latest* draft (pinned during Save) is compared to it.
+   * Unsent drafts are untouched.
    */
   confirmSave(token: number) {
     if (!this.lastCapture || this.lastCapture.token !== token) return;
     const { sent } = this.lastCapture;
+    // Clear capture first so pruneIfPristine may run against the new baseline.
     this.lastCapture = null;
 
     for (const [id, savedEdit] of sent) {
+      // Latest user intention — pinned in-store for the whole Save.
+      // If the row was removed (delete of a brand-new insert), treat as DELETE intent.
       const cur = this.rows.get(id);
+      const latest: RowEdit = cur
+        ? cloneEdit(cur)
+        : savedEdit.original === null
+          ? {
+              original: null,
+              draft: cloneSnap(savedEdit.draft),
+              deleted: true,
+            }
+          : cloneEdit(savedEdit);
 
       if (savedEdit.deleted) {
-        if (cur?.deleted) {
+        // WH delete of `savedEdit.original` succeeded.
+        if (latest.deleted) {
           this.rows.delete(id);
           const orig = savedEdit.original;
           if (orig && validKey(orig.fromParts)) {
@@ -499,72 +538,22 @@ export class KeyMapEditStore {
           }
           this.origins.delete(id);
         }
+        // else: undeleted mid-save — leave latest draft; rare, keep as-is with old original
         continue;
       }
 
-      const savedWasInsert = savedEdit.original === null;
       const savedDraft = savedEdit.draft;
       if (!validKey(savedDraft.fromParts)) continue;
 
-      // INSERT landed in WH; user deleted the row while Save was in flight.
-      if (savedWasInsert && cur?.deleted) {
-        cur.original = cloneSnap(savedDraft);
-        cur.draft = cloneSnap(savedDraft);
-        cur.deleted = true;
-        this.origins.set(id, cloneSnap(savedDraft));
-        this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
-        continue;
-      }
-
-      // Row removed from store entirely mid-save after a sent INSERT —
-      // restore as pending DELETE of the just-inserted key.
-      if (savedWasInsert && !cur) {
-        this.rows.set(id, {
-          original: cloneSnap(savedDraft),
-          draft: cloneSnap(savedDraft),
-          deleted: true,
-        });
-        this.origins.set(id, cloneSnap(savedDraft));
-        this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
-        continue;
-      }
-
-      if (!cur) continue;
-
-      if (savedWasInsert) {
-        if (snapEqual(cur.draft, savedDraft, this.editable) && !cur.deleted) {
-          this.origins.set(id, cloneSnap(savedDraft));
-          this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
-          this.rows.delete(id);
-        } else if (!cur.deleted) {
-          cur.original = cloneSnap(savedDraft);
-          this.origins.set(id, cloneSnap(savedDraft));
-          this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
-          this.pruneIfPristine(id);
-        }
-        continue;
-      }
-
-      // UPDATE or rename saved
-      if (savedEdit.original) {
+      // Rename: old From is gone from WH.
+      if (
+        savedEdit.original &&
+        tupleKey(savedEdit.original.fromParts) !== tupleKey(savedDraft.fromParts)
+      ) {
         this.byOriginFrom.delete(tupleKey(savedEdit.original.fromParts));
       }
-      this.origins.set(id, cloneSnap(savedDraft));
-      this.byOriginFrom.set(tupleKey(savedDraft.fromParts), id);
 
-      if (cur.deleted) {
-        // Deleted after an update/rename was sent — WH now has savedDraft; keep DELETE.
-        cur.original = cloneSnap(savedDraft);
-        cur.draft = cloneSnap(savedDraft);
-        continue;
-      }
-
-      if (snapEqual(cur.draft, savedDraft, this.editable)) {
-        this.rows.delete(id);
-      } else {
-        cur.original = cloneSnap(savedDraft);
-        this.pruneIfPristine(id);
-      }
+      this.rebaseAfterSave(id, savedDraft, latest);
     }
   }
 }

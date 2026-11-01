@@ -194,7 +194,9 @@ mod tests {
         assert!(eu.is_file(), "missing {}", eu.display());
         let ws = rename_append_workspace(&eu, &us);
         let db = DbSession::new().expect("duckdb");
-        let seeds = collect_load_seeds(&db, &ws, &[], &[]).expect("seeds");
+        let seeds = collect_load_seeds(&db, &ws, &[], &[])
+            .expect("seeds")
+            .seeds;
         let expected = vec![
             "date".to_string(),
             "region".to_string(),
@@ -222,7 +224,9 @@ mod tests {
 
         let ws = rename_append_workspace(&eu, &us);
         let db = DbSession::new().expect("duckdb");
-        let seeds = collect_load_seeds(&db, &ws, &[], &[]).expect("seeds");
+        let seeds = collect_load_seeds(&db, &ws, &[], &[])
+            .expect("seeds")
+            .seeds;
         assert!(!seeds.is_empty(), "e2e needs Load* seeds");
 
         let preview = preview_workspace(&db, &ws, &[], &[]).expect("preview");

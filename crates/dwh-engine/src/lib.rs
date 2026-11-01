@@ -60,7 +60,7 @@ pub use key_map_write::{
     KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
 };
 pub use compile::{collect_sql_model_schemas, prepare_workspace, PreparedWorkspace};
-pub use load_seeds::collect_load_seeds;
+pub use load_seeds::{collect_load_seeds, LoadSeedDiagnostic, LoadSeedsResult};
 pub use postgres_catalog::{
     describe_postgres_object, list_postgres_objects, test_postgres_connection,
     PostgresColumn, PostgresObject,

@@ -488,7 +488,9 @@ mod tests {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "c".into(),
-                        map_id: map.id.clone(),
+                        columns: vec![],
+                        output_column: None,
+                        map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },
                 ],

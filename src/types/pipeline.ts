@@ -62,7 +62,7 @@ export type TransformationStep =
         table_name: string;
       };
     }
-  | { type: "FromQuery"; payload: { query_id: string } }
+  | { type: "FromQuery"; payload: { query_id: ObjectTarget } }
   | { type: "SqlModel"; payload: { raw_sql: string } }
   | { type: "Filter"; payload: { condition: string } }
   | { type: "SelectColumns"; payload: { columns: string[] } }
@@ -95,13 +95,13 @@ export type TransformationStep =
   | {
       type: "Join";
       payload: {
-        right_query_id: string;
+        right_query_id: ObjectTarget;
         join_type: JoinType;
         left_on: string[];
         right_on: string[];
       };
     }
-  | { type: "Append"; payload: { other_query_ids: string[] } }
+  | { type: "Append"; payload: { other_query_ids: ObjectTarget[] } }
   | { type: "CustomSql"; payload: { raw_sql: string } }
   | {
       type: "NormalizeKey";
@@ -109,8 +109,64 @@ export type TransformationStep =
     }
   | {
       type: "ApplyKeyMap";
-      payload: { column: string; map_id: string; entries?: KeyMapEntry[] };
+      payload: {
+        column?: string;
+        columns?: string[];
+        output_column?: string;
+        map_id: ObjectTarget;
+        entries?: KeyMapEntry[];
+      };
     };
+
+/** Local object id, or a typed reference into another project (ADR-0025). */
+export type ObjectKind = "source" | "query" | "mapping";
+
+export type ObjectTarget =
+  | string
+  | {
+      scope: "reference";
+      reference_id: string;
+      kind: ObjectKind;
+      id: string;
+    };
+
+export function isExternalTarget(
+  t: ObjectTarget,
+): t is { scope: "reference"; reference_id: string; kind: ObjectKind; id: string } {
+  return typeof t === "object" && t !== null && t.scope === "reference";
+}
+
+export function localTargetId(t: ObjectTarget): string | null {
+  return typeof t === "string" ? t : null;
+}
+
+/** Stable graph / picker key (local id, or `xref:…` for an external target). */
+export function targetKey(t: ObjectTarget): string {
+  if (typeof t === "string") return t;
+  return `xref:${t.reference_id}:${t.kind}:${t.id}`;
+}
+
+export function externalTarget(
+  referenceId: string,
+  kind: ObjectKind,
+  id: string,
+): ObjectTarget {
+  return { scope: "reference", reference_id: referenceId, kind, id };
+}
+
+export interface ProjectReference {
+  id: string;
+  alias: string;
+  locator: string;
+  expected_project_uid: string;
+  locked_revision: string;
+}
+
+export interface ConnectionBinding {
+  owner_project_uid: string;
+  owner_connection_id: string;
+  local_connection_id: string;
+}
 
 /** Deterministic key cleanup ops (near-miss Apply). */
 export type NormalizeOp =
@@ -122,6 +178,8 @@ export type NormalizeOp =
 
 export interface KeyMapEntry {
   from: string;
+  /** Composite From tuple ([ADR-0024]); soft-migrate: omit → [from]. */
+  from_parts?: string[];
   to: string;
   /** Extra editable WH columns (ADR-0022); keys ⊆ KeyMapDef.editable_columns. */
   attrs?: Record<string, string>;
@@ -139,7 +197,7 @@ export type KeyMapStorage =
       connection_id?: string;
     };
 
-/** Named From→To join-key alias table (ADR-0020 / ADR-0022). */
+/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -147,6 +205,8 @@ export interface KeyMapDef {
   /** Default seed; or bind to existing dbt ref / source. */
   storage?: KeyMapStorage;
   from_column?: string;
+  /** Composite From columns on the map relation; soft-migrate: omit → [from_column]. */
+  from_columns?: string[];
   to_column?: string;
   /** Extra WH columns editable in the UI (not From/To). */
   editable_columns?: string[];
@@ -243,6 +303,10 @@ export interface CanvasLayout {
 export interface Project {
   id: string;
   name: string;
+  /** Immutable global identity (ADR-0025). Empty until first save. */
+  project_uid?: string;
+  references?: ProjectReference[];
+  connection_bindings?: ConnectionBinding[];
   root_path?: string;
   connections: ConnectionDef[];
   sources: SourceDef[];
@@ -348,6 +412,9 @@ export function emptyProject(
   return {
     id: newProjectId(name),
     name,
+    project_uid: crypto.randomUUID(),
+    references: [],
+    connection_bindings: [],
     connections: [],
     sources: [],
     workspace: { queries: [], focus_query_id: "" },
@@ -389,6 +456,9 @@ export function migrateProject(p: Project): Project {
   }
   return {
     ...p,
+    project_uid: p.project_uid?.trim() ? p.project_uid : crypto.randomUUID(),
+    references: p.references ?? [],
+    connection_bindings: p.connection_bindings ?? [],
     execution_engine: engine,
     destination,
     outputs: p.outputs ?? [],

@@ -36,3 +36,5 @@ Product decisions and behavior contracts are not optional context.
 - `openspec/changes/app-options-recent/` — ADR-0021 Options + Open Recent
 - `openspec/changes/keymap-live-bind/` — ADR-0022 Postgres KeyMap live bind
 - `openspec/specs/dbt-setup-onboarding/` — ADR-0023 first-run / Options dbt install (merged)
+- `openspec/specs/keymap-composite-*` — ADR-0024 composite From + multi-key Join Auto (merged)
+- `openspec/specs/project-references/` — ADR-0025 references between saved projects (merged)

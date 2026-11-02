@@ -6,10 +6,11 @@ use crate::secrets_io;
 use crate::settings_io::{self, AppSettings};
 use dwh_engine::{
     blame_unmatched_key as run_blame_unmatched_key, clear_join_prepare as run_clear_join_prepare,
-    collect_load_seeds, describe_postgres_object as run_describe_postgres_object,
+    prepare_workspace as run_prepare_workspace,
+    describe_postgres_object as run_describe_postgres_object,
     describe_workspace as run_describe_workspace, explain_join_key as run_explain_join_key,
     explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
-    join_key_fuzzy_suggest as run_join_key_fuzzy_suggest,
+    join_key_fuzzy_suggest_on as run_join_key_fuzzy_suggest_on,
     join_key_near_miss as run_join_key_near_miss,
     join_prepare_status as run_join_prepare_status, list_postgres_objects as run_list_postgres_objects,
     ensure_join_sides_materialized as run_ensure_join_sides,
@@ -26,16 +27,18 @@ use dwh_engine::{
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
-    list_export_tree as walk_export_tree, preview_dbt_model_sql_with_seeds_and_sources,
-    push_key_map_to_export, resolve_dbt_bin,
-    remove_key_map_from_export, sync_key_maps_from_export, ConnectionDef, DbtProducer, DbtTarget,
-    ExportResult, KeyMapDef,
-    KeyMapSyncResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
-    Workspace,
+    copy_referenced_object, list_export_tree as walk_export_tree, make_project_reference,
+    preview_dbt_model_sql_with_seeds_and_sources, push_key_map_to_export, reference_consumers,
+    reference_statuses, refresh_reference, relink_reference, resolve_dbt_bin, resolve_operation,
+    remove_key_map_from_export, sync_key_maps_from_export, ConnectionBinding, ConnectionDef,
+    CopiedObject, DbtProducer, DbtTarget, ExecutionEngine, ExportResult, KeyMapDef,
+    KeyMapSyncResult, LoweredOperation, ObjectKind, ObjectTarget, PreviewDbtModel, Project,
+    ProjectReference, QueryDef, ResolveInput, ResolveKind, SourceDef, TransformationStep,
+    WarehouseDialect, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -658,7 +661,9 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "company".into(),
-                        map_id: company_map.id.clone(),
+                        columns: vec![],
+                        output_column: None,
+                        map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
                     },
                     TransformationStep::RenameColumn {
@@ -684,7 +689,9 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "org_name".into(),
-                        map_id: company_map.id.clone(),
+                        columns: vec![],
+                        output_column: None,
+                        map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
                     },
                     TransformationStep::RenameColumn {
@@ -778,14 +785,31 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
 
 fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
     let fixtures = find_fixtures_dir()?;
+    use crate::demo_keymap_labs as labs;
     match name.trim().to_ascii_lowercase().as_str() {
         "sales" | "sample" | "" => demo_sales(&fixtures),
         "union" => demo_union(&fixtures),
         "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
         "right" | "right_joins" | "coverage" => demo_right_joins(&fixtures),
         "keymap" | "key_map" | "mapping" | "aliases" => demo_keymap(&fixtures),
+        "keymap_crosswalk" | "crosswalk" => labs::demo_keymap_crosswalk(&fixtures),
+        "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
+        "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
+        "keymap_hop" | "hop" => labs::demo_keymap_hop(&fixtures),
+        "keymap_offer" | "offer" | "composite" => labs::demo_keymap_offer(&fixtures),
+        "keymap_pg" | "keymap_pg_crosswalk" | "pg_crosswalk" => {
+            labs::demo_keymap_pg_crosswalk(&fixtures)
+        }
+        "keymap_pg_dual" | "pg_dual" => labs::demo_keymap_pg_dual(&fixtures),
+        "keymap_pg_seed" | "pg_seed" => labs::demo_keymap_pg_seed(&fixtures),
+        "keymap_ref" | "ref" => labs::demo_keymap_ref(&fixtures),
+        "keymap_mixed" | "mixed" => labs::demo_keymap_mixed(&fixtures),
+        "keymap_parquet" | "parquet" => labs::demo_keymap_parquet(&fixtures),
         other => Err(format!(
-            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap"
+            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap | \
+             keymap_crosswalk | keymap_dual | keymap_codes | keymap_hop | \
+             keymap_pg | keymap_pg_dual | keymap_pg_seed | keymap_ref | \
+             keymap_mixed | keymap_parquet"
         )),
     }
 }
@@ -799,6 +823,17 @@ struct PreviewArgs {
     /// Project sources — Hive partitioning and other source-specific scan opts.
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    /// Saved project file. Required when the operation cites a reference (ADR-0025).
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 /// Read-only matching inputs; accepting proposals uses existing KeyMap editing.
@@ -826,6 +861,25 @@ struct JoinDiagArgs {
     /// When true, Prepare rebuilds even if fingerprint matches (Reload sides).
     #[serde(default)]
     force: Option<bool>,
+    /// Per-column Suggest on composite Join ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+    #[serde(default)]
+    key_index: Option<usize>,
+    /// Composite-map mode: Join key indices that form From ([ADR-0024]).
+    #[serde(default)]
+    composite_indices: Option<Vec<usize>>,
+    /// Which slot within `composite_indices` is fuzzy-scored (others exact).
+    #[serde(default)]
+    composite_fuzzy_slot: Option<usize>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -885,6 +939,16 @@ struct ExplainArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -898,6 +962,16 @@ struct ExplainKeyArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -911,6 +985,108 @@ struct BlameKeyArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
+}
+
+fn cites_external(ws: &Workspace) -> bool {
+    ws.queries.iter().any(|q| {
+        q.steps.iter().any(|step| match step {
+            TransformationStep::FromQuery { query_id }
+            | TransformationStep::Join {
+                right_query_id: query_id,
+                ..
+            }
+            | TransformationStep::ApplyKeyMap {
+                map_id: query_id, ..
+            } => matches!(query_id, ObjectTarget::External { .. }),
+            TransformationStep::Append { other_query_ids } => other_query_ids
+                .iter()
+                .any(|id| matches!(id, ObjectTarget::External { .. })),
+            TransformationStep::SqlModel { raw_sql }
+            | TransformationStep::CustomSql { raw_sql }
+            | TransformationStep::DeriveColumn {
+                expression: raw_sql,
+                ..
+            } => raw_sql.contains("{{xref:"),
+            _ => false,
+        })
+    })
+}
+
+/// Lower a reference closure once (ADR-0025). Local operations stay on the
+/// workspace the caller sent.
+fn lower_for_operation(
+    workspace: &Workspace,
+    sources: &[SourceDef],
+    connections: &[ConnectionDef],
+    project_file: Option<&str>,
+    project_uid: Option<&str>,
+    references: &[ProjectReference],
+    connection_bindings: &[ConnectionBinding],
+    execution_engine: Option<WarehouseDialect>,
+    kind: ResolveKind,
+    published_fallback: Vec<String>,
+) -> Result<LoweredOperation, String> {
+    if !cites_external(workspace) {
+        return Ok(LoweredOperation {
+            workspace: workspace.clone(),
+            sources: sources.to_vec(),
+            published_query_ids: published_fallback,
+            provenance_json: None,
+        });
+    }
+    let available: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+    resolve_operation(&ResolveInput {
+        root_file: Path::new(project_file.unwrap_or("")),
+        project_uid: project_uid.unwrap_or(""),
+        execution_engine: ExecutionEngine::from_dialect(
+            execution_engine.unwrap_or(WarehouseDialect::Duckdb),
+        ),
+        references,
+        connection_bindings,
+        workspace,
+        sources,
+        available_connections: &available,
+        kind,
+    })
+}
+
+/// Join / model RPCs pin focus to the host (or model) query before lowering.
+fn lower_focused(
+    workspace: &Workspace,
+    focus_query_id: &str,
+    sources: &[SourceDef],
+    connections: &[ConnectionDef],
+    project_file: Option<&str>,
+    project_uid: Option<&str>,
+    references: &[ProjectReference],
+    connection_bindings: &[ConnectionBinding],
+    execution_engine: Option<WarehouseDialect>,
+) -> Result<(Workspace, Vec<SourceDef>), String> {
+    let mut ws = workspace.clone();
+    ws.focus_query_id = focus_query_id.to_string();
+    let lowered = lower_for_operation(
+        &ws,
+        sources,
+        connections,
+        project_file,
+        project_uid,
+        references,
+        connection_bindings,
+        execution_engine,
+        ResolveKind::Preview,
+        Vec::new(),
+    )?;
+    Ok((lowered.workspace, lowered.sources))
 }
 
 fn parse_join_side(side: &str) -> Result<JoinKeySide, String> {
@@ -930,6 +1106,16 @@ struct PreviewDbtArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -956,6 +1142,15 @@ struct ExportArgs {
     /// When true, skip post-export `dbt parse` (UI runs parse as a separate phase).
     #[serde(default)]
     skip_parse: Option<bool>,
+    /// Saved project file. Required when the operation cites a reference (ADR-0025).
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
 }
 
 #[derive(Deserialize)]
@@ -967,6 +1162,9 @@ struct PathArg {
     env: Option<HashMap<String, String>>,
     connections: Option<Vec<ConnectionDef>>,
     destination_connection_id: Option<String>,
+    /// When true, update last-opened session path (Open / Restore). Peek loads stay false.
+    #[serde(default)]
+    remember: Option<bool>,
 }
 
 fn resolve_dbt_cli_env(a: &PathArg) -> HashMap<String, String> {
@@ -1006,6 +1204,75 @@ struct DescribeArgs {
 struct SaveProjectArgs {
     path: String,
     project: Project,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceStatusesArgs {
+    project_file: String,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MakeReferenceArgs {
+    project_file: String,
+    owner_file: String,
+    alias: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelinkReferenceArgs {
+    project_file: String,
+    reference: ProjectReference,
+    owner_file: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshReferenceArgs {
+    project_file: String,
+    project_uid: String,
+    reference_id: String,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    workspace: Workspace,
+    #[serde(default)]
+    sources: Vec<SourceDef>,
+    #[serde(default)]
+    connections: Vec<ConnectionDef>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceConsumersArgs {
+    workspace: Workspace,
+    reference_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopyReferencedArgs {
+    project_file: String,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    connections: Vec<ConnectionDef>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
+    reference_id: String,
+    kind: ObjectKind,
+    object_id: String,
+    new_local_id: String,
+    new_name: String,
 }
 
 #[derive(Deserialize)]
@@ -1081,6 +1348,11 @@ impl PreviewCache {
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
 }
 
 fn fingerprint_json(parts: &[&Value]) -> u64 {
@@ -1093,7 +1365,7 @@ fn fingerprint_json(parts: &[&Value]) -> u64 {
     h.finish()
 }
 
-/// One pending heavy job + one running worker. Newer submits supersede the same lane only.
+/// One pending heavy job + one running worker.
 struct HeavyJob {
     cmd: String,
     args: Value,
@@ -1104,19 +1376,27 @@ struct HeavyJob {
 enum HeavyLane {
     /// Debounced preview / describe — may be superseded by a newer preview.
     Preview,
-    /// Join prepare / diagnostics / lens — never dropped by a preview.
+    /// Join prepare / diagnostics / lens — replace pending of same lane only.
     Analysis,
+    /// KeyMap / warehouse mutations — FIFO, never superseded.
+    Mutation,
 }
 
 #[derive(Default)]
 struct HeavyPending {
     preview: Option<HeavyJob>,
     analysis: Option<HeavyJob>,
+    /// Ordered warehouse / KeyMap jobs (read + write). No replace.
+    mutations: VecDeque<HeavyJob>,
 }
 
 impl HeavyPending {
+    /// Prefer mutations (FIFO), then analysis, then preview.
     fn take_next(&mut self) -> Option<HeavyJob> {
-        self.analysis.take().or_else(|| self.preview.take())
+        self.mutations
+            .pop_front()
+            .or_else(|| self.analysis.take())
+            .or_else(|| self.preview.take())
     }
 }
 
@@ -1161,7 +1441,8 @@ impl HostState {
         self.preview_cancel.interrupt();
     }
 
-    /// Heavy DuckDB RPCs: queued (1 pending), coalesced by fingerprint, async-safe.
+    /// Heavy DuckDB RPCs: worker-threaded. Preview/analysis replace pending peers;
+    /// mutations (KeyMap R/W) are FIFO and never superseded.
     pub fn is_heavy_rpc(cmd: &str) -> bool {
         matches!(
             cmd,
@@ -1177,6 +1458,8 @@ impl HostState {
                 | "prepare_join_inputs"
                 | "preview_prepared_join_side"
                 | "install_dbt_venv"
+                | "read_key_map"
+                | "write_key_map"
         )
     }
 
@@ -1185,6 +1468,7 @@ impl HostState {
             "preview_workspace" | "preview_pipeline" | "describe_workspace" => {
                 HeavyLane::Preview
             }
+            "read_key_map" | "write_key_map" => HeavyLane::Mutation,
             _ => HeavyLane::Analysis,
         }
     }
@@ -1194,7 +1478,25 @@ impl HostState {
         Self::heavy_lane(cmd) == HeavyLane::Preview
     }
 
-    /// Enqueue a heavy job. Supersedes only the same lane (preview ↛ prepare).
+    /// After KeyMap/warehouse writes: drop stale preview + join-prepare caches.
+    fn invalidate_caches_after_mutation(&self, cmd: &str) {
+        if cmd != "write_key_map" {
+            return;
+        }
+        if let Ok(mut cache) = self.preview_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(db) = self.db.lock() {
+            let _ = run_clear_join_prepare(&db);
+        }
+        if let Ok(mut g) = self.join_prep_progress.lock() {
+            *g = JoinPrepareProgress::default();
+        }
+    }
+
+    /// Enqueue a heavy job.
+    /// Preview/analysis: supersede only the same lane.
+    /// Mutation: append FIFO (never replace).
     pub fn enqueue_heavy(&self, cmd: &str, args: Value) -> Result<Value, String> {
         // Fast path: preview cache hit without queue.
         if let Some(hit) = self.preview_cache_lookup(cmd, &args) {
@@ -1236,6 +1538,9 @@ impl HostState {
                         let _ = old.reply.send(Err("Preview superseded.".into()));
                     }
                     slot.analysis = Some(job);
+                }
+                HeavyLane::Mutation => {
+                    slot.mutations.push_back(job);
                 }
             }
             self.heavy_cv.notify_one();
@@ -1305,7 +1610,10 @@ impl HostState {
             if let Ok(mut running) = self.heavy_running_fp.lock() {
                 *running = Some(fp);
             }
-            let result = self.dispatch_heavy_job(&job.cmd, job.args);
+            let result = self.dispatch_heavy_job(&job.cmd, job.args.clone());
+            if result.is_ok() {
+                self.invalidate_caches_after_mutation(&job.cmd);
+            }
             if let Ok(mut running) = self.heavy_running_fp.lock() {
                 *running = None;
             }
@@ -1347,6 +1655,20 @@ impl HostState {
                 let ws = a.workspace.ok_or("preview_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let lowered = lower_for_operation(
+                    &ws,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                    ResolveKind::Preview,
+                    Vec::new(),
+                )?;
+                let ws = lowered.workspace;
+                let sources = lowered.sources;
                 let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
                 let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
@@ -1376,6 +1698,20 @@ impl HostState {
                 let ws = a.workspace.ok_or("describe_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let lowered = lower_for_operation(
+                    &ws,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                    ResolveKind::Preview,
+                    Vec::new(),
+                )?;
+                let ws = lowered.workspace;
+                let sources = lowered.sources;
                 let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
                 let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
@@ -1424,10 +1760,24 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let sources = a.sources.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
+                let (ws, sources) = match lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Err(e),
+                };
                 let out = match self.db.try_lock() {
                     Ok(db) => run_join_prepare_status(
                         &db,
-                        &a.workspace,
+                        &ws,
                         &sources,
                         &conns,
                         &a.host_query_id,
@@ -1494,9 +1844,20 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let out: JoinPrepareResult = run_prepare_join_inputs(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1526,10 +1887,21 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 // Upgrade live sides → TEMP (with progress) before anti-join scans.
                 run_ensure_join_sides(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1549,7 +1921,7 @@ impl HostState {
                 );
                 let out: JoinDiagnostics = run_join_diagnostics(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1572,10 +1944,21 @@ impl HostState {
                 let a: ExplainArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let keys = a.keys.unwrap_or_default();
                 let out: ExplainJoinRowsResult = run_explain_join_rows(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1589,10 +1972,21 @@ impl HostState {
                 let a: ExplainKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let side = parse_join_side(&a.side)?;
                 let out: ExplainJoinKeyResult = run_explain_join_key(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1606,10 +2000,21 @@ impl HostState {
                 let a: BlameKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let side = parse_join_side(&a.side)?;
                 let out: BlameUnmatchedKeyResult = run_blame_unmatched_key(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1623,9 +2028,20 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let out: JoinKeyNearMiss = run_join_key_near_miss(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1637,13 +2053,27 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest(
-                    &db,
+                let (ws, sources) = lower_focused(
                     &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
+                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest_on(
+                    &db,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
                     a.join_step_index,
+                    a.key_index,
+                    a.composite_indices,
+                    a.composite_fuzzy_slot,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
@@ -1707,14 +2137,28 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let seeds =
-                    collect_load_seeds(&db, &a.workspace, &conns, &sources).unwrap_or_default();
-                let out: PreviewDbtModel = preview_dbt_model_sql_with_seeds_and_sources(
+                let (ws, sources) = lower_focused(
                     &a.workspace,
                     &a.query_id,
-                    dialect,
-                    &seeds,
                     &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine.or(a.target_dialect),
+                )?;
+                let prepared = run_prepare_workspace(&db, &ws, &conns, &sources)?;
+                for w in &prepared.warnings {
+                    eprintln!("[dwh] prepare warning: {w}");
+                }
+                let out: PreviewDbtModel = preview_dbt_model_sql_with_seeds_and_sources(
+                    &ws,
+                    &a.query_id,
+                    dialect,
+                    &prepared.seeds,
+                    &sources,
+                    &prepared.sql_models,
                 )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
@@ -1724,8 +2168,28 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let seeds =
-                    collect_load_seeds(&db, &a.workspace, &conns, &sources).unwrap_or_default();
+                let published = a.outputs.clone().unwrap_or_default();
+                let lowered = lower_for_operation(
+                    &a.workspace,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                    ResolveKind::Export {
+                        published_ids: published.clone(),
+                    },
+                    published,
+                )?;
+                let prepared =
+                    run_prepare_workspace(&db, &lowered.workspace, &conns, &lowered.sources)?;
+                for w in &prepared.warnings {
+                    eprintln!("[dwh] prepare warning: {w}");
+                }
+                let seeds = &prepared.seeds;
+                let sql_models = &prepared.sql_models;
                 let pg_schema = a
                     .destination_schema
                     .as_deref()
@@ -1734,34 +2198,80 @@ impl HostState {
                     .unwrap_or("public");
                 let path = match (a.execution_engine, a.destination_kind) {
                     (Some(eng), Some(dest)) => {
-                        use dwh_pipeline::{DestinationKind, ExecutionEngine};
+                        use dwh_pipeline::DestinationKind;
                         let engine = ExecutionEngine::from_dialect(eng);
                         let destination = match dest {
                             WarehouseDialect::Duckdb => DestinationKind::Duckdb,
                             WarehouseDialect::Postgres => DestinationKind::Postgres,
                         };
-                        let published = a.outputs.clone().unwrap_or_default();
                         DbtProducer.produce_routed_with_schema_and_sources(
                             &a.pipeline_name,
-                            &a.workspace,
+                            &lowered.workspace,
                             &a.output_dir,
                             target,
                             engine,
                             destination,
                             pg_schema,
-                            &published,
-                            &seeds,
-                            &sources,
+                            &lowered.published_query_ids,
+                            seeds,
+                            &lowered.sources,
+                            sql_models,
+                            lowered.provenance_json.as_deref(),
                         )?
                     }
-                    _ => DbtProducer.produce_with_seeds(
-                        &a.pipeline_name,
-                        &a.workspace,
-                        &a.output_dir,
-                        target,
-                        dialect,
-                        &seeds,
-                    )?,
+                    _ => {
+                        if let Some(body) = lowered.provenance_json.as_deref() {
+                            use dwh_pipeline::DestinationKind;
+                            let has_files = lowered.workspace.queries.iter().any(|q| {
+                                q.steps.iter().any(|s| {
+                                    matches!(
+                                        s,
+                                        TransformationStep::LoadCsv { .. }
+                                            | TransformationStep::LoadParquet { .. }
+                                    )
+                                })
+                            });
+                            let (engine, destination) = match (dialect, has_files) {
+                                (WarehouseDialect::Postgres, true) => {
+                                    (ExecutionEngine::Duckdb, DestinationKind::Postgres)
+                                }
+                                (WarehouseDialect::Postgres, false) => {
+                                    (ExecutionEngine::Postgres, DestinationKind::Postgres)
+                                }
+                                (WarehouseDialect::Duckdb, _) => {
+                                    (ExecutionEngine::Duckdb, DestinationKind::Duckdb)
+                                }
+                            };
+                            let schema = match engine {
+                                ExecutionEngine::Postgres => "sys",
+                                ExecutionEngine::Duckdb => "public",
+                            };
+                            DbtProducer.produce_routed_with_schema_and_sources(
+                                &a.pipeline_name,
+                                &lowered.workspace,
+                                &a.output_dir,
+                                target,
+                                engine,
+                                destination,
+                                schema,
+                                &lowered.published_query_ids,
+                                seeds,
+                                &[],
+                                sql_models,
+                                Some(body),
+                            )?
+                        } else {
+                            DbtProducer.produce_with_seeds(
+                                &a.pipeline_name,
+                                &lowered.workspace,
+                                &a.output_dir,
+                                target,
+                                dialect,
+                                seeds,
+                                sql_models,
+                            )?
+                        }
+                    }
                 };
                 let files = walk_export_tree(&path)?;
                 let mut result = ExportResult::with_files(path.clone(), files);
@@ -1831,19 +2341,102 @@ impl HostState {
                 run_test_postgres_connection(&db, &a.connection_string)?;
                 Ok(Value::Null)
             }
+            "reference_statuses" => {
+                drop(db);
+                let a: ReferenceStatusesArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = reference_statuses(Path::new(&a.project_file), &a.references);
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "make_project_reference" => {
+                drop(db);
+                let a: MakeReferenceArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = make_project_reference(
+                    Path::new(&a.project_file),
+                    Path::new(&a.owner_file),
+                    &a.alias,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "relink_reference" => {
+                drop(db);
+                let a: RelinkReferenceArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = relink_reference(
+                    Path::new(&a.project_file),
+                    &a.reference,
+                    Path::new(&a.owner_file),
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "refresh_reference" => {
+                drop(db);
+                let a: RefreshReferenceArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let available: Vec<String> = a.connections.iter().map(|c| c.id.clone()).collect();
+                let out = refresh_reference(
+                    &ResolveInput {
+                        root_file: Path::new(&a.project_file),
+                        project_uid: &a.project_uid,
+                        execution_engine: ExecutionEngine::from_dialect(
+                            a.execution_engine.unwrap_or(WarehouseDialect::Duckdb),
+                        ),
+                        references: &a.references,
+                        connection_bindings: &a.connection_bindings,
+                        workspace: &a.workspace,
+                        sources: &a.sources,
+                        available_connections: &available,
+                        kind: ResolveKind::ValidateAll,
+                    },
+                    &a.reference_id,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "reference_consumers" => {
+                drop(db);
+                let a: ReferenceConsumersArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = reference_consumers(&a.workspace, &a.reference_id);
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "copy_referenced_object" => {
+                drop(db);
+                let a: CopyReferencedArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let available: Vec<String> = a.connections.iter().map(|c| c.id.clone()).collect();
+                let out: CopiedObject = copy_referenced_object(
+                    Path::new(&a.project_file),
+                    &a.references,
+                    &a.connection_bindings,
+                    &available,
+                    ExecutionEngine::from_dialect(
+                        a.execution_engine.unwrap_or(WarehouseDialect::Duckdb),
+                    ),
+                    &a.reference_id,
+                    a.kind,
+                    &a.object_id,
+                    &a.new_local_id,
+                    &a.new_name,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
             "save_project" => {
                 drop(db);
                 let a: SaveProjectArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                secrets_io::save_project_with_secrets(&a.path, &a.project)?;
+                let saved = secrets_io::save_project_with_secrets(&a.path, &a.project)?;
                 remember_project_path(&a.path)?;
-                Ok(Value::Null)
+                serde_json::to_value(saved).map_err(|e| e.to_string())
             }
             "load_project" => {
                 drop(db);
                 let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let mut project = secrets_io::load_project_with_secrets(&a.path)?;
                 project.root_path = Some(a.path.clone());
-                let _ = remember_project_path(&a.path);
+                // Default false: reference catalogs / peeks must not steal the session path.
+                if a.remember.unwrap_or(false) {
+                    let _ = remember_project_path(&a.path);
+                }
                 serde_json::to_value(project).map_err(|e| e.to_string())
             }
             "get_last_project_path" => {

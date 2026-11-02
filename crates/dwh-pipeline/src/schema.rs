@@ -5,7 +5,7 @@
 
 use crate::emit::{ascii_fold_name, union_column_names, validate_unambiguous_ascii_names};
 use crate::graph::topo_queries;
-use crate::model::{TransformationStep, Workspace};
+use crate::model::{apply_keymap_columns, TransformationStep, Workspace};
 use std::collections::HashMap;
 
 /// Ordered column names after a step, or unknown.
@@ -39,6 +39,15 @@ pub fn infer_workspace_schemas(
     workspace: &Workspace,
     load_seeds: &HashMap<String, Vec<String>>,
 ) -> Result<WorkspaceSchemas, String> {
+    infer_workspace_schemas_ex(workspace, load_seeds, &HashMap::new())
+}
+
+/// Like [`infer_workspace_schemas`], plus live-described SqlModel column lists (engine preview).
+pub fn infer_workspace_schemas_ex(
+    workspace: &Workspace,
+    load_seeds: &HashMap<String, Vec<String>>,
+    sql_model_schemas: &HashMap<String, Vec<String>>,
+) -> Result<WorkspaceSchemas, String> {
     let order = topo_queries(workspace)?;
     let mut out = WorkspaceSchemas::default();
 
@@ -50,7 +59,15 @@ pub fn infer_workspace_schemas(
         let mut prev: StepSchema = None;
 
         for (idx, step) in query.steps.iter().enumerate() {
-            let next = apply_step_schema(step, prev.as_deref(), &out.query_out, load_seeds, &qid, idx)?;
+            let next = apply_step_schema_ex(
+                step,
+                prev.as_deref(),
+                &out.query_out,
+                load_seeds,
+                sql_model_schemas,
+                &qid,
+                idx,
+            )?;
             step_schemas.push(next.clone());
             prev = next;
         }
@@ -68,6 +85,26 @@ pub fn apply_step_schema(
     prev: Option<&[String]>,
     query_out: &HashMap<String, StepSchema>,
     load_seeds: &HashMap<String, Vec<String>>,
+    query_id: &str,
+    step_idx: usize,
+) -> Result<StepSchema, String> {
+    apply_step_schema_ex(
+        step,
+        prev,
+        query_out,
+        load_seeds,
+        &HashMap::new(),
+        query_id,
+        step_idx,
+    )
+}
+
+fn apply_step_schema_ex(
+    step: &TransformationStep,
+    prev: Option<&[String]>,
+    query_out: &HashMap<String, StepSchema>,
+    load_seeds: &HashMap<String, Vec<String>>,
+    sql_model_schemas: &HashMap<String, Vec<String>>,
     query_id: &str,
     step_idx: usize,
 ) -> Result<StepSchema, String> {
@@ -89,14 +126,44 @@ pub fn apply_step_schema(
                     "query '{query_id}': FromQuery must be the first step"
                 ));
             }
-            Ok(query_out.get(dep).cloned().unwrap_or(None))
+            Ok(query_out.get(dep.compiler_id()?).cloned().unwrap_or(None))
         }
-        TransformationStep::SqlModel { .. } => Ok(None),
+        TransformationStep::SqlModel { .. } => {
+            Ok(sql_model_schemas.get(query_id).cloned())
+        }
         TransformationStep::Filter { .. }
         | TransformationStep::SortBy { .. }
         | TransformationStep::Limit { .. }
-        | TransformationStep::NormalizeKey { .. }
-        | TransformationStep::ApplyKeyMap { .. } => Ok(prev.map(|p| p.to_vec())),
+        | TransformationStep::NormalizeKey { .. } => Ok(prev.map(|p| p.to_vec())),
+        TransformationStep::ApplyKeyMap {
+            column,
+            columns,
+            output_column,
+            ..
+        } => {
+            // ADR-0024: new output_column is appended; overwrite keeps the same list.
+            let Some(cols) = prev else {
+                return Ok(None);
+            };
+            let fact = apply_keymap_columns(column, columns);
+            let out = output_column
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| fact.first().map(|s| s.as_str()))
+                .unwrap_or("");
+            if out.is_empty() {
+                return Ok(Some(cols.to_vec()));
+            }
+            let fold = ascii_fold_name(out);
+            if cols.iter().any(|c| ascii_fold_name(c) == fold) {
+                Ok(Some(cols.to_vec()))
+            } else {
+                let mut next = cols.to_vec();
+                next.push(out.to_string());
+                Ok(Some(next))
+            }
+        }
         TransformationStep::SelectColumns { columns } => {
             if columns.is_empty() {
                 return Err("SelectColumns: empty columns".into());
@@ -154,7 +221,7 @@ pub fn apply_step_schema(
             let Some(left) = prev else {
                 return Ok(None);
             };
-            let Some(Some(right)) = query_out.get(right_query_id).map(|s| s.as_ref()) else {
+            let Some(Some(right)) = query_out.get(right_query_id.compiler_id()?).map(|s| s.as_ref()) else {
                 return Ok(None);
             };
             join_result_schema(left, right, left_on, right_on)
@@ -166,7 +233,7 @@ pub fn apply_step_schema(
             let mut sources: Vec<&[String]> = vec![left];
             let mut owned: Vec<Vec<String>> = Vec::new();
             for oid in other_query_ids {
-                match query_out.get(oid) {
+                match query_out.get(oid.compiler_id()?) {
                     Some(Some(cols)) => {
                         owned.push(cols.clone());
                     }
@@ -325,5 +392,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(out, vec!["id", "amt", "region"]);
+    }
+
+    #[test]
+    fn apply_keymap_appends_new_output_column() {
+        let prev = vec!["ext".into(), "region".into()];
+        let step = TransformationStep::ApplyKeyMap {
+            column: "ext".into(),
+            columns: vec!["ext".into()],
+            output_column: Some("canonical".into()),
+            map_id: "m".into(),
+            entries: vec![],
+        };
+        let next = apply_step_schema(
+            &step,
+            Some(&prev),
+            &HashMap::new(),
+            &HashMap::new(),
+            "q",
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next, vec!["ext", "region", "canonical"]);
+    }
+
+    #[test]
+    fn apply_keymap_keeps_schema_when_overwriting() {
+        let prev = vec!["ext".into(), "canonical".into()];
+        let step = TransformationStep::ApplyKeyMap {
+            column: "ext".into(),
+            columns: vec!["ext".into()],
+            output_column: Some("canonical".into()),
+            map_id: "m".into(),
+            entries: vec![],
+        };
+        let next = apply_step_schema(
+            &step,
+            Some(&prev),
+            &HashMap::new(),
+            &HashMap::new(),
+            "q",
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next, vec!["ext", "canonical"]);
     }
 }

@@ -433,8 +433,18 @@
     status.textContent = "Loading latest release…";
 
     fetch(RELEASES_API)
-      .then((r) => {
-        if (!r.ok) throw new Error("No release yet");
+      .then(async (r) => {
+        if (r.status === 404) {
+          const err = new Error("no_release");
+          err.code = "no_release";
+          throw err;
+        }
+        if (!r.ok) {
+          const err = new Error("fetch_failed");
+          err.code = "fetch_failed";
+          err.status = r.status;
+          throw err;
+        }
         return r.json();
       })
       .then((rel) => {
@@ -482,9 +492,12 @@
           });
         }
       })
-      .catch(() => {
-        status.textContent = "No published release yet.";
-        actions.innerHTML = `<a class="btn btn-primary" href="${RELEASES_PAGE}">Open releases</a>`;
+      .catch((err) => {
+        const noneYet = err && err.code === "no_release";
+        status.textContent = noneYet
+          ? "No published release yet."
+          : "Couldn’t fetch release info.";
+        actions.innerHTML = `<a class="btn btn-primary" href="${RELEASES_PAGE}">Open GitHub Releases</a>`;
       });
   }
 

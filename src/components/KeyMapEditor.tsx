@@ -14,15 +14,23 @@ import type {
 import { listPostgresObjects, readKeyMap, type KeyMapDirtyDelta } from "../lib/bridge";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
-import { mergeKeyMapProposals } from "../lib/keyMap";
 import type { Workspace } from "../types/pipeline";
 import {
+  fromColumnsEff,
+  fromPartsEff,
   keyMapSeedName,
   parseFromToPaste,
+  tupleKey,
   validateKeyMapEntries,
   type ApplySide,
 } from "../lib/keyMap";
-import { KeyMapDirtyBuffer, KEYMAP_PAGE_SIZE } from "../lib/keyMapDirty";
+import {
+  KeyMapEditStore,
+  KEYMAP_PAGE_SIZE,
+  type EditorKeyMapEntry,
+  type PageSlot,
+  type RowId,
+} from "../lib/keyMapDirty";
 import {
   KeyMapBindWizard,
   applyKeyMapBind,
@@ -43,6 +51,8 @@ export type KeyMapEditorProps = {
   pickToOptions?: string[];
   /** Prefill From rows (e.g. unmatched keys). */
   suggestedFrom?: string[];
+  /** Prefill composite From tuples (ADR-0024). */
+  suggestedFromParts?: string[][];
   /** Known dbt sources (Explorer / LoadPostgres) for storage=source datalist. */
   sourceOptions?: KeyMapSourceOption[];
   /** Postgres connections for source write-back / read. */
@@ -54,6 +64,20 @@ export type KeyMapEditorProps = {
   onWarehouseRead?: (contentHash: string, totalCount?: number | null) => void;
   /** Dirty delta for source Save (ADR-0022). */
   onDirtyChange?: (delta: KeyMapDirtyDelta | null) => void;
+  /**
+   * Save lifecycle: one in-flight capture per map. `captureSave` returns
+   * `{ token, delta }` or `null` if already saving; confirm/abort take that token.
+   */
+  onSaveApi?: (api: {
+    captureSave: () => { token: number; delta: KeyMapDirtyDelta | null } | null;
+    confirmSave: (token: number) => void;
+    abortSave: (token: number) => void;
+    isSaving: () => boolean;
+  }) => void;
+  /** When true, Save button is disabled (App tracks in-flight WH write). */
+  saveInFlight?: boolean;
+  /** Bumped by App after WH Save when saveApi was absent (legacy clear). */
+  dirtyResetSeq?: number;
   onApply?: (side: ApplySide) => void;
   onClose?: () => void;
   onSave?: () => void;
@@ -69,6 +93,8 @@ export type KeyMapEditorProps = {
     rightQueryName: string;
     leftOn: string;
     rightOn: string;
+    leftOnCols?: string[];
+    rightOnCols?: string[];
     /** Unmatched side that opened Add to map… */
     probeSide?: "left" | "right";
   } | null;
@@ -92,12 +118,16 @@ export function KeyMapEditor({
   connections = [],
   pickToOptions = [],
   suggestedFrom = [],
+  suggestedFromParts = [],
   sourceOptions = [],
   postgresConnections = [],
   refOptions = [],
   onChange,
   onWarehouseRead,
   onDirtyChange,
+  onSaveApi,
+  dirtyResetSeq,
+  saveInFlight = false,
   onApply,
   onClose,
   onSave,
@@ -127,15 +157,78 @@ export function KeyMapEditor({
   const [rebindOpen, setRebindOpen] = useState(false);
   const [dirtyTick, setDirtyTick] = useState(0);
   const loadedTableKey = useRef<string>("");
-  const dirtyRef = useRef(new KeyMapDirtyBuffer());
+  const storeRef = useRef(new KeyMapEditStore());
+  const pageRef = useRef<PageSlot[]>([]);
+  const newIdsRef = useRef<RowId[]>([]);
+  const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
   const editableCols = map.editable_columns ?? [];
+  const fromCols = fromColumnsEff(map);
+  const arity = fromCols.length;
+  const saving = saveInFlight || storeRef.current.isSaveInFlight();
+
+  useEffect(() => {
+    storeRef.current.setSchema({ arity, editable: editableCols });
+  }, [arity, editableCols]);
+
+  function publishView() {
+    if (!isSource) return;
+    const entries = storeRef.current.viewEntries(
+      pageRef.current,
+      newIdsRef.current,
+    );
+    onChange({ ...map, entries });
+  }
 
   function bumpDirty() {
-    onDirtyChange?.(dirtyRef.current.toDelta());
+    onDirtyChange?.(storeRef.current.toDelta());
     setDirtyTick((n) => n + 1);
   }
+
+  function afterSaveSettle() {
+    newIdsRef.current = newIdsRef.current.filter((id) =>
+      storeRef.current.get(id),
+    );
+    onDirtyChange?.(storeRef.current.toDelta());
+    publishView();
+    setDirtyTick((n) => n + 1);
+  }
+
+  useEffect(() => {
+    if (!onSaveApi) return;
+    onSaveApi({
+      captureSave: () => {
+        const cap = storeRef.current.captureSave();
+        if (!cap) return null;
+        onDirtyChange?.(cap.delta);
+        setDirtyTick((n) => n + 1);
+        return { token: cap.token, delta: cap.delta };
+      },
+      confirmSave: (token: number) => {
+        storeRef.current.confirmSave(token);
+        afterSaveSettle();
+      },
+      abortSave: (token: number) => {
+        storeRef.current.abortSave(token);
+        afterSaveSettle();
+      },
+      isSaving: () => storeRef.current.isSaveInFlight(),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable API registration
+  }, [onSaveApi, map.id]);
+
+  // Legacy path when Save succeeds without saveApi (editor not mounted).
+  useEffect(() => {
+    if (dirtyResetSeq === undefined) return;
+    if (dirtyResetSeen.current === dirtyResetSeq) return;
+    dirtyResetSeen.current = dirtyResetSeq;
+    storeRef.current.clear();
+    pageRef.current = [];
+    newIdsRef.current = [];
+    afterSaveSettle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirtyResetSeq]);
 
   // Never invent a connection_id — empty means "not assigned for write".
   const activeConnectionId =
@@ -212,6 +305,7 @@ export function KeyMapEditor({
       source,
       table,
       map.from_column ?? "from",
+      (map.from_columns ?? []).join(","),
       map.to_column ?? "to",
       (map.editable_columns ?? []).join(","),
       pageOffset,
@@ -241,7 +335,19 @@ export function KeyMapEditor({
     )
       .then((r) => {
         if (cancelled) return;
-        onChange({ ...map, entries: r.entries });
+        pageRef.current = storeRef.current.adoptPage(
+          r.entries,
+          pageRef.current,
+        );
+        // Keep in-page inserts that are still dirty.
+        newIdsRef.current = newIdsRef.current.filter((id) =>
+          storeRef.current.get(id),
+        );
+        const entries = storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        );
+        onChange({ ...map, entries });
         onWarehouseRead?.(r.content_hash, r.total_count);
         setTotalCount(r.total_count ?? null);
         const total = r.total_count;
@@ -266,6 +372,7 @@ export function KeyMapEditor({
   }, [
     map.storage,
     map.from_column,
+    map.from_columns,
     map.to_column,
     map.editable_columns,
     activeConnectionId,
@@ -308,10 +415,13 @@ export function KeyMapEditor({
     if (!q) return map.entries.map((e, i) => ({ e, i }));
     return map.entries
       .map((e, i) => ({ e, i }))
-      .filter(
-        ({ e }) =>
-          e.from.toLowerCase().includes(q) || e.to.toLowerCase().includes(q),
-      );
+      .filter(({ e }) => {
+        const parts = fromPartsEff(e);
+        return (
+          parts.some((p) => p.toLowerCase().includes(q)) ||
+          e.to.toLowerCase().includes(q)
+        );
+      });
   }, [map.entries, filter, isSource]);
 
   const virtualizer = useVirtualizer({
@@ -323,51 +433,72 @@ export function KeyMapEditor({
   });
   const virtualRows = virtualizer.getVirtualItems();
 
-  function setEntries(entries: KeyMapEntry[], opts?: { trackAll?: boolean }) {
-    const v = validateKeyMapEntries(entries);
+  function setEntries(entries: KeyMapEntry[]) {
+    const v = validateKeyMapEntries(entries, arity);
     if (!v.ok) {
       setError(v.error);
       onChange({ ...map, entries });
       return;
     }
     setError(null);
-    if (isSource && opts?.trackAll) {
-      for (const e of v.entries) dirtyRef.current.noteUpsert(e);
-      bumpDirty();
-    }
     onChange({ ...map, entries: v.entries });
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
-    const prev = map.entries[index];
-    if (!prev) return;
-    const merged: KeyMapEntry = {
-      ...prev,
+    const raw = map.entries[index] as EditorKeyMapEntry | undefined;
+    if (!raw) return;
+    const rowId = raw.__dwhRowId;
+    const merged: EditorKeyMapEntry = {
+      ...raw,
       ...patch,
       attrs:
         patch.attrs !== undefined
           ? patch.attrs
-          : prev.attrs,
+          : raw.attrs,
+      ...(rowId ? { __dwhRowId: rowId } : {}),
     };
-    if (patch.attrs === undefined && prev.attrs) {
-      merged.attrs = { ...prev.attrs };
+    if (patch.attrs === undefined && raw.attrs) {
+      merged.attrs = { ...raw.attrs };
     }
     const next = map.entries.map((e, i) => (i === index ? merged : e));
-    const v = validateKeyMapEntries(next);
+
+    if (isSource && rowId) {
+      const slot = pageRef.current.find((s) => s.id === rowId);
+      storeRef.current.updateDraft(
+        rowId,
+        {
+          fromParts: fromPartsEff(merged),
+          to: merged.to,
+          attrs: merged.attrs ?? {},
+        },
+        slot?.loaded ?? null,
+      );
+      bumpDirty();
+      // Allow temporarily invalid From/To in the view (draft store keeps them).
+      setError(null);
+      const v = validateKeyMapEntries(next, arity);
+      if (!v.ok) {
+        setError(v.error);
+        onChange({ ...map, entries: next });
+        return;
+      }
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
+    }
+
+    const v = validateKeyMapEntries(next, arity);
     if (!v.ok) {
       setError(v.error);
       onChange({ ...map, entries: next });
       return;
     }
     setError(null);
-    if (isSource) {
-      if (patch.from !== undefined && patch.from.trim() !== prev.from.trim()) {
-        dirtyRef.current.noteRename(prev.from, merged);
-      } else {
-        dirtyRef.current.noteUpsert(merged);
-      }
-      bumpDirty();
-    }
     onChange({ ...map, entries: v.entries });
   }
 
@@ -380,53 +511,157 @@ export function KeyMapEditor({
   }
 
   function addRow(from = "", to = "") {
-    const entry: KeyMapEntry = { from, to };
+    const parts =
+      arity > 1
+        ? Array.from({ length: arity }, (_, i) => (i === 0 ? from : ""))
+        : from
+          ? [from]
+          : Array.from({ length: arity }, () => "");
+    if (isSource) {
+      const id = storeRef.current.addRow({
+        fromParts: parts,
+        to,
+        attrs: Object.fromEntries(editableCols.map((c) => [c, ""])),
+      });
+      newIdsRef.current = [...newIdsRef.current, id];
+      bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
+    }
+    const entry: KeyMapEntry = {
+      from: parts[0] ?? "",
+      from_parts: parts,
+      to,
+    };
     if (editableCols.length) {
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
-    }
-    if (isSource) {
-      dirtyRef.current.noteUpsert(entry);
-      bumpDirty();
     }
     setEntries([...map.entries, entry]);
   }
 
   function deleteRow(index: number) {
-    const prev = map.entries[index];
-    if (isSource && prev) {
-      dirtyRef.current.noteDelete(prev.from);
+    const raw = map.entries[index] as EditorKeyMapEntry | undefined;
+    if (isSource && raw?.__dwhRowId) {
+      const id = raw.__dwhRowId;
+      const slot = pageRef.current.find((s) => s.id === id);
+      storeRef.current.deleteRow(id, slot?.loaded ?? null);
+      newIdsRef.current = newIdsRef.current.filter((x) => x !== id);
       bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
     }
     setEntries(map.entries.filter((_, j) => j !== index));
   }
 
   function addSuggested() {
-    const have = new Set(map.entries.map((e) => e.from.trim()));
-    const extra = suggestedFrom
-      .map((s) => s.trim())
-      .filter((s) => s && !have.has(s))
-      .map((from) => ({ from, to: "" }));
-    if (extra.length) setEntries([...map.entries, ...extra], { trackAll: true });
+    const have = new Set(map.entries.map((e) => tupleKey(fromPartsEff(e))));
+    const fromTuples: string[][] =
+      suggestedFromParts.length > 0
+        ? suggestedFromParts
+        : suggestedFrom.map((s) => [s.trim()]);
+    const proposals = fromTuples
+      .map((parts) => parts.map((p) => p.trim()))
+      .filter((parts) => parts.every(Boolean) && !have.has(tupleKey(parts)))
+      .map((parts) => ({ fromParts: parts, to: "" }));
+    if (!proposals.length) return;
+    if (isSource) {
+      const { newIds } = storeRef.current.applyProposals(
+        proposals,
+        pageRef.current,
+      );
+      if (newIds.length) {
+        newIdsRef.current = [...newIdsRef.current, ...newIds];
+      }
+      bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      return;
+    }
+    const extra = proposals.map((p) => ({
+      from: p.fromParts[0]!,
+      from_parts: p.fromParts,
+      to: "",
+    }));
+    setEntries([...map.entries, ...extra]);
   }
 
   function applyPaste() {
-    const parsed = parseFromToPaste(pasteText);
+    const parsed = parseFromToPaste(pasteText, arity);
     if (!parsed.length) {
       setError("Paste TSV/CSV with from,to columns");
       return;
     }
+    if (isSource) {
+      for (const e of parsed) {
+        const parts = fromPartsEff(e);
+        const key = tupleKey(parts);
+        const pageHit = pageRef.current.find(
+          (s) => tupleKey(s.loaded.fromParts) === key,
+        );
+        const existingId =
+          pageHit?.id ??
+          storeRef.current.rowIdByOriginFrom(parts) ??
+          (map.entries as EditorKeyMapEntry[]).find(
+            (x) => tupleKey(fromPartsEff(x)) === key,
+          )?.__dwhRowId;
+        if (existingId) {
+          storeRef.current.updateDraft(
+            existingId,
+            { fromParts: parts, to: e.to, attrs: e.attrs ?? {} },
+            pageHit?.loaded ?? null,
+          );
+        } else {
+          const id = storeRef.current.addRow({
+            fromParts: parts,
+            to: e.to,
+            attrs: e.attrs ?? {},
+          });
+          newIdsRef.current.push(id);
+        }
+      }
+      bumpDirty();
+      onChange({
+        ...map,
+        entries: storeRef.current.viewEntries(
+          pageRef.current,
+          newIdsRef.current,
+        ),
+      });
+      setPasteOpen(false);
+      setPasteText("");
+      return;
+    }
     const merged = [...map.entries];
-    const byFrom = new Map(merged.map((e, i) => [e.from.trim(), i] as const));
+    const byFrom = new Map(
+      merged.map((e, i) => [tupleKey(fromPartsEff(e)), i] as const),
+    );
     for (const e of parsed) {
-      const i = byFrom.get(e.from.trim());
+      const i = byFrom.get(tupleKey(fromPartsEff(e)));
       if (i === undefined) {
-        byFrom.set(e.from.trim(), merged.length);
+        byFrom.set(tupleKey(fromPartsEff(e)), merged.length);
         merged.push(e);
       } else {
         merged[i] = e;
       }
     }
-    setEntries(merged, { trackAll: true });
+    setEntries(merged);
     setPasteOpen(false);
     setPasteText("");
   }
@@ -481,10 +716,10 @@ export function KeyMapEditor({
     }
     if (kind === "ref") {
       return {
-        label: "SoT · dbt ref",
+        label: "SoT · dbt ref (export only)",
         detail: refStorage?.model?.trim()
-          ? `{{ ref('${refStorage.model}') }} · project cache only (no write-back)`
-          : "set model name · project cache only",
+          ? `{{ ref('${refStorage.model}') }} · DuckDB preview cannot resolve this model; local rows are a draft cache, not the relation`
+          : "set model name · local cache is not the dbt model",
       };
     }
     if (exportPath) {
@@ -543,28 +778,38 @@ export function KeyMapEditor({
         </select>
       </label>
       {refStorage && (
-        <label className={labelClass}>
-          Model
-          <input
-            list="keymap-ref-models"
-            value={refStorage.model}
-            onChange={(e) =>
-              onChange({
-                ...map,
-                storage: { kind: "ref", model: e.target.value },
-              })
-            }
-            placeholder="stg_channel_map"
-            className={`${fieldClass} font-mono`}
-          />
-          {refOptions.length > 0 && (
-            <datalist id="keymap-ref-models">
-              {refOptions.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-          )}
-        </label>
+        <>
+          <p className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[10px] leading-snug text-amber-100/90">
+            Export joins{" "}
+            <span className="font-mono">
+              {`{{ ref('${refStorage.model?.trim() || "…"}') }}`}
+            </span>
+            . Preview will refuse ApplyKeyMap for this map — local rows below are
+            a draft cache only (not write-back, not live preview).
+          </p>
+          <label className={labelClass}>
+            Model
+            <input
+              list="keymap-ref-models"
+              value={refStorage.model}
+              onChange={(e) =>
+                onChange({
+                  ...map,
+                  storage: { kind: "ref", model: e.target.value },
+                })
+              }
+              placeholder="stg_channel_map"
+              className={`${fieldClass} font-mono`}
+            />
+            {refOptions.length > 0 && (
+              <datalist id="keymap-ref-models">
+                {refOptions.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            )}
+          </label>
+        </>
       )}
       {sourceStorage && (
         <div className="space-y-3">
@@ -729,19 +974,80 @@ export function KeyMapEditor({
           ref storage: rows are project cache only (no warehouse write-back).
         </p>
       )}
-      <div className="grid grid-cols-2 gap-2">
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className={labelClass}>Match by columns</span>
+          <button
+            type="button"
+            onClick={() => {
+              const next = [...fromCols, `from_${fromCols.length + 1}`];
+              onChange({
+                ...map,
+                from_columns: next,
+                from_column: next[0],
+                entries: map.entries.map((e) => {
+                  const parts = fromPartsEff(e);
+                  while (parts.length < next.length) parts.push("");
+                  return {
+                    ...e,
+                    from: parts[0] ?? "",
+                    from_parts: parts,
+                  };
+                }),
+              });
+            }}
+            className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
+          >
+            + Column
+          </button>
+        </div>
+        {fromCols.map((col, i) => (
+          <label key={`from-col-${i}`} className={labelClass}>
+            Match[{i + 1}]
+            <div className="mt-1 flex gap-1">
+              <input
+                value={col}
+                onChange={(e) => {
+                  const next = [...fromCols];
+                  next[i] = e.target.value;
+                  onChange({
+                    ...map,
+                    from_columns: next,
+                    from_column: next[0],
+                  });
+                }}
+                className={`${fieldClass} mt-0 font-mono`}
+              />
+              {fromCols.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = fromCols.filter((_, j) => j !== i);
+                    onChange({
+                      ...map,
+                      from_columns: next,
+                      from_column: next[0],
+                      entries: map.entries.map((e) => {
+                        const parts = fromPartsEff(e).filter((_, j) => j !== i);
+                        return {
+                          ...e,
+                          from: parts[0] ?? "",
+                          from_parts: parts,
+                        };
+                      }),
+                    });
+                  }}
+                  className="rounded border border-slate-700 px-2 text-slate-500 hover:text-rose-300"
+                  aria-label="Remove match column"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </label>
+        ))}
         <label className={labelClass}>
-          From column
-          <input
-            value={map.from_column ?? "from"}
-            onChange={(e) =>
-              onChange({ ...map, from_column: e.target.value })
-            }
-            className={`${fieldClass} font-mono`}
-          />
-        </label>
-        <label className={labelClass}>
-          To column
+          Target value column
           <input
             value={map.to_column ?? "to"}
             onChange={(e) => onChange({ ...map, to_column: e.target.value })}
@@ -750,14 +1056,13 @@ export function KeyMapEditor({
         </label>
       </div>
       <p className="text-[11px] leading-snug text-slate-500">
-        Names of the alias / canon columns in the seed or warehouse table.
-        Leave as{" "}
-        <span className="font-mono text-slate-400">from</span> /{" "}
-        <span className="font-mono text-slate-400">to</span> for the default
-        seed. Change only when storage is an existing table or model with
-        different names (e.g.{" "}
-        <span className="font-mono text-slate-400">alias</span> →{" "}
-        <span className="font-mono text-slate-400">company_id</span>).
+        Mapping relation column names. Arity {arity}: uniqueness is the match{" "}
+        <span className="font-mono text-slate-400">key</span> (ADR-0024).
+        Default seed header is{" "}
+        <span className="font-mono text-slate-400">
+          {fromCols.join(",")},{map.to_column ?? "to"}
+        </span>
+        .
       </p>
     </div>
   );
@@ -789,7 +1094,9 @@ export function KeyMapEditor({
           <button
             type="button"
             onClick={() => {
-              dirtyRef.current.clear();
+              storeRef.current.clear();
+              pageRef.current = [];
+              newIdsRef.current = [];
               bumpDirty();
               loadedTableKey.current = "";
               setRowsStatus(null);
@@ -801,13 +1108,17 @@ export function KeyMapEditor({
             Reload
           </button>
         )}
-      {suggestedFrom.length > 0 && (
+      {(suggestedFromParts.length > 0 || suggestedFrom.length > 0) && (
         <button
           type="button"
           onClick={addSuggested}
           className="rounded-md border border-amber-900/50 px-2.5 py-1.5 text-[12px] text-amber-200/90 hover:border-amber-700"
         >
-          Add unmatched ({suggestedFrom.length})
+          Add unmatched (
+          {suggestedFromParts.length > 0
+            ? suggestedFromParts.length
+            : suggestedFrom.length}
+          )
         </button>
       )}
       <button
@@ -823,8 +1134,8 @@ export function KeyMapEditor({
           : filter.trim()
             ? `${rows.length} / ${map.entries.length} rows`
             : `${map.entries.length} rows`}
-        {dirtyTick >= 0 && dirtyRef.current.dirtyCount() > 0
-          ? ` · ${dirtyRef.current.dirtyCount()} dirty`
+        {dirtyTick >= 0 && storeRef.current.dirtyCount() > 0
+          ? ` · ${storeRef.current.dirtyCount()} dirty`
           : ""}
       </span>
       {isSource && (
@@ -872,24 +1183,16 @@ export function KeyMapEditor({
           compact ? "text-[11px]" : "text-[13px]"
         }`}
       >
-        <thead className="sticky top-0 z-10 bg-[#0a1520] text-[10px] uppercase tracking-wide text-slate-500">
+        <thead className="sticky top-0 z-10 bg-[#0a1520] text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="w-10 px-3 py-2 font-semibold">#</th>
-            <th className="px-3 py-2 font-semibold">
-              From
-              {map.from_column && map.from_column !== "from" ? (
-                <span className="ml-1 font-mono normal-case text-slate-600">
-                  ({map.from_column})
-                </span>
-              ) : null}
-            </th>
-            <th className="px-3 py-2 font-semibold">
-              To
-              {map.to_column && map.to_column !== "to" ? (
-                <span className="ml-1 font-mono normal-case text-slate-600">
-                  ({map.to_column})
-                </span>
-              ) : null}
+            {fromCols.map((col, fi) => (
+              <th key={`fh-${fi}`} className="px-3 py-2 font-semibold font-mono normal-case text-slate-300">
+                {col || `match_${fi + 1}`}
+              </th>
+            ))}
+            <th className="px-3 py-2 font-semibold font-mono normal-case text-slate-300">
+              {map.to_column?.trim() || "to"}
             </th>
             {editableCols.map((c) => (
               <th key={c} className="px-3 py-2 font-semibold font-mono normal-case">
@@ -900,7 +1203,7 @@ export function KeyMapEditor({
           </tr>
         </thead>
         <tbody>
-          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={4 + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
+          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
           {virtualRows.map((v) => { const {e,i}=rows[v.index]!; return (
             <tr
               key={i}
@@ -910,15 +1213,32 @@ export function KeyMapEditor({
               <td className="px-3 py-1 font-mono text-[11px] text-slate-600">
                 {i + 1}
               </td>
-              <td className="px-2 py-1">
-                <input
-                  data-col="from"
-                  value={e.from}
-                  onChange={(ev) => updateRow(i, { from: ev.target.value })}
-                  onKeyDown={(ev) => onCellKeyDown(ev, i, "from")}
-                  className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-sky-200/90 focus:border-slate-600 focus:bg-slate-950"
-                />
-              </td>
+              {fromCols.map((_, fi) => {
+                const parts = fromPartsEff(e);
+                return (
+                  <td key={`fc-${fi}`} className="px-2 py-1">
+                    <input
+                      data-col={fi === 0 ? "from" : `from-${fi}`}
+                      value={parts[fi] ?? ""}
+                      onChange={(ev) => {
+                        const nextParts = [...fromPartsEff(e)];
+                        while (nextParts.length < arity) nextParts.push("");
+                        nextParts[fi] = ev.target.value;
+                        updateRow(i, {
+                          from: nextParts[0] ?? "",
+                          from_parts: nextParts,
+                        });
+                      }}
+                      onKeyDown={(ev) =>
+                        fi === 0
+                          ? onCellKeyDown(ev, i, "from")
+                          : undefined
+                      }
+                      className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-sky-200/90 focus:border-slate-600 focus:bg-slate-950"
+                    />
+                  </td>
+                );
+              })}
               <td className="px-2 py-1">
                 <input
                   data-col="to"
@@ -954,7 +1274,7 @@ export function KeyMapEditor({
               </td>
             </tr>
           ); })}
-          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={4 + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
+          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
         </tbody>
       </table>
       {pickToOptions.length > 0 && (
@@ -1029,7 +1349,7 @@ export function KeyMapEditor({
                 onClick={onChooseOtherMap}
                 className="shrink-0 text-[11px] text-slate-500 underline-offset-2 hover:text-slate-300 hover:underline"
               >
-                Use a different KeyMap…
+                Use a different mapping…
               </button>
             )}
           </div>
@@ -1062,7 +1382,66 @@ export function KeyMapEditor({
             key={map.id}
             workspace={workspace}
             connections={connections}
-            onAccept={(suggestions) => setEntries(mergeKeyMapProposals(map.entries, suggestions))}
+            onAccept={(suggestions) => {
+              if (!isSource) {
+                const merged = [...map.entries];
+                const byFrom = new Map(
+                  merged.map((e, i) => [tupleKey(fromPartsEff(e)), i] as const),
+                );
+                for (const s of suggestions) {
+                  if (s.ambiguous) continue;
+                  const parts =
+                    s.from_parts?.length
+                      ? s.from_parts
+                      : s.from_key.trim()
+                        ? [s.from_key]
+                        : [];
+                  if (!parts.length || !s.to_key.trim()) continue;
+                  const key = tupleKey(parts);
+                  const i = byFrom.get(key);
+                  if (i !== undefined && merged[i]!.to.trim()) continue;
+                  const entry = {
+                    from: parts[0]!,
+                    from_parts: parts,
+                    to: s.to_key,
+                  };
+                  if (i === undefined) {
+                    byFrom.set(key, merged.length);
+                    merged.push(entry);
+                  } else {
+                    merged[i] = entry;
+                  }
+                }
+                setEntries(merged);
+                return;
+              }
+              const proposals = suggestions
+                .filter((s) => !s.ambiguous)
+                .map((s) => ({
+                  fromParts: s.from_parts?.length
+                    ? s.from_parts
+                    : s.from_key.trim()
+                      ? [s.from_key]
+                      : [],
+                  to: s.to_key,
+                }))
+                .filter((p) => p.fromParts.every(Boolean) && p.to.trim());
+              const { newIds } = storeRef.current.applyProposals(
+                proposals,
+                pageRef.current,
+              );
+              if (newIds.length) {
+                newIdsRef.current = [...newIdsRef.current, ...newIds];
+              }
+              bumpDirty();
+              onChange({
+                ...map,
+                entries: storeRef.current.viewEntries(
+                  pageRef.current,
+                  newIdsRef.current,
+                ),
+              });
+            }}
           />}
           {pasteOpen && (
             <div className="shrink-0 space-y-2 border-b border-slate-800 px-4 py-3">
@@ -1070,7 +1449,11 @@ export function KeyMapEditor({
                 value={pasteText}
                 onChange={(e) => setPasteText(e.target.value)}
                 rows={compact ? 3 : 6}
-                placeholder={"from,to\nwww,web\nshop,store"}
+                placeholder={
+                  arity > 1
+                    ? `${fromCols.join(",")},${map.to_column ?? "to"}\nid,2024-06-01,sk1`
+                    : "from,to\nwww,web\nshop,store"
+                }
                 className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 font-mono text-[12px] text-slate-200"
               />
               <button
@@ -1101,7 +1484,7 @@ export function KeyMapEditor({
           : ["left", "right", "both"];
 
         const runApply = (side: ApplySide) => {
-          const v = validateKeyMapEntries(map.entries);
+          const v = validateKeyMapEntries(map.entries, arity);
           if (!v.ok) {
             setError(v.error);
             return;
@@ -1167,14 +1550,16 @@ export function KeyMapEditor({
               {onSave && (
                 <button
                   type="button"
+                  disabled={saving}
+                  title={saving ? "Save in progress…" : undefined}
                   onClick={onSave}
                   className={
                     onApply
-                      ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700"
-                      : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                      ? "rounded-lg border border-slate-700 px-3 py-2.5 text-sm text-slate-300 hover:border-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
                   }
                 >
-                  {saveLabel}
+                  {saving ? "Saving…" : saveLabel}
                 </button>
               )}
               {onDelete && (
@@ -1204,11 +1589,15 @@ export function KeyMapEditor({
                   </span>
                   {" · on "}
                   <span className="font-mono text-slate-300">
-                    {joinApplyContext.leftOn}
+                    {(joinApplyContext.leftOnCols ?? [joinApplyContext.leftOn]).join(
+                      ", ",
+                    )}
                   </span>
                   {" = "}
                   <span className="font-mono text-slate-300">
-                    {joinApplyContext.rightOn}
+                    {(
+                      joinApplyContext.rightOnCols ?? [joinApplyContext.rightOn]
+                    ).join(", ")}
                   </span>
                   . Opened from{" "}
                   <span className="font-semibold text-amber-100">
@@ -1263,12 +1652,15 @@ export function KeyMapEditor({
             storage:
               map.storage?.kind === "source" ? map.storage : undefined,
             from_column: map.from_column,
+            from_columns: fromCols,
             to_column: map.to_column,
             editable_columns: map.editable_columns,
           }}
           onCancel={() => setRebindOpen(false)}
           onConfirm={(bind: KeyMapBindResult) => {
-            dirtyRef.current.clear();
+            storeRef.current.clear();
+            pageRef.current = [];
+            newIdsRef.current = [];
             bumpDirty();
             loadedTableKey.current = "";
             setPageOffset(0);

@@ -1,5 +1,6 @@
 //! Read/write KeyMap rows against a Postgres source table (ADR-0020 / ADR-0022).
 
+use crate::key_map_delta::{validate_mapping_delta, ValidatedMappingDelta};
 use crate::postgres_catalog::{ensure_pg_attached, ensure_pg_attached_rw};
 use crate::session::DbSession;
 use dwh_pipeline::{escape_sql_string, quote_ident, KeyMapDef, KeyMapEntry, KeyMapStorage};
@@ -7,8 +8,10 @@ use duckdb::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+
+pub use crate::key_map_delta::{KeyMapDirtyBaseline, KeyMapDirtyDelta};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KeyMapWriteResult {
@@ -18,13 +21,6 @@ pub struct KeyMapWriteResult {
     pub created_table: bool,
     /// SHA-256 of sorted typed field lines after write (optimistic concurrency token).
     pub content_hash: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyMapDirtyDelta {
-    pub upserts: Vec<KeyMapEntry>,
-    pub deleted_froms: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -47,7 +43,8 @@ pub struct KeyMapReadResult {
 
 /// Canonical, type-preserving serialization of one From→To (+ attrs) for hashing.
 fn entry_hash_line(e: &KeyMapEntry) -> String {
-    let from = serde_json::to_string(e.from.trim()).unwrap_or_else(|_| "\"\"".into());
+    let parts = e.from_parts_eff();
+    let from = serde_json::to_string(&parts).unwrap_or_else(|_| "[]".into());
     let to = serde_json::to_string(e.to.as_str()).unwrap_or_else(|_| "\"\"".into());
     let mut attrs: Vec<_> = e.attrs.iter().collect();
     attrs.sort_by(|a, b| a.0.cmp(b.0));
@@ -97,15 +94,212 @@ fn advisory_lock_key(schema: &str, table: &str) -> i64 {
 fn validate_entries(entries: &[KeyMapEntry]) -> Result<(), String> {
     let mut seen = std::collections::HashSet::new();
     for e in entries {
-        let from = e.from.trim();
-        if from.is_empty() {
-            return Err("empty from in KeyMap entries".into());
+        let parts: Vec<String> = e
+            .from_parts_eff()
+            .into_iter()
+            .map(|p| p.trim().to_string())
+            .collect();
+        if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+            return Err("empty from part in KeyMap entries".into());
         }
         if e.to.is_empty() {
-            return Err(format!("empty to for from '{from}'"));
+            return Err(format!("empty to for from {parts:?}"));
         }
-        if !seen.insert(from.to_string()) {
-            return Err(format!("duplicate from '{from}'"));
+        let key = parts.join("\0");
+        if !seen.insert(key) {
+            return Err(format!("duplicate from {parts:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Compare `to` + every editable attr.
+/// Baseline: missing key or `None` ≡ SQL NULL; `Some("")` ≡ empty string.
+/// Row map: missing key ≡ SQL NULL.
+fn entry_to_matches(
+    baseline: &KeyMapDirtyBaseline,
+    row: &KeyMapEntry,
+    editable: &[String],
+) -> bool {
+    if baseline.to != row.to {
+        return false;
+    }
+    for col in editable {
+        let expected = match baseline.attrs.get(col) {
+            None => None,
+            Some(v) => v.as_deref(),
+        };
+        let got = row.attrs.get(col).map(String::as_str);
+        if expected != got {
+            return false;
+        }
+    }
+    true
+}
+
+fn baseline_tuple_key(parts: &[String]) -> String {
+    parts.join("\0")
+}
+
+/// Batch-read current warehouse rows for a set of From tuples (one IN query per chunk).
+fn read_baselines_batch_on_conn(
+    conn: &duckdb::Connection,
+    alias: &str,
+    schema: &str,
+    table: &str,
+    from_columns: &[String],
+    to_column: &str,
+    editable: &[String],
+    tuples: &[Vec<String>],
+) -> Result<HashMap<String, KeyMapEntry>, String> {
+    let mut out = HashMap::with_capacity(tuples.len());
+    if tuples.is_empty() {
+        return Ok(out);
+    }
+    let q_froms: Vec<String> = from_columns.iter().map(|c| quote_ident(c)).collect();
+    let q_to = quote_ident(to_column);
+    let rel = format!(
+        "{alias}.{}.{}",
+        quote_ident(schema),
+        quote_ident(table)
+    );
+    let mut select_cols: Vec<String> = q_froms
+        .iter()
+        .map(|q| format!("CAST({q} AS VARCHAR)"))
+        .collect();
+    select_cols.push(format!("CAST({q_to} AS VARCHAR)"));
+    for c in editable {
+        select_cols.push(format!("CAST({} AS VARCHAR)", quote_ident(c)));
+    }
+    let n_from = from_columns.len();
+    // Keep IN-lists bounded for query size / planner (fuzzy Save can be 100K keys).
+    const CHUNK: usize = 2_000;
+    for chunk in tuples.chunks(CHUNK) {
+        let cast_tuple: String = q_froms
+            .iter()
+            .map(|q| format!("CAST({q} AS VARCHAR)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pred = if n_from == 1 {
+            let list = chunk
+                .iter()
+                .map(|p| {
+                    format!(
+                        "'{}'",
+                        escape_sql_string(p.first().map(|s| s.as_str()).unwrap_or(""))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{cast_tuple} IN ({list})")
+        } else {
+            let values: String = chunk
+                .iter()
+                .map(|parts| {
+                    let cells: String = parts
+                        .iter()
+                        .map(|p| format!("'{}'", escape_sql_string(p)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({cells})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({cast_tuple}) IN ({values})")
+        };
+        let sql = format!(
+            "SELECT {} FROM {rel} WHERE {pred}",
+            select_cols.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("baseline batch read {schema}.{table}: {e}"))?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let mut parts = Vec::with_capacity(n_from);
+            for i in 0..n_from {
+                parts.push(row.get::<_, String>(i).map_err(|e| e.to_string())?);
+            }
+            let to: String = row.get(n_from).map_err(|e| e.to_string())?;
+            let mut attrs = BTreeMap::new();
+            for (i, c) in editable.iter().enumerate() {
+                if let Ok(val) = row.get::<_, String>(n_from + 1 + i) {
+                    attrs.insert(c.clone(), val);
+                }
+            }
+            let key = baseline_tuple_key(&parts);
+            out.insert(
+                key,
+                KeyMapEntry {
+                    from: parts.first().cloned().unwrap_or_default(),
+                    from_parts: parts,
+                    to,
+                    attrs,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+fn verify_baselines_on_conn(
+    conn: &duckdb::Connection,
+    alias: &str,
+    schema: &str,
+    table: &str,
+    from_columns: &[String],
+    to_column: &str,
+    editable: &[String],
+    baselines: &[KeyMapDirtyBaseline],
+) -> Result<(), String> {
+    let mut tuples: Vec<Vec<String>> = Vec::with_capacity(baselines.len());
+    for b in baselines {
+        let parts: Vec<String> = b
+            .from_parts
+            .iter()
+            .map(|p| p.trim().to_string())
+            .collect();
+        if parts.len() != from_columns.len() || parts.iter().any(|p| p.is_empty()) {
+            return Err(format!(
+                "refused: invalid baseline from_parts {parts:?} (arity {})",
+                from_columns.len()
+            ));
+        }
+        tuples.push(parts);
+    }
+    let found = read_baselines_batch_on_conn(
+        conn,
+        alias,
+        schema,
+        table,
+        from_columns,
+        to_column,
+        editable,
+        &tuples,
+    )?;
+    for (b, parts) in baselines.iter().zip(tuples.iter()) {
+        let current = found.get(&baseline_tuple_key(parts));
+        match (b.existed, current) {
+            (false, Some(_)) => {
+                return Err(format!(
+                    "refused: KeyMap row {parts:?} was created concurrently"
+                ));
+            }
+            (false, None) => {}
+            (true, None) => {
+                return Err(format!(
+                    "refused: KeyMap row {parts:?} was deleted concurrently"
+                ));
+            }
+            (true, Some(row)) => {
+                if !entry_to_matches(b, row, editable) {
+                    return Err(format!(
+                        "refused: KeyMap row {parts:?} changed concurrently \
+                         (expected to={:?}, got to={:?})",
+                        b.to, row.to
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -116,21 +310,31 @@ fn read_entries_on_conn(
     alias: &str,
     schema: &str,
     table: &str,
-    from_column: &str,
+    from_columns: &[String],
     to_column: &str,
     editable: &[String],
     query: &KeyMapReadQuery,
 ) -> Result<(Vec<KeyMapEntry>, Option<u64>), String> {
-    let q_from = quote_ident(from_column);
+    let from_columns: Vec<String> = from_columns
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if from_columns.is_empty() {
+        return Err("from_columns required".into());
+    }
+    let q_froms: Vec<String> = from_columns.iter().map(|c| quote_ident(c)).collect();
     let q_to = quote_ident(to_column);
     let q_schema = quote_ident(schema);
     let q_table = quote_ident(table);
     let rel = format!("{alias}.{q_schema}.{q_table}");
+    let n_from = from_columns.len();
 
-    let mut select_cols = vec![
-        format!("CAST({q_from} AS VARCHAR)"),
-        format!("CAST({q_to} AS VARCHAR)"),
-    ];
+    let mut select_cols: Vec<String> = q_froms
+        .iter()
+        .map(|q| format!("CAST({q} AS VARCHAR)"))
+        .collect();
+    select_cols.push(format!("CAST({q_to} AS VARCHAR)"));
     for c in editable {
         select_cols.push(format!("CAST({} AS VARCHAR)", quote_ident(c)));
     }
@@ -141,8 +345,10 @@ fn read_entries_on_conn(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
+        // Prefix filter on the first From column (composite: primary key part).
         where_sql = format!(
-            " WHERE CAST({q_from} AS VARCHAR) ILIKE '{}%'",
+            " WHERE CAST({} AS VARCHAR) ILIKE '{}%'",
+            q_froms[0],
             escape_sql_string(prefix)
         );
     }
@@ -160,8 +366,9 @@ fn read_entries_on_conn(
         }
     }
 
+    let order = q_froms.join(", ");
     let mut sql = format!(
-        "SELECT {} FROM {rel}{where_sql} ORDER BY {q_from}",
+        "SELECT {} FROM {rel}{where_sql} ORDER BY {order}",
         select_cols.join(", ")
     );
     if let Some(lim) = query.limit {
@@ -177,48 +384,127 @@ fn read_entries_on_conn(
     let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        let from: String = row.get(0).map_err(|e| e.to_string())?;
-        let to: String = row.get(1).map_err(|e| e.to_string())?;
+        let mut parts = Vec::with_capacity(n_from);
+        for i in 0..n_from {
+            let v: String = row.get(i).map_err(|e| e.to_string())?;
+            parts.push(v);
+        }
+        let to: String = row.get(n_from).map_err(|e| e.to_string())?;
         let mut attrs = BTreeMap::new();
         for (i, c) in editable.iter().enumerate() {
-            let v: Option<String> = row.get(2 + i).ok();
+            let v: Option<String> = row.get(n_from + 1 + i).ok();
             if let Some(val) = v {
                 attrs.insert(c.clone(), val);
             }
         }
-        out.push(KeyMapEntry { from, to, attrs });
+        out.push(KeyMapEntry {
+            from: parts.first().cloned().unwrap_or_default(),
+            from_parts: parts,
+            to,
+            attrs,
+        });
     }
     Ok((out, total_count))
 }
 
-fn values_row(e: &KeyMapEntry, editable: &[String]) -> String {
-    let mut parts = vec![
-        format!("'{}'", escape_sql_string(e.from.trim())),
-        format!("'{}'", escape_sql_string(&e.to)),
-    ];
+/// Literal for a VALUES cell. Missing attr → SQL NULL (not `''`) so NULL round-trips
+/// and an edit to one field does not blank other nullable columns.
+fn sql_value_literal(v: Option<&str>) -> String {
+    match v {
+        None => "NULL".into(),
+        Some(s) => format!("'{}'", escape_sql_string(s)),
+    }
+}
+
+fn values_row(e: &KeyMapEntry, from_arity: usize, editable: &[String]) -> String {
+    let from_parts = e.from_parts_eff();
+    let mut parts = Vec::with_capacity(from_arity + 1 + editable.len());
+    for i in 0..from_arity {
+        let v = from_parts.get(i).map(|s| s.trim()).unwrap_or("");
+        parts.push(sql_value_literal(Some(v)));
+    }
+    parts.push(sql_value_literal(Some(&e.to)));
     for c in editable {
-        let v = e.attrs.get(c).map(|s| s.as_str()).unwrap_or("");
-        parts.push(format!("'{}'", escape_sql_string(v)));
+        parts.push(sql_value_literal(e.attrs.get(c).map(|s| s.as_str())));
     }
     format!("({})", parts.join(", "))
 }
 
-fn values_alias_cols(editable: &[String]) -> String {
-    let mut cols = vec!["from_val".to_string(), "to_val".to_string()];
+fn values_alias_cols(from_arity: usize, editable: &[String]) -> String {
+    let mut cols: Vec<String> = (0..from_arity).map(|i| format!("f{i}")).collect();
+    cols.push("to_val".to_string());
     for (i, _) in editable.iter().enumerate() {
         cols.push(format!("a{i}"));
     }
     cols.join(", ")
 }
 
-/// Apply a dirty delta (ADR-0022): batched DELETE removed Froms + UPDATE/INSERT upserts.
+fn is_textual_pg_type(data_type: &str) -> bool {
+    let dt = data_type.trim().to_ascii_lowercase();
+    matches!(
+        dt.as_str(),
+        "text"
+            | "character varying"
+            | "character"
+            | "citext"
+            | "name"
+            | "xml"
+            | "json"
+            | "jsonb"
+            | "bytea"
+            | "tsvector"
+            | "tsquery"
+    ) || dt.starts_with("character varying")
+        || dt.starts_with("character(")
+        || dt.starts_with("char(")
+}
+
+/// Normalize information_schema.data_type for use in `CAST(… AS …)`.
+fn pg_cast_type(data_type: &str) -> String {
+    let dt = data_type.trim().to_ascii_lowercase();
+    match dt.as_str() {
+        "" | "user-defined" | "array" => "text".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Cast a VALUES text/NULL cell to the Postgres column type.
+/// Non-text: empty string → NULL (UI may send `""` for cleared cells).
+fn sql_cast_expr(value_ref: &str, data_type: &str) -> String {
+    let ty = pg_cast_type(data_type);
+    if is_textual_pg_type(&ty) {
+        format!("CAST({value_ref} AS {ty})")
+    } else {
+        format!("CAST(NULLIF({value_ref}, '') AS {ty})")
+    }
+}
+
+fn col_type_map(
+    db: &DbSession,
+    connection_string: &str,
+    schema: &str,
+    table: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let cols = crate::postgres_catalog::describe_postgres_object(
+        db,
+        connection_string,
+        schema,
+        table,
+    )?;
+    Ok(cols
+        .into_iter()
+        .map(|c| (c.name, c.data_type))
+        .collect())
+}
+
+/// Apply a dirty delta (ADR-0022 / ADR-0024): batched DELETE removed From tuples + UPDATE/INSERT upserts.
 /// Preserves unselected / autogenerated columns on UPDATE.
 pub fn write_key_map_delta_to_postgres(
     db: &DbSession,
     connection_string: &str,
     schema: &str,
     table: &str,
-    from_column: &str,
+    from_columns: &[String],
     to_column: &str,
     editable: &[String],
     delta: &KeyMapDirtyDelta,
@@ -226,31 +512,79 @@ pub fn write_key_map_delta_to_postgres(
 ) -> Result<KeyMapWriteResult, String> {
     let schema = schema.trim();
     let table = table.trim();
-    let from_column = from_column.trim();
     let to_column = to_column.trim();
+    let from_columns: Vec<String> = from_columns
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
     if schema.is_empty() || table.is_empty() {
         return Err("schema and table are required".into());
     }
-    if from_column.is_empty() || to_column.is_empty() {
-        return Err("from_column and to_column are required".into());
+    if from_columns.is_empty() || to_column.is_empty() {
+        return Err("from_columns and to_column are required".into());
     }
-    if from_column == to_column {
-        return Err("from_column and to_column must differ".into());
+    if from_columns.iter().any(|c| c == to_column) {
+        return Err("from_columns and to_column must differ".into());
     }
-    validate_entries(&delta.upserts)?;
+    let arity = from_columns.len();
+    let validated = validate_mapping_delta(delta, arity)?;
+    apply_validated_delta_to_postgres(
+        db,
+        connection_string,
+        schema,
+        table,
+        &from_columns,
+        to_column,
+        editable,
+        &validated,
+        expected_content_hash,
+    )
+}
 
+fn apply_validated_delta_to_postgres(
+    db: &DbSession,
+    connection_string: &str,
+    schema: &str,
+    table: &str,
+    from_columns: &[String],
+    to_column: &str,
+    editable: &[String],
+    delta: &ValidatedMappingDelta,
+    expected_content_hash: Option<&str>,
+) -> Result<KeyMapWriteResult, String> {
     db.ensure_postgres()?;
-    let q_from = quote_ident(from_column);
+    let q_froms: Vec<String> = from_columns.iter().map(|c| quote_ident(c)).collect();
     let q_to = quote_ident(to_column);
     let pg_schema = quote_ident(schema);
     let pg_table = quote_ident(table);
     let pg_rel = format!("{pg_schema}.{pg_table}");
     let lock_key = advisory_lock_key(schema, table);
+    let from_set: std::collections::HashSet<&str> =
+        from_columns.iter().map(|s| s.as_str()).collect();
     let editable: Vec<String> = editable
         .iter()
         .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty() && c != from_column && c != to_column)
+        .filter(|c| !c.is_empty() && !from_set.contains(c.as_str()) && c != to_column)
         .collect();
+    let arity = from_columns.len();
+
+    let type_map = col_type_map(db, connection_string, schema, table)?;
+    let from_tys: Vec<&str> = from_columns
+        .iter()
+        .map(|c| type_map.get(c).map(|s| s.as_str()).unwrap_or("text"))
+        .collect();
+    let to_ty = type_map
+        .get(to_column)
+        .map(|s| s.as_str())
+        .unwrap_or("text");
+    let editable_tys: Vec<&str> = editable
+        .iter()
+        .map(|c| type_map.get(c).map(|s| s.as_str()).unwrap_or("text"))
+        .collect();
+
+    let dels = delta.deletes();
+    let baseline_list = delta.baseline_list();
 
     db.with_conn(|conn| {
         let alias = ensure_pg_attached_rw(conn, connection_string)?;
@@ -264,65 +598,153 @@ pub fn write_key_map_delta_to_postgres(
                 &alias,
                 &format!("SELECT pg_advisory_xact_lock({lock_key})"),
             )?;
-
-            // ADR-0022: do not full-scan 100K rows for concurrency on dirty-delta writes.
-            // Full-table hash is only meaningful for small maps / legacy full-sync callers
-            // that still pass expected_content_hash with a complete snapshot.
-            let _ = expected_content_hash;
+            // Prefer row-level baselines (scale-safe). Fall back to full-table hash only
+            // when baselines are absent and expected_content_hash is provided.
+            if !baseline_list.is_empty() {
+                verify_baselines_on_conn(
+                    conn,
+                    &alias,
+                    schema,
+                    table,
+                    from_columns,
+                    to_column,
+                    &editable,
+                    &baseline_list,
+                )?;
+            } else if let Some(expected) = expected_content_hash
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let (current, _) = read_entries_on_conn(
+                    conn,
+                    &alias,
+                    schema,
+                    table,
+                    from_columns,
+                    to_column,
+                    &editable,
+                    &KeyMapReadQuery::default(),
+                )?;
+                let got = key_map_content_hash(&current);
+                if got != expected {
+                    return Err(format!(
+                        "refused: KeyMap changed concurrently (content hash mismatch)"
+                    ));
+                }
+            }
 
             let mut written = 0usize;
 
-            if !delta.deleted_froms.is_empty() {
-                let list = delta
-                    .deleted_froms
-                    .iter()
-                    .map(|f| format!("'{}'", escape_sql_string(f.trim())))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let del = format!("DELETE FROM {pg_rel} WHERE {q_from} IN ({list})");
-                pg_execute(conn, &alias, &del)
-                    .map_err(|e| format!("DELETE removed froms: {e}"))?;
+            if !dels.is_empty() {
+                if arity == 1 {
+                    let list = dels
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "'{}'",
+                                escape_sql_string(p.first().map(|s| s.as_str()).unwrap_or(""))
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let del = format!("DELETE FROM {pg_rel} WHERE {} IN ({list})", q_froms[0]);
+                    pg_execute(conn, &alias, &del)
+                        .map_err(|e| format!("DELETE removed froms: {e}"))?;
+                } else {
+                    let tuple_list = dels
+                        .iter()
+                        .map(|parts| {
+                            let cells: Vec<String> = (0..arity)
+                                .map(|i| {
+                                    format!(
+                                        "'{}'",
+                                        escape_sql_string(
+                                            parts.get(i).map(|s| s.as_str()).unwrap_or(""),
+                                        )
+                                    )
+                                })
+                                .collect();
+                            format!("({})", cells.join(", "))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let cols = q_froms.join(", ");
+                    let del = format!(
+                        "DELETE FROM {pg_rel} WHERE ({cols}) IN ({tuple_list})"
+                    );
+                    pg_execute(conn, &alias, &del)
+                        .map_err(|e| format!("DELETE removed from tuples: {e}"))?;
+                }
             }
 
-            if !delta.upserts.is_empty() {
-                let vcols = values_alias_cols(&editable);
+            if !delta.upserts().is_empty() {
+                let vcols = values_alias_cols(arity, &editable);
                 let values = delta
-                    .upserts
+                    .upserts()
                     .iter()
-                    .map(|e| values_row(e, &editable))
+                    .map(|e| values_row(e, arity, &editable))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let values_sql = format!("(VALUES {values}) AS v({vcols})");
 
-                let mut set_parts = vec![format!("{q_to} = v.to_val")];
+                let mut set_parts = vec![format!(
+                    "{q_to} = {}",
+                    sql_cast_expr("v.to_val", to_ty)
+                )];
                 for (i, c) in editable.iter().enumerate() {
-                    set_parts.push(format!("{} = v.a{i}", quote_ident(c)));
+                    set_parts.push(format!(
+                        "{} = {}",
+                        quote_ident(c),
+                        sql_cast_expr(&format!("v.a{i}"), editable_tys[i])
+                    ));
                 }
+                let join_pred: String = (0..arity)
+                    .map(|i| {
+                        format!(
+                            "CAST(m.{} AS VARCHAR) = v.f{i}",
+                            q_froms[i]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
                 let upd = format!(
-                    "UPDATE {pg_rel} AS m SET {} FROM {values_sql} WHERE CAST(m.{q_from} AS VARCHAR) = v.from_val",
+                    "UPDATE {pg_rel} AS m SET {} FROM {values_sql} WHERE {join_pred}",
                     set_parts.join(", ")
                 );
                 pg_execute(conn, &alias, &upd).map_err(|e| format!("UPDATE upserts: {e}"))?;
 
-                let mut insert_cols = vec![q_from.clone(), q_to.clone()];
+                let mut insert_cols: Vec<String> = q_froms.clone();
+                insert_cols.push(q_to.clone());
                 for c in &editable {
                     insert_cols.push(quote_ident(c));
                 }
-                let mut select_cols = vec!["v.from_val".to_string(), "v.to_val".to_string()];
+                let mut select_cols: Vec<String> = (0..arity)
+                    .map(|i| sql_cast_expr(&format!("v.f{i}"), from_tys[i]))
+                    .collect();
+                select_cols.push(sql_cast_expr("v.to_val", to_ty));
                 for (i, _) in editable.iter().enumerate() {
-                    select_cols.push(format!("v.a{i}"));
+                    select_cols.push(sql_cast_expr(&format!("v.a{i}"), editable_tys[i]));
                 }
+                let exists_pred: String = (0..arity)
+                    .map(|i| {
+                        format!(
+                            "CAST(m.{} AS VARCHAR) = v.f{i}",
+                            q_froms[i]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
                 let ins = format!(
                     "INSERT INTO {pg_rel} ({cols}) \
                      SELECT {sel} FROM {values_sql} \
                      WHERE NOT EXISTS (\
-                       SELECT 1 FROM {pg_rel} m WHERE CAST(m.{q_from} AS VARCHAR) = v.from_val\
+                       SELECT 1 FROM {pg_rel} m WHERE {exists_pred}\
                      )",
                     cols = insert_cols.join(", "),
                     sel = select_cols.join(", "),
                 );
                 pg_execute(conn, &alias, &ins).map_err(|e| format!("INSERT upserts: {e}"))?;
-                written = delta.upserts.len();
+                written = delta.upserts().len();
             }
 
             Ok(written)
@@ -332,13 +754,13 @@ pub fn write_key_map_delta_to_postgres(
             Ok(rows_written) => {
                 conn.execute_batch("COMMIT")
                     .map_err(|e| format!("COMMIT: {e}"))?;
-                // Hash of delta upserts only when not full-table; UI refreshes page after save.
+                // Cheap token for UI; concurrency is row-baseline based.
                 Ok(KeyMapWriteResult {
                     schema: schema.to_string(),
                     table: table.to_string(),
                     rows_written,
                     created_table: false,
-                    content_hash: key_map_content_hash(&delta.upserts),
+                    content_hash: key_map_content_hash(delta.upserts()),
                 })
             }
             Err(e) => {
@@ -365,7 +787,7 @@ pub fn write_key_map_to_postgres(
         connection_string,
         schema,
         table,
-        from_column,
+        &[from_column.to_string()],
         to_column,
         &[],
         entries,
@@ -378,7 +800,7 @@ pub fn write_key_map_to_postgres_ex(
     connection_string: &str,
     schema: &str,
     table: &str,
-    from_column: &str,
+    from_columns: &[String],
     to_column: &str,
     editable: &[String],
     entries: &[KeyMapEntry],
@@ -387,37 +809,38 @@ pub fn write_key_map_to_postgres_ex(
     validate_entries(entries)?;
     let keep: std::collections::HashSet<String> = entries
         .iter()
-        .map(|e| e.from.trim().to_string())
+        .map(|e| e.from_parts_eff().join("\0"))
         .collect();
 
-    // Load current froms to compute deletes (small maps / full sync path).
     let current = read_key_map_from_postgres_ex(
         db,
         connection_string,
         schema,
         table,
-        from_column,
+        from_columns,
         to_column,
         editable,
         &KeyMapReadQuery::default(),
     )?;
-    let deleted_froms: Vec<String> = current
+    let deleted_from_parts: Vec<Vec<String>> = current
         .entries
         .iter()
-        .map(|e| e.from.trim().to_string())
-        .filter(|f| !keep.contains(f))
+        .map(|e| e.from_parts_eff())
+        .filter(|p| !keep.contains(&p.join("\0")))
         .collect();
 
     let delta = KeyMapDirtyDelta {
         upserts: entries.to_vec(),
-        deleted_froms,
+        deleted_froms: vec![],
+        deleted_from_parts,
+        baselines: vec![],
     };
     write_key_map_delta_to_postgres(
         db,
         connection_string,
         schema,
         table,
-        from_column,
+        from_columns,
         to_column,
         editable,
         &delta,
@@ -438,7 +861,7 @@ pub fn read_key_map_from_postgres(
         connection_string,
         schema,
         table,
-        from_column,
+        &[from_column.to_string()],
         to_column,
         &[],
         &KeyMapReadQuery::default(),
@@ -451,14 +874,13 @@ pub fn read_key_map_from_postgres_ex(
     connection_string: &str,
     schema: &str,
     table: &str,
-    from_column: &str,
+    from_columns: &[String],
     to_column: &str,
     editable: &[String],
     query: &KeyMapReadQuery,
 ) -> Result<KeyMapReadResult, String> {
     let schema = schema.trim();
     let table = table.trim();
-    let from_column = from_column.trim();
     let to_column = to_column.trim();
     if schema.is_empty() || table.is_empty() {
         return Err("schema and table are required".into());
@@ -467,12 +889,14 @@ pub fn read_key_map_from_postgres_ex(
 
     db.with_conn(|conn| {
         let alias = ensure_pg_attached(conn, connection_string)?;
+        // Page-only read (ADR-0022 scale). content_hash is informational for the page;
+        // Save concurrency uses per-From baselines in the dirty delta.
         let (entries, total_count) = read_entries_on_conn(
             conn,
             &alias,
             schema,
             table,
-            from_column,
+            from_columns,
             to_column,
             editable,
             query,
@@ -512,13 +936,14 @@ pub fn write_key_map_with_delta(
 ) -> Result<KeyMapWriteResult, String> {
     match &map.storage {
         KeyMapStorage::Source { source, table, .. } => {
+            let from_cols = map.from_columns_eff();
             if let Some(d) = delta {
                 write_key_map_delta_to_postgres(
                     db,
                     connection_string,
                     source,
                     table,
-                    map.from_column.as_str(),
+                    &from_cols,
                     map.to_column.as_str(),
                     &map.editable_columns,
                     d,
@@ -530,7 +955,7 @@ pub fn write_key_map_with_delta(
                     connection_string,
                     source,
                     table,
-                    map.from_column.as_str(),
+                    &from_cols,
                     map.to_column.as_str(),
                     &map.editable_columns,
                     &map.entries,
@@ -577,7 +1002,7 @@ pub fn read_key_map_paged(
             connection_string,
             source,
             table,
-            map.from_column.as_str(),
+            &map.from_columns_eff(),
             map.to_column.as_str(),
             &map.editable_columns,
             query,
@@ -589,6 +1014,97 @@ pub fn read_key_map_paged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validated_delta_prefers_from_parts() {
+        let delta = KeyMapDirtyDelta {
+            upserts: vec![],
+            deleted_froms: vec!["ignored".into()],
+            deleted_from_parts: vec![vec!["SKU123".into(), "2024-06-01".into()]],
+            baselines: vec![KeyMapDirtyBaseline {
+                from_parts: vec!["SKU123".into(), "2024-06-01".into()],
+                existed: true,
+                to: "x".into(),
+                attrs: BTreeMap::new(),
+            }],
+        };
+        let v = validate_mapping_delta(&delta, 2).unwrap();
+        assert_eq!(
+            v.deletes(),
+            &[vec!["SKU123".to_string(), "2024-06-01".to_string()]]
+        );
+    }
+
+    #[test]
+    fn baseline_to_match_ignores_non_editable_row_attrs() {
+        let b = KeyMapDirtyBaseline {
+            from_parts: vec!["A".into()],
+            existed: true,
+            to: "X".into(),
+            attrs: BTreeMap::new(),
+        };
+        let mut row = KeyMapEntry::pair("A", "X");
+        row.attrs.insert("note".into(), "extra".into());
+        // `note` not in editable → ignored (autogenerated / unselected cols).
+        assert!(entry_to_matches(&b, &row, &[]));
+        row.to = "Z".into();
+        assert!(!entry_to_matches(&b, &row, &[]));
+    }
+
+    #[test]
+    fn baseline_null_attr_conflicts_when_filled() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("note".into(), None); // explicit SQL NULL
+        let b = KeyMapDirtyBaseline {
+            from_parts: vec!["A".into()],
+            existed: true,
+            to: "X".into(),
+            attrs,
+        };
+        let editable = vec!["note".into()];
+        let mut row = KeyMapEntry::pair("A", "X");
+        // Still NULL → ok.
+        assert!(entry_to_matches(&b, &row, &editable));
+        // Concurrent fill NULL → value must refuse.
+        row.attrs.insert("note".into(), "filled".into());
+        assert!(!entry_to_matches(&b, &row, &editable));
+        // Empty string is also not NULL.
+        row.attrs.insert("note".into(), "".into());
+        assert!(!entry_to_matches(&b, &row, &editable));
+        // Explicit empty-string baseline ≠ NULL row.
+        let mut empty_attrs = BTreeMap::new();
+        empty_attrs.insert("note".into(), Some("".into()));
+        let b_empty = KeyMapDirtyBaseline {
+            from_parts: vec!["A".into()],
+            existed: true,
+            to: "X".into(),
+            attrs: empty_attrs,
+        };
+        row.attrs.remove("note");
+        assert!(!entry_to_matches(&b_empty, &row, &editable));
+        row.attrs.insert("note".into(), "".into());
+        assert!(entry_to_matches(&b_empty, &row, &editable));
+    }
+
+    #[test]
+    fn baseline_attr_value_must_match() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("note".into(), Some("old".into()));
+        let b = KeyMapDirtyBaseline {
+            from_parts: vec!["A".into()],
+            existed: true,
+            to: "X".into(),
+            attrs,
+        };
+        let editable = vec!["note".into()];
+        let mut row = KeyMapEntry::pair("A", "X");
+        row.attrs.insert("note".into(), "old".into());
+        assert!(entry_to_matches(&b, &row, &editable));
+        row.attrs.insert("note".into(), "new".into());
+        assert!(!entry_to_matches(&b, &row, &editable));
+        row.attrs.remove("note");
+        assert!(!entry_to_matches(&b, &row, &editable));
+    }
 
     #[test]
     fn content_hash_order_independent() {
@@ -626,9 +1142,44 @@ mod tests {
         let mut e = KeyMapEntry::pair("a", "b");
         e.attrs.insert("note".into(), "x".into());
         e.attrs.insert("ignored".into(), "y".into());
-        let row = values_row(&e, &["note".into()]);
+        let row = values_row(&e, 1, &["note".into()]);
         assert!(row.contains("'x'"));
         assert!(!row.contains("'y'"), "unselected attr must not be in upsert VALUES");
+    }
+
+    #[test]
+    fn values_row_missing_attr_is_sql_null_not_empty_string() {
+        let e = KeyMapEntry::pair("a", "b");
+        let row = values_row(&e, 1, &["note".into()]);
+        assert_eq!(row, "('a', 'b', NULL)");
+    }
+
+    #[test]
+    fn values_row_empty_string_attr_stays_quoted_empty() {
+        let mut e = KeyMapEntry::pair("a", "b");
+        e.attrs.insert("note".into(), "".into());
+        let row = values_row(&e, 1, &["note".into()]);
+        assert_eq!(row, "('a', 'b', '')");
+    }
+
+    #[test]
+    fn sql_cast_expr_text_keeps_empty_string() {
+        assert_eq!(
+            sql_cast_expr("v.a0", "character varying"),
+            "CAST(v.a0 AS character varying)"
+        );
+    }
+
+    #[test]
+    fn sql_cast_expr_numeric_nullif_empty() {
+        assert_eq!(
+            sql_cast_expr("v.a0", "integer"),
+            "CAST(NULLIF(v.a0, '') AS integer)"
+        );
+        assert_eq!(
+            sql_cast_expr("v.to_val", "boolean"),
+            "CAST(NULLIF(v.to_val, '') AS boolean)"
+        );
     }
 
     #[test]

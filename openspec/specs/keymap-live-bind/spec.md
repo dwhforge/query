@@ -30,6 +30,17 @@ Source Save SHALL upsert by the From column (batched), delete removed From keys,
 - **WHEN** a row is updated and a column is not in `editable_columns`
 - **THEN** that column’s value in Postgres remains unchanged after Save
 
+#### Scenario: NULL editable attrs round-trip
+
+- **WHEN** an editable attribute is SQL NULL in Postgres
+- **THEN** read omits or nulls that attr (does not coerce to empty string)
+- **AND** a subsequent Save that does not set that attr writes SQL NULL (not `''`)
+
+#### Scenario: Typed column cast on write-back
+
+- **WHEN** From, To, or an editable column has a non-text Postgres type
+- **THEN** Save CASTs VALUES cells to that column’s type (empty non-text → NULL)
+
 ### Requirement: Preview joins live source maps
 
 When applying a source-backed KeyMap in DuckDB preview, the system SHALL join the attached Postgres map relation for From→To remap rather than embedding the full dictionary as VALUES.

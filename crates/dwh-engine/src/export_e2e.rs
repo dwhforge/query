@@ -13,7 +13,7 @@ mod tests {
     };
     use duckdb::params;
     use serde_json::Value as JsonValue;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::env::temp_dir;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -194,7 +194,9 @@ mod tests {
         assert!(eu.is_file(), "missing {}", eu.display());
         let ws = rename_append_workspace(&eu, &us);
         let db = DbSession::new().expect("duckdb");
-        let seeds = collect_load_seeds(&db, &ws, &[], &[]).expect("seeds");
+        let seeds = collect_load_seeds(&db, &ws, &[], &[])
+            .expect("seeds")
+            .seeds;
         let expected = vec![
             "date".to_string(),
             "region".to_string(),
@@ -222,7 +224,9 @@ mod tests {
 
         let ws = rename_append_workspace(&eu, &us);
         let db = DbSession::new().expect("duckdb");
-        let seeds = collect_load_seeds(&db, &ws, &[], &[]).expect("seeds");
+        let seeds = collect_load_seeds(&db, &ws, &[], &[])
+            .expect("seeds")
+            .seeds;
         assert!(!seeds.is_empty(), "e2e needs Load* seeds");
 
         let preview = preview_workspace(&db, &ws, &[], &[]).expect("preview");
@@ -240,6 +244,7 @@ mod tests {
                 DbtTarget::V1,
                 WarehouseDialect::Duckdb,
                 &seeds,
+                &HashMap::new(),
             )
             .expect("export");
 
@@ -292,5 +297,323 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&out);
+    }
+
+    /// ADR-0025: owner mapping + query, consumer reference, preview matches `dbt build`.
+    #[test]
+    fn reference_preview_matches_dbt_build() {
+        use dwh_pipeline::{
+            dbt_build, dbt_build_with_env, make_project_reference, refresh_reference,
+            resolve_operation, Destination, DestinationKind, ExecutionEngine, KeyMapDef,
+            KeyMapEntry, Materialization, ObjectKind, ObjectTarget, Project, QueryDef,
+            ResolveInput, ResolveKind, TransformationStep,
+        };
+
+        let root = temp_dir().join(format!("dwh_ref_e2e_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let owner_dir = root.join("owner");
+        let consumer_dir = root.join("consumer");
+        fs::create_dir_all(owner_dir.join("data")).unwrap();
+        fs::create_dir_all(consumer_dir.join("data")).unwrap();
+        fs::write(
+            owner_dir.join("data/products.csv"),
+            "system_code,product_code,name\nSYS,P1,Widget\nSYS,P2,Gadget\n",
+        )
+        .unwrap();
+        fs::write(
+            consumer_dir.join("data/products.csv"),
+            "system_code,product_code,name\nNO,X,Decoy\n",
+        )
+        .unwrap();
+
+        let mut map = KeyMapDef::new("km_products", "Products");
+        map.from_column = "system_code".into();
+        map.from_columns = vec!["system_code".into(), "product_code".into()];
+        map.to_column = "canonical_id".into();
+        map.entries = vec![
+            KeyMapEntry::parts(vec!["SYS".into(), "P1".into()], "CAN-1"),
+            KeyMapEntry::parts(vec!["SYS".into(), "P2".into()], "CAN-2"),
+        ];
+        let mut owner = Project {
+            id: "proj_owner".into(),
+            name: "Owner".into(),
+            project_uid: "uid-owner".into(),
+            references: vec![],
+            connection_bindings: vec![],
+            root_path: None,
+            connections: vec![],
+            sources: vec![],
+            workspace: Workspace {
+                queries: vec![QueryDef {
+                    id: "q_products".into(),
+                    name: "products".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "data/products.csv".into(),
+                    }],
+                    execution: Default::default(),
+                }],
+                focus_query_id: "q_products".into(),
+                key_maps: vec![map],
+            },
+            dbt_target: DbtTarget::V1,
+            execution_engine: ExecutionEngine::Duckdb,
+            destination: Destination::duckdb("local.duckdb"),
+            outputs: vec![],
+            materialization: Materialization::Table,
+            target_dialect: WarehouseDialect::Duckdb,
+            target_connection_id: None,
+            last_dbt_export_path: None,
+            canvas: None,
+        };
+        let owner_path = owner_dir.join("lib.dwhproj.json");
+        fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
+
+        let consumer_path = consumer_dir.join("app.dwhproj.json");
+        let mut consumer = Project {
+            id: "proj_consumer".into(),
+            name: "Consumer".into(),
+            project_uid: "uid-consumer".into(),
+            references: vec![],
+            connection_bindings: vec![],
+            root_path: None,
+            connections: vec![],
+            sources: vec![],
+            workspace: Workspace {
+                queries: vec![],
+                focus_query_id: String::new(),
+                key_maps: vec![],
+            },
+            dbt_target: DbtTarget::V1,
+            execution_engine: ExecutionEngine::Duckdb,
+            destination: Destination::duckdb("local.duckdb"),
+            outputs: vec![],
+            materialization: Materialization::Table,
+            target_dialect: WarehouseDialect::Duckdb,
+            target_connection_id: None,
+            last_dbt_export_path: None,
+            canvas: None,
+        };
+        fs::write(&consumer_path, consumer.to_json_pretty().unwrap()).unwrap();
+        let reference =
+            make_project_reference(&consumer_path, &owner_path, "SharedLib").expect("reference");
+        consumer.references = vec![reference.clone()];
+        consumer.workspace.queries.push(QueryDef {
+            id: "q_local".into(),
+            name: "local products".into(),
+            steps: vec![
+                TransformationStep::FromQuery {
+                    query_id: ObjectTarget::external(&reference.id, ObjectKind::Query, "q_products"),
+                },
+                TransformationStep::ApplyKeyMap {
+                    column: "system_code".into(),
+                    columns: vec!["system_code".into(), "product_code".into()],
+                    output_column: Some("canonical_id".into()),
+                    map_id: ObjectTarget::external(
+                        &reference.id,
+                        ObjectKind::Mapping,
+                        "km_products",
+                    ),
+                    entries: vec![],
+                },
+                TransformationStep::RenameColumn {
+                    from: "name".into(),
+                    to: "product_name".into(),
+                },
+            ],
+            execution: Default::default(),
+        });
+        consumer.workspace.focus_query_id = "q_local".into();
+        consumer.outputs = vec!["q_local".into()];
+        fs::write(&consumer_path, consumer.to_json_pretty().unwrap()).unwrap();
+        let consumer_disk = fs::read_to_string(&consumer_path).unwrap();
+        assert!(
+            !consumer_disk.contains("CAN-1"),
+            "consumer file must not snapshot owner mapping rows"
+        );
+
+        let resolve = |refs: &[dwh_pipeline::ProjectReference], ws: &Workspace| {
+            resolve_operation(&ResolveInput {
+                root_file: &consumer_path,
+                project_uid: "uid-consumer",
+                execution_engine: ExecutionEngine::Duckdb,
+                references: refs,
+                connection_bindings: &[],
+                workspace: ws,
+                sources: &[],
+                available_connections: &[],
+                kind: ResolveKind::Export {
+                    published_ids: vec!["q_local".into()],
+                },
+            })
+        };
+        let lowered = resolve(&consumer.references, &consumer.workspace).expect("lower");
+        assert!(lowered.provenance_json.is_some());
+        let provenance = lowered.provenance_json.clone().unwrap();
+        assert!(provenance.contains("uid-owner"));
+        assert!(!provenance.contains("SharedLib"));
+        assert!(!provenance.contains("products.csv"));
+        assert!(!provenance.contains("password"));
+
+        let db = DbSession::new().expect("duckdb");
+        let preview = preview_workspace(&db, &lowered.workspace, &[], &lowered.sources)
+            .expect("preview");
+        let preview_cols: Vec<String> = preview.columns.iter().map(|c| c.name.clone()).collect();
+        let preview_set = row_multiset(&preview_cols, &preview.rows);
+        let blob = format!("{preview_set:?}");
+        assert!(blob.contains("Widget") && blob.contains("CAN-1"), "{blob}");
+        assert!(!blob.contains("Decoy"), "consumer csv must not be read: {blob}");
+
+        let seeds = collect_load_seeds(&db, &lowered.workspace, &[], &lowered.sources)
+            .expect("seeds")
+            .seeds;
+        let export_a = root.join("export_a");
+        let export_b = root.join("export_b");
+        fs::create_dir_all(&export_a).unwrap();
+        fs::create_dir_all(&export_b).unwrap();
+        let produce = |dir: &Path| {
+            DbtProducer
+                .produce_routed_with_schema_and_sources(
+                    "ref_e2e",
+                    &lowered.workspace,
+                    dir.to_str().unwrap(),
+                    DbtTarget::V1,
+                    ExecutionEngine::Duckdb,
+                    DestinationKind::Duckdb,
+                    "public",
+                    &lowered.published_query_ids,
+                    &seeds,
+                    &lowered.sources,
+                    &HashMap::new(),
+                    lowered.provenance_json.as_deref(),
+                )
+                .expect("export")
+        };
+        let path_a = produce(&export_a);
+        let path_b = produce(&export_b);
+        let texts = |dir: &Path| -> BTreeMap<String, String> {
+            let mut out = BTreeMap::new();
+            for entry in walkdir_files(dir) {
+                let rel = entry.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
+                if rel.contains("target/") || rel.ends_with("local.duckdb") || rel.ends_with(".log")
+                {
+                    continue;
+                }
+                if let Ok(text) = fs::read_to_string(&entry) {
+                    out.insert(rel, text);
+                }
+            }
+            out
+        };
+        assert_eq!(texts(Path::new(&path_a)), texts(Path::new(&path_b)));
+        let prov = fs::read_to_string(Path::new(&path_a).join("dwhq_provenance.json")).unwrap();
+        assert_eq!(prov, provenance);
+
+        let pg_dir = root.join("export_pg");
+        fs::create_dir_all(&pg_dir).unwrap();
+        let pg_path = DbtProducer
+            .produce_routed_with_schema_and_sources(
+                "ref_e2e",
+                &lowered.workspace,
+                pg_dir.to_str().unwrap(),
+                DbtTarget::V1,
+                ExecutionEngine::Duckdb,
+                DestinationKind::Postgres,
+                "public",
+                &lowered.published_query_ids,
+                &seeds,
+                &lowered.sources,
+                &HashMap::new(),
+                lowered.provenance_json.as_deref(),
+            )
+            .expect("pg export");
+        let profile = fs::read_to_string(Path::new(&pg_path).join("profiles.yml")).unwrap();
+        assert!(profile.contains("alias: pg"), "{profile}");
+        assert!(profile.contains("type: postgres"), "{profile}");
+        let manifest = fs::read_to_string(Path::new(&pg_path).join(".dwhforge-export.json")).unwrap();
+        assert!(manifest.contains("duckdb->postgres"), "{manifest}");
+
+        if let Some(bin) = resolve_dbt_bin(&[]) {
+            let built = dbt_build(&path_a, Some(&bin));
+            assert!(built.ok, "dbt build failed:\n{}", built.log);
+            let focus = lowered.workspace.query("q_local").unwrap();
+            let mart = dbt_model_name(&lowered.workspace, focus, &lowered.published_query_ids);
+            let duckdb_file = Path::new(&path_a).join("local.duckdb");
+            let (wh_cols, wh_rows) = read_mart_table(&duckdb_file, &mart).expect("read mart");
+            let fold = |s: &str| s.chars().map(|c| c.to_ascii_lowercase()).collect::<String>();
+            let mut aligned = Vec::new();
+            for row in &wh_rows {
+                let mut out_row = Vec::new();
+                for pc in &preview_cols {
+                    let pf = fold(pc);
+                    let idx = wh_cols.iter().position(|c| fold(c) == pf).expect("col");
+                    out_row.push(row[idx].clone());
+                }
+                aligned.push(out_row);
+            }
+            let w_set = row_multiset(&preview_cols, &aligned);
+            assert_eq!(preview_set, w_set, "preview vs dbt build\n{preview_set:?}\n{w_set:?}");
+
+            if let Ok(dsn) = std::env::var("DWH_PG_DSN") {
+                if !dsn.trim().is_empty() {
+                    let mut env = HashMap::new();
+                    env.insert("DWH_PG_DSN".into(), dsn);
+                    let built_pg = dbt_build_with_env(&pg_path, Some(&bin), &env);
+                    assert!(built_pg.ok, "postgres dbt build failed:\n{}", built_pg.log);
+                }
+            }
+        } else {
+            eprintln!("skip dbt build: dbt not installed");
+        }
+
+        owner.workspace.key_maps[0].entries[0].to = "CAN-9".into();
+        fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
+        let stale = resolve(&consumer.references, &consumer.workspace);
+        let err = stale.expect_err("owner change must require refresh");
+        assert!(err.contains("update available"), "{err}");
+
+        let refreshed = refresh_reference(
+            &ResolveInput {
+                root_file: &consumer_path,
+                project_uid: "uid-consumer",
+                execution_engine: ExecutionEngine::Duckdb,
+                references: &consumer.references,
+                connection_bindings: &[],
+                workspace: &consumer.workspace,
+                sources: &[],
+                available_connections: &[],
+                kind: ResolveKind::ValidateAll,
+            },
+            &reference.id,
+        )
+        .expect("refresh");
+        consumer.references = vec![refreshed];
+        let again = resolve(&consumer.references, &consumer.workspace).expect("after refresh");
+        let preview2 = preview_workspace(&db, &again.workspace, &[], &again.sources).expect("preview2");
+        let cols2: Vec<String> = preview2.columns.iter().map(|c| c.name.clone()).collect();
+        let set2 = row_multiset(&cols2, &preview2.rows);
+        let blob2 = format!("{set2:?}");
+        assert!(blob2.contains("CAN-9"), "{blob2}");
+        assert!(!blob2.contains("CAN-1"), "{blob2}");
+        let still = fs::read_to_string(&consumer_path).unwrap();
+        assert!(!still.contains("CAN-9"), "refresh must not write the consumer file");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(cur) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&cur) else { continue };
+            for ent in rd.flatten() {
+                let path = ent.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 }

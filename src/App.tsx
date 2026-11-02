@@ -1,10 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
 }
 
 const BOTTOM_DOCK_HEIGHT_KEY = "dwh.bottomDockHeightPx";
+const EXPLORER_COLLAPSED_KEY = "dwh.explorerCollapsed";
+const INSPECTOR_COLLAPSED_KEY = "dwh.inspectorCollapsed";
 /**
  * Minimum canvas strip when Join Lens / Data is maximized.
  * Intentionally tiny — drag the splitter up to give almost all height to the dock.
@@ -12,6 +22,24 @@ const BOTTOM_DOCK_HEIGHT_KEY = "dwh.bottomDockHeightPx";
 const MIN_CANVAS_ABOVE_DOCK = 28;
 const BOTTOM_DOCK_MIN = 160;
 const BOTTOM_DOCK_HANDLE = 8;
+/** Drag side panel below this width → fully collapse (VS Code sash snap). */
+const SIDE_PANEL_COLLAPSE_SNAP = 96;
+
+function loadCollapsedFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistCollapsedFlag(key: string, collapsed: boolean) {
+  try {
+    localStorage.setItem(key, collapsed ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
 
 function loadBottomDockHeight(): number {
   try {
@@ -49,6 +77,13 @@ import { HelpDialog } from "./components/HelpDialog";
 import { OptionsDialog } from "./components/OptionsDialog";
 import { DbtSetupDialog } from "./components/DbtSetupDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
+import {
+  collectExternalBoundaries,
+  newQueryFromExternal,
+  parseTargetKey,
+  resolveOwnerPath,
+  workspaceFocusingObject,
+} from "./lib/projectRefs";
 import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
   OpProgress,
@@ -113,16 +148,23 @@ import {
   type DbtSetupStatus,
   getGlobalConnections,
   getLastProjectPath,
+  copyReferencedObject,
   loadProject,
   loadDemoWorkspace,
   prepareJoinInputs,
   previewDbtModel,
   previewWorkspace,
+  projectRefContext,
   pushKeyMapToExport,
   pushRecentProject,
-  readKeyMap,
+  makeProjectReference,
+  referenceConsumers,
+  referenceStatuses,
+  refreshReference,
+  relinkReference,
   removeKeyMapFromExport,
   saveProject,
+  type ReferenceStatus,
   setAppSettings,
   setGlobalConnections,
   syncKeyMapsFromExport,
@@ -149,7 +191,13 @@ import {
   projectEngine,
   queryExecution,
   routeLabel,
+  externalTarget,
+  isExternalTarget,
+  newId,
+  targetKey,
   togglePublishedOutput,
+  type ObjectTarget,
+  type ProjectReference,
   syncSourcesFromQueries,
   type ConnectionDef,
   type ConnectionKind,
@@ -173,28 +221,173 @@ import {
   type Workspace,
 } from "./types/pipeline";
 
+type KeyMapJoinCtx = {
+  hostQueryId: string;
+  joinStepIndex: number;
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+  /** Join type at open time — LEFT→INNER during Save must abort Apply. */
+  joinType: JoinType;
+  /** Side whose unmatched key opened Add to map… */
+  probeSide?: "left" | "right";
+  /** Fact columns for ApplyKeyMap (selected Join keys, ADR-0024). */
+  applyLeftOn?: string[];
+  applyRightOn?: string[];
+  /** Output column on the left (host) ApplyKeyMap. */
+  outputColumnLeft?: string;
+  /** Output column on the right ApplyKeyMap (may differ, e.g. sku vs item_code). */
+  outputColumnRight?: string;
+};
+
 type KeyMapTabSession = {
   map: KeyMapDef;
   /** Optimistic concurrency token from last warehouse read (source storage). */
   contentHash?: string;
   /** ADR-0022 dirty delta for source Save. */
   dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
+  /** Editor store Save API — one in-flight capture; confirm/abort take its token. */
+  saveApi?: {
+    captureSave: () => {
+      token: number;
+      delta: import("./lib/bridge").KeyMapDirtyDelta | null;
+    } | null;
+    confirmSave: (token: number) => void;
+    abortSave: (token: number) => void;
+    isSaving: () => boolean;
+  };
+  /** True while a warehouse write for this tab is awaiting a response. */
+  saveInFlight?: boolean;
+  /** Bumped after successful WH Save when editor saveApi is absent. */
+  dirtyResetSeq?: number;
   totalCount?: number | null;
   pickTo?: string[];
   suggestedFrom?: string[];
-  joinCtx?: {
-    hostQueryId: string;
-    joinStepIndex: number;
-    rightQueryId: string;
-    leftOn: string[];
-    rightOn: string[];
-    /** Side whose unmatched key opened Add to map… */
-    probeSide?: "left" | "right";
-  };
+  suggestedFromParts?: string[][];
+  joinCtx?: KeyMapJoinCtx;
 };
 
+/** Intent to insert ApplyKeyMap after a successful KeyMap Save. */
+type KeyMapApplyIntent = {
+  map: KeyMapDef;
+  ctx: KeyMapJoinCtx;
+  side: ApplySide;
+  leftCols: string[];
+  rightCols: string[];
+  outputColumnLeft: string;
+  outputColumnRight: string;
+};
+
+type KeyMapApplyResult =
+  | { status: "ok"; mapId: string; workspace: Workspace }
+  | { status: "join_gone"; mapId: string };
+
+/**
+ * After ApplyKeyMap insert, Join may shift; find the same Join by right + ON + type.
+ */
+function resolveJoinStepFromCtx(
+  ws: Workspace,
+  ctx: KeyMapJoinCtx,
+): number | null {
+  const q = ws.queries.find((x) => x.id === ctx.hostQueryId);
+  if (!q) return null;
+  const leftKey = ctx.leftOn.join("\0");
+  const rightKey = ctx.rightOn.join("\0");
+  const matches = (
+    s: TransformationStep | undefined,
+  ): s is TransformationStep & { type: "Join" } =>
+    s?.type === "Join" &&
+    targetKey(s.payload.right_query_id) === ctx.rightQueryId &&
+    s.payload.left_on.join("\0") === leftKey &&
+    s.payload.right_on.join("\0") === rightKey &&
+    s.payload.join_type === ctx.joinType;
+  const at = q.steps[ctx.joinStepIndex];
+  if (matches(at)) return ctx.joinStepIndex;
+  for (let i = 0; i < q.steps.length; i++) {
+    if (matches(q.steps[i])) return i;
+  }
+  return null;
+}
+
+/** Pure: fold ApplyKeyMap into the latest project workspace. */
+function applyKeyMapOntoProject(
+  project: Project,
+  intent: KeyMapApplyIntent,
+): { project: Project; result: KeyMapApplyResult } {
+  const joinIdx = resolveJoinStepFromCtx(project.workspace, intent.ctx);
+  if (joinIdx == null) {
+    return {
+      project,
+      result: { status: "join_gone", mapId: intent.map.id },
+    };
+  }
+  const workspace = applyKeyMapToWorkspace(
+    {
+      ...project.workspace,
+      key_maps: upsertKeyMapList(project.workspace.key_maps ?? [], intent.map),
+    },
+    intent.ctx.hostQueryId,
+    joinIdx,
+    intent.ctx.rightQueryId,
+    intent.side,
+    intent.leftCols[0]!,
+    intent.rightCols[0]!,
+    intent.map,
+    intent.leftCols,
+    intent.rightCols,
+    intent.outputColumnLeft,
+    intent.outputColumnRight,
+  );
+  return {
+    project: { ...project, workspace },
+    result: { status: "ok", mapId: intent.map.id, workspace },
+  };
+}
+
+type ProjectBag = {
+  project: Project;
+  /** Set by apply_keymap; cleared after UI handles close/error. */
+  keyMapApplyResult: KeyMapApplyResult | null;
+};
+
+type ProjectBagAction =
+  | { type: "set"; updater: (p: Project) => Project }
+  | { type: "apply_keymap"; intent: KeyMapApplyIntent }
+  | { type: "clear_keymap_apply_result" };
+
+function projectBagReducer(
+  state: ProjectBag,
+  action: ProjectBagAction,
+): ProjectBag {
+  switch (action.type) {
+    case "set":
+      return { ...state, project: action.updater(state.project) };
+    case "apply_keymap": {
+      const { project, result } = applyKeyMapOntoProject(
+        state.project,
+        action.intent,
+      );
+      return { project, keyMapApplyResult: result };
+    }
+    case "clear_keymap_apply_result":
+      return { ...state, keyMapApplyResult: null };
+    default:
+      return state;
+  }
+}
+
 function App() {
-  const [project, setProject] = useState<Project>(() => emptyProject("Untitled"));
+  const [projectBag, dispatchProject] = useReducer(projectBagReducer, {
+    project: emptyProject("Untitled"),
+    keyMapApplyResult: null,
+  });
+  const project = projectBag.project;
+  const setProject = useCallback((update: SetStateAction<Project>) => {
+    dispatchProject({
+      type: "set",
+      updater: typeof update === "function" ? update : () => update,
+    });
+  }, []);
   const [appSettings, setAppSettingsState] = useState<AppSettings>({
     default_target_dialect: "duckdb",
     default_dbt_target: "v1",
@@ -219,11 +412,72 @@ function App() {
   /** Height before last “maximize Join Lens / Data” double-click. */
   const bottomDockRestoreRef = useRef<number | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(300);
+  const [explorerCollapsed, setExplorerCollapsed] = useState(() =>
+    loadCollapsedFlag(EXPLORER_COLLAPSED_KEY),
+  );
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(() =>
+    loadCollapsedFlag(INSPECTOR_COLLAPSED_KEY),
+  );
   const explorerWidthRef = useRef(explorerWidth);
   const inspectorWidthRef = useRef(inspectorWidth);
   explorerWidthRef.current = explorerWidth;
   inspectorWidthRef.current = inspectorWidth;
+
+  function setExplorerCollapsedPersist(next: boolean) {
+    setExplorerCollapsed(next);
+    persistCollapsedFlag(EXPLORER_COLLAPSED_KEY, next);
+  }
+  function setInspectorCollapsedPersist(next: boolean) {
+    setInspectorCollapsed(next);
+    persistCollapsedFlag(INSPECTOR_COLLAPSED_KEY, next);
+  }
+
+  function maximizeBottomDock() {
+    const stackH = canvasDockStackRef.current?.clientHeight ?? 0;
+    if (stackH <= 0) return;
+    const maxH = clampBottomDockHeight(stackH, stackH);
+    setBottomDockHeight((h) => {
+      if (h < maxH - 12) bottomDockRestoreRef.current = h;
+      bottomDockHeightRef.current = maxH;
+      try {
+        localStorage.setItem(BOTTOM_DOCK_HEIGHT_KEY, String(maxH));
+      } catch {
+        /* ignore */
+      }
+      return maxH;
+    });
+  }
+
+  function focusJoinLensLayout() {
+    setExplorerCollapsedPersist(true);
+    setInspectorCollapsedPersist(true);
+    setJoinLensOn(true);
+    setBottomTab("data");
+    setCenterTab("canvas");
+    maximizeBottomDock();
+  }
+
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
+  const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(
+    null,
+  );
+  const [refStatuses, setRefStatuses] = useState<ReferenceStatus[]>([]);
+  const [refCatalogs, setRefCatalogs] = useState<
+    Record<
+      string,
+      {
+        alias: string;
+        queries: { id: string; name: string }[];
+        maps: { id: string; name: string }[];
+      }
+    >
+  >({});
+  /** Electron has no `window.prompt` — alias is collected in-app. */
+  const [addRefPending, setAddRefPending] = useState<{
+    consumerPath: string;
+    ownerPath: string;
+    alias: string;
+  } | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
     null,
   );
@@ -341,6 +595,7 @@ function App() {
   const [mapPickPending, setMapPickPending] = useState<{
     fromValues: string[];
     toValues?: string[];
+    fromParts?: string[][];
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
     /** Prefer this map (from existing ApplyKeyMap); still offer others. */
     preferredMapId?: string | null;
@@ -351,6 +606,7 @@ function App() {
   const [mapSwitchOffer, setMapSwitchOffer] = useState<{
     fromValues: string[];
     toValues?: string[];
+    fromParts?: string[][];
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
     preferredMapId: string;
   } | null>(null);
@@ -457,12 +713,17 @@ function App() {
   const sources = project.sources;
 
   const runPreview = useCallback(
-    async (ws: Workspace, conns: ConnectionDef[], srcs: SourceDef[] = []) => {
+    async (
+      ws: Workspace,
+      conns: ConnectionDef[],
+      srcs: SourceDef[] = [],
+      projectRef = projectRefContext(project),
+    ) => {
       // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
       const reqId = ++previewReqIdRef.current;
       setLoading(true);
       try {
-        const result = await previewWorkspace(ws, conns, srcs);
+        const result = await previewWorkspace(ws, conns, srcs, projectRef);
         if (reqId !== previewReqIdRef.current) return;
         setPreview(result);
         setError(null);
@@ -481,7 +742,7 @@ function App() {
         }
       }
     },
-    [],
+    [project],
   );
 
   const debouncedPreview = useMemo(
@@ -499,7 +760,8 @@ function App() {
     showPgPicker ||
     showS3Dialog ||
     showHiveDialog ||
-    Boolean(mapPickPending);
+    Boolean(mapPickPending) ||
+    Boolean(addRefPending);
 
   useEffect(() => {
     // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
@@ -518,7 +780,7 @@ function App() {
       return;
     }
     const hostId = activeQueryId;
-    const rightId = joinRightId || step.payload.right_query_id;
+    const rightId = joinRightId || targetKey(step.payload.right_query_id);
     if (!hostId || !rightId) {
       setJoinLeftColumns([]);
       setJoinRightColumns([]);
@@ -601,6 +863,7 @@ function App() {
       selectedStepIndex,
       sources,
       connections,
+      projectRefContext(project),
     )
       .then((s) => {
         if (s.prepared) {
@@ -660,6 +923,7 @@ function App() {
       connections,
       sources,
       !!joinPrepareLabel,
+      projectRefContext(project),
     )
       .then((r) => {
         setJoinPrepareLabel(formatJoinPrepareHint(r));
@@ -724,6 +988,7 @@ function App() {
       selectedStepIndex,
       connections,
       sources,
+      projectRefContext(project),
     )
       .then((d) => {
         setJoinDiag(d);
@@ -765,6 +1030,7 @@ function App() {
       projectDialect(project),
       connections,
       sources,
+      projectRefContext(project),
     )
       .then((m) => {
         if (!cancelled) {
@@ -826,7 +1092,7 @@ function App() {
       }
       const j = q.steps.find((s) => s.type === "Join");
       if (j && j.type === "Join") {
-        setJoinRightId(j.payload.right_query_id);
+        setJoinRightId(targetKey(j.payload.right_query_id));
         setJoinKeyPairsBoth(
           pairsFromOn(j.payload.left_on, j.payload.right_on),
         );
@@ -838,11 +1104,12 @@ function App() {
       }
       const fq = q.steps.find((s) => s.type === "FromQuery");
       setFromQueryId(
-        fq && fq.type === "FromQuery" ? fq.payload.query_id : "",
+        fq && fq.type === "FromQuery" ? targetKey(fq.payload.query_id) : "",
       );
       const a = q.steps.find((s) => s.type === "Append");
       if (a && a.type === "Append") {
-        setAppendOtherId(a.payload.other_query_ids[0] ?? "");
+        const first = a.payload.other_query_ids[0];
+        setAppendOtherId(first ? targetKey(first) : "");
       } else {
         setAppendOtherId("");
       }
@@ -864,18 +1131,20 @@ function App() {
         setGroupAggs(step.payload.aggregates.join(", "));
         break;
       case "Join":
-        setJoinRightId(step.payload.right_query_id);
+        setJoinRightId(targetKey(step.payload.right_query_id));
         setJoinKeyPairsBoth(
           pairsFromOn(step.payload.left_on, step.payload.right_on),
         );
         setJoinType(step.payload.join_type);
         break;
       case "FromQuery":
-        setFromQueryId(step.payload.query_id);
+        setFromQueryId(targetKey(step.payload.query_id));
         break;
-      case "Append":
-        setAppendOtherId(step.payload.other_query_ids[0] ?? "");
+      case "Append": {
+        const first = step.payload.other_query_ids[0];
+        setAppendOtherId(first ? targetKey(first) : "");
         break;
+      }
       case "SortBy":
         setSortCol(step.payload.column);
         setSortDesc(step.payload.descending);
@@ -909,6 +1178,7 @@ function App() {
     (id: string) => {
       setCenterTab("canvas");
       setSelectedKeyMapId(null);
+      setSelectedExternalKey(null);
       setActiveQueryId(id);
       const q = queries.find((x) => x.id === id);
       syncInspectorFromQuery(q);
@@ -919,7 +1189,325 @@ function App() {
     [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
 
-  function closeKeyMapTab(mapId: string) {
+  const externalBoundaries = useMemo(
+    () => collectExternalBoundaries(project),
+    [project],
+  );
+
+  useEffect(() => {
+    const file = project.root_path;
+    const refs = project.references ?? [];
+    if (!file || refs.length === 0) {
+      setRefStatuses([]);
+      return;
+    }
+    let cancelled = false;
+    void referenceStatuses(file, refs)
+      .then((list) => {
+        if (!cancelled) setRefStatuses(list);
+      })
+      .catch(() => {
+        if (!cancelled) setRefStatuses([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.root_path, project.references]);
+
+  useEffect(() => {
+    const file = project.root_path;
+    const refs = project.references ?? [];
+    if (!file || refs.length === 0) {
+      setRefCatalogs({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const next: typeof refCatalogs = {};
+      for (const r of refs) {
+        try {
+          const owner = await loadProject(resolveOwnerPath(file, r.locator));
+          next[r.id] = {
+            alias: r.alias,
+            queries: owner.workspace.queries.map((q) => ({
+              id: q.id,
+              name: q.name,
+            })),
+            maps: (owner.workspace.key_maps ?? []).map((m) => ({
+              id: m.id,
+              name: m.name,
+            })),
+          };
+        } catch {
+          next[r.id] = { alias: r.alias, queries: [], maps: [] };
+        }
+      }
+      if (!cancelled) setRefCatalogs(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [project.root_path, project.references]);
+
+  function objectTargetFromPicker(value: string): ObjectTarget {
+    return parseTargetKey(value) ?? value;
+  }
+
+  async function handleAddReference() {
+    let path = project.root_path;
+    if (!path) {
+      const pickedSave =
+        (await save({
+          defaultPath: `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+          filters: [{ name: "DWH Project", extensions: ["json"] }],
+        })) ?? null;
+      if (typeof pickedSave !== "string") return;
+      try {
+        const saved = await saveProject(pickedSave, {
+          ...project,
+          root_path: pickedSave,
+        });
+        path = pickedSave;
+        setProject((p) => ({
+          ...p,
+          ...saved,
+          root_path: pickedSave,
+          connections: p.connections,
+        }));
+      } catch (e) {
+        setError(typeof e === "string" ? e : String(e));
+        return;
+      }
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "DWH Project", extensions: ["json"] }],
+    });
+    if (typeof picked !== "string") return;
+    const norm = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+    if (norm(picked) === norm(path)) {
+      setError("A project cannot reference itself (same file)");
+      return;
+    }
+    try {
+      const owner = await loadProject(picked);
+      if (
+        project.project_uid?.trim() &&
+        owner.project_uid?.trim() &&
+        project.project_uid === owner.project_uid
+      ) {
+        setError(
+          "Same project_uid as the open project (likely a copied file). Save As the owner first to fork identity, then reference it.",
+        );
+        return;
+      }
+      setAddRefPending({
+        consumerPath: path,
+        ownerPath: picked,
+        alias: owner.name?.trim() || "Shared",
+      });
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function confirmAddReference() {
+    if (!addRefPending) return;
+    const { consumerPath, ownerPath, alias } = addRefPending;
+    const name = alias.trim() || "Shared";
+    try {
+      const ref = await makeProjectReference(consumerPath, ownerPath, name);
+      setProject((p) => ({
+        ...p,
+        references: [...(p.references ?? []), ref],
+      }));
+      setTreeExpanded((e) => ({ ...e, references: true }));
+      setAddRefPending(null);
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRefreshReference(ref: ProjectReference) {
+    try {
+      const updated = await refreshReference(project, ref.id);
+      setProject((p) => ({
+        ...p,
+        references: (p.references ?? []).map((r) =>
+          r.id === ref.id ? updated : r,
+        ),
+      }));
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRelinkReference(ref: ProjectReference) {
+    const file = project.root_path;
+    if (!file) {
+      setError("Save the project before relinking");
+      return;
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "DWH Project", extensions: ["json"] }],
+    });
+    if (typeof picked !== "string") return;
+    try {
+      const updated = await relinkReference(file, ref, picked);
+      setProject((p) => ({
+        ...p,
+        references: (p.references ?? []).map((r) =>
+          r.id === ref.id ? updated : r,
+        ),
+      }));
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleOpenReferenceOwner(ref: ProjectReference) {
+    const file = project.root_path;
+    if (!file) {
+      setError("Save the project to resolve reference paths");
+      return;
+    }
+    try {
+      await revealItemInDir(resolveOwnerPath(file, ref.locator));
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRemoveReference(ref: ProjectReference) {
+    try {
+      const consumers = await referenceConsumers(project.workspace, ref.id);
+      if (consumers.length > 0) {
+        setError(
+          `Cannot remove “${ref.alias}”: still used by ${consumers.join(", ")}`,
+        );
+        return;
+      }
+      setProject((p) => ({
+        ...p,
+        references: (p.references ?? []).filter((r) => r.id !== ref.id),
+      }));
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  function selectExternalBoundary(key: string) {
+    setSelectedExternalKey(key);
+    setActiveQueryId(null);
+    setSelectedStepIndex(null);
+    setSelectedKeyMapId(null);
+    setCenterTab("canvas");
+  }
+
+  function useReferencedQuery(
+    referenceId: string,
+    queryId: string,
+    nameHint: string,
+  ) {
+    const q = newQueryFromExternal(
+      project,
+      externalTarget(referenceId, "query", queryId),
+      nameHint,
+    );
+    setQueries((prev) => [...prev, q]);
+    selectQuery(q.id);
+  }
+
+  function deriveFromExternalKey(key: string) {
+    const target = parseTargetKey(key);
+    if (!target || !isExternalTarget(target)) return;
+    if (target.kind !== "query") {
+      setError("Use-in-new-query applies to referenced queries");
+      return;
+    }
+    const alias =
+      (project.references ?? []).find((r) => r.id === target.reference_id)
+        ?.alias ?? target.reference_id;
+    useReferencedQuery(
+      target.reference_id,
+      target.id,
+      `${alias}_${target.id}`,
+    );
+  }
+
+  async function createLocalCopyOfExternal(key: string) {
+    const target = parseTargetKey(key);
+    const file = project.root_path;
+    if (!target || !isExternalTarget(target) || !file) {
+      setError("Save the project and select an external object first");
+      return;
+    }
+    const ref = (project.references ?? []).find(
+      (r) => r.id === target.reference_id,
+    );
+    if (!ref) {
+      setError("Unknown reference");
+      return;
+    }
+    if (target.kind !== "query" && target.kind !== "mapping") {
+      setError("Create local copy supports queries and mappings");
+      return;
+    }
+    try {
+      const id =
+        target.kind === "query"
+          ? newQueryId(
+              `${target.id}_copy`,
+              project.workspace.queries.map((q) => q.id),
+            )
+          : newId(
+              "map",
+              `${target.id}_copy`,
+              (project.workspace.key_maps ?? []).map((m) => m.id),
+            );
+      const copied = await copyReferencedObject(
+        file,
+        project.references ?? [],
+        ref.id,
+        target.kind,
+        target.id,
+        id,
+        "",
+        {
+          connectionBindings: project.connection_bindings ?? [],
+          connections,
+          executionEngine: projectEngine(project),
+        },
+      );
+      if (copied.kind === "query") {
+        setQueries((prev) => [...prev, copied.query]);
+        selectQuery(copied.query.id);
+        return;
+      }
+      setProject((p) => ({
+        ...p,
+        workspace: {
+          ...p.workspace,
+          key_maps: [...(p.workspace.key_maps ?? []), copied.key_map],
+        },
+      }));
+      setSelectedKeyMapId(copied.key_map.id);
+      openKeyMapEditor(copied.key_map);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  /** Close map tab; if opened from Join Lens, restore Join + Lens No match. */
+  function closeKeyMapTab(mapId: string, wsForJoin?: Workspace) {
+    const closing = keyMapTabs.find((t) => t.map.id === mapId);
+    const joinCtx = closing?.joinCtx;
     setKeyMapTabs((tabs) => {
       const idx = tabs.findIndex((t) => t.map.id === mapId);
       const next = tabs.filter((t) => t.map.id !== mapId);
@@ -932,6 +1520,21 @@ function App() {
       return next;
     });
     setSelectedKeyMapId((id) => (id === mapId ? null : id));
+    if (!joinCtx) return;
+    const ws = wsForJoin ?? project.workspace;
+    setActiveQueryId(joinCtx.hostQueryId);
+    setBottomTab("data");
+    setJoinLensOn(true);
+    setDiagView(null);
+    const idx = resolveJoinStepFromCtx(ws, joinCtx);
+    if (idx != null) {
+      setSelectedStepIndex(idx);
+      const q = ws.queries.find((x) => x.id === joinCtx.hostQueryId);
+      const step = q?.steps[idx];
+      if (step) loadStepIntoEditor(step);
+    }
+    // Re-enter No match (map was opened from Lens unmatched / Suggest flow).
+    setForceProbeNonce((n) => n + 1);
   }
 
   function patchKeyMapTab(mapId: string, patch: Partial<KeyMapTabSession> | ((t: KeyMapTabSession) => KeyMapTabSession)) {
@@ -942,6 +1545,22 @@ function App() {
       }),
     );
   }
+
+  // After apply_keymap commits into projectBag — close tab or show error (never
+  // read apply outcome from impure setProject locals).
+  useEffect(() => {
+    const result = projectBag.keyMapApplyResult;
+    if (!result) return;
+    dispatchProject({ type: "clear_keymap_apply_result" });
+    if (result.status === "join_gone") {
+      setError(
+        "Join was removed or changed while Save was pending — mapping was saved, but Apply was skipped. Re-open the Join and Apply again.",
+      );
+      return;
+    }
+    closeKeyMapTab(result.mapId, result.workspace);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- closeKeyMapTab closes over latest tabs/project
+  }, [projectBag.keyMapApplyResult]);
 
   // Keep forms in sync when steps change; clamp selected step index.
   useEffect(() => {
@@ -1445,7 +2064,7 @@ function App() {
 
   async function handleOpenRecentProject(path: string) {
     try {
-      const loaded = await loadProject(path);
+      const loaded = await loadProject(path, { remember: true });
       applyLoadedProject(loaded, path);
       setExportMsg(`Opened ${path}`);
       await rememberRecentProject(path);
@@ -1514,16 +2133,24 @@ function App() {
   async function handleLoadDemo(id: DemoId) {
     try {
       const ws = await loadDemoWorkspace(id);
-      const projectName =
-        id === "sales"
-          ? "demo_sales"
-          : id === "union"
-            ? "demo_union"
-            : id === "right"
-              ? "demo_right_joins"
-              : id === "keymap"
-                ? "demo_keymap"
-                : "demo_sql";
+      const projectName = `demo_${id}`;
+      // Route presets for KeyMap labs (ADR-0014). PG labs need conn_postgres.
+      type Eng = "duckdb" | "postgres";
+      let engine: Eng =
+        appSettings.default_execution_engine ??
+        appSettings.default_target_dialect ??
+        "duckdb";
+      let destKind: Eng | null = null;
+      if (id === "keymap_pg" || id === "keymap_pg_dual") {
+        engine = "postgres";
+        destKind = "postgres";
+      } else if (id === "keymap_pg_seed" || id === "keymap_mixed") {
+        engine = "duckdb";
+        destKind = "postgres";
+      } else if (id === "keymap_parquet") {
+        engine = "duckdb";
+        destKind = "duckdb";
+      }
       setProject((p) =>
         migrateProject({
           ...p,
@@ -1533,13 +2160,23 @@ function App() {
           workspace: ws,
           canvas: { positions: {} },
           dbt_target: appSettings.default_dbt_target,
-          execution_engine:
-            appSettings.default_execution_engine ??
-            appSettings.default_target_dialect ??
-            "duckdb",
-          target_dialect:
-            appSettings.default_execution_engine ??
-            appSettings.default_target_dialect,
+          execution_engine: engine,
+          target_dialect: engine,
+          ...(destKind
+            ? {
+                destination: {
+                  kind: destKind,
+                  connection_id:
+                    destKind === "postgres"
+                      ? (p.connections.find((c) => c.id === "conn_postgres")
+                          ?.id ??
+                        p.destination?.connection_id ??
+                        "conn_postgres")
+                      : p.destination?.connection_id,
+                  duckdb_path: p.destination?.duckdb_path,
+                },
+              }
+            : {}),
         }),
       );
       setActiveQueryId(ws.focus_query_id);
@@ -1598,7 +2235,8 @@ function App() {
         // Joins (e.g. two RIGHT OUTER to different dims).
         const existing = q.steps.findIndex(
           (s) =>
-            s.type === "Join" && s.payload.right_query_id === rightQueryId,
+            s.type === "Join" &&
+            targetKey(s.payload.right_query_id) === rightQueryId,
         );
         let steps: TransformationStep[];
         if (existing >= 0) {
@@ -1699,10 +2337,15 @@ function App() {
           ),
         };
       } else if (kind === "right") {
-        ws = {
-          ...project.workspace,
-          focus_query_id: joinDiag.right_query_id,
-        };
+        const joinStep =
+          activeQuery?.steps[joinDiag.join_step_index] ??
+          project.workspace.queries.find((q) => q.id === activeQueryId)
+            ?.steps[joinDiag.join_step_index];
+        const rightTarget =
+          joinStep?.type === "Join"
+            ? joinStep.payload.right_query_id
+            : joinDiag.right_query_id;
+        ws = workspaceFocusingObject(project.workspace, rightTarget);
       } else {
         // output = host through Join inclusive
         ws = {
@@ -1718,7 +2361,12 @@ function App() {
           ),
         };
       }
-      const result = await previewWorkspace(ws, connections, sources);
+      const result = await previewWorkspace(
+        ws,
+        connections,
+        sources,
+        projectRefContext(project),
+      );
       const total =
         kind === "left"
           ? joinDiag.left_count
@@ -1765,17 +2413,21 @@ function App() {
             ),
           }
         : null;
-    const rightWs: Workspace = {
-      ...project.workspace,
-      focus_query_id: rightQueryId,
-    };
+    const rightWs: Workspace | null = rightQueryId
+      ? workspaceFocusingObject(project.workspace, rightQueryId)
+      : null;
 
     // Schema only — avoid LIMIT 50 scans just to populate Join column pickers.
+    const pref = projectRefContext(project);
     const leftRes = leftWs
-      ? await describeWorkspace(leftWs, connections, sources).catch(() => null)
+      ? await describeWorkspace(leftWs, connections, sources, pref).catch(
+          () => null,
+        )
       : null;
-    const rightRes = rightQueryId
-      ? await describeWorkspace(rightWs, connections, sources).catch(() => null)
+    const rightRes = rightWs
+      ? await describeWorkspace(rightWs, connections, sources, pref).catch(
+          () => null,
+        )
       : null;
     return {
       left: leftRes?.columns ?? [],
@@ -1820,7 +2472,7 @@ function App() {
           : (host?.steps.findIndex(
               (s) =>
                 s.type === "Join" &&
-                s.payload.right_query_id === edge.otherQueryId,
+                targetKey(s.payload.right_query_id) === edge.otherQueryId,
             ) ?? -1);
       const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
@@ -1842,7 +2494,8 @@ function App() {
       const idx =
         host?.steps.findIndex(
           (s) =>
-            s.type === "FromQuery" && s.payload.query_id === edge.otherQueryId,
+            s.type === "FromQuery" &&
+            targetKey(s.payload.query_id) === edge.otherQueryId,
         ) ?? -1;
       if (idx >= 0 && host) {
         setSelectedStepIndex(idx);
@@ -1859,7 +2512,7 @@ function App() {
           (s) =>
             !(
               s.type === "FromQuery" &&
-              s.payload.query_id === edge.otherQueryId
+              targetKey(s.payload.query_id) === edge.otherQueryId
             ),
         );
         const stillHasRoot = withoutFrom.some(
@@ -1889,13 +2542,13 @@ function App() {
               if (
                 edge.stepIndex != null &&
                 i === edge.stepIndex &&
-                s.payload.right_query_id === edge.otherQueryId
+                targetKey(s.payload.right_query_id) === edge.otherQueryId
               ) {
                 return false;
               }
               if (
                 edge.stepIndex == null &&
-                s.payload.right_query_id === edge.otherQueryId
+                targetKey(s.payload.right_query_id) === edge.otherQueryId
               ) {
                 return false;
               }
@@ -1910,7 +2563,7 @@ function App() {
               (s) =>
                 !(
                   s.type === "FromQuery" &&
-                  s.payload.query_id === edge.otherQueryId
+                  targetKey(s.payload.query_id) === edge.otherQueryId
                 ),
             ),
           };
@@ -1921,7 +2574,7 @@ function App() {
             .map((s) => {
               if (s.type !== "Append") return s;
               const others = s.payload.other_query_ids.filter(
-                (id) => id !== edge.otherQueryId,
+                (id) => targetKey(id) !== edge.otherQueryId,
               );
               if (others.length === 0) return null;
               return {
@@ -1986,15 +2639,21 @@ function App() {
       ...q,
         steps: q.steps
           .map((s) => {
-            if (s.type === "Join" && s.payload.right_query_id === queryId) {
+            if (
+              s.type === "Join" &&
+              targetKey(s.payload.right_query_id) === queryId
+            ) {
               return null;
             }
-            if (s.type === "FromQuery" && s.payload.query_id === queryId) {
+            if (
+              s.type === "FromQuery" &&
+              targetKey(s.payload.query_id) === queryId
+            ) {
               return null;
             }
             if (s.type === "Append") {
               const others = s.payload.other_query_ids.filter(
-                (id) => id !== queryId,
+                (id) => targetKey(id) !== queryId,
               );
               if (others.length === 0) return null;
               return {
@@ -2119,8 +2778,18 @@ function App() {
           .pop()
           ?.replace(/\.dwhproj\.json$/i, "")
           .replace(/\.json$/i, "") ?? project.name;
-      await saveProject(path, { ...project, root_path: path, name: base });
-      setProject((p) => ({ ...p, root_path: path, name: base }));
+      const saved = await saveProject(path, {
+        ...project,
+        root_path: path,
+        name: base,
+      });
+      setProject((p) => ({
+        ...p,
+        ...saved,
+        root_path: path,
+        name: base,
+        connections: p.connections,
+      }));
       setExportMsg(`Project saved → ${path}`);
       setError(null);
       await rememberRecentProject(path);
@@ -2152,7 +2821,39 @@ function App() {
         filters: [{ name: "DWH Project", extensions: ["json"] }],
       })) ?? null;
     if (typeof picked !== "string") return;
-    await writeProjectTo(picked);
+    // ADR-0025: a copy is a new identity; keep referencing the original possible.
+    const sameFile =
+      !!project.root_path &&
+      project.root_path.replace(/\\/g, "/").toLowerCase() ===
+        picked.replace(/\\/g, "/").toLowerCase();
+    const forked = sameFile
+      ? project
+      : { ...project, project_uid: crypto.randomUUID() };
+    try {
+      const base =
+        picked
+          .split(/[/\\]/)
+          .pop()
+          ?.replace(/\.dwhproj\.json$/i, "")
+          .replace(/\.json$/i, "") ?? forked.name;
+      const saved = await saveProject(picked, {
+        ...forked,
+        root_path: picked,
+        name: base,
+      });
+      setProject((p) => ({
+        ...forked,
+        ...saved,
+        root_path: picked,
+        name: base,
+        connections: p.connections,
+      }));
+      setExportMsg(`Project saved → ${picked}`);
+      setError(null);
+      await rememberRecentProject(picked);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
   }
 
   function applyLoadedProject(loaded: Project, pathHint?: string) {
@@ -2205,19 +2906,16 @@ function App() {
     opts?: {
       pickTo?: string[];
       suggestedFrom?: string[];
-      joinCtx?: {
-        hostQueryId: string;
-        joinStepIndex: number;
-        rightQueryId: string;
-        leftOn: string[];
-        rightOn: string[];
-        probeSide?: "left" | "right";
-      };
+      suggestedFromParts?: string[][];
+      joinCtx?: NonNullable<KeyMapTabSession["joinCtx"]>;
     },
   ) {
     const normalized: KeyMapDef = {
       storage: { kind: "seed" },
       from_column: "from",
+      from_columns: map.from_columns?.length
+        ? map.from_columns
+        : [map.from_column ?? "from"],
       to_column: "to",
       ...map,
     };
@@ -2228,6 +2926,7 @@ function App() {
         map: normalized,
         pickTo: opts?.pickTo,
         suggestedFrom: opts?.suggestedFrom,
+        suggestedFromParts: opts?.suggestedFromParts,
         joinCtx: opts?.joinCtx,
       };
       if (i < 0) return [...tabs, session];
@@ -2260,7 +2959,8 @@ function App() {
       return next;
     });
     setCenterTab(normalized.id);
-    // Source-backed: load live rows from WH into the editor.
+    // Source-backed: KeyMapEditor loads paged rows (ADR-0022). Do not full-read here —
+    // a late unbounded read would replace the page and drop dirty overlays.
     const sourceStorage =
       normalized.storage?.kind === "source" ? normalized.storage : null;
     if (sourceStorage) {
@@ -2275,8 +2975,6 @@ function App() {
         } catch {
           /* keep project.connections */
         }
-        // Read may resolve a DSN via Explorer source match, but never write that
-        // into storage.connection_id — assignment must be an explicit user choice.
         const resolved = resolveKeyMapConnection(
           project,
           normalized,
@@ -2285,21 +2983,6 @@ function App() {
         );
         if (!resolved.ok) {
           setError(resolved.error);
-          return;
-        }
-        try {
-          const r = await readKeyMap(normalized, resolved.dsn);
-          patchKeyMapTab(normalized.id, (s) => ({
-            ...s,
-            map: { ...s.map, entries: r.entries },
-            contentHash: r.content_hash,
-          }));
-        } catch (e) {
-          setError(
-            typeof e === "string"
-              ? e
-              : `Could not load KeyMap from warehouse: ${String(e)}`,
-          );
         }
       })();
     }
@@ -2388,11 +3071,35 @@ function App() {
       }
       const tab = keyMapTabs.find((t) => t.map.id === map.id);
       const expectedHash = tab?.contentHash;
-      const delta = tab?.dirtyDelta ?? null;
+      // One in-flight WH Save per mapping.
+      if (tab?.saveInFlight || tab?.saveApi?.isSaving()) {
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message: "KeyMap save already in progress",
+        };
+        setExportMsg(result.message);
+        return result;
+      }
+      const captured = tab?.saveApi?.captureSave() ?? null;
+      if (tab?.saveApi && !captured) {
+        const result: KeyMapSaveResult = {
+          local: "saved",
+          external: "skipped",
+          message: "KeyMap save already in progress",
+        };
+        setExportMsg(result.message);
+        return result;
+      }
+      const saveToken = captured?.token;
+      const delta = captured?.delta ?? tab?.dirtyDelta ?? null;
       const hasDelta =
         !!delta &&
-        (delta.upserts.length > 0 || delta.deletedFroms.length > 0);
+        (delta.upserts.length > 0 ||
+          delta.deletedFroms.length > 0 ||
+          (delta.deletedFromParts?.length ?? 0) > 0);
       if (!hasDelta) {
+        if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
         // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
         const result: KeyMapSaveResult = {
           local: "saved",
@@ -2404,13 +3111,25 @@ function App() {
         setError(null);
         return result;
       }
+      patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: true }));
       try {
         const r = await writeKeyMap(map, resolved.dsn, expectedHash, delta);
-        patchKeyMapTab(map.id, (s) => ({
-          ...s,
-          contentHash: r.content_hash,
-          dirtyDelta: null,
-        }));
+        if (tab?.saveApi && saveToken != null) {
+          tab.saveApi.confirmSave(saveToken);
+          patchKeyMapTab(map.id, (s) => ({
+            ...s,
+            contentHash: r.content_hash,
+            saveInFlight: false,
+          }));
+        } else {
+          patchKeyMapTab(map.id, (s) => ({
+            ...s,
+            contentHash: r.content_hash,
+            dirtyDelta: null,
+            dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
+            saveInFlight: false,
+          }));
+        }
         const result: KeyMapSaveResult = {
           local: "saved",
           external: "synced",
@@ -2421,8 +3140,11 @@ function App() {
         setError(null);
         return result;
       } catch (e) {
+        if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
+        patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: false }));
         const msg = typeof e === "string" ? e : String(e);
         const isConflict = /refused|concurrently|hash/i.test(msg);
+        // Conflict/error: abort capture, keep drafts for retry.
         const result: KeyMapSaveResult = {
           local: "saved",
           external: isConflict ? "conflict" : "error",
@@ -2452,7 +3174,7 @@ function App() {
   }
 
   function handleAddKeyMap() {
-    const map = emptyKeyMap("Key map");
+    const map = emptyKeyMap("Mapping");
     void saveKeyMapToProject(map);
     openKeyMapEditor(map);
     setTreeExpanded((e) => ({ ...e, keyMaps: true }));
@@ -2526,26 +3248,59 @@ function App() {
     fromValues: string[],
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>,
     toValues?: string[],
+    fromParts?: string[][],
   ) {
     const entries = [...map.entries];
     const indexByFrom = new Map(
-      entries.map((e, i) => [e.from.trim(), i] as const),
+      entries.map((e, i) => {
+        const parts =
+          e.from_parts?.length ? e.from_parts : e.from.trim() ? [e.from] : [];
+        return [JSON.stringify(parts.map((p) => p.trim())), i] as const;
+      }),
     );
     fromValues.forEach((rawFrom, i) => {
-      const from = rawFrom.trim();
-      if (!from) return;
+      const parts = (
+        fromParts?.[i]?.length
+          ? fromParts[i]!
+          : rawFrom.trim()
+            ? [rawFrom]
+            : []
+      ).map((p) => p.trim());
+      if (!parts.length || parts.some((p) => !p)) return;
+      const key = JSON.stringify(parts);
       const to = (toValues?.[i] ?? "").trim();
-      const existing = indexByFrom.get(from);
+      const existing = indexByFrom.get(key);
       if (existing !== undefined) {
         if (to && !entries[existing]!.to.trim()) {
           entries[existing] = { ...entries[existing]!, to };
         }
         return;
       }
-      indexByFrom.set(from, entries.length);
-      entries.push({ from, to });
+      indexByFrom.set(key, entries.length);
+      entries.push({ from: parts[0]!, from_parts: parts, to });
     });
-    const merged = { ...map, entries };
+    const arity = Math.max(
+      map.from_columns?.length ?? 0,
+      joinCtx.applyLeftOn?.length ?? 0,
+      fromParts?.find((p) => p.length)?.length ?? 1,
+      1,
+    );
+    const from_columns =
+      map.from_columns?.length === arity
+        ? map.from_columns
+        : joinCtx.applyLeftOn && joinCtx.applyLeftOn.length === arity
+          ? joinCtx.applyLeftOn
+          : arity > 1 && joinCtx.leftOn.length >= arity
+            ? joinCtx.leftOn.slice(0, arity)
+            : map.from_columns?.length
+              ? map.from_columns
+              : [map.from_column ?? "from"];
+    const merged = {
+      ...map,
+      from_columns,
+      from_column: from_columns[0],
+      entries,
+    };
     // Persist into the project so Join Lens can hide mapped unmatched keys immediately.
     setProject((p) => {
       const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], merged);
@@ -2557,6 +3312,7 @@ function App() {
     });
     openKeyMapEditor(merged, {
       suggestedFrom: fromValues,
+      suggestedFromParts: fromParts,
       joinCtx,
     });
   }
@@ -2564,24 +3320,86 @@ function App() {
   function handleMapKeyFromLens(
     side: "left" | "right",
     fromValues: string[],
-    opts?: { toValues?: string[] },
+    opts?: {
+      toValues?: string[];
+      fromParts?: string[][];
+      applyColumns?: string[];
+      outputColumn?: string;
+    },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
+    const {
+      leftOn: lensLeftOn,
+      rightOn: lensRightOn,
+      hostQueryId,
+      joinStepIndex,
+      rightQueryId,
+      joinType,
+    } = joinLensTarget;
     const maps = project.workspace.key_maps ?? [];
     const toValues = opts?.toValues;
-    const joinCtx = { ...joinLensTarget, probeSide: side };
+    const fromParts = opts?.fromParts;
+    const tupleArity = fromParts?.find((p) => p.length)?.length ?? 0;
+    // Always left-oriented fact cols (Auto / Find Right pass leftOn names).
+    const applyCols = (
+      opts?.applyColumns?.filter((c) => c.trim()) ??
+      (tupleArity > 1 ? lensLeftOn.slice(0, tupleArity) : undefined)
+    )?.filter(Boolean);
+    const applyLeftOn =
+      applyCols?.length ? applyCols : [lensLeftOn[0] ?? "key"];
+    const applyRightOn = applyLeftOn.map((lc) => {
+      const idx = lensLeftOn.findIndex(
+        (c) => c.toLowerCase() === lc.toLowerCase(),
+      );
+      return lensRightOn[idx >= 0 ? idx : 0] ?? lc;
+    });
+
+    const outputColumnLeft =
+      opts?.outputColumn?.trim() || applyLeftOn[0] || lensLeftOn[0] || "key";
+    const outLeftIdx = applyLeftOn.findIndex(
+      (c) => c.toLowerCase() === outputColumnLeft.toLowerCase(),
+    );
+    const outputColumnRight =
+      applyRightOn[outLeftIdx >= 0 ? outLeftIdx : 0] ??
+      applyRightOn[0] ??
+      lensRightOn[0] ??
+      "key";
+
+    const joinCtx: KeyMapJoinCtx = {
+      hostQueryId,
+      joinStepIndex,
+      rightQueryId,
+      leftOn: lensLeftOn,
+      rightOn: lensRightOn,
+      joinType,
+      probeSide: side,
+      applyLeftOn,
+      applyRightOn,
+      outputColumnLeft,
+      outputColumnRight,
+    };
     if (maps.length === 0) {
+      const arity = applyLeftOn.length;
+      const from_columns =
+        arity > 1 ? applyLeftOn : ["from"];
       openMapWithFromValues(
         {
           ...emptyKeyMap("join aliases"),
-          entries: fromValues.map((from, i) => ({
-            from,
-            to: toValues?.[i] ?? "",
-          })),
+          from_columns,
+          from_column: from_columns[0],
+          entries: fromValues.map((from, i) => {
+            const parts = fromParts?.[i] ?? [from];
+            return {
+              from: parts[0] ?? from,
+              from_parts: parts,
+              to: toValues?.[i] ?? "",
+            };
+          }),
         },
         fromValues,
         joinCtx,
         toValues,
+        fromParts,
       );
       setMapSwitchOffer(null);
       return;
@@ -2596,10 +3414,17 @@ function App() {
       ? maps.find((m) => m.id === preferredId)
       : undefined;
     if (preferred) {
-      openMapWithFromValues(preferred, fromValues, joinCtx, toValues);
+      openMapWithFromValues(
+        preferred,
+        fromValues,
+        joinCtx,
+        toValues,
+        fromParts,
+      );
       setMapSwitchOffer({
         fromValues,
         toValues,
+        fromParts,
         joinCtx,
         preferredMapId: preferred.id,
       });
@@ -2618,17 +3443,19 @@ function App() {
           })
         : undefined) ?? maps[0]!;
     setMapPickChoice(suggested.id);
-    setMapPickPending({ fromValues, toValues, joinCtx });
+    setMapPickPending({ fromValues, toValues, fromParts, joinCtx });
     setMapSwitchOffer(null);
   }
 
   function openMapPickerFromSwitchOffer() {
     if (!mapSwitchOffer) return;
-    const { fromValues, toValues, joinCtx, preferredMapId } = mapSwitchOffer;
+    const { fromValues, toValues, fromParts, joinCtx, preferredMapId } =
+      mapSwitchOffer;
     setMapPickChoice(preferredMapId);
     setMapPickPending({
       fromValues,
       toValues,
+      fromParts,
       joinCtx,
       preferredMapId,
     });
@@ -2653,7 +3480,7 @@ function App() {
     });
     if (typeof path !== "string") return;
     try {
-      const loaded = await loadProject(path);
+      const loaded = await loadProject(path, { remember: true });
       applyLoadedProject(loaded, path);
       setExportMsg(`Opened ${path}`);
       await rememberRecentProject(path);
@@ -2706,7 +3533,7 @@ function App() {
         const path = await getLastProjectPath();
         if (cancelled) return;
         if (path) {
-          const loaded = await loadProject(path);
+          const loaded = await loadProject(path, { remember: true });
           if (cancelled) return;
           applyLoadedProject(loaded, path);
           setExportMsg(`Restored ${path}`);
@@ -2857,6 +3684,7 @@ function App() {
         project.outputs ?? [],
         true,
         sources,
+        projectRefContext(project),
       );
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
@@ -2984,9 +3812,10 @@ function App() {
       ? {
           hostQueryId: activeQueryId,
           joinStepIndex: selectedStepIndex,
-          rightQueryId: selectedStep.payload.right_query_id,
+          rightQueryId: targetKey(selectedStep.payload.right_query_id),
           leftOn: selectedStep.payload.left_on,
           rightOn: selectedStep.payload.right_on,
+          joinType: selectedStep.payload.join_type,
         }
       : null;
 
@@ -3018,7 +3847,12 @@ function App() {
         q.id === hostId ? { ...q, steps: upstreamSteps } : q,
       ),
     };
-    void previewWorkspace(leftWs, connections, sources)
+    void previewWorkspace(
+      leftWs,
+      connections,
+      sources,
+      projectRefContext(project),
+    )
       .then((res) => {
         if (!cancelled) {
           setUpstreamColumnNames(res.columns.map((c) => c.name));
@@ -3308,6 +4142,15 @@ function App() {
         }
         onViewData={() => setBottomTab("data")}
         onViewModel={() => setBottomTab("model")}
+        explorerVisible={!explorerCollapsed}
+        inspectorVisible={!inspectorCollapsed}
+        onToggleExplorer={() =>
+          setExplorerCollapsedPersist(!explorerCollapsed)
+        }
+        onToggleInspector={() =>
+          setInspectorCollapsedPersist(!inspectorCollapsed)
+        }
+        onFocusJoinLens={focusJoinLensLayout}
         onCopySql={() => void copySql()}
         onNewConnection={() => openNewConnection("postgres")}
         onSetExecutionEngine={handleSetExecutionEngine}
@@ -3326,6 +4169,66 @@ function App() {
       />
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {addRefPending && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setAddRefPending(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-ref-title"
+            className="w-full max-w-sm rounded-xl border border-slate-700 bg-[#0a1219] p-4 shadow-2xl shadow-black/50"
+          >
+            <h2
+              id="add-ref-title"
+              className="text-sm font-semibold text-teal-100"
+            >
+              Add reference
+            </h2>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Alias used in pickers and on the canvas. Does not change export
+              names.
+            </p>
+            <label className="mt-3 block text-[10px] uppercase tracking-wide text-slate-500">
+              Alias
+              <input
+                autoFocus
+                value={addRefPending.alias}
+                onChange={(e) =>
+                  setAddRefPending((p) =>
+                    p ? { ...p, alias: e.target.value } : p,
+                  )
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void confirmAddReference();
+                  if (e.key === "Escape") setAddRefPending(null);
+                }}
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+              />
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
+                onClick={() => setAddRefPending(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
+                onClick={() => void confirmAddReference()}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <OptionsDialog
         open={optionsOpen}
         settings={appSettings}
@@ -3516,17 +4419,30 @@ function App() {
                   setMapPickChoice(null);
                   setMapSwitchOffer(null);
                   if (choice === "__new__") {
+                    const arity =
+                      pending.fromParts?.find((p) => p.length)?.length ?? 1;
+                    const from_columns =
+                      arity > 1 && pending.joinCtx.leftOn.length >= arity
+                        ? pending.joinCtx.leftOn.slice(0, arity)
+                        : ["from"];
                     openMapWithFromValues(
                       {
                         ...emptyKeyMap("join aliases"),
-                        entries: pending.fromValues.map((from, i) => ({
-                          from,
-                          to: pending.toValues?.[i] ?? "",
-                        })),
+                        from_columns,
+                        from_column: from_columns[0],
+                        entries: pending.fromValues.map((from, i) => {
+                          const parts = pending.fromParts?.[i] ?? [from];
+                          return {
+                            from: parts[0] ?? from,
+                            from_parts: parts,
+                            to: pending.toValues?.[i] ?? "",
+                          };
+                        }),
                       },
                       pending.fromValues,
                       pending.joinCtx,
                       pending.toValues,
+                      pending.fromParts,
                     );
                     return;
                   }
@@ -3539,6 +4455,7 @@ function App() {
                     pending.fromValues,
                     pending.joinCtx,
                     pending.toValues,
+                    pending.fromParts,
                   );
                 }}
               >
@@ -3615,68 +4532,106 @@ function App() {
         />
       ) : (
         <div className="flex min-h-0 flex-1">
-          {/* Explorer */}
-          <aside
-            className="min-h-0 shrink-0 overflow-hidden bg-[#050b12]"
-            style={{ width: explorerWidth }}
-          >
-            <ExplorerTree
-              project={project}
-              activeQueryId={activeQueryId}
-              selectedSourceId={selectedSourceId}
-              selectedKeyMapId={selectedKeyMapId}
-              expanded={treeExpanded}
-              onToggle={(key) =>
-                setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
-              }
-              onSelectQuery={selectQuery}
-              onSelectSource={onSelectSource}
-              onSelectConnection={(c) => {
-                setEditingConnection(c);
-                setConnEditorKind(c.kind);
-                setConnEditorOpen(true);
-              }}
-              onExport={() => void handleExportDbt()}
-              onRevealExport={() => void handleRevealExport()}
-              exportFiles={exportFiles}
-              onAddConnection={() => openNewConnection("postgres")}
-              onAddSourceCsv={() => void addSourceOnlyCsv()}
-              onAddSourceParquet={() => void addSourceOnlyParquet()}
-              onAddSourceHiveParquet={() => openHiveDialog("source")}
-              onAddSourceS3={() => openS3Dialog("source")}
-              onAddSourcePostgres={() => openPgPicker("source")}
-              onNewQueryCsv={() => void addCsvQuery()}
-              onNewQueryParquet={() => void addParquetQuery()}
-              onNewQueryHiveParquet={() => openHiveDialog("query")}
-              onNewQueryS3={() => openS3Dialog("query")}
-              onNewQueryPostgres={() => openPgPicker("query")}
-              onNewQueryFromSource={addQueryFromSource}
-              onNewSqlModel={addSqlModelQuery}
-              onRenameQuery={renameQuery}
-              onRenameSource={renameSource}
-              onSelectKeyMap={(map) => {
-                setSelectedKeyMapId(map.id);
-                openKeyMapEditor(map);
-              }}
-              onAddKeyMap={handleAddKeyMap}
-              onRenameKeyMap={handleRenameKeyMap}
-              onDeleteKeyMap={handleDeleteKeyMap}
-            />
-          </aside>
+          {/* Explorer — fully collapsible like a VS Code side bar */}
+          {!explorerCollapsed && (
+            <aside
+              className="min-h-0 shrink-0 overflow-hidden bg-[#050b12]"
+              style={{ width: explorerWidth }}
+            >
+              <ExplorerTree
+                project={project}
+                activeQueryId={activeQueryId}
+                selectedSourceId={selectedSourceId}
+                selectedKeyMapId={selectedKeyMapId}
+                expanded={treeExpanded}
+                onToggle={(key) =>
+                  setTreeExpanded((e) => ({ ...e, [key]: !e[key] }))
+                }
+                onSelectQuery={selectQuery}
+                onSelectSource={onSelectSource}
+                onSelectConnection={(c) => {
+                  setEditingConnection(c);
+                  setConnEditorKind(c.kind);
+                  setConnEditorOpen(true);
+                }}
+                onExport={() => void handleExportDbt()}
+                onRevealExport={() => void handleRevealExport()}
+                exportFiles={exportFiles}
+                referenceStatuses={refStatuses}
+                referenceCatalogs={refCatalogs}
+                onAddReference={() => void handleAddReference()}
+                onRefreshReference={(r) => void handleRefreshReference(r)}
+                onRelinkReference={(r) => void handleRelinkReference(r)}
+                onOpenReferenceOwner={(r) => void handleOpenReferenceOwner(r)}
+                onRemoveReference={(r) => void handleRemoveReference(r)}
+                onUseReferencedQuery={useReferencedQuery}
+                onAddConnection={() => openNewConnection("postgres")}
+                onAddSourceCsv={() => void addSourceOnlyCsv()}
+                onAddSourceParquet={() => void addSourceOnlyParquet()}
+                onAddSourceHiveParquet={() => openHiveDialog("source")}
+                onAddSourceS3={() => openS3Dialog("source")}
+                onAddSourcePostgres={() => openPgPicker("source")}
+                onNewQueryCsv={() => void addCsvQuery()}
+                onNewQueryParquet={() => void addParquetQuery()}
+                onNewQueryHiveParquet={() => openHiveDialog("query")}
+                onNewQueryS3={() => openS3Dialog("query")}
+                onNewQueryPostgres={() => openPgPicker("query")}
+                onNewQueryFromSource={addQueryFromSource}
+                onNewSqlModel={addSqlModelQuery}
+                onRenameQuery={renameQuery}
+                onRenameSource={renameSource}
+                onSelectKeyMap={(map) => {
+                  setSelectedKeyMapId(map.id);
+                  openKeyMapEditor(map);
+                }}
+                onAddKeyMap={handleAddKeyMap}
+                onRenameKeyMap={handleRenameKeyMap}
+                onDeleteKeyMap={handleDeleteKeyMap}
+              />
+            </aside>
+          )}
           <PanelResizeHandle
-            aria-label="Resize explorer"
-            onDelta={(dx) =>
-              setExplorerWidth((w) => {
-                const next = clampPanelWidth(w + dx, 160, 480);
-                explorerWidthRef.current = next;
-                return next;
-              })
+            collapsedRail={explorerCollapsed}
+            aria-label={
+              explorerCollapsed ? "Show explorer" : "Resize explorer"
             }
-            onDragEnd={() =>
+            title={
+              explorerCollapsed
+                ? "Drag right or double-click to show Explorer"
+                : "Drag to resize · drag past the edge or double-click to hide Explorer"
+            }
+            onDelta={(dx) => {
+              if (explorerCollapsed) {
+                if (dx > 0) {
+                  setExplorerCollapsedPersist(false);
+                  const next = clampPanelWidth(
+                    Math.max(explorerWidthRef.current, 160) + dx,
+                    160,
+                    480,
+                  );
+                  explorerWidthRef.current = next;
+                  setExplorerWidth(next);
+                }
+                return;
+              }
+              const raw = explorerWidthRef.current + dx;
+              if (raw < SIDE_PANEL_COLLAPSE_SNAP) {
+                setExplorerCollapsedPersist(true);
+                return;
+              }
+              const next = clampPanelWidth(raw, 160, 480);
+              explorerWidthRef.current = next;
+              setExplorerWidth(next);
+            }}
+            onDragEnd={() => {
+              if (explorerCollapsed) return;
               persistPanelWidths(
                 explorerWidthRef.current,
                 inspectorWidthRef.current,
-              )
+              );
+            }}
+            onDoubleClick={() =>
+              setExplorerCollapsedPersist(!explorerCollapsed)
             }
           />
 
@@ -3790,6 +4745,8 @@ function App() {
                   connections={project.connections}
                   pickToOptions={keyMapEditor.pickTo}
                   suggestedFrom={keyMapEditor.suggestedFrom}
+                  suggestedFromParts={keyMapEditor.suggestedFromParts}
+                  dirtyResetSeq={keyMapEditor.dirtyResetSeq}
                   exportPath={project.last_dbt_export_path}
                   joinApplyHint={
                     keyMapEditor.joinCtx
@@ -3815,6 +4772,8 @@ function App() {
                             keyMapEditor.joinCtx.leftOn[0] ?? "key",
                           rightOn:
                             keyMapEditor.joinCtx.rightOn[0] ?? "key",
+                          leftOnCols: keyMapEditor.joinCtx.leftOn,
+                          rightOnCols: keyMapEditor.joinCtx.rightOn,
                           probeSide: keyMapEditor.joinCtx.probeSide,
                         }
                       : null
@@ -3854,16 +4813,33 @@ function App() {
                     }))
                   }
                   onWarehouseRead={(contentHash, totalCount) =>
-                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
-                      ...s,
-                      contentHash,
-                      totalCount,
-                    }))
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => {
+                      // Freeze concurrency token while dirty — page changes must not
+                      // refresh hash over an outstanding row-level baseline delta.
+                      const dirty = s.dirtyDelta;
+                      const hasDirty =
+                        !!dirty &&
+                        (dirty.upserts.length > 0 ||
+                          dirty.deletedFroms.length > 0 ||
+                          (dirty.deletedFromParts?.length ?? 0) > 0);
+                      return {
+                        ...s,
+                        contentHash: hasDirty ? s.contentHash : contentHash,
+                        totalCount,
+                      };
+                    })
                   }
                   onDirtyChange={(dirtyDelta) =>
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({
                       ...s,
                       dirtyDelta,
+                    }))
+                  }
+                  saveInFlight={keyMapEditor.saveInFlight}
+                  onSaveApi={(saveApi) =>
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
+                      ...s,
+                      saveApi,
                     }))
                   }
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
@@ -3918,27 +4894,64 @@ function App() {
                               );
                               return;
                             }
-                            setProject((p) => ({
-                              ...p,
-                              workspace: applyKeyMapToWorkspace(
-                                {
-                                  ...p.workspace,
-                                  key_maps: upsertKeyMapList(
-                                    p.workspace.key_maps ?? [],
-                                    map,
-                                  ),
-                                },
-                                ctx.hostQueryId,
-                                ctx.joinStepIndex,
-                                ctx.rightQueryId,
-                                side,
-                                ctx.leftOn[0] ?? "key",
-                                ctx.rightOn[0] ?? "key",
+                            // Duplicate / rejected Save is not this Apply's success.
+                            if (
+                              result.external === "skipped" &&
+                              /already in progress/i.test(result.message)
+                            ) {
+                              setError(
+                                "KeyMap save already in progress — wait for it to finish, then Apply again. Mapping drafts are unchanged.",
+                              );
+                              return;
+                            }
+                            const leftCols =
+                              ctx.applyLeftOn?.length
+                                ? ctx.applyLeftOn
+                                : map.from_columns &&
+                                    map.from_columns.length > 1 &&
+                                    ctx.leftOn.length >= map.from_columns.length
+                                  ? ctx.leftOn.slice(
+                                      0,
+                                      map.from_columns.length,
+                                    )
+                                  : [ctx.leftOn[0] ?? "key"];
+                            const rightCols =
+                              ctx.applyRightOn?.length
+                                ? ctx.applyRightOn
+                                : map.from_columns &&
+                                    map.from_columns.length > 1 &&
+                                    ctx.rightOn.length >=
+                                      map.from_columns.length
+                                  ? ctx.rightOn.slice(
+                                      0,
+                                      map.from_columns.length,
+                                    )
+                                  : [ctx.rightOn[0] ?? "key"];
+                            const outputColumnLeft =
+                              ctx.outputColumnLeft?.trim() || leftCols[0]!;
+                            const outLeftIdx = leftCols.findIndex(
+                              (c) =>
+                                c.toLowerCase() ===
+                                outputColumnLeft.toLowerCase(),
+                            );
+                            const outputColumnRight =
+                              ctx.outputColumnRight?.trim() ||
+                              rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
+                              rightCols[0]!;
+                            // Commit Apply via reducer — outcome lives in
+                            // keyMapApplyResult and is handled after commit.
+                            dispatchProject({
+                              type: "apply_keymap",
+                              intent: {
                                 map,
-                              ),
-                            }));
-                            closeKeyMapTab(map.id);
-                            setCenterTab("canvas");
+                                ctx,
+                                side,
+                                leftCols,
+                                rightCols,
+                                outputColumnLeft,
+                                outputColumnRight,
+                              },
+                            });
                           });
                         }
                       : undefined
@@ -3972,6 +4985,10 @@ function App() {
                 onRemoveEdge={removeEdgeOnCanvas}
                 onRemoveQuery={removeQueryOnCanvas}
                 onDeriveQuery={deriveQueryFrom}
+                externalBoundaries={externalBoundaries}
+                selectedExternalKey={selectedExternalKey}
+                onSelectExternal={selectExternalBoundary}
+                onDeriveExternal={deriveFromExternalKey}
               />
             </div>
             <PanelResizeHandle
@@ -4182,6 +5199,7 @@ function App() {
                         rightOn={joinLensTarget.rightOn}
                         connections={connections}
                         sources={sources}
+                        projectRef={projectRefContext(project)}
                         columns={preview.columns}
                         rows={preview.rows}
                         joinDiag={joinDiag}
@@ -4237,23 +5255,52 @@ function App() {
           </section>
 
           <PanelResizeHandle
-            aria-label="Resize inspector"
-            onDelta={(dx) =>
-              setInspectorWidth((w) => {
-                const next = clampPanelWidth(w - dx, 220, 560);
-                inspectorWidthRef.current = next;
-                return next;
-              })
+            collapsedRail={inspectorCollapsed}
+            aria-label={
+              inspectorCollapsed ? "Show inspector" : "Resize inspector"
             }
-            onDragEnd={() =>
+            title={
+              inspectorCollapsed
+                ? "Drag left or double-click to show Inspector"
+                : "Drag to resize · drag past the edge or double-click to hide Inspector"
+            }
+            onDelta={(dx) => {
+              if (inspectorCollapsed) {
+                if (dx < 0) {
+                  setInspectorCollapsedPersist(false);
+                  const next = clampPanelWidth(
+                    Math.max(inspectorWidthRef.current, 220) - dx,
+                    220,
+                    560,
+                  );
+                  inspectorWidthRef.current = next;
+                  setInspectorWidth(next);
+                }
+                return;
+              }
+              const raw = inspectorWidthRef.current - dx;
+              if (raw < SIDE_PANEL_COLLAPSE_SNAP) {
+                setInspectorCollapsedPersist(true);
+                return;
+              }
+              const next = clampPanelWidth(raw, 220, 560);
+              inspectorWidthRef.current = next;
+              setInspectorWidth(next);
+            }}
+            onDragEnd={() => {
+              if (inspectorCollapsed) return;
               persistPanelWidths(
                 explorerWidthRef.current,
                 inspectorWidthRef.current,
-              )
+              );
+            }}
+            onDoubleClick={() =>
+              setInspectorCollapsedPersist(!inspectorCollapsed)
             }
           />
 
-          {/* Inspector: top = step order, bottom = edit selected step */}
+          {/* Inspector — fully collapsible like a VS Code side bar */}
+          {!inspectorCollapsed && (
           <aside
             className="flex min-h-0 shrink-0 flex-col overflow-hidden bg-[#050b12]"
             style={{ width: inspectorWidth }}
@@ -4341,12 +5388,78 @@ function App() {
               </div>
             )}
             <div className="flex min-h-0 flex-1 flex-col">
+              {selectedExternalKey ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-auto px-3 py-2">
+                  <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-sky-500">
+                    External · read-only
+                  </h3>
+                  {(() => {
+                    const b = externalBoundaries.find(
+                      (x) => x.key === selectedExternalKey,
+                    );
+                    const target = parseTargetKey(selectedExternalKey);
+                    if (!b || !target || !isExternalTarget(target)) {
+                      return (
+                        <p className="text-sm text-slate-600">
+                          External object unavailable.
+                        </p>
+                      );
+                    }
+                    return (
+                      <div className="space-y-3 text-sm text-slate-300">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                            Reference
+                          </div>
+                          <div className="font-semibold text-sky-200">
+                            {b.alias}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                            Object
+                          </div>
+                          <div className="font-mono text-xs">
+                            {b.kind} · {b.objectId}
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Definition is owned by the referenced project. Edit it
+                          there, then Update the reference.
+                        </p>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-sky-500/15 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/25"
+                          onClick={() => deriveFromExternalKey(selectedExternalKey)}
+                        >
+                          Use in new query
+                        </button>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-sky-700 hover:text-sky-200"
+                          onClick={() =>
+                            void createLocalCopyOfExternal(selectedExternalKey)
+                          }
+                        >
+                          Create local copy
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
+              ) : (
+              <>
               <div className="flex min-h-0 flex-[1_1_50%] flex-col border-b border-[var(--line)] px-3 py-2">
                 <History
                   steps={activeQuery?.steps ?? []}
-                  queryNames={Object.fromEntries(
-                    queries.map((q) => [q.id, q.name]),
-                  )}
+                  queryNames={{
+                    ...Object.fromEntries(
+                      queries.map((q) => [q.id, q.name]),
+                    ),
+                    ...Object.fromEntries(
+                      externalBoundaries.map((b) => [b.key, b.label]),
+                    ),
+                  }}
                   selectedIndex={selectedStepIndex}
                   onSelect={selectStepAt}
                   onRemoveAt={removeStepAt}
@@ -4386,11 +5499,29 @@ function App() {
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                         >
                           <option value="">parent query…</option>
-                          {otherQueries.map((q) => (
-                            <option key={q.id} value={q.id}>
-                              {q.name}
-                            </option>
-                          ))}
+                          <optgroup label="This project">
+                            {otherQueries.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                          {Object.entries(refCatalogs).map(([rid, cat]) =>
+                            cat.queries.length > 0 ? (
+                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                {cat.queries.map((q) => (
+                                  <option
+                                    key={`${rid}:${q.id}`}
+                                    value={targetKey(
+                                      externalTarget(rid, "query", q.id),
+                                    )}
+                                  >
+                                    {cat.alias}.{q.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null,
+                          )}
                         </select>
                         <button
                           type="button"
@@ -4401,7 +5532,9 @@ function App() {
                               return;
                             replaceStepAt(selectedStepIndex, {
                               type: "FromQuery",
-                              payload: { query_id: fromQueryId },
+                              payload: {
+                                query_id: objectTargetFromPicker(fromQueryId),
+                              },
                             });
                           }}
                         >
@@ -4559,19 +5692,45 @@ function App() {
                         <select
                           value={joinRightId}
                           onChange={(e) => setJoinRightId(e.target.value)}
-                          disabled={otherQueries.length === 0}
+                          disabled={
+                            otherQueries.length === 0 &&
+                            Object.values(refCatalogs).every(
+                              (c) => c.queries.length === 0,
+                            )
+                          }
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                         >
                           <option value="">right query…</option>
-                          {otherQueries.map((q) => (
-                            <option key={q.id} value={q.id}>
-                              {q.name}
-                            </option>
-                          ))}
+                          <optgroup label="This project">
+                            {otherQueries.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                          {Object.entries(refCatalogs).map(([rid, cat]) =>
+                            cat.queries.length > 0 ? (
+                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                {cat.queries.map((q) => (
+                                  <option
+                                    key={`${rid}:${q.id}`}
+                                    value={targetKey(
+                                      externalTarget(rid, "query", q.id),
+                                    )}
+                                  >
+                                    {cat.alias}.{q.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null,
+                          )}
                         </select>
-                        {otherQueries.length === 0 && (
+                        {otherQueries.length === 0 &&
+                          Object.values(refCatalogs).every(
+                            (c) => c.queries.length === 0,
+                          ) && (
                           <p className="text-[11px] text-amber-500/90">
-                            Need another query in the project to join.
+                            Need another query (local or referenced) to join.
                           </p>
                         )}
                         <label className="block text-[10px] uppercase tracking-wide text-slate-500">
@@ -4613,7 +5772,8 @@ function App() {
                             replaceStepAt(selectedStepIndex, {
                               type: "Join",
                               payload: {
-                                right_query_id: joinRightId,
+                                right_query_id:
+                                  objectTargetFromPicker(joinRightId),
                                 join_type: joinType,
                                 left_on,
                                 right_on,
@@ -4646,11 +5806,29 @@ function App() {
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
                         >
                           <option value="">other query…</option>
-                          {otherQueries.map((q) => (
-                            <option key={q.id} value={q.id}>
-                              {q.name}
-                            </option>
-                          ))}
+                          <optgroup label="This project">
+                            {otherQueries.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                          {Object.entries(refCatalogs).map(([rid, cat]) =>
+                            cat.queries.length > 0 ? (
+                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                {cat.queries.map((q) => (
+                                  <option
+                                    key={`${rid}:${q.id}`}
+                                    value={targetKey(
+                                      externalTarget(rid, "query", q.id),
+                                    )}
+                                  >
+                                    {cat.alias}.{q.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null,
+                          )}
                         </select>
                         <button
                           type="button"
@@ -4661,7 +5839,11 @@ function App() {
                               return;
                             replaceStepAt(selectedStepIndex, {
                               type: "Append",
-                              payload: { other_query_ids: [appendOtherId] },
+                              payload: {
+                                other_query_ids: [
+                                  objectTargetFromPicker(appendOtherId),
+                                ],
+                              },
                             });
                           }}
                         >
@@ -5084,33 +6266,60 @@ function App() {
                         <label className="block text-[10px] text-slate-500">
                           KeyMap
                           <select
-                            value={selectedStep.payload.map_id}
+                            value={targetKey(selectedStep.payload.map_id)}
                             onChange={(e) => {
-                              const map_id = e.target.value;
-                              const map = (
-                                project.workspace.key_maps ?? []
-                              ).find((m) => m.id === map_id);
+                              const map_id = objectTargetFromPicker(
+                                e.target.value,
+                              );
+                              const localId =
+                                typeof map_id === "string" ? map_id : null;
+                              const map = localId
+                                ? (project.workspace.key_maps ?? []).find(
+                                    (m) => m.id === localId,
+                                  )
+                                : undefined;
                               replaceStepAt(selectedStepIndex, {
                                 type: "ApplyKeyMap",
                                 payload: {
                                   column: selectedStep.payload.column,
                                   map_id,
-                                  entries: map?.entries ?? selectedStep.payload.entries ?? [],
+                                  entries: map?.entries ?? [],
                                 },
                               });
                             }}
                             className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
                           >
-                            {(project.workspace.key_maps ?? []).length === 0 && (
-                              <option value={selectedStep.payload.map_id}>
-                                {selectedStep.payload.map_id}
+                            {(project.workspace.key_maps ?? []).length === 0 &&
+                              Object.values(refCatalogs).every(
+                                (c) => c.maps.length === 0,
+                              ) && (
+                              <option value={targetKey(selectedStep.payload.map_id)}>
+                                {targetKey(selectedStep.payload.map_id)}
                               </option>
                             )}
-                            {(project.workspace.key_maps ?? []).map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.name} ({m.entries.length} rows)
-                              </option>
-                            ))}
+                            <optgroup label="This project">
+                              {(project.workspace.key_maps ?? []).map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.name} ({m.entries.length} rows)
+                                </option>
+                              ))}
+                            </optgroup>
+                            {Object.entries(refCatalogs).map(([rid, cat]) =>
+                              cat.maps.length > 0 ? (
+                                <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                  {cat.maps.map((m) => (
+                                    <option
+                                      key={`${rid}:${m.id}`}
+                                      value={targetKey(
+                                        externalTarget(rid, "mapping", m.id),
+                                      )}
+                                    >
+                                      {cat.alias}.{m.name}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ) : null,
+                            )}
                           </select>
                         </label>
                         <p className="font-mono text-[10px] text-slate-500">
@@ -5149,12 +6358,11 @@ function App() {
                           className="w-full rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
                           onClick={() => {
                             const maps = project.workspace.key_maps ?? [];
+                            const mid = targetKey(selectedStep.payload.map_id);
                             const map =
-                              maps.find(
-                                (m) => m.id === selectedStep.payload.map_id,
-                              ) ?? {
-                                id: selectedStep.payload.map_id,
-                                name: selectedStep.payload.map_id,
+                              maps.find((m) => m.id === mid) ?? {
+                                id: mid,
+                                name: mid,
                                 entries: selectedStep.payload.entries ?? [],
                               };
                             openKeyMapEditor(map, {
@@ -5193,8 +6401,11 @@ function App() {
                   </div>
                 </div>
               </div>
+              </>
+              )}
             </div>
           </aside>
+          )}
         </div>
       )}
     </div>

@@ -4,11 +4,12 @@
 //! and cache by fingerprint. Server caps batch size and matches per side.
 
 use crate::arrow_json::{array_value_to_json, map_arrow_type};
+use crate::compile::compile_ctes_from;
 use crate::preview::ColumnMetadata;
 use crate::session::DbSession;
 use dwh_pipeline::{
     ascii_fold_name, cte_name, emit_transform_step, escape_sql_string, quote_ident, ConnectionDef,
-    GraphCompiler, TransformationStep, WarehouseDialect, Workspace,
+    TransformationStep, WarehouseDialect, Workspace,
 };
 use duckdb::arrow::array::*;
 use duckdb::arrow::datatypes::DataType;
@@ -108,10 +109,8 @@ pub fn explain_join_rows(
                 offs.len()
             ));
         }
-        let compiled = GraphCompiler::new(&resolved)
-            .with_sources(sources)
-            .with_connections(connections)
-            .compile_ctes_from(host_query_id)?;
+        let compiled =
+            compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
         Some(resolve_preview_offsets(
             db,
             &compiled.definitions,
@@ -177,6 +176,7 @@ pub fn explain_join_rows(
     };
     let batch_refs: Vec<&JoinKeyTuple> = batch_keys.iter().collect();
 
+    let right_query_id = right_query_id.compiler_id()?;
     let left_cte = cte_name(host_query_id, join_step_index - 1);
     let right_cte = {
         let rq = resolved
@@ -188,10 +188,8 @@ pub fn explain_join_rows(
         cte_name(right_query_id, rq.steps.len() - 1)
     };
 
-    let compiled = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .with_connections(connections)
-        .compile_ctes_from(host_query_id)?;
+    let compiled =
+        compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
     let batch_sql = values_batch_sql(&batch_refs, left_on.len())?;
     let left_on_join = left_on
         .iter()
@@ -324,7 +322,7 @@ pub fn explain_join_rows(
     Ok(ExplainJoinRowsResult {
         host_query_id: host_query_id.to_string(),
         join_step_index,
-        right_query_id: right_query_id.clone(),
+        right_query_id: right_query_id.to_string(),
         left_on: left_on.clone(),
         right_on: right_on.clone(),
         left_columns,
@@ -456,7 +454,8 @@ fn resolve_preview_offsets(
             } => {
                 // Chained Join after the explained Join (e.g. two RIGHT OUTER).
                 // Keep *original* key_names — we still pin to the earlier Join's ON.
-                let right_cte = last_by_query.get(right_query_id).ok_or_else(|| {
+                let right_id = right_query_id.compiler_id()?;
+                let right_cte = last_by_query.get(right_id).ok_or_else(|| {
                     format!(
                         "Join Lens: right query '{right_query_id}' missing from compiled CTEs"
                     )
@@ -1185,6 +1184,7 @@ fn join_key_context(
     if join_step_index == 0 {
         return Err("Join cannot be the first step".into());
     }
+    let right_query_id = right_query_id.compiler_id()?;
     let rq = resolved
         .query(right_query_id)
         .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
@@ -1204,7 +1204,7 @@ fn join_key_context(
             let (l, r, j) = crate::join_prepare::prepared_cte_names();
             let mut last_by_query = std::collections::HashMap::new();
             last_by_query.insert(host_query_id.to_string(), j.to_string());
-            last_by_query.insert(right_query_id.clone(), r.to_string());
+            last_by_query.insert(right_query_id.to_string(), r.to_string());
             (
                 dwh_pipeline::CompiledCtes {
                     definitions: defs,
@@ -1215,10 +1215,8 @@ fn join_key_context(
                 j.to_string(),
             )
         } else {
-            let compiled = GraphCompiler::new(&resolved)
-                .with_sources(sources)
-                .with_connections(connections)
-                .compile_ctes_from(host_query_id)?;
+            let compiled =
+                compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
             (
                 compiled,
                 cte_name(host_query_id, join_step_index - 1),
@@ -1233,7 +1231,7 @@ fn join_key_context(
         resolved_right_steps_len: rq.steps.len(),
         left_on: left_on.clone(),
         right_on: right_on.clone(),
-        right_query_id: right_query_id.clone(),
+        right_query_id: right_query_id.to_string(),
         resolved,
         compiled,
     })

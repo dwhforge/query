@@ -20,6 +20,9 @@ pub struct FuzzyPair {
     pub alt_to_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_score: Option<f64>,
+    /// Composite From tuple ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)). Empty → `[from_key]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_parts: Vec<String>,
 }
 
 /// The stored key is never normalized. Only the comparison label is normalized.
@@ -271,6 +274,7 @@ pub(crate) fn match_keys(
             ambiguous: alternative.is_some(),
             alt_to_key: alternative.map(|r| right[r.row].key.clone()),
             alt_score: alternative.map(|r| r.score),
+            from_parts: vec![],
         });
     }
     out.sort_unstable_by(|a, b| a.from_key.cmp(&b.from_key));

@@ -1,6 +1,7 @@
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
+use crate::compile::{compile_focus_sql, graph_compiler, prepare_workspace};
 use crate::session::DbSession;
-use dwh_pipeline::{ConnectionDef, GraphCompiler, SourceDef, TransformationStep, Workspace};
+use dwh_pipeline::{ConnectionDef, SourceDef, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -49,10 +50,7 @@ pub fn preview_workspace(
     sources: &[SourceDef],
 ) -> Result<PreviewResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let sql = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .with_connections(connections)
-        .to_sql(true)?;
+    let sql = compile_focus_sql(db, &resolved, connections, sources, true)?;
     run_sql(db, sql)
 }
 
@@ -63,9 +61,7 @@ pub fn preview_pipeline(
 ) -> Result<PreviewResult, String> {
     let ws = Workspace::from_linear_steps(steps.to_vec());
     let resolved = db.prepare_workspace(&ws, connections)?;
-    let sql = GraphCompiler::new(&resolved)
-        .with_connections(connections)
-        .to_sql(true)?;
+    let sql = compile_focus_sql(db, &resolved, connections, &[], true)?;
     run_sql(db, sql)
 }
 
@@ -77,10 +73,12 @@ pub fn describe_workspace(
     sources: &[SourceDef],
 ) -> Result<PreviewResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let compiled = GraphCompiler::new(&resolved)
-        .with_sources(sources)
-        .with_connections(connections)
-        .compile_ctes()?;
+    let prepared = prepare_workspace(db, &resolved, connections, sources)?;
+    for w in &prepared.warnings {
+        eprintln!("[dwh] prepare warning: {w}");
+    }
+    let compiled =
+        graph_compiler(&resolved, connections, sources, &prepared.schemas).compile_ctes()?;
     let focus_last = compiled
         .last_by_query
         .get(&resolved.focus_query_id)

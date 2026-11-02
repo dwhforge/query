@@ -4,15 +4,15 @@ use crate::destination::{
 use crate::dialect::{
     validate_engine_execution, workspace_needs_s3_landing, WarehouseDialect,
 };
-use crate::emit::{
-    emit_transform_step_ex, key_map_seed_csv_named, key_map_seed_name,
+    use crate::emit::{
+    emit_transform_step_ex, key_map_seed_csv_cols, key_map_seed_name,
     substitute_query_placeholders, EmitSchemaOpts,
 };
 use crate::export_manifest::commit_export_plan;
 use crate::graph::{sanitize_id, topo_queries};
 use crate::model::{KeyMapEntry, TransformationStep, Workspace};
 use crate::producers::{DbtTarget, OutputProducer};
-use crate::schema::{infer_workspace_schemas, WorkspaceSchemas};
+use crate::schema::{infer_workspace_schemas_ex, WorkspaceSchemas};
 use crate::parquet_scan::read_parquet_call_opts;
 use crate::sql_escape::escape_sql_string;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -41,12 +41,15 @@ fn collect_seed_key_maps(workspace: &Workspace) -> BTreeMap<String, Vec<KeyMapEn
                 map_id, entries, ..
             } = step
             {
+                let Ok(map_key) = map_id.compiler_id() else {
+                    continue;
+                };
                 let seed_backed = workspace
-                    .key_map(map_id)
+                    .key_map(map_key)
                     .map(|m| m.is_seed_backed())
                     .unwrap_or(true);
                 if seed_backed {
-                    out.entry(map_id.clone()).or_insert_with(|| entries.clone());
+                    out.entry(map_key.to_string()).or_insert_with(|| entries.clone());
                 }
             }
         }
@@ -74,8 +77,11 @@ fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
     for q in &workspace.queries {
         for step in &q.steps {
             if let TransformationStep::ApplyKeyMap { map_id, .. } = step {
-                out.entry(map_id.clone()).or_insert_with(|| {
-                    let seed = key_map_seed_name(map_id);
+                let Ok(map_key) = map_id.compiler_id() else {
+                    continue;
+                };
+                out.entry(map_key.to_string()).or_insert_with(|| {
+                    let seed = key_map_seed_name(map_key);
                     format!("{{{{ ref('{seed}') }}}}")
                 });
             }
@@ -84,21 +90,17 @@ fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
     out
 }
 
-/// map_id → (from_column, to_column) for ApplyKeyMap join emit.
-fn key_map_columns(workspace: &Workspace) -> HashMap<String, (String, String)> {
+/// map_id → (from_columns, to_column) for ApplyKeyMap join emit.
+fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, String)> {
     let mut out = HashMap::new();
     for km in &workspace.key_maps {
-        let from = if km.from_column.trim().is_empty() {
-            "from".into()
-        } else {
-            km.from_column.clone()
-        };
+        let froms = km.from_columns_eff();
         let to = if km.to_column.trim().is_empty() {
             "to".into()
         } else {
             km.to_column.clone()
         };
-        out.insert(km.id.clone(), (from, to));
+        out.insert(km.id.clone(), (froms, to));
     }
     out
 }
@@ -121,6 +123,7 @@ impl OutputProducer for DbtProducer {
             target,
             dialect,
             &HashMap::new(),
+            &HashMap::new(),
         )
     }
 }
@@ -135,6 +138,7 @@ impl DbtProducer {
         target: DbtTarget,
         dialect: WarehouseDialect,
         load_seeds: &HashMap<String, Vec<String>>,
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         let has_files = workspace_needs_s3_landing(&workspace.queries)
             || workspace.queries.iter().any(|q| {
@@ -165,6 +169,7 @@ impl DbtProducer {
             engine,
             destination,
             load_seeds,
+            sql_model_schemas,
         )
     }
 
@@ -178,6 +183,7 @@ impl DbtProducer {
         engine: ExecutionEngine,
         destination: DestinationKind,
         load_seeds: &HashMap<String, Vec<String>>,
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         // Pure postgres engine historically used `sys`; duckdb→pg marts use `public`.
         let default_schema = match engine {
@@ -194,6 +200,7 @@ impl DbtProducer {
             default_schema,
             &[],
             load_seeds,
+            sql_model_schemas,
         )
     }
 
@@ -210,6 +217,7 @@ impl DbtProducer {
         postgres_schema: &str,
         published_query_ids: &[String],
         load_seeds: &HashMap<String, Vec<String>>,
+        sql_model_schemas: &HashMap<String, Vec<String>>,
     ) -> Result<String, String> {
         self.produce_routed_with_schema_and_sources(
             pipeline_name,
@@ -222,6 +230,8 @@ impl DbtProducer {
             published_query_ids,
             load_seeds,
             &[],
+            sql_model_schemas,
+            None,
         )
     }
 
@@ -237,6 +247,8 @@ impl DbtProducer {
         published_query_ids: &[String],
         load_seeds: &HashMap<String, Vec<String>>,
         sources: &[crate::project::SourceDef],
+        sql_model_schemas: &HashMap<String, Vec<String>>,
+        provenance_json: Option<&str>,
     ) -> Result<String, String> {
         if matches!(target, DbtTarget::V2) {
             return Err(
@@ -270,7 +282,7 @@ impl DbtProducer {
             validate_engine_execution(q, engine)?;
         }
 
-        let plan = build_export_plan_routed(
+        let mut plan = build_export_plan_routed(
             pipeline_name,
             workspace,
             target,
@@ -280,7 +292,11 @@ impl DbtProducer {
             published_query_ids,
             load_seeds,
             sources,
+            sql_model_schemas,
         )?;
+        if let Some(body) = provenance_json.filter(|s| !s.is_empty()) {
+            plan.insert("dwhq_provenance.json".into(), body.to_string());
+        }
         let root = Path::new(output_dir).join(pipeline_name);
         let manifest_tag = if is_duckdb_to_postgres(engine, destination) {
             "duckdb->postgres"
@@ -315,12 +331,14 @@ pub fn build_export_plan(
         &[],
         load_seeds,
         &[],
+        &HashMap::new(),
     )
 }
 
 /// Export plan with explicit engine × destination (four routes).
 /// `postgres_schema` = where marts land when destination is Postgres (default callers use `public`).
 /// `published_query_ids` empty → only focus query is `mart_*`.
+/// `sql_model_schemas`: live-described SqlModel columns (from engine); empty → unknown SqlModel schema.
 pub fn build_export_plan_routed(
     pipeline_name: &str,
     workspace: &Workspace,
@@ -331,6 +349,7 @@ pub fn build_export_plan_routed(
     published_query_ids: &[String],
     load_seeds: &HashMap<String, Vec<String>>,
     sources: &[crate::project::SourceDef],
+    sql_model_schemas: &HashMap<String, Vec<String>>,
 ) -> Result<BTreeMap<String, String>, String> {
     let dialect = engine.dialect();
     let mut plan = BTreeMap::new();
@@ -349,26 +368,23 @@ pub fn build_export_plan_routed(
         seeds_cfg.push_str(&format!("  {pipeline_name}:\n"));
         for map_id in key_maps.keys() {
             let seed = key_map_seed_name(map_id);
-            let (from_col, to_col) = workspace
+            let (from_cols, to_col) = workspace
                 .key_map(map_id)
                 .map(|m| {
-                    (
-                        if m.from_column.trim().is_empty() {
-                            "from".to_string()
-                        } else {
-                            m.from_column.clone()
-                        },
-                        if m.to_column.trim().is_empty() {
-                            "to".to_string()
-                        } else {
-                            m.to_column.clone()
-                        },
-                    )
+                    let froms = m.from_columns_eff();
+                    let to = if m.to_column.trim().is_empty() {
+                        "to".to_string()
+                    } else {
+                        m.to_column.clone()
+                    };
+                    (froms, to)
                 })
-                .unwrap_or_else(|| ("from".into(), "to".into()));
-            seeds_cfg.push_str(&format!(
-                "    {seed}:\n      +column_types:\n        {from_col}: varchar\n        {to_col}: varchar\n"
-            ));
+                .unwrap_or_else(|| (vec!["from".into()], "to".into()));
+            seeds_cfg.push_str(&format!("    {seed}:\n      +column_types:\n"));
+            for fc in &from_cols {
+                seeds_cfg.push_str(&format!("        {fc}: varchar\n"));
+            }
+            seeds_cfg.push_str(&format!("        {to_col}: varchar\n"));
         }
     }
     let pg_schema_raw = postgres_schema.trim();
@@ -427,26 +443,20 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
 
     for (map_id, entries) in &key_maps {
         let seed = key_map_seed_name(map_id);
-        let (from_col, to_col) = workspace
+        let (from_cols, to_col) = workspace
             .key_map(map_id)
             .map(|m| {
-                (
-                    if m.from_column.trim().is_empty() {
-                        "from".to_string()
-                    } else {
-                        m.from_column.clone()
-                    },
-                    if m.to_column.trim().is_empty() {
-                        "to".to_string()
-                    } else {
-                        m.to_column.clone()
-                    },
-                )
+                let to = if m.to_column.trim().is_empty() {
+                    "to".to_string()
+                } else {
+                    m.to_column.clone()
+                };
+                (m.from_columns_eff(), to)
             })
-            .unwrap_or_else(|| ("from".into(), "to".into()));
+            .unwrap_or_else(|| (vec!["from".into()], "to".into()));
         plan.insert(
             format!("seeds/{seed}.csv"),
-            key_map_seed_csv_named(entries, &from_col, &to_col),
+            key_map_seed_csv_cols(entries, &from_cols, &to_col),
         );
     }
 
@@ -483,9 +493,25 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
     }
 
     let order = topo_queries(workspace)?;
-    let schemas = infer_workspace_schemas(workspace, load_seeds)?;
+    let schemas = infer_workspace_schemas_ex(workspace, load_seeds, sql_model_schemas)?;
     let mut model_name_by_query: HashMap<String, String> = HashMap::new();
-    let mut pg_by_schema: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut pg_by_schema: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+    let mut note_source = |dbt_name: &str, db_schema: &str, table: &str| -> Result<(), String> {
+        let name = sanitize_id(dbt_name);
+        let schema = sanitize_id(db_schema);
+        let table = sanitize_id(table);
+        let entry = pg_by_schema
+            .entry(name.clone())
+            .or_insert_with(|| (schema.clone(), BTreeSet::new()));
+        if entry.0 != schema {
+            return Err(format!(
+                "dbt source '{name}' would use both schemas '{}' and '{schema}'",
+                entry.0
+            ));
+        }
+        entry.1.insert(table);
+        Ok(())
+    };
 
     for qid in &order {
         let query = workspace
@@ -515,23 +541,26 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
                 TransformationStep::LoadPostgres {
                     schema,
                     table_name,
+                    source_alias,
                     ..
                 } => {
-                    pg_by_schema
-                        .entry(sanitize_id(schema))
-                        .or_default()
-                        .insert(sanitize_id(table_name));
+                    note_source(
+                        source_alias.as_deref().unwrap_or(schema),
+                        schema,
+                        table_name,
+                    )?;
                 }
                 TransformationStep::LoadDuckdb {
                     schema,
                     table_name,
+                    source_alias,
                     ..
                 } => {
-                    // External DuckDB relations are declared as dbt sources under schema name.
-                    pg_by_schema
-                        .entry(sanitize_id(schema))
-                        .or_default()
-                        .insert(sanitize_id(table_name));
+                    note_source(
+                        source_alias.as_deref().unwrap_or(schema),
+                        schema,
+                        table_name,
+                    )?;
                 }
                 _ => {}
             }
@@ -540,12 +569,16 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
 
     // KeyMap storage=source also needs dbt sources.yml entries.
     for km in &workspace.key_maps {
-        if let KeyMapStorage::Source { source, table, .. } = &km.storage {
+        if let KeyMapStorage::Source {
+            source,
+            table,
+            db_schema,
+            ..
+        } = &km.storage
+        {
             if !source.trim().is_empty() && !table.trim().is_empty() {
-                pg_by_schema
-                    .entry(sanitize_id(source))
-                    .or_default()
-                    .insert(sanitize_id(table));
+                let schema = db_schema.as_deref().unwrap_or(source);
+                note_source(source, schema, table)?;
             }
         }
     }
@@ -554,9 +587,9 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
         "version: 2\n# No postgres sources in this export.\nsources: []\n".to_string()
     } else {
         let mut sources_yml = String::from("version: 2\nsources:\n");
-        for (schema, tables) in &pg_by_schema {
+        for (name, (schema, tables)) in &pg_by_schema {
             sources_yml.push_str(&format!(
-                "  - name: {schema}\n    schema: {schema}\n    tables:\n"
+                "  - name: {name}\n    schema: {schema}\n    tables:\n"
             ));
             for table in tables {
                 sources_yml.push_str(&format!("      - name: {table}\n"));
@@ -653,22 +686,24 @@ pub fn preview_dbt_model_sql_with_seeds(
         dialect,
         load_seeds,
         &[],
+        &HashMap::new(),
     )
 }
 
-/// Like [`preview_dbt_model_sql_with_seeds`], with project sources (Hive partitioning).
+/// Like [`preview_dbt_model_sql_with_seeds`], with project sources + optional SqlModel schemas.
 pub fn preview_dbt_model_sql_with_seeds_and_sources(
     workspace: &Workspace,
     query_id: &str,
     dialect: WarehouseDialect,
     load_seeds: &HashMap<String, Vec<String>>,
     sources: &[crate::project::SourceDef],
+    sql_model_schemas: &HashMap<String, Vec<String>>,
 ) -> Result<PreviewDbtModel, String> {
     let query = workspace
         .query(query_id)
         .ok_or_else(|| format!("query '{query_id}' not found"))?;
     let names = dbt_model_names(workspace)?;
-    let schemas = infer_workspace_schemas(workspace, load_seeds)?;
+    let schemas = infer_workspace_schemas_ex(workspace, load_seeds, sql_model_schemas)?;
     let sql = compile_query_as_dbt_model(
         workspace,
         query,
@@ -740,25 +775,28 @@ fn compile_query_as_dbt_model(
             TransformationStep::LoadPostgres {
                 schema,
                 table_name,
+                source_alias,
                 ..
             } => {
-                let (src, tbl) = pg_dbt_source_ref(schema, table_name);
+                let (src, tbl) = pg_dbt_source_ref(schema, table_name, source_alias.as_deref());
                 format!("select * from {{{{ source('{src}', '{tbl}') }}}}\n")
             }
             TransformationStep::LoadDuckdb {
                 schema,
                 table_name,
+                source_alias,
                 ..
             } => {
-                let (src, tbl) = pg_dbt_source_ref(schema, table_name);
+                let (src, tbl) = pg_dbt_source_ref(schema, table_name, source_alias.as_deref());
                 format!(
                     "-- source: duckdb file (ATTACH read-only in profile / pre-hook)\n\
                      select * from {{{{ source('{src}', '{tbl}') }}}}\n"
                 )
             }
             TransformationStep::FromQuery { query_id } => {
-                let m = models.get(query_id).ok_or_else(|| {
-                    format!("dbt FromQuery: missing model for '{query_id}'")
+                let qid = query_id.compiler_id()?;
+                let m = models.get(qid).ok_or_else(|| {
+                    format!("dbt FromQuery: missing model for '{qid}'")
                 })?;
                 format!("select * from {{{{ ref('{m}') }}}}\n")
             }
@@ -822,18 +860,20 @@ fn compile_query_as_dbt_model(
             TransformationStep::LoadPostgres {
                 schema,
                 table_name,
+                source_alias,
                 ..
             } => {
-                let (src, tbl) = pg_dbt_source_ref(schema, table_name);
+                let (src, tbl) = pg_dbt_source_ref(schema, table_name, source_alias.as_deref());
                 left_dbt = Some(format!("source('{src}', '{tbl}')"));
                 format!("select * from {{{{ source('{src}', '{tbl}') }}}}")
             }
             TransformationStep::LoadDuckdb {
                 schema,
                 table_name,
+                source_alias,
                 ..
             } => {
-                let (src, tbl) = pg_dbt_source_ref(schema, table_name);
+                let (src, tbl) = pg_dbt_source_ref(schema, table_name, source_alias.as_deref());
                 left_dbt = Some(format!("source('{src}', '{tbl}')"));
                 format!("select * from {{{{ source('{src}', '{tbl}') }}}}")
             }
@@ -841,8 +881,9 @@ fn compile_query_as_dbt_model(
                 if !prev.is_empty() {
                     return Err("dbt FromQuery must be the first step".into());
                 }
-                let m = models.get(query_id).ok_or_else(|| {
-                    format!("dbt FromQuery: missing model for '{query_id}'")
+                let qid = query_id.compiler_id()?;
+                let m = models.get(qid).ok_or_else(|| {
+                    format!("dbt FromQuery: missing model for '{qid}'")
                 })?;
                 left_dbt = Some(format!("ref('{m}')"));
                 format!("select * from {{{{ ref('{m}') }}}}")
@@ -899,8 +940,11 @@ fn compile_query_as_dbt_model(
 }
 
 /// dbt `source(schema, table)` — source name equals Postgres schema (see sources.yml).
-fn pg_dbt_source_ref(schema: &str, table: &str) -> (String, String) {
-    (sanitize_id(schema), sanitize_id(table))
+fn pg_dbt_source_ref(schema: &str, table: &str, source_alias: Option<&str>) -> (String, String) {
+    (
+        sanitize_id(source_alias.unwrap_or(schema)),
+        sanitize_id(table),
+    )
 }
 
 #[cfg(test)]
@@ -1030,6 +1074,7 @@ mod tests {
                 DbtTarget::V1,
                 WarehouseDialect::Postgres,
                 &HashMap::new(),
+                &HashMap::new(),
             )
             .expect("Files→PG via duckdb engine must not require landing");
         let profiles = fs::read_to_string(Path::new(&path).join("profiles.yml")).unwrap();
@@ -1068,6 +1113,7 @@ mod tests {
                         connection_string: String::new(),
                         schema: "sys".into(),
                         table_name: "data_source_items".into(),
+                        source_alias: None,
                     }],
                     execution: Default::default(),
                 },
@@ -1079,6 +1125,7 @@ mod tests {
                         connection_string: String::new(),
                         schema: "sys".into(),
                         table_name: "data_extraction_sources".into(),
+                        source_alias: None,
                     }],
                     execution: Default::default(),
                 },
@@ -1140,6 +1187,7 @@ mod tests {
                         connection_string: String::new(),
                         schema: "sales".into(),
                         table_name: "eu".into(),
+                        source_alias: None,
                     }],
                     execution: Default::default(),
                 },
@@ -1151,6 +1199,7 @@ mod tests {
                         connection_string: String::new(),
                         schema: "sales".into(),
                         table_name: "us".into(),
+                        source_alias: None,
                     }],
                     execution: Default::default(),
                 },
@@ -1369,6 +1418,58 @@ mod tests {
     }
 
     #[test]
+    fn keymap_composite_seed_column_types_all_froms() {
+        use crate::model::{KeyMapDef, KeyMapEntry};
+        let mut map = KeyMapDef::new("offer_day", "offer");
+        map.from_columns = vec!["ext_offer_id".into(), "as_of_day".into()];
+        map.to_column = "offer_sk".into();
+        map.entries = vec![KeyMapEntry::parts(
+            vec!["001".into(), "2024-06-01".into()],
+            "SK-1",
+        )];
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "q".into(),
+                name: "events".into(),
+                steps: vec![
+                    TransformationStep::LoadCsv {
+                        path: "x.csv".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: String::new(),
+                        columns: vec!["ext_offer_id".into(), "day".into()],
+                        output_column: Some("offer_sk".into()),
+                        map_id: map.id.clone().into(),
+                        entries: map.entries.clone(),
+                    },
+                ],
+                execution: Default::default(),
+            }],
+            focus_query_id: "q".into(),
+            key_maps: vec![map],
+        };
+        let mut seeds = HashMap::new();
+        seeds.insert(
+            "q".into(),
+            vec!["ext_offer_id".into(), "day".into(), "amt".into()],
+        );
+        let plan = build_export_plan(
+            "comp",
+            &ws,
+            DbtTarget::V1,
+            WarehouseDialect::Duckdb,
+            &seeds,
+        )
+        .unwrap();
+        let yml = &plan["dbt_project.yml"];
+        assert!(
+            yml.contains("ext_offer_id: varchar") && yml.contains("as_of_day: varchar"),
+            "all From columns need varchar: {yml}"
+        );
+        assert!(yml.contains("offer_sk: varchar"), "{yml}");
+    }
+
+    #[test]
     fn keymap_export_writes_seed_and_ref() {
         use crate::model::{KeyMapDef, KeyMapEntry};
         let mut map = KeyMapDef::new("channel_alias", "channel");
@@ -1387,7 +1488,9 @@ mod tests {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
-                        map_id: map.id.clone(),
+                        columns: vec![],
+                        output_column: None,
+                        map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },
                 ],
@@ -1416,6 +1519,7 @@ mod tests {
             plan["dbt_project.yml"]
         );
         assert!(plan["dbt_project.yml"].contains("from: varchar"));
+        assert!(plan["dbt_project.yml"].contains("to: varchar"));
         let seed = &plan["seeds/map_channel_alias.csv"];
         assert!(seed.contains("www") && seed.contains("web"));
         let model = plan
@@ -1449,6 +1553,7 @@ mod tests {
             source: "dict".into(),
             table: "aliases".into(),
             connection_id: Some("pg1".into()),
+            db_schema: None,
         };
         map.entries = vec![KeyMapEntry {
             from: "www".into(),
@@ -1465,7 +1570,9 @@ mod tests {
                     },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
-                        map_id: map.id.clone(),
+                        columns: vec![],
+                        output_column: None,
+                        map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },
                 ],

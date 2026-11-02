@@ -7,6 +7,162 @@ fn default_pg_schema() -> String {
     "public".into()
 }
 
+/// Cross-project object kind ([ADR-0025](../../../docs/adr/0025-project-references.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectKind {
+    Source,
+    Query,
+    Mapping,
+}
+
+impl ObjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObjectKind::Source => "source",
+            ObjectKind::Query => "query",
+            ObjectKind::Mapping => "mapping",
+        }
+    }
+
+    pub fn tag(self) -> char {
+        match self {
+            ObjectKind::Source => 's',
+            ObjectKind::Query => 'q',
+            ObjectKind::Mapping => 'm',
+        }
+    }
+}
+
+/// Local id (bare string on disk) or a reference to an object in another project.
+///
+/// External form: `{ "scope": "reference", "reference_id", "kind", "id" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectTarget {
+    Local(String),
+    External {
+        reference_id: String,
+        kind: ObjectKind,
+        id: String,
+    },
+}
+
+impl ObjectTarget {
+    pub fn external(reference_id: impl Into<String>, kind: ObjectKind, id: impl Into<String>) -> Self {
+        ObjectTarget::External {
+            reference_id: reference_id.into(),
+            kind,
+            id: id.into(),
+        }
+    }
+
+    pub fn is_external(&self) -> bool {
+        matches!(self, ObjectTarget::External { .. })
+    }
+
+    /// Id the existing compilers understand. External targets must be lowered first.
+    pub fn compiler_id(&self) -> Result<&str, String> {
+        match self {
+            ObjectTarget::Local(id) => Ok(id.as_str()),
+            ObjectTarget::External {
+                reference_id,
+                kind,
+                id,
+            } => Err(format!(
+                "unresolved external {} '{id}' via reference '{reference_id}'",
+                kind.as_str()
+            )),
+        }
+    }
+}
+
+impl From<&str> for ObjectTarget {
+    fn from(id: &str) -> Self {
+        ObjectTarget::Local(id.to_string())
+    }
+}
+
+impl From<String> for ObjectTarget {
+    fn from(id: String) -> Self {
+        ObjectTarget::Local(id)
+    }
+}
+
+impl std::fmt::Display for ObjectTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObjectTarget::Local(id) => f.write_str(id),
+            ObjectTarget::External {
+                reference_id,
+                kind,
+                id,
+            } => write!(f, "reference:{reference_id}:{}:{id}", kind.as_str()),
+        }
+    }
+}
+
+impl Serialize for ObjectTarget {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ObjectTarget::Local(id) => serializer.serialize_str(id),
+            ObjectTarget::External {
+                reference_id,
+                kind,
+                id,
+            } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("scope", "reference")?;
+                map.serialize_entry("reference_id", reference_id)?;
+                map.serialize_entry("kind", kind)?;
+                map.serialize_entry("id", id)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(id) => Ok(ObjectTarget::Local(id)),
+            serde_json::Value::Object(map) => {
+                let scope = map.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+                if scope != "reference" {
+                    return Err(serde::de::Error::custom(
+                        "object target scope must be \"reference\" or a local id string",
+                    ));
+                }
+                let reference_id = map
+                    .get("reference_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let id = map.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if reference_id.is_empty() || id.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "external target needs reference_id and id",
+                    ));
+                }
+                let kind = map
+                    .get("kind")
+                    .cloned()
+                    .ok_or_else(|| serde::de::Error::custom("external target needs kind"))?;
+                let kind: ObjectKind = serde_json::from_value(kind).map_err(serde::de::Error::custom)?;
+                Ok(ObjectTarget::External {
+                    reference_id,
+                    kind,
+                    id,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "object target must be a string or a reference object",
+            )),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinType {
@@ -47,6 +203,9 @@ pub enum TransformationStep {
         #[serde(default = "default_pg_schema")]
         schema: String,
         table_name: String,
+        /// dbt `source()` name when it must differ from `schema` (external projects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_alias: Option<String>,
     },
     /// Read a relation from an attached DuckDB database file (read-only source).
     LoadDuckdb {
@@ -58,9 +217,12 @@ pub enum TransformationStep {
         #[serde(default = "default_pg_schema")]
         schema: String,
         table_name: String,
+        /// dbt `source()` name when it must differ from `schema` (external projects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_alias: Option<String>,
     },
     /// Start from another query’s output (`ref` in dbt). Must be the first step.
-    FromQuery { query_id: String },
+    FromQuery { query_id: ObjectTarget },
     /// Hand-written SQL as the query root (ready-made model body). Must be first.
     /// Dialect = author’s prod warehouse; DuckDB is preview-only.
     SqlModel { raw_sql: String },
@@ -89,32 +251,46 @@ pub enum TransformationStep {
     /// Keep first N rows after prior steps (typically after SortBy).
     Limit { n: u64 },
     Join {
-        right_query_id: String,
+        right_query_id: ObjectTarget,
         join_type: JoinType,
         left_on: Vec<String>,
         right_on: Vec<String>,
     },
-    Append { other_query_ids: Vec<String> },
+    Append { other_query_ids: Vec<ObjectTarget> },
     CustomSql { raw_sql: String },
     /// Deterministic key cleanup before Join (trim/case/spaces/zeros). Overwrites in place.
     NormalizeKey {
         columns: Vec<String>,
         ops: Vec<NormalizeOp>,
     },
-    /// Remap join-key values via a KeyMap (`from` → `to`). Entries are a snapshot for emit.
+    /// Remap join-key values via a KeyMap (`from` → `to`, or From tuple → to).
+    /// Soft-migrate: legacy `column` → `columns: [column]` ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
     ApplyKeyMap {
+        /// Legacy single fact column (arity 1). Prefer `columns` when set.
+        #[serde(default)]
         column: String,
-        map_id: String,
+        /// Fact columns matching KeyMap `from_columns` (ordered).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        columns: Vec<String>,
+        /// Where COALESCE(map.to, …) is written (default: first of columns).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_column: Option<String>,
+        map_id: ObjectTarget,
         #[serde(default)]
         entries: Vec<KeyMapEntry>,
     },
 }
 
-/// One From→To alias row. `from` must be unique within a [`KeyMapDef`].
+/// One From→To alias row. Unique by trimmed From **tuple** within a [`KeyMapDef`].
 /// Optional `attrs` hold whitelisted extra columns for Postgres source maps ([ADR-0022](../../../docs/adr/0022-keymap-postgres-live-bind.md)).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct KeyMapEntry {
+    /// Legacy / arity-1 convenience From. Prefer `from_parts` when arity > 1.
+    #[serde(default)]
     pub from: String,
+    /// From tuple aligned to [`KeyMapDef::from_columns_eff`] ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_parts: Vec<String>,
     pub to: String,
     /// Extra editable column values (keys ⊆ `KeyMapDef.editable_columns`). Ignored by ApplyKeyMap join.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -123,11 +299,45 @@ pub struct KeyMapEntry {
 
 impl KeyMapEntry {
     pub fn pair(from: impl Into<String>, to: impl Into<String>) -> Self {
+        let from = from.into();
         Self {
-            from: from.into(),
+            from: from.clone(),
+            from_parts: vec![from],
             to: to.into(),
             attrs: std::collections::BTreeMap::new(),
         }
+    }
+
+    pub fn parts(from_parts: Vec<String>, to: impl Into<String>) -> Self {
+        let from = from_parts.first().cloned().unwrap_or_default();
+        Self {
+            from,
+            from_parts,
+            to: to.into(),
+            attrs: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Effective From parts (soft-migrate legacy `from`).
+    pub fn from_parts_eff(&self) -> Vec<String> {
+        if !self.from_parts.is_empty() {
+            self.from_parts.clone()
+        } else if !self.from.trim().is_empty() {
+            vec![self.from.clone()]
+        } else {
+            vec![]
+        }
+    }
+}
+
+/// Effective ApplyKeyMap fact columns (soft-migrate legacy `column`).
+pub fn apply_keymap_columns(column: &str, columns: &[String]) -> Vec<String> {
+    if !columns.is_empty() {
+        columns.to_vec()
+    } else if !column.trim().is_empty() {
+        vec![column.to_string()]
+    } else {
+        vec![]
     }
 }
 
@@ -149,6 +359,9 @@ pub enum KeyMapStorage {
         /// Optional Postgres connection for read/write-back (UI / host).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection_id: Option<String>,
+        /// Database schema when `source` is only the dbt source name (external projects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        db_schema: Option<String>,
     },
 }
 
@@ -171,9 +384,12 @@ pub struct KeyMapDef {
     /// Backend relation — seed (default), dbt ref, or dbt source.
     #[serde(default)]
     pub storage: KeyMapStorage,
-    /// Column on the map relation used as From (default `from`).
+    /// Legacy single From column on the map relation (default `from`). Prefer `from_columns`.
     #[serde(default = "default_from_col")]
     pub from_column: String,
+    /// From columns on the map relation (ordered). Soft-migrate: empty → `[from_column]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_columns: Vec<String>,
     /// Column on the map relation used as To (default `to`).
     #[serde(default = "default_to_col")]
     pub to_column: String,
@@ -190,12 +406,28 @@ impl KeyMapDef {
             entries: vec![],
             storage: KeyMapStorage::Seed,
             from_column: default_from_col(),
+            from_columns: vec![],
             to_column: default_to_col(),
             editable_columns: vec![],
         }
     }
 
-    /// Reject empty / duplicate `from` (after trim) and empty `to` for seed-backed maps.
+    /// Effective From column names on the map relation ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+    pub fn from_columns_eff(&self) -> Vec<String> {
+        if !self.from_columns.is_empty() {
+            self.from_columns.clone()
+        } else if !self.from_column.trim().is_empty() {
+            vec![self.from_column.clone()]
+        } else {
+            vec![default_from_col()]
+        }
+    }
+
+    pub fn arity(&self) -> usize {
+        self.from_columns_eff().len().max(1)
+    }
+
+    /// Reject empty / duplicate From **tuples** and empty `to` for seed-backed maps.
     pub fn validate(&self) -> Result<(), String> {
         match &self.storage {
             KeyMapStorage::Ref { model } => {
@@ -213,27 +445,40 @@ impl KeyMapDef {
             }
             KeyMapStorage::Seed => {}
         }
-        if self.from_column.trim().is_empty() || self.to_column.trim().is_empty() {
+        let from_cols = self.from_columns_eff();
+        if from_cols.iter().any(|c| c.trim().is_empty()) || self.to_column.trim().is_empty() {
             return Err(format!(
-                "KeyMap '{}': from_column/to_column must be non-empty",
+                "KeyMap '{}': from_columns/to_column must be non-empty",
                 self.id
             ));
         }
+        let n = from_cols.len();
         // External relations may have empty local entries (SoT is the table).
         if matches!(self.storage, KeyMapStorage::Seed) || !self.entries.is_empty() {
             let mut seen = std::collections::HashSet::new();
             for e in &self.entries {
-                let from = e.from.trim();
-                if from.is_empty() {
-                    return Err(format!("KeyMap '{}': empty from", self.id));
+                let parts = e.from_parts_eff();
+                if parts.len() != n {
+                    return Err(format!(
+                        "KeyMap '{}': entry from_parts len {} != arity {n}",
+                        self.id,
+                        parts.len()
+                    ));
+                }
+                let key: Vec<String> = parts.iter().map(|p| p.trim().to_string()).collect();
+                if key.iter().any(|p| p.is_empty()) {
+                    return Err(format!("KeyMap '{}': empty from part", self.id));
                 }
                 if e.to.is_empty() {
-                    return Err(format!("KeyMap '{}': empty to for from '{from}'", self.id));
-                }
-                if !seen.insert(from.to_string()) {
                     return Err(format!(
-                        "KeyMap '{}': duplicate from '{from}'",
-                        self.id
+                        "KeyMap '{}': empty to for from {:?}",
+                        self.id, key
+                    ));
+                }
+                if !seen.insert(key.clone()) {
+                    return Err(format!(
+                        "KeyMap '{}': duplicate from tuple {:?}",
+                        self.id, key
                     ));
                 }
             }
@@ -312,9 +557,7 @@ impl Workspace {
             matches!(
                 km.storage,
                 KeyMapStorage::Source {
-                    connection_id: Some(_),
-                    ..
-                }
+                    connection_id: Some(_), .. }
             )
         })
     }
@@ -330,9 +573,7 @@ impl Workspace {
                         ..
                     }
                     | TransformationStep::LoadPostgres {
-                        connection_id: Some(id),
-                        ..
-                    } => {
+                        connection_id: Some(id), .. } => {
                         if !ids.contains(id) {
                             ids.push(id.clone());
                         }
@@ -343,9 +584,7 @@ impl Workspace {
         }
         for km in &self.key_maps {
             if let KeyMapStorage::Source {
-                connection_id: Some(id),
-                ..
-            } = &km.storage
+                connection_id: Some(id), .. } = &km.storage
             {
                 if !ids.contains(id) {
                     ids.push(id.clone());
@@ -363,9 +602,7 @@ impl Workspace {
         let mut out = std::collections::HashMap::new();
         for km in &self.key_maps {
             if let KeyMapStorage::Source {
-                connection_id: Some(cid),
-                ..
-            } = &km.storage
+                connection_id: Some(cid), .. } = &km.storage
             {
                 let c = connections
                     .iter()
@@ -387,9 +624,7 @@ impl Workspace {
             for step in &mut q.steps {
                 if let TransformationStep::LoadPostgres {
                     connection_id,
-                    connection_string,
-                    ..
-                } = step
+                    connection_string, .. } = step
                 {
                     if let Some(cid) = connection_id {
                         let c = connections

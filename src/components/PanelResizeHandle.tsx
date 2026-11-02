@@ -14,6 +14,8 @@ type Props = {
   onDoubleClick?: () => void;
   "aria-label"?: string;
   title?: string;
+  /** Wider hit target when the adjacent panel is collapsed (VS Code sash). */
+  collapsedRail?: boolean;
 };
 
 /** Thin drag grip between flex panels. */
@@ -24,6 +26,7 @@ export function PanelResizeHandle({
   onDoubleClick,
   "aria-label": ariaLabel = "Resize panel",
   title,
+  collapsedRail = false,
 }: Props) {
   const last = useRef(0);
   const dragging = useRef(false);
@@ -84,14 +87,18 @@ export function PanelResizeHandle({
       className={
         horizontal
           ? "group relative z-[2] h-1.5 w-full shrink-0 cursor-row-resize bg-transparent hover:bg-teal-500/25 active:bg-teal-500/40"
-          : "group relative z-[2] w-1.5 shrink-0 cursor-col-resize bg-transparent hover:bg-teal-500/25 active:bg-teal-500/40"
+          : collapsedRail
+            ? "group relative z-[2] w-2 shrink-0 cursor-col-resize bg-slate-900/80 hover:bg-teal-500/30 active:bg-teal-500/45"
+            : "group relative z-[2] w-1.5 shrink-0 cursor-col-resize bg-transparent hover:bg-teal-500/25 active:bg-teal-500/40"
       }
     >
       <div
         className={
           horizontal
             ? "pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-[var(--line)] group-hover:bg-teal-500/60 group-active:bg-teal-400/80"
-            : "pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[var(--line)] group-hover:bg-teal-500/60 group-active:bg-teal-400/80"
+            : collapsedRail
+              ? "pointer-events-none absolute inset-y-2 left-1/2 w-0.5 -translate-x-1/2 rounded-full bg-teal-700/70 group-hover:bg-teal-400/90"
+              : "pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[var(--line)] group-hover:bg-teal-500/60 group-active:bg-teal-400/80"
         }
       />
     </div>

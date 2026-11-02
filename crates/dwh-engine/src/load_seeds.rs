@@ -10,16 +10,32 @@ use dwh_pipeline::{
 use duckdb::params;
 use std::collections::HashMap;
 
-/// Describe each Load* query → ordered column names. Missing/failed describe omits the query
-/// (emit falls back or errors when schema is required).
+/// Soft failure describing why a Load* query has no seed columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadSeedDiagnostic {
+    pub query_id: String,
+    pub message: String,
+}
+
+/// Seeds plus per-query diagnostics (unknown schema reasons).
+#[derive(Debug, Clone, Default)]
+pub struct LoadSeedsResult {
+    pub seeds: HashMap<String, Vec<String>>,
+    pub diagnostics: Vec<LoadSeedDiagnostic>,
+}
+
+/// Describe each Load* query → ordered column names.
+/// Soft per-source failures are returned in [`LoadSeedsResult::diagnostics`];
+/// hard session/workspace prep errors are `Err`.
 pub fn collect_load_seeds(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
     sources: &[SourceDef],
-) -> Result<HashMap<String, Vec<String>>, String> {
+) -> Result<LoadSeedsResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
     let mut seeds = HashMap::new();
+    let mut diagnostics = Vec::new();
 
     for q in &resolved.queries {
         let Some(step) = q.steps.first() else {
@@ -29,15 +45,13 @@ pub fn collect_load_seeds(
             TransformationStep::LoadPostgres {
                 connection_string,
                 schema,
-                table_name,
-                ..
-            } => match describe_postgres_object(db, connection_string, schema, table_name) {
+                table_name, .. } => match describe_postgres_object(db, connection_string, schema, table_name) {
                 Ok(c) => c.into_iter().map(|col| col.name).collect::<Vec<_>>(),
                 Err(e) => {
-                    eprintln!(
-                        "[dwh] seed skip query '{}': describe postgres {schema}.{table_name}: {e}",
-                        q.id
-                    );
+                    diagnostics.push(LoadSeedDiagnostic {
+                        query_id: q.id.clone(),
+                        message: format!("describe postgres {schema}.{table_name}: {e}"),
+                    });
                     continue;
                 }
             },
@@ -46,7 +60,10 @@ pub fn collect_load_seeds(
                 {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("[dwh] seed skip query '{}': describe csv {path}: {e}", q.id);
+                        diagnostics.push(LoadSeedDiagnostic {
+                            query_id: q.id.clone(),
+                            message: format!("describe csv {path}: {e}"),
+                        });
                         continue;
                     }
                 }
@@ -60,22 +77,27 @@ pub fn collect_load_seeds(
                 match describe_file_relation(db, &read_parquet_call_opts(path, hive)) {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!(
-                            "[dwh] seed skip query '{}': describe parquet {path}: {e}",
-                            q.id
-                        );
+                        diagnostics.push(LoadSeedDiagnostic {
+                            query_id: q.id.clone(),
+                            message: format!("describe parquet {path}: {e}"),
+                        });
                         continue;
                     }
                 }
             }
             _ => continue,
         };
-        if !cols.is_empty() {
+        if cols.is_empty() {
+            diagnostics.push(LoadSeedDiagnostic {
+                query_id: q.id.clone(),
+                message: "describe returned no columns".into(),
+            });
+        } else {
             seeds.insert(q.id.clone(), cols);
         }
     }
 
-    Ok(seeds)
+    Ok(LoadSeedsResult { seeds, diagnostics })
 }
 
 fn describe_file_relation(db: &DbSession, relation_sql: &str) -> Result<Vec<String>, String> {

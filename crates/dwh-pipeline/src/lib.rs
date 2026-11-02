@@ -14,6 +14,7 @@ pub mod parquet_scan;
 pub mod postgres_attach;
 pub mod producers;
 pub mod project;
+pub mod references;
 pub mod schema;
 pub mod secrets;
 pub mod sql_escape;
@@ -22,6 +23,7 @@ pub use compiler::{CompiledCtes, GraphCompiler, PipelineCompiler};
 pub use graph::{
     cte_name, join_left_input_is_expensive, join_right_input_is_expensive,
     query_closure_is_expensive, step_is_derived_expensive, steps_are_derived_expensive,
+    topo_queries, topo_queries_from,
 };
 pub use parquet_scan::{read_parquet_call, read_parquet_call_opts};
 pub use sql_escape::{escape_sql_string, quote_ident};
@@ -40,8 +42,8 @@ pub use dialect::{
 };
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
-    key_map_seed_csv_named, key_map_seed_name, normalize_column_expr, normalize_key_column_expr,
-    parse_key_map_seed_csv,
+    key_map_seed_csv_cols, key_map_seed_csv_named, key_map_seed_name, normalize_column_expr,
+    normalize_key_column_expr, parse_key_map_seed_csv, parse_key_map_seed_csv_cols,
     parse_key_map_seed_csv_mode, rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
     validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,
@@ -50,7 +52,10 @@ pub use key_map_sync::{
     push_key_map_to_export, remove_key_map_from_export, sync_key_maps_from_export,
     KeyMapSyncResult, KEYMAP_CONFLICT_DIR,
 };
-pub use schema::{apply_step_schema, infer_workspace_schemas, StepSchema, WorkspaceSchemas};
+pub use schema::{
+    apply_step_schema, infer_workspace_schemas, infer_workspace_schemas_ex, StepSchema,
+    WorkspaceSchemas,
+};
 pub use postgres_attach::{
     duckdb_file_attach_alias, duckdb_postgres_relation, postgres_attach_alias,
 };
@@ -63,8 +68,15 @@ pub use export_manifest::{
 };
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{
-    JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, QueryDef, TransformationStep,
-    Workspace,
+    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, ObjectKind,
+    ObjectTarget, QueryDef, TransformationStep, Workspace,
+};
+pub use project::{ConnectionBinding, ProjectReference};
+pub use references::{
+    copy_referenced_object, ensure_project_uid, fork_project_identity, make_project_reference,
+    project_revision, reference_consumers, reference_statuses, refresh_reference, relink_reference,
+    resolve_operation, CopiedObject, LoweredOperation, ProvenanceRecord, ReferenceState,
+    ReferenceStatus, ResolveInput, ResolveKind,
 };
 pub use producers::{
     build_export_plan, build_export_plan_routed, dbt_model_name, dbt_model_names_published,

@@ -195,8 +195,8 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
         };
         let id = rpc.id;
         // Keep the accept loop free so Cancel can be read while other work runs.
-        // Heavy RPCs share a bounded queue (1 pending; stale → superseded).
-        // join_prepare_status is cheap but must not block the reader on `db`.
+        // Heavy RPCs: preview/analysis replace pending peers; KeyMap R/W are FIFO
+        // mutations (never superseded). join_prepare_status must not block on `db`.
         let async_cmd = rpc.cmd == "llm_chat"
             || rpc.cmd == "key_map_fuzzy_suggest"
             || rpc.cmd == "join_prepare_status"

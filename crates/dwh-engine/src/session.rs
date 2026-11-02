@@ -167,8 +167,7 @@ impl DbSession {
             for q in &resolved.queries {
                 for s in &q.steps {
                     if let TransformationStep::LoadPostgres {
-                        connection_string, ..
-                    } = s
+                        connection_string, .. } = s
                     {
                         let dsn = connection_string.trim();
                         if !dsn.is_empty() {

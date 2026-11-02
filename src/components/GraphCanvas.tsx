@@ -33,7 +33,12 @@ import {
   type MouseEvent,
 } from "react";
 import { formatJoinKeyLabel } from "../lib/joinKeys";
-import type { QueryDef, TransformationStep } from "../types/pipeline";
+import type { ExternalBoundary } from "../lib/projectRefs";
+import {
+  targetKey,
+  type QueryDef,
+  type TransformationStep,
+} from "../types/pipeline";
 
 export type CanvasPositions = Record<string, { x: number; y: number }>;
 
@@ -58,6 +63,9 @@ export type QueryNodeData = {
   expanded: boolean;
   isFocus: boolean;
   isActive: boolean;
+  /** Collapsed boundary for an external dependency (ADR-0025). */
+  isExternal?: boolean;
+  externalAlias?: string;
 };
 
 type QueryNodeType = Node<QueryNodeData, "query">;
@@ -150,6 +158,11 @@ interface GraphCanvasProps {
   onRemoveQuery?: (queryId: string) => void;
   /** New query whose first step is FromQuery(this node). */
   onDeriveQuery?: (fromQueryId: string) => void;
+  /** External dependencies cited by local steps (ADR-0025). */
+  externalBoundaries?: ExternalBoundary[];
+  selectedExternalKey?: string | null;
+  onSelectExternal?: (key: string) => void;
+  onDeriveExternal?: (key: string) => void;
 }
 
 function sourceKind(q: QueryDef): string {
@@ -258,11 +271,11 @@ function queryDepths(queries: QueryDef[]): Map<string, number> {
     if (q) {
       for (const step of q.steps) {
         if (step.type === "Join") {
-          d = Math.max(d, depth(step.payload.right_query_id, stack) + 1);
+          d = Math.max(d, depth(targetKey(step.payload.right_query_id), stack) + 1);
         }
         if (step.type === "Append") {
           for (const other of step.payload.other_query_ids) {
-            d = Math.max(d, depth(other, stack) + 1);
+            d = Math.max(d, depth(targetKey(other), stack) + 1);
           }
         }
       }
@@ -283,6 +296,8 @@ function buildGraph(
   prevPositions: Map<string, { x: number; y: number }>,
   expandedIds: Set<string>,
   selectedEdgeId: string | null,
+  externalBoundaries: ExternalBoundary[] = [],
+  selectedExternalKey: string | null = null,
 ): { nodes: QueryNodeType[]; edges: Edge[] } {
   const depths = queryDepths(queries);
   const rankBuckets = new Map<number, string[]>();
@@ -293,6 +308,7 @@ function buildGraph(
     rankBuckets.set(d, bucket);
   }
 
+  const localIds = new Set(queries.map((q) => q.id));
   const nodes: QueryNodeType[] = queries.map((q) => {
     const d = depths.get(q.id) ?? 0;
     const bucket = rankBuckets.get(d) ?? [];
@@ -326,7 +342,7 @@ function buildGraph(
     for (let stepIdx = 0; stepIdx < q.steps.length; stepIdx++) {
       const step = q.steps[stepIdx]!;
       if (step.type === "Join") {
-        const right = step.payload.right_query_id;
+        const right = targetKey(step.payload.right_query_id);
         // Include step index so two Joins (e.g. two RIGHT OUTER) stay distinct.
         const id = `join:${right}->${q.id}:s${stepIdx}`;
         const selected = selectedEdgeId === id;
@@ -361,7 +377,8 @@ function buildGraph(
         });
       }
       if (step.type === "Append") {
-        for (const other of step.payload.other_query_ids) {
+        for (const otherTarget of step.payload.other_query_ids) {
+          const other = targetKey(otherTarget);
           const id = `append:${other}->${q.id}`;
           const selected = selectedEdgeId === id;
           edges.push({
@@ -390,7 +407,7 @@ function buildGraph(
         }
       }
       if (step.type === "FromQuery") {
-        const src = step.payload.query_id;
+        const src = targetKey(step.payload.query_id);
         const id = `from:${src}->${q.id}`;
         const selected = selectedEdgeId === id;
         edges.push({
@@ -421,6 +438,28 @@ function buildGraph(
     }
   }
 
+  externalBoundaries.forEach((b, i) => {
+    if (localIds.has(b.key)) return;
+    const saved = prevPositions.get(b.key);
+    nodes.push({
+      id: b.key,
+      type: "query",
+      position: saved ?? { x: 48, y: 48 + i * 110 },
+      data: {
+        label: b.objectId,
+        sourceKind: "External",
+        stepCount: 0,
+        stepSummary: b.alias,
+        steps: [],
+        expanded: false,
+        isFocus: false,
+        isActive: b.key === selectedExternalKey,
+        isExternal: true,
+        externalAlias: b.alias,
+      },
+    });
+  });
+
   return { nodes, edges };
 }
 
@@ -429,6 +468,50 @@ const QueryNode = memo(function QueryNode({
   data,
 }: NodeProps<QueryNodeType>) {
   const { toggleExpand, deriveQuery } = useContext(CanvasActionsCtx);
+  if (data.isExternal) {
+    return (
+      <div
+        className={`min-w-[160px] max-w-[220px] rounded-xl border border-dashed px-3 py-2.5 shadow-lg transition ${
+          data.isActive
+            ? "border-sky-400/70 bg-slate-950/95 shadow-[0_0_0_1px_rgba(56,189,248,0.35)]"
+            : "border-sky-700/50 bg-slate-950/80"
+        }`}
+      >
+        <Handle
+          type="target"
+          position={Position.Left}
+          className="!h-2.5 !w-2.5 !border-sky-800 !bg-sky-500"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-sky-300">
+            External
+          </span>
+          <button
+            type="button"
+            title="Use in new query (local FromQuery)"
+            className="nodrag nopan rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-sky-300"
+            onClick={(e) => {
+              e.stopPropagation();
+              deriveQuery(id);
+            }}
+          >
+            use↳
+          </button>
+        </div>
+        <div className="mt-1 truncate text-sm font-semibold text-slate-100">
+          {data.label}
+        </div>
+        <div className="mt-0.5 truncate text-[10px] text-sky-400/90">
+          {data.externalAlias}
+        </div>
+        <Handle
+          type="source"
+          position={Position.Right}
+          className="!h-2.5 !w-2.5 !border-sky-800 !bg-sky-500"
+        />
+      </div>
+    );
+  }
   return (
     <div
       className={`min-w-[180px] max-w-[240px] rounded-xl border px-3 py-2.5 shadow-lg transition ${
@@ -532,6 +615,10 @@ function GraphCanvasInner({
   onRemoveEdge,
   onRemoveQuery,
   onDeriveQuery,
+  externalBoundaries = [],
+  selectedExternalKey = null,
+  onSelectExternal,
+  onDeriveExternal,
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow();
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
@@ -557,6 +644,8 @@ function GraphCanvasInner({
         positionsRef.current,
         expandedIds,
         selectedEdgeId,
+        externalBoundaries,
+        selectedExternalKey,
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- bootstrap only
     [],
@@ -576,9 +665,13 @@ function GraphCanvasInner({
 
   const deriveQuery = useCallback(
     (queryId: string) => {
+      if (queryId.startsWith("xref:")) {
+        onDeriveExternal?.(queryId);
+        return;
+      }
       onDeriveQuery?.(queryId);
     },
-    [onDeriveQuery],
+    [onDeriveQuery, onDeriveExternal],
   );
 
   const actions = useMemo(
@@ -595,6 +688,8 @@ function GraphCanvasInner({
       positionsRef.current,
       expandedIds,
       selectedEdgeId,
+      externalBoundaries,
+      selectedExternalKey,
     );
     setNodes((current) => {
       for (const n of current) {
@@ -614,8 +709,10 @@ function GraphCanvasInner({
     });
     setEdges(built.edges);
 
-    const key = queries
-      .map((q) => q.id)
+    const key = [
+      ...queries.map((q) => q.id),
+      ...externalBoundaries.map((b) => b.key),
+    ]
       .sort()
       .join("|");
     if (key && key !== fittedKey.current) {
@@ -630,6 +727,8 @@ function GraphCanvasInner({
     activeQueryId,
     expandedIds,
     selectedEdgeId,
+    externalBoundaries,
+    selectedExternalKey,
     setNodes,
     setEdges,
     fitView,
@@ -649,13 +748,20 @@ function GraphCanvasInner({
     (_: MouseEvent, node: Node) => {
       setSelectedEdgeId(null);
       setSelectedEdge(null);
+      const data = node.data as QueryNodeData | undefined;
+      if (data?.isExternal) {
+        onSelectExternal?.(node.id);
+        return;
+      }
       onSelect(node.id);
     },
-    [onSelect],
+    [onSelect, onSelectExternal],
   );
 
   const onNodeDoubleClick = useCallback(
     (_: MouseEvent, node: Node) => {
+      const data = node.data as QueryNodeData | undefined;
+      if (data?.isExternal) return;
       onSetFocus(node.id);
     },
     [onSetFocus],

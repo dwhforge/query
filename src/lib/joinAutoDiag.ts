@@ -1,4 +1,8 @@
-import type { TransformationStep, Workspace } from "../types/pipeline";
+import {
+  targetKey,
+  type TransformationStep,
+  type Workspace,
+} from "../types/pipeline";
 import type { JoinPrepareStatus } from "./bridge";
 
 /** Per-side row cap for auto-running Probe diagnostics. */
@@ -48,9 +52,11 @@ function stepFixtureOk(step: TransformationStep): boolean {
 function directDeps(steps: TransformationStep[]): string[] {
   const deps: string[] = [];
   for (const step of steps) {
-    if (step.type === "FromQuery") deps.push(step.payload.query_id);
-    else if (step.type === "Join") deps.push(step.payload.right_query_id);
-    else if (step.type === "Append") deps.push(...step.payload.other_query_ids);
+    if (step.type === "FromQuery") deps.push(targetKey(step.payload.query_id));
+    else if (step.type === "Join")
+      deps.push(targetKey(step.payload.right_query_id));
+    else if (step.type === "Append")
+      deps.push(...step.payload.other_query_ids.map(targetKey));
   }
   return deps;
 }
@@ -91,7 +97,7 @@ function joinSideSteps(
   for (const d of directDeps(prefix)) {
     left.push(...queryClosure(workspace, d));
   }
-  const right = queryClosure(workspace, join.payload.right_query_id);
+  const right = queryClosure(workspace, targetKey(join.payload.right_query_id));
   return { left, right };
 }
 

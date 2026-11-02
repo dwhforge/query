@@ -65,10 +65,42 @@ pub struct CanvasPosition {
     pub y: f64,
 }
 
+/// A dependency on another saved DWHQuery project ([ADR-0025](../../../docs/adr/0025-project-references.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ProjectReference {
+    /// Stable within the declaring project. Not derived from `alias`.
+    pub id: String,
+    /// Display and search label. Not object identity.
+    pub alias: String,
+    /// Project-file path, relative to the declaring project file.
+    pub locator: String,
+    pub expected_project_uid: String,
+    /// Semantic definition fingerprint of the owner.
+    pub locked_revision: String,
+}
+
+/// Remap of an owner connection requirement onto a global connection id.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionBinding {
+    pub owner_project_uid: String,
+    pub owner_connection_id: String,
+    pub local_connection_id: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// Immutable global identity ([ADR-0025](../../../docs/adr/0025-project-references.md)).
+    /// Empty until the owner saves. Not a substitute for query/source/mapping ids.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_uid: String,
+    /// Other saved projects this file uses. Empty for a local-only project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<ProjectReference>,
+    /// Owner connection id → global connection id. No secrets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_bindings: Vec<ConnectionBinding>,
     /// Absolute path of the open project file — **runtime only**, never written to disk
     /// (derived from Open/Save path). Old files may still contain it; load ignores it.
     #[serde(default, skip_serializing)]
@@ -208,6 +240,9 @@ mod tests {
         let p = Project {
             id: "proj_1".into(),
             name: "demo".into(),
+            project_uid: String::new(),
+            references: vec![],
+            connection_bindings: vec![],
             root_path: None,
             connections: vec![ConnectionDef {
                 id: "conn_pg".into(),

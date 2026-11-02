@@ -1,7 +1,9 @@
 import type {
+  ConnectionBinding,
   ConnectionDef,
   PreviewResult,
   Project,
+  ProjectReference,
   SourceDef,
   TransformationStep,
   WarehouseDialect,
@@ -9,6 +11,25 @@ import type {
 } from "../types/pipeline";
 
 export type DbtTarget = "v1" | "v2";
+
+/** Root project identity for ADR-0025 reference lowering. */
+export type ProjectRefContext = {
+  projectFile?: string;
+  projectUid?: string;
+  references?: ProjectReference[];
+  connectionBindings?: ConnectionBinding[];
+  executionEngine?: WarehouseDialect;
+};
+
+export function projectRefContext(project: Project): ProjectRefContext {
+  return {
+    projectFile: project.root_path,
+    projectUid: project.project_uid,
+    references: project.references ?? [],
+    connectionBindings: project.connection_bindings ?? [],
+    executionEngine: project.execution_engine ?? project.target_dialect,
+  };
+}
 
 function bridge() {
   const dwh = window.dwh;
@@ -29,11 +50,17 @@ export function previewWorkspace(
   workspace: Workspace,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<PreviewResult> {
   return invoke<PreviewResult>("preview_workspace", {
     workspace,
     connections,
     sources,
+    projectFile: projectRef?.projectFile,
+    projectUid: projectRef?.projectUid,
+    references: projectRef?.references ?? [],
+    connectionBindings: projectRef?.connectionBindings ?? [],
+    executionEngine: projectRef?.executionEngine,
   });
 }
 
@@ -42,11 +69,17 @@ export function describeWorkspace(
   workspace: Workspace,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<PreviewResult> {
   return invoke<PreviewResult>("describe_workspace", {
     workspace,
     connections,
     sources,
+    projectFile: projectRef?.projectFile,
+    projectUid: projectRef?.projectUid,
+    references: projectRef?.references ?? [],
+    connectionBindings: projectRef?.connectionBindings ?? [],
+    executionEngine: projectRef?.executionEngine,
   });
 }
 
@@ -671,6 +704,7 @@ export function exportDbt(
   /** UI progress: write files only; call `parseExport` as a second phase. */
   skipParse?: boolean,
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<ExportResult> {
   return invoke<ExportResult>("export_dbt", {
     pipelineName,
@@ -686,6 +720,10 @@ export function exportDbt(
     destinationSchema: destinationSchema?.trim() || "public",
     outputs: outputs ?? [],
     skipParse: skipParse ?? false,
+    projectFile: projectRef?.projectFile,
+    projectUid: projectRef?.projectUid,
+    references: projectRef?.references ?? [],
+    connectionBindings: projectRef?.connectionBindings ?? [],
   });
 }
 
@@ -813,12 +851,91 @@ export function testPostgresConnection(
   return invoke<void>("test_postgres_connection", { connectionString });
 }
 
-export function saveProject(path: string, project: Project): Promise<void> {
-  return invoke<void>("save_project", { path, project });
+export function saveProject(path: string, project: Project): Promise<Project> {
+  return invoke<Project>("save_project", { path, project });
 }
 
-export function loadProject(path: string): Promise<Project> {
-  return invoke<Project>("load_project", { path });
+export type ReferenceState =
+  | "ready"
+  | "update_available"
+  | "missing"
+  | "identity_mismatch"
+  | "incompatible_format"
+  | "invalid_dependency_graph";
+
+export type ReferenceStatus = {
+  reference_id: string;
+  state: ReferenceState;
+  message: string;
+};
+
+export function referenceStatuses(
+  projectFile: string,
+  references: ProjectReference[],
+): Promise<ReferenceStatus[]> {
+  return invoke<ReferenceStatus[]>("reference_statuses", {
+    projectFile,
+    references,
+  });
+}
+
+export function makeProjectReference(
+  projectFile: string,
+  ownerFile: string,
+  alias: string,
+): Promise<ProjectReference> {
+  return invoke<ProjectReference>("make_project_reference", {
+    projectFile,
+    ownerFile,
+    alias,
+  });
+}
+
+export function relinkReference(
+  projectFile: string,
+  reference: ProjectReference,
+  ownerFile: string,
+): Promise<ProjectReference> {
+  return invoke<ProjectReference>("relink_reference", {
+    projectFile,
+    reference,
+    ownerFile,
+  });
+}
+
+export function refreshReference(
+  project: Project,
+  referenceId: string,
+): Promise<ProjectReference> {
+  return invoke<ProjectReference>("refresh_reference", {
+    projectFile: project.root_path,
+    projectUid: project.project_uid,
+    referenceId,
+    references: project.references ?? [],
+    connectionBindings: project.connection_bindings ?? [],
+    workspace: project.workspace,
+    sources: project.sources,
+    connections: project.connections,
+    executionEngine: project.execution_engine ?? project.target_dialect,
+  });
+}
+
+export function referenceConsumers(
+  workspace: Workspace,
+  referenceId: string,
+): Promise<string[]> {
+  return invoke<string[]>("reference_consumers", { workspace, referenceId });
+}
+
+/** Load a project file. Pass `remember: true` for Open / Restore (session MRU). */
+export function loadProject(
+  path: string,
+  opts?: { remember?: boolean },
+): Promise<Project> {
+  return invoke<Project>("load_project", {
+    path,
+    remember: opts?.remember ?? false,
+  });
 }
 
 export function getLastProjectPath(): Promise<string | null> {

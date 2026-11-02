@@ -484,6 +484,7 @@ fn prepare_join_inputs_ex(
         return Err("Join cannot be the first step (no left input)".into());
     }
 
+    let right_query_id = right_query_id.compiler_id()?;
     let left_expensive = join_left_input_is_expensive(workspace, host_query_id, join_step_index)?;
     let right_expensive = join_right_input_is_expensive(workspace, right_query_id)?;
     progress(
@@ -661,7 +662,7 @@ fn prepare_join_inputs_ex(
             fingerprint: fp.clone(),
             host_query_id: host_query_id.to_string(),
             join_step_index,
-            right_query_id: right_query_id.clone(),
+            right_query_id: right_query_id.to_string(),
             left_on: left_on.clone(),
             right_on: right_on.clone(),
             join_type: join_type.clone(),

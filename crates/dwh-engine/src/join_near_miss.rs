@@ -79,6 +79,7 @@ pub fn join_key_near_miss(
         return Err("Join cannot be the first step (no left input)".into());
     }
 
+    let right_query_id = right_query_id.compiler_id()?;
     let left_cte_full = cte_name(host_query_id, join_step_index - 1);
     let right_cte_full = cte_name(right_query_id, {
         let rq = resolved

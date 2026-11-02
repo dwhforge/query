@@ -1,5 +1,5 @@
 import { formatJoinKeyLabel } from "../lib/joinKeys";
-import type { TransformationStep } from "../types/pipeline";
+import { targetKey, type TransformationStep } from "../types/pipeline";
 
 interface HistoryProps {
   steps: TransformationStep[];
@@ -50,7 +50,7 @@ export function stepSummaryLine(
         detail: `${step.payload.schema || "main"}.${step.payload.table_name}`,
       };
     case "FromQuery":
-      return { kind: "From", detail: qname(step.payload.query_id) };
+      return { kind: "From", detail: qname(targetKey(step.payload.query_id)) };
     case "SqlModel":
       return {
         kind: "SQL model",
@@ -93,7 +93,7 @@ export function stepSummaryLine(
     case "Join":
       return {
         kind: `Join ${step.payload.join_type}`,
-        detail: `${qname(step.payload.right_query_id)} on ${formatJoinKeyLabel(
+        detail: `${qname(targetKey(step.payload.right_query_id))} on ${formatJoinKeyLabel(
           step.payload.left_on,
           step.payload.right_on,
         )}`,
@@ -101,7 +101,7 @@ export function stepSummaryLine(
     case "Append":
       return {
         kind: "Append",
-        detail: step.payload.other_query_ids.map(qname).join(", "),
+        detail: step.payload.other_query_ids.map((id) => qname(targetKey(id))).join(", "),
       };
     case "CustomSql":
       return { kind: "Custom SQL", detail: "snippet" };
@@ -113,7 +113,7 @@ export function stepSummaryLine(
     case "ApplyKeyMap":
       return {
         kind: "ApplyKeyMap",
-        detail: `${step.payload.column} ← ${step.payload.map_id}`,
+        detail: `${step.payload.column} ← ${targetKey(step.payload.map_id)}`,
       };
     default:
       return { kind: "Step", detail: "" };

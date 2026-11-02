@@ -14,6 +14,7 @@ pub mod parquet_scan;
 pub mod postgres_attach;
 pub mod producers;
 pub mod project;
+pub mod references;
 pub mod schema;
 pub mod secrets;
 pub mod sql_escape;
@@ -67,8 +68,14 @@ pub use export_manifest::{
 };
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{
-    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, QueryDef,
-    TransformationStep, Workspace,
+    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, ObjectKind,
+    ObjectTarget, QueryDef, TransformationStep, Workspace,
+};
+pub use project::{ConnectionBinding, ProjectReference};
+pub use references::{
+    ensure_project_uid, fork_project_identity, make_project_reference, project_revision,
+    reference_consumers, reference_statuses, refresh_reference, relink_reference, resolve_operation,
+    LoweredOperation, ProvenanceRecord, ReferenceState, ReferenceStatus, ResolveInput, ResolveKind,
 };
 pub use producers::{
     build_export_plan, build_export_plan_routed, dbt_model_name, dbt_model_names_published,

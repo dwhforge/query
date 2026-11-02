@@ -490,7 +490,7 @@ mod tests {
                         column: "c".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },
                 ],

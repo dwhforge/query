@@ -136,8 +136,9 @@ pub fn emit_transform_step_ex(
             if left_on.is_empty() || left_on.len() != right_on.len() {
                 return Err("Join: left_on/right_on must be non-empty and same length".into());
             }
-            let right = relations.get(right_query_id).ok_or_else(|| {
-                format!("Join: right query '{right_query_id}' not compiled yet (check deps)")
+            let right_id = right_query_id.compiler_id()?;
+            let right = relations.get(right_id).ok_or_else(|| {
+                format!("Join: right query '{right_id}' not compiled yet (check deps)")
             })?;
             let join_kw = join_type.sql_keyword();
             if left_on == right_on {
@@ -185,6 +186,7 @@ pub fn emit_transform_step_ex(
                 let mut rights = Vec::with_capacity(other_query_ids.len());
                 let mut all_known = true;
                 for oid in other_query_ids {
+                    let oid = oid.compiler_id()?;
                     let other = relations
                         .get(oid)
                         .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
@@ -204,6 +206,7 @@ pub fn emit_transform_step_ex(
                 WarehouseDialect::Duckdb => {
                     let mut left = format!("SELECT * FROM {prev}");
                     for oid in other_query_ids {
+                        let oid = oid.compiler_id()?;
                         let other = relations
                             .get(oid)
                             .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
@@ -219,6 +222,7 @@ pub fn emit_transform_step_ex(
                     })?;
                     let mut right_models = Vec::with_capacity(other_query_ids.len());
                     for oid in other_query_ids {
+                        let oid = oid.compiler_id()?;
                         let other = relations
                             .get(oid)
                             .ok_or_else(|| format!("Append: query '{oid}' not compiled yet"))?;
@@ -236,7 +240,7 @@ pub fn emit_transform_step_ex(
         TransformationStep::CustomSql { raw_sql } => {
             require_prev(prev, "CustomSql")?;
             let mut sql = raw_sql.replace("{{prev_step}}", prev);
-            for dep in direct_deps(std::slice::from_ref(step)) {
+            for dep in direct_deps(std::slice::from_ref(step))? {
                 if let Some(rel) = relations.get(&dep) {
                     sql = sql.replace(&format!("{{{{query:{dep}}}}}"), rel);
                 }
@@ -265,15 +269,16 @@ pub fn emit_transform_step_ex(
             if fact_cols.is_empty() || fact_cols.iter().any(|c| c.trim().is_empty()) {
                 return Err("ApplyKeyMap: columns must be non-empty".into());
             }
-            if map_id.trim().is_empty() {
+            let map_key = map_id.compiler_id()?;
+            if map_key.trim().is_empty() {
                 return Err("ApplyKeyMap: map_id must be non-empty".into());
             }
             let seed_rel = opts
                 .key_map_relations
-                .and_then(|m| m.get(map_id).map(|s| s.as_str()));
+                .and_then(|m| m.get(map_key).map(|s| s.as_str()));
             let (from_cols, to_col) = opts
                 .key_map_columns
-                .and_then(|m| m.get(map_id))
+                .and_then(|m| m.get(map_key))
                 .map(|(fs, t)| (fs.clone(), t.as_str()))
                 .unwrap_or_else(|| (vec!["from".into()], "to"));
             if from_cols.len() != fact_cols.len() {

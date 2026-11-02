@@ -256,6 +256,9 @@ mod tests {
         let p = Project {
             id: "proj_demo".into(),
             name: "demo".into(),
+            project_uid: String::new(),
+            references: vec![],
+            connection_bindings: vec![],
             root_path: Some("/abs/path/demo.dwhproj.json".into()),
             connections: vec![ConnectionDef {
                 id: "conn_local".into(),

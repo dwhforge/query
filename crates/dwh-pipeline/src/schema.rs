@@ -126,7 +126,7 @@ fn apply_step_schema_ex(
                     "query '{query_id}': FromQuery must be the first step"
                 ));
             }
-            Ok(query_out.get(dep).cloned().unwrap_or(None))
+            Ok(query_out.get(dep.compiler_id()?).cloned().unwrap_or(None))
         }
         TransformationStep::SqlModel { .. } => {
             Ok(sql_model_schemas.get(query_id).cloned())
@@ -221,7 +221,7 @@ fn apply_step_schema_ex(
             let Some(left) = prev else {
                 return Ok(None);
             };
-            let Some(Some(right)) = query_out.get(right_query_id).map(|s| s.as_ref()) else {
+            let Some(Some(right)) = query_out.get(right_query_id.compiler_id()?).map(|s| s.as_ref()) else {
                 return Ok(None);
             };
             join_result_schema(left, right, left_on, right_on)
@@ -233,7 +233,7 @@ fn apply_step_schema_ex(
             let mut sources: Vec<&[String]> = vec![left];
             let mut owned: Vec<Vec<String>> = Vec::new();
             for oid in other_query_ids {
-                match query_out.get(oid) {
+                match query_out.get(oid.compiler_id()?) {
                     Some(Some(cols)) => {
                         owned.push(cols.clone());
                     }

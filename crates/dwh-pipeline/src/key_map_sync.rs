@@ -107,6 +107,9 @@ fn patch_apply_snapshots(workspace: &mut Workspace, map_id: &str, entries: &[Key
                 ..
             } = step
             {
+                let Ok(mid) = mid.compiler_id() else {
+                    continue;
+                };
                 if mid == map_id || key_map_seed_name(mid) == map_id {
                     *step_entries = entries.to_vec();
                 }

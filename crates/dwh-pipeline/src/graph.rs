@@ -2,22 +2,24 @@ use crate::model::{TransformationStep, Workspace};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Query ids that `query_id` depends on via Join/Append.
-pub fn direct_deps(steps: &[TransformationStep]) -> Vec<String> {
+pub fn direct_deps(steps: &[TransformationStep]) -> Result<Vec<String>, String> {
     let mut deps = Vec::new();
     for step in steps {
         match step {
             TransformationStep::FromQuery { query_id } => {
-                deps.push(query_id.clone());
+                deps.push(query_id.compiler_id()?.to_string());
             }
             TransformationStep::Join { right_query_id, .. } => {
-                deps.push(right_query_id.clone());
+                deps.push(right_query_id.compiler_id()?.to_string());
             }
             TransformationStep::Append { other_query_ids } => {
-                deps.extend(other_query_ids.iter().cloned());
+                for id in other_query_ids {
+                    deps.push(id.compiler_id()?.to_string());
+                }
             }
             TransformationStep::SqlModel { raw_sql }
             | TransformationStep::CustomSql { raw_sql } => {
-                // {{query:id}}
+                // {{query:id}} — external {{xref:…}} is rewritten before compile.
                 for cap in extract_query_placeholders(raw_sql) {
                     deps.push(cap);
                 }
@@ -27,7 +29,11 @@ pub fn direct_deps(steps: &[TransformationStep]) -> Vec<String> {
     }
     deps.sort();
     deps.dedup();
-    deps
+    Ok(deps)
+}
+
+pub fn extract_query_placeholders_pub(raw: &str) -> Vec<String> {
+    extract_query_placeholders(raw)
 }
 
 fn extract_query_placeholders(raw: &str) -> Vec<String> {
@@ -87,7 +93,7 @@ pub fn reachable_from(workspace: &Workspace, root_id: &str) -> Result<HashSet<St
         let q = workspace
             .query(&id)
             .ok_or_else(|| format!("missing query {id}"))?;
-        for dep in direct_deps(&q.steps) {
+        for dep in direct_deps(&q.steps)? {
             if !ids.contains(&dep) {
                 return Err(format!(
                     "query '{id}' references unknown query '{dep}'"
@@ -136,7 +142,7 @@ fn topo_subset(workspace: &Workspace, need: &HashSet<String>) -> Result<Vec<Stri
         let q = workspace
             .query(id)
             .ok_or_else(|| format!("missing query {id}"))?;
-        for dep in direct_deps(&q.steps) {
+        for dep in direct_deps(&q.steps)? {
             if !need.contains(&dep) {
                 continue;
             }
@@ -234,7 +240,7 @@ pub fn join_left_input_is_expensive(
     if steps_are_derived_expensive(prefix) {
         return Ok(true);
     }
-    for dep in direct_deps(prefix) {
+    for dep in direct_deps(prefix)? {
         if query_closure_is_expensive(workspace, &dep)? {
             return Ok(true);
         }

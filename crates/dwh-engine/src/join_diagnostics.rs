@@ -105,6 +105,7 @@ pub fn join_diagnostics_with_limit(
         return Err("Join cannot be the first step (no left input)".into());
     }
 
+    let right_query_id = right_query_id.compiler_id()?;
     let left_cte_full = cte_name(host_query_id, join_step_index - 1);
     let join_cte_full = cte_name(host_query_id, join_step_index);
     let right_cte_full = cte_name(right_query_id, {
@@ -301,7 +302,7 @@ pub fn join_diagnostics_with_limit(
     Ok(JoinDiagnostics {
         host_query_id: host_query_id.to_string(),
         join_step_index,
-        right_query_id: right_query_id.clone(),
+        right_query_id: right_query_id.to_string(),
         left_on: left_on.clone(),
         right_on: right_on.clone(),
         sample_limit,

@@ -2,11 +2,11 @@
 
 use crate::connections_io::{self, migrate_project_connections};
 use dwh_pipeline::{
-    merge_project_secrets, migrate_legacy_project_secrets, project_for_disk, upsert_global_secrets,
-    Project, SecretsFile,
+    ensure_project_uid, merge_project_secrets, migrate_legacy_project_secrets, project_for_disk,
+    upsert_global_secrets, Project, SecretsFile,
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn dwh_home_dir() -> Result<PathBuf, String> {
     let home = dirs_next_home().ok_or_else(|| "Cannot resolve home directory".to_string())?;
@@ -46,13 +46,16 @@ pub fn save_secrets_file(file: &SecretsFile) -> Result<(), String> {
     Ok(())
 }
 
-pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<(), String> {
+pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<Project, String> {
+    let mut project = project.clone();
+    // Mint a uid only when both memory and the file lack one (ADR-0025).
+    ensure_project_uid(&mut project, Some(Path::new(path)));
     // Migrate any inline project connections into the global store first.
     if !project.connections.is_empty() {
         let _ = migrate_project_connections(&project.connections)?;
     }
 
-    let (disk, extracted) = project_for_disk(project);
+    let (disk, extracted) = project_for_disk(&project);
     let json = disk.to_json_pretty()?;
     if let Some(parent) = PathBuf::from(path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -76,7 +79,8 @@ pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<(), St
             save_secrets_file(&store)?;
         }
     }
-    Ok(())
+    project.root_path = Some(path.to_string());
+    Ok(project)
 }
 
 pub fn load_project_with_secrets(path: &str) -> Result<Project, String> {

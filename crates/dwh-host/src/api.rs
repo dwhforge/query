@@ -27,12 +27,13 @@ use dwh_engine::{
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
-    list_export_tree as walk_export_tree, preview_dbt_model_sql_with_seeds_and_sources,
-    push_key_map_to_export, resolve_dbt_bin,
-    remove_key_map_from_export, sync_key_maps_from_export, ConnectionDef, DbtProducer, DbtTarget,
-    ExportResult, KeyMapDef,
-    KeyMapSyncResult, PreviewDbtModel, Project, QueryDef, TransformationStep, WarehouseDialect,
-    Workspace,
+    list_export_tree as walk_export_tree, make_project_reference,
+    preview_dbt_model_sql_with_seeds_and_sources, push_key_map_to_export, reference_consumers,
+    reference_statuses, refresh_reference, relink_reference, resolve_dbt_bin, resolve_operation,
+    remove_key_map_from_export, sync_key_maps_from_export, ConnectionBinding, ConnectionDef,
+    DbtProducer, DbtTarget, ExecutionEngine, ExportResult, KeyMapDef, KeyMapSyncResult,
+    LoweredOperation, ObjectTarget, PreviewDbtModel, Project, ProjectReference, QueryDef,
+    ResolveInput, ResolveKind, SourceDef, TransformationStep, WarehouseDialect, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -661,7 +662,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                         column: "company".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: company_map.id.clone(),
+                        map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
                     },
                     TransformationStep::RenameColumn {
@@ -689,7 +690,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                         column: "org_name".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: company_map.id.clone(),
+                        map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
                     },
                     TransformationStep::RenameColumn {
@@ -821,6 +822,17 @@ struct PreviewArgs {
     /// Project sources — Hive partitioning and other source-specific scan opts.
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    /// Saved project file. Required when the operation cites a reference (ADR-0025).
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 /// Read-only matching inputs; accepting proposals uses existing KeyMap editing.
@@ -944,6 +956,69 @@ struct BlameKeyArgs {
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
 }
 
+fn cites_external(ws: &Workspace) -> bool {
+    ws.queries.iter().any(|q| {
+        q.steps.iter().any(|step| match step {
+            TransformationStep::FromQuery { query_id }
+            | TransformationStep::Join {
+                right_query_id: query_id,
+                ..
+            }
+            | TransformationStep::ApplyKeyMap {
+                map_id: query_id, ..
+            } => matches!(query_id, ObjectTarget::External { .. }),
+            TransformationStep::Append { other_query_ids } => other_query_ids
+                .iter()
+                .any(|id| matches!(id, ObjectTarget::External { .. })),
+            TransformationStep::SqlModel { raw_sql }
+            | TransformationStep::CustomSql { raw_sql }
+            | TransformationStep::DeriveColumn {
+                expression: raw_sql,
+                ..
+            } => raw_sql.contains("{{xref:"),
+            _ => false,
+        })
+    })
+}
+
+/// Lower a reference closure once (ADR-0025). Local operations stay on the
+/// workspace the caller sent.
+fn lower_for_operation(
+    workspace: &Workspace,
+    sources: &[SourceDef],
+    connections: &[ConnectionDef],
+    project_file: Option<&str>,
+    project_uid: Option<&str>,
+    references: &[ProjectReference],
+    connection_bindings: &[ConnectionBinding],
+    execution_engine: Option<WarehouseDialect>,
+    kind: ResolveKind,
+    published_fallback: Vec<String>,
+) -> Result<LoweredOperation, String> {
+    if !cites_external(workspace) {
+        return Ok(LoweredOperation {
+            workspace: workspace.clone(),
+            sources: sources.to_vec(),
+            published_query_ids: published_fallback,
+            provenance_json: None,
+        });
+    }
+    let available: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+    resolve_operation(&ResolveInput {
+        root_file: Path::new(project_file.unwrap_or("")),
+        project_uid: project_uid.unwrap_or(""),
+        execution_engine: ExecutionEngine::from_dialect(
+            execution_engine.unwrap_or(WarehouseDialect::Duckdb),
+        ),
+        references,
+        connection_bindings,
+        workspace,
+        sources,
+        available_connections: &available,
+        kind,
+    })
+}
+
 fn parse_join_side(side: &str) -> Result<JoinKeySide, String> {
     match side.trim().to_ascii_lowercase().as_str() {
         "left" => Ok(JoinKeySide::Left),
@@ -987,6 +1062,15 @@ struct ExportArgs {
     /// When true, skip post-export `dbt parse` (UI runs parse as a separate phase).
     #[serde(default)]
     skip_parse: Option<bool>,
+    /// Saved project file. Required when the operation cites a reference (ADR-0025).
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
 }
 
 #[derive(Deserialize)]
@@ -998,6 +1082,9 @@ struct PathArg {
     env: Option<HashMap<String, String>>,
     connections: Option<Vec<ConnectionDef>>,
     destination_connection_id: Option<String>,
+    /// When true, update last-opened session path (Open / Restore). Peek loads stay false.
+    #[serde(default)]
+    remember: Option<bool>,
 }
 
 fn resolve_dbt_cli_env(a: &PathArg) -> HashMap<String, String> {
@@ -1037,6 +1124,56 @@ struct DescribeArgs {
 struct SaveProjectArgs {
     path: String,
     project: Project,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceStatusesArgs {
+    project_file: String,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MakeReferenceArgs {
+    project_file: String,
+    owner_file: String,
+    alias: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelinkReferenceArgs {
+    project_file: String,
+    reference: ProjectReference,
+    owner_file: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshReferenceArgs {
+    project_file: String,
+    project_uid: String,
+    reference_id: String,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    workspace: Workspace,
+    #[serde(default)]
+    sources: Vec<SourceDef>,
+    #[serde(default)]
+    connections: Vec<ConnectionDef>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceConsumersArgs {
+    workspace: Workspace,
+    reference_id: String,
 }
 
 #[derive(Deserialize)]
@@ -1419,6 +1556,20 @@ impl HostState {
                 let ws = a.workspace.ok_or("preview_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let lowered = lower_for_operation(
+                    &ws,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                    ResolveKind::Preview,
+                    Vec::new(),
+                )?;
+                let ws = lowered.workspace;
+                let sources = lowered.sources;
                 let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
                 let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
@@ -1448,6 +1599,20 @@ impl HostState {
                 let ws = a.workspace.ok_or("describe_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let lowered = lower_for_operation(
+                    &ws,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                    ResolveKind::Preview,
+                    Vec::new(),
+                )?;
+                let ws = lowered.workspace;
+                let sources = lowered.sources;
                 let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
                 let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
@@ -1802,7 +1967,23 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let prepared = run_prepare_workspace(&db, &a.workspace, &conns, &sources)?;
+                let published = a.outputs.clone().unwrap_or_default();
+                let lowered = lower_for_operation(
+                    &a.workspace,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                    ResolveKind::Export {
+                        published_ids: published.clone(),
+                    },
+                    published,
+                )?;
+                let prepared =
+                    run_prepare_workspace(&db, &lowered.workspace, &conns, &lowered.sources)?;
                 for w in &prepared.warnings {
                     eprintln!("[dwh] prepare warning: {w}");
                 }
@@ -1816,36 +1997,80 @@ impl HostState {
                     .unwrap_or("public");
                 let path = match (a.execution_engine, a.destination_kind) {
                     (Some(eng), Some(dest)) => {
-                        use dwh_pipeline::{DestinationKind, ExecutionEngine};
+                        use dwh_pipeline::DestinationKind;
                         let engine = ExecutionEngine::from_dialect(eng);
                         let destination = match dest {
                             WarehouseDialect::Duckdb => DestinationKind::Duckdb,
                             WarehouseDialect::Postgres => DestinationKind::Postgres,
                         };
-                        let published = a.outputs.clone().unwrap_or_default();
                         DbtProducer.produce_routed_with_schema_and_sources(
                             &a.pipeline_name,
-                            &a.workspace,
+                            &lowered.workspace,
                             &a.output_dir,
                             target,
                             engine,
                             destination,
                             pg_schema,
-                            &published,
-                            &seeds,
-                            &sources,
-                            &sql_models,
+                            &lowered.published_query_ids,
+                            seeds,
+                            &lowered.sources,
+                            sql_models,
+                            lowered.provenance_json.as_deref(),
                         )?
                     }
-                    _ => DbtProducer.produce_with_seeds(
-                        &a.pipeline_name,
-                        &a.workspace,
-                        &a.output_dir,
-                        target,
-                        dialect,
-                        &seeds,
-                        &sql_models,
-                    )?,
+                    _ => {
+                        if let Some(body) = lowered.provenance_json.as_deref() {
+                            use dwh_pipeline::DestinationKind;
+                            let has_files = lowered.workspace.queries.iter().any(|q| {
+                                q.steps.iter().any(|s| {
+                                    matches!(
+                                        s,
+                                        TransformationStep::LoadCsv { .. }
+                                            | TransformationStep::LoadParquet { .. }
+                                    )
+                                })
+                            });
+                            let (engine, destination) = match (dialect, has_files) {
+                                (WarehouseDialect::Postgres, true) => {
+                                    (ExecutionEngine::Duckdb, DestinationKind::Postgres)
+                                }
+                                (WarehouseDialect::Postgres, false) => {
+                                    (ExecutionEngine::Postgres, DestinationKind::Postgres)
+                                }
+                                (WarehouseDialect::Duckdb, _) => {
+                                    (ExecutionEngine::Duckdb, DestinationKind::Duckdb)
+                                }
+                            };
+                            let schema = match engine {
+                                ExecutionEngine::Postgres => "sys",
+                                ExecutionEngine::Duckdb => "public",
+                            };
+                            DbtProducer.produce_routed_with_schema_and_sources(
+                                &a.pipeline_name,
+                                &lowered.workspace,
+                                &a.output_dir,
+                                target,
+                                engine,
+                                destination,
+                                schema,
+                                &lowered.published_query_ids,
+                                seeds,
+                                &[],
+                                sql_models,
+                                Some(body),
+                            )?
+                        } else {
+                            DbtProducer.produce_with_seeds(
+                                &a.pipeline_name,
+                                &lowered.workspace,
+                                &a.output_dir,
+                                target,
+                                dialect,
+                                seeds,
+                                sql_models,
+                            )?
+                        }
+                    }
                 };
                 let files = walk_export_tree(&path)?;
                 let mut result = ExportResult::with_files(path.clone(), files);
@@ -1915,19 +2140,81 @@ impl HostState {
                 run_test_postgres_connection(&db, &a.connection_string)?;
                 Ok(Value::Null)
             }
+            "reference_statuses" => {
+                drop(db);
+                let a: ReferenceStatusesArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = reference_statuses(Path::new(&a.project_file), &a.references);
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "make_project_reference" => {
+                drop(db);
+                let a: MakeReferenceArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = make_project_reference(
+                    Path::new(&a.project_file),
+                    Path::new(&a.owner_file),
+                    &a.alias,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "relink_reference" => {
+                drop(db);
+                let a: RelinkReferenceArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = relink_reference(
+                    Path::new(&a.project_file),
+                    &a.reference,
+                    Path::new(&a.owner_file),
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "refresh_reference" => {
+                drop(db);
+                let a: RefreshReferenceArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let available: Vec<String> = a.connections.iter().map(|c| c.id.clone()).collect();
+                let out = refresh_reference(
+                    &ResolveInput {
+                        root_file: Path::new(&a.project_file),
+                        project_uid: &a.project_uid,
+                        execution_engine: ExecutionEngine::from_dialect(
+                            a.execution_engine.unwrap_or(WarehouseDialect::Duckdb),
+                        ),
+                        references: &a.references,
+                        connection_bindings: &a.connection_bindings,
+                        workspace: &a.workspace,
+                        sources: &a.sources,
+                        available_connections: &available,
+                        kind: ResolveKind::ValidateAll,
+                    },
+                    &a.reference_id,
+                )?;
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "reference_consumers" => {
+                drop(db);
+                let a: ReferenceConsumersArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out = reference_consumers(&a.workspace, &a.reference_id);
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
             "save_project" => {
                 drop(db);
                 let a: SaveProjectArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                secrets_io::save_project_with_secrets(&a.path, &a.project)?;
+                let saved = secrets_io::save_project_with_secrets(&a.path, &a.project)?;
                 remember_project_path(&a.path)?;
-                Ok(Value::Null)
+                serde_json::to_value(saved).map_err(|e| e.to_string())
             }
             "load_project" => {
                 drop(db);
                 let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let mut project = secrets_io::load_project_with_secrets(&a.path)?;
                 project.root_path = Some(a.path.clone());
-                let _ = remember_project_path(&a.path);
+                // Default false: reference catalogs / peeks must not steal the session path.
+                if a.remember.unwrap_or(false) {
+                    let _ = remember_project_path(&a.path);
+                }
                 serde_json::to_value(project).map_err(|e| e.to_string())
             }
             "get_last_project_path" => {

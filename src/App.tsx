@@ -77,6 +77,13 @@ import { HelpDialog } from "./components/HelpDialog";
 import { OptionsDialog } from "./components/OptionsDialog";
 import { DbtSetupDialog } from "./components/DbtSetupDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
+import {
+  collectExternalBoundaries,
+  newQueryFromExternal,
+  parseTargetKey,
+  resolveOwnerPath,
+  rewriteStepsForLocalCopy,
+} from "./lib/projectRefs";
 import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
   OpProgress,
@@ -146,10 +153,17 @@ import {
   prepareJoinInputs,
   previewDbtModel,
   previewWorkspace,
+  projectRefContext,
   pushKeyMapToExport,
   pushRecentProject,
+  makeProjectReference,
+  referenceConsumers,
+  referenceStatuses,
+  refreshReference,
+  relinkReference,
   removeKeyMapFromExport,
   saveProject,
+  type ReferenceStatus,
   setAppSettings,
   setGlobalConnections,
   syncKeyMapsFromExport,
@@ -176,7 +190,13 @@ import {
   projectEngine,
   queryExecution,
   routeLabel,
+  externalTarget,
+  isExternalTarget,
+  newId,
+  targetKey,
   togglePublishedOutput,
+  type ObjectTarget,
+  type ProjectReference,
   syncSourcesFromQueries,
   type ConnectionDef,
   type ConnectionKind,
@@ -276,7 +296,7 @@ function resolveJoinStepFromCtx(
     s: TransformationStep | undefined,
   ): s is TransformationStep & { type: "Join" } =>
     s?.type === "Join" &&
-    s.payload.right_query_id === ctx.rightQueryId &&
+    targetKey(s.payload.right_query_id) === ctx.rightQueryId &&
     s.payload.left_on.join("\0") === leftKey &&
     s.payload.right_on.join("\0") === rightKey &&
     s.payload.join_type === ctx.joinType;
@@ -437,6 +457,26 @@ function App() {
   }
 
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
+  const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(
+    null,
+  );
+  const [refStatuses, setRefStatuses] = useState<ReferenceStatus[]>([]);
+  const [refCatalogs, setRefCatalogs] = useState<
+    Record<
+      string,
+      {
+        alias: string;
+        queries: { id: string; name: string }[];
+        maps: { id: string; name: string }[];
+      }
+    >
+  >({});
+  /** Electron has no `window.prompt` — alias is collected in-app. */
+  const [addRefPending, setAddRefPending] = useState<{
+    consumerPath: string;
+    ownerPath: string;
+    alias: string;
+  } | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
     null,
   );
@@ -672,12 +712,17 @@ function App() {
   const sources = project.sources;
 
   const runPreview = useCallback(
-    async (ws: Workspace, conns: ConnectionDef[], srcs: SourceDef[] = []) => {
+    async (
+      ws: Workspace,
+      conns: ConnectionDef[],
+      srcs: SourceDef[] = [],
+      projectRef = projectRefContext(project),
+    ) => {
       // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
       const reqId = ++previewReqIdRef.current;
       setLoading(true);
       try {
-        const result = await previewWorkspace(ws, conns, srcs);
+        const result = await previewWorkspace(ws, conns, srcs, projectRef);
         if (reqId !== previewReqIdRef.current) return;
         setPreview(result);
         setError(null);
@@ -696,7 +741,7 @@ function App() {
         }
       }
     },
-    [],
+    [project],
   );
 
   const debouncedPreview = useMemo(
@@ -714,7 +759,8 @@ function App() {
     showPgPicker ||
     showS3Dialog ||
     showHiveDialog ||
-    Boolean(mapPickPending);
+    Boolean(mapPickPending) ||
+    Boolean(addRefPending);
 
   useEffect(() => {
     // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
@@ -733,7 +779,7 @@ function App() {
       return;
     }
     const hostId = activeQueryId;
-    const rightId = joinRightId || step.payload.right_query_id;
+    const rightId = joinRightId || targetKey(step.payload.right_query_id);
     if (!hostId || !rightId) {
       setJoinLeftColumns([]);
       setJoinRightColumns([]);
@@ -1041,7 +1087,7 @@ function App() {
       }
       const j = q.steps.find((s) => s.type === "Join");
       if (j && j.type === "Join") {
-        setJoinRightId(j.payload.right_query_id);
+        setJoinRightId(targetKey(j.payload.right_query_id));
         setJoinKeyPairsBoth(
           pairsFromOn(j.payload.left_on, j.payload.right_on),
         );
@@ -1053,11 +1099,12 @@ function App() {
       }
       const fq = q.steps.find((s) => s.type === "FromQuery");
       setFromQueryId(
-        fq && fq.type === "FromQuery" ? fq.payload.query_id : "",
+        fq && fq.type === "FromQuery" ? targetKey(fq.payload.query_id) : "",
       );
       const a = q.steps.find((s) => s.type === "Append");
       if (a && a.type === "Append") {
-        setAppendOtherId(a.payload.other_query_ids[0] ?? "");
+        const first = a.payload.other_query_ids[0];
+        setAppendOtherId(first ? targetKey(first) : "");
       } else {
         setAppendOtherId("");
       }
@@ -1079,18 +1126,20 @@ function App() {
         setGroupAggs(step.payload.aggregates.join(", "));
         break;
       case "Join":
-        setJoinRightId(step.payload.right_query_id);
+        setJoinRightId(targetKey(step.payload.right_query_id));
         setJoinKeyPairsBoth(
           pairsFromOn(step.payload.left_on, step.payload.right_on),
         );
         setJoinType(step.payload.join_type);
         break;
       case "FromQuery":
-        setFromQueryId(step.payload.query_id);
+        setFromQueryId(targetKey(step.payload.query_id));
         break;
-      case "Append":
-        setAppendOtherId(step.payload.other_query_ids[0] ?? "");
+      case "Append": {
+        const first = step.payload.other_query_ids[0];
+        setAppendOtherId(first ? targetKey(first) : "");
         break;
+      }
       case "SortBy":
         setSortCol(step.payload.column);
         setSortDesc(step.payload.descending);
@@ -1124,6 +1173,7 @@ function App() {
     (id: string) => {
       setCenterTab("canvas");
       setSelectedKeyMapId(null);
+      setSelectedExternalKey(null);
       setActiveQueryId(id);
       const q = queries.find((x) => x.id === id);
       syncInspectorFromQuery(q);
@@ -1133,6 +1183,331 @@ function App() {
     },
     [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
+
+  const externalBoundaries = useMemo(
+    () => collectExternalBoundaries(project),
+    [project],
+  );
+
+  useEffect(() => {
+    const file = project.root_path;
+    const refs = project.references ?? [];
+    if (!file || refs.length === 0) {
+      setRefStatuses([]);
+      return;
+    }
+    let cancelled = false;
+    void referenceStatuses(file, refs)
+      .then((list) => {
+        if (!cancelled) setRefStatuses(list);
+      })
+      .catch(() => {
+        if (!cancelled) setRefStatuses([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.root_path, project.references]);
+
+  useEffect(() => {
+    const file = project.root_path;
+    const refs = project.references ?? [];
+    if (!file || refs.length === 0) {
+      setRefCatalogs({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const next: typeof refCatalogs = {};
+      for (const r of refs) {
+        try {
+          const owner = await loadProject(resolveOwnerPath(file, r.locator));
+          next[r.id] = {
+            alias: r.alias,
+            queries: owner.workspace.queries.map((q) => ({
+              id: q.id,
+              name: q.name,
+            })),
+            maps: (owner.workspace.key_maps ?? []).map((m) => ({
+              id: m.id,
+              name: m.name,
+            })),
+          };
+        } catch {
+          next[r.id] = { alias: r.alias, queries: [], maps: [] };
+        }
+      }
+      if (!cancelled) setRefCatalogs(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [project.root_path, project.references]);
+
+  function objectTargetFromPicker(value: string): ObjectTarget {
+    return parseTargetKey(value) ?? value;
+  }
+
+  async function handleAddReference() {
+    let path = project.root_path;
+    if (!path) {
+      const pickedSave =
+        (await save({
+          defaultPath: `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+          filters: [{ name: "DWH Project", extensions: ["json"] }],
+        })) ?? null;
+      if (typeof pickedSave !== "string") return;
+      try {
+        const saved = await saveProject(pickedSave, {
+          ...project,
+          root_path: pickedSave,
+        });
+        path = pickedSave;
+        setProject((p) => ({
+          ...p,
+          ...saved,
+          root_path: pickedSave,
+          connections: p.connections,
+        }));
+      } catch (e) {
+        setError(typeof e === "string" ? e : String(e));
+        return;
+      }
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "DWH Project", extensions: ["json"] }],
+    });
+    if (typeof picked !== "string") return;
+    const norm = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+    if (norm(picked) === norm(path)) {
+      setError("A project cannot reference itself (same file)");
+      return;
+    }
+    try {
+      const owner = await loadProject(picked);
+      if (
+        project.project_uid?.trim() &&
+        owner.project_uid?.trim() &&
+        project.project_uid === owner.project_uid
+      ) {
+        setError(
+          "Same project_uid as the open project (likely a copied file). Save As the owner first to fork identity, then reference it.",
+        );
+        return;
+      }
+      setAddRefPending({
+        consumerPath: path,
+        ownerPath: picked,
+        alias: owner.name?.trim() || "Shared",
+      });
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function confirmAddReference() {
+    if (!addRefPending) return;
+    const { consumerPath, ownerPath, alias } = addRefPending;
+    const name = alias.trim() || "Shared";
+    try {
+      const ref = await makeProjectReference(consumerPath, ownerPath, name);
+      setProject((p) => ({
+        ...p,
+        references: [...(p.references ?? []), ref],
+      }));
+      setTreeExpanded((e) => ({ ...e, references: true }));
+      setAddRefPending(null);
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRefreshReference(ref: ProjectReference) {
+    try {
+      const updated = await refreshReference(project, ref.id);
+      setProject((p) => ({
+        ...p,
+        references: (p.references ?? []).map((r) =>
+          r.id === ref.id ? updated : r,
+        ),
+      }));
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRelinkReference(ref: ProjectReference) {
+    const file = project.root_path;
+    if (!file) {
+      setError("Save the project before relinking");
+      return;
+    }
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "DWH Project", extensions: ["json"] }],
+    });
+    if (typeof picked !== "string") return;
+    try {
+      const updated = await relinkReference(file, ref, picked);
+      setProject((p) => ({
+        ...p,
+        references: (p.references ?? []).map((r) =>
+          r.id === ref.id ? updated : r,
+        ),
+      }));
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleOpenReferenceOwner(ref: ProjectReference) {
+    const file = project.root_path;
+    if (!file) {
+      setError("Save the project to resolve reference paths");
+      return;
+    }
+    try {
+      await revealItemInDir(resolveOwnerPath(file, ref.locator));
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  async function handleRemoveReference(ref: ProjectReference) {
+    try {
+      const consumers = await referenceConsumers(project.workspace, ref.id);
+      if (consumers.length > 0) {
+        setError(
+          `Cannot remove “${ref.alias}”: still used by ${consumers.join(", ")}`,
+        );
+        return;
+      }
+      setProject((p) => ({
+        ...p,
+        references: (p.references ?? []).filter((r) => r.id !== ref.id),
+      }));
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  function selectExternalBoundary(key: string) {
+    setSelectedExternalKey(key);
+    setActiveQueryId(null);
+    setSelectedStepIndex(null);
+    setSelectedKeyMapId(null);
+    setCenterTab("canvas");
+  }
+
+  function useReferencedQuery(
+    referenceId: string,
+    queryId: string,
+    nameHint: string,
+  ) {
+    const q = newQueryFromExternal(
+      project,
+      externalTarget(referenceId, "query", queryId),
+      nameHint,
+    );
+    setQueries((prev) => [...prev, q]);
+    selectQuery(q.id);
+  }
+
+  function deriveFromExternalKey(key: string) {
+    const target = parseTargetKey(key);
+    if (!target || !isExternalTarget(target)) return;
+    if (target.kind !== "query") {
+      setError("Use-in-new-query applies to referenced queries");
+      return;
+    }
+    const alias =
+      (project.references ?? []).find((r) => r.id === target.reference_id)
+        ?.alias ?? target.reference_id;
+    useReferencedQuery(
+      target.reference_id,
+      target.id,
+      `${alias}_${target.id}`,
+    );
+  }
+
+  async function createLocalCopyOfExternal(key: string) {
+    const target = parseTargetKey(key);
+    const file = project.root_path;
+    if (!target || !isExternalTarget(target) || !file) {
+      setError("Save the project and select an external object first");
+      return;
+    }
+    const ref = (project.references ?? []).find(
+      (r) => r.id === target.reference_id,
+    );
+    if (!ref) {
+      setError("Unknown reference");
+      return;
+    }
+    try {
+      const owner = await loadProject(resolveOwnerPath(file, ref.locator));
+      if (target.kind === "query") {
+        const src = owner.workspace.queries.find((q) => q.id === target.id);
+        if (!src) {
+          setError(`Owner query '${target.id}' not found`);
+          return;
+        }
+        const name = `${src.name}_copy`;
+        const id = newQueryId(
+          name,
+          project.workspace.queries.map((q) => q.id),
+        );
+        const copy = {
+          ...src,
+          id,
+          name,
+          steps: rewriteStepsForLocalCopy(src.steps, ref.id),
+        };
+        setQueries((prev) => [...prev, copy]);
+        selectQuery(id);
+        return;
+      }
+      if (target.kind === "mapping") {
+        const src = (owner.workspace.key_maps ?? []).find(
+          (m) => m.id === target.id,
+        );
+        if (!src) {
+          setError(`Owner mapping '${target.id}' not found`);
+          return;
+        }
+        const id = newId(
+          "map",
+          `${src.name}_copy`,
+          (project.workspace.key_maps ?? []).map((m) => m.id),
+        );
+        const copy = {
+          ...src,
+          id,
+          name: `${src.name}_copy`,
+          entries: src.storage?.kind === "seed" ? [...src.entries] : [],
+        };
+        setProject((p) => ({
+          ...p,
+          workspace: {
+            ...p.workspace,
+            key_maps: [...(p.workspace.key_maps ?? []), copy],
+          },
+        }));
+        setSelectedKeyMapId(id);
+        openKeyMapEditor(copy);
+        return;
+      }
+      setError("Create local copy supports queries and mappings");
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
 
   /** Close map tab; if opened from Join Lens, restore Join + Lens No match. */
   function closeKeyMapTab(mapId: string, wsForJoin?: Workspace) {
@@ -1694,7 +2069,7 @@ function App() {
 
   async function handleOpenRecentProject(path: string) {
     try {
-      const loaded = await loadProject(path);
+      const loaded = await loadProject(path, { remember: true });
       applyLoadedProject(loaded, path);
       setExportMsg(`Opened ${path}`);
       await rememberRecentProject(path);
@@ -1865,7 +2240,8 @@ function App() {
         // Joins (e.g. two RIGHT OUTER to different dims).
         const existing = q.steps.findIndex(
           (s) =>
-            s.type === "Join" && s.payload.right_query_id === rightQueryId,
+            s.type === "Join" &&
+            targetKey(s.payload.right_query_id) === rightQueryId,
         );
         let steps: TransformationStep[];
         if (existing >= 0) {
@@ -1985,7 +2361,12 @@ function App() {
           ),
         };
       }
-      const result = await previewWorkspace(ws, connections, sources);
+      const result = await previewWorkspace(
+        ws,
+        connections,
+        sources,
+        projectRefContext(project),
+      );
       const total =
         kind === "left"
           ? joinDiag.left_count
@@ -2038,11 +2419,16 @@ function App() {
     };
 
     // Schema only — avoid LIMIT 50 scans just to populate Join column pickers.
+    const pref = projectRefContext(project);
     const leftRes = leftWs
-      ? await describeWorkspace(leftWs, connections, sources).catch(() => null)
+      ? await describeWorkspace(leftWs, connections, sources, pref).catch(
+          () => null,
+        )
       : null;
     const rightRes = rightQueryId
-      ? await describeWorkspace(rightWs, connections, sources).catch(() => null)
+      ? await describeWorkspace(rightWs, connections, sources, pref).catch(
+          () => null,
+        )
       : null;
     return {
       left: leftRes?.columns ?? [],
@@ -2087,7 +2473,7 @@ function App() {
           : (host?.steps.findIndex(
               (s) =>
                 s.type === "Join" &&
-                s.payload.right_query_id === edge.otherQueryId,
+                targetKey(s.payload.right_query_id) === edge.otherQueryId,
             ) ?? -1);
       const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
@@ -2109,7 +2495,8 @@ function App() {
       const idx =
         host?.steps.findIndex(
           (s) =>
-            s.type === "FromQuery" && s.payload.query_id === edge.otherQueryId,
+            s.type === "FromQuery" &&
+            targetKey(s.payload.query_id) === edge.otherQueryId,
         ) ?? -1;
       if (idx >= 0 && host) {
         setSelectedStepIndex(idx);
@@ -2126,7 +2513,7 @@ function App() {
           (s) =>
             !(
               s.type === "FromQuery" &&
-              s.payload.query_id === edge.otherQueryId
+              targetKey(s.payload.query_id) === edge.otherQueryId
             ),
         );
         const stillHasRoot = withoutFrom.some(
@@ -2156,13 +2543,13 @@ function App() {
               if (
                 edge.stepIndex != null &&
                 i === edge.stepIndex &&
-                s.payload.right_query_id === edge.otherQueryId
+                targetKey(s.payload.right_query_id) === edge.otherQueryId
               ) {
                 return false;
               }
               if (
                 edge.stepIndex == null &&
-                s.payload.right_query_id === edge.otherQueryId
+                targetKey(s.payload.right_query_id) === edge.otherQueryId
               ) {
                 return false;
               }
@@ -2177,7 +2564,7 @@ function App() {
               (s) =>
                 !(
                   s.type === "FromQuery" &&
-                  s.payload.query_id === edge.otherQueryId
+                  targetKey(s.payload.query_id) === edge.otherQueryId
                 ),
             ),
           };
@@ -2188,7 +2575,7 @@ function App() {
             .map((s) => {
               if (s.type !== "Append") return s;
               const others = s.payload.other_query_ids.filter(
-                (id) => id !== edge.otherQueryId,
+                (id) => targetKey(id) !== edge.otherQueryId,
               );
               if (others.length === 0) return null;
               return {
@@ -2253,15 +2640,21 @@ function App() {
       ...q,
         steps: q.steps
           .map((s) => {
-            if (s.type === "Join" && s.payload.right_query_id === queryId) {
+            if (
+              s.type === "Join" &&
+              targetKey(s.payload.right_query_id) === queryId
+            ) {
               return null;
             }
-            if (s.type === "FromQuery" && s.payload.query_id === queryId) {
+            if (
+              s.type === "FromQuery" &&
+              targetKey(s.payload.query_id) === queryId
+            ) {
               return null;
             }
             if (s.type === "Append") {
               const others = s.payload.other_query_ids.filter(
-                (id) => id !== queryId,
+                (id) => targetKey(id) !== queryId,
               );
               if (others.length === 0) return null;
               return {
@@ -2386,8 +2779,18 @@ function App() {
           .pop()
           ?.replace(/\.dwhproj\.json$/i, "")
           .replace(/\.json$/i, "") ?? project.name;
-      await saveProject(path, { ...project, root_path: path, name: base });
-      setProject((p) => ({ ...p, root_path: path, name: base }));
+      const saved = await saveProject(path, {
+        ...project,
+        root_path: path,
+        name: base,
+      });
+      setProject((p) => ({
+        ...p,
+        ...saved,
+        root_path: path,
+        name: base,
+        connections: p.connections,
+      }));
       setExportMsg(`Project saved → ${path}`);
       setError(null);
       await rememberRecentProject(path);
@@ -2419,7 +2822,39 @@ function App() {
         filters: [{ name: "DWH Project", extensions: ["json"] }],
       })) ?? null;
     if (typeof picked !== "string") return;
-    await writeProjectTo(picked);
+    // ADR-0025: a copy is a new identity; keep referencing the original possible.
+    const sameFile =
+      !!project.root_path &&
+      project.root_path.replace(/\\/g, "/").toLowerCase() ===
+        picked.replace(/\\/g, "/").toLowerCase();
+    const forked = sameFile
+      ? project
+      : { ...project, project_uid: crypto.randomUUID() };
+    try {
+      const base =
+        picked
+          .split(/[/\\]/)
+          .pop()
+          ?.replace(/\.dwhproj\.json$/i, "")
+          .replace(/\.json$/i, "") ?? forked.name;
+      const saved = await saveProject(picked, {
+        ...forked,
+        root_path: picked,
+        name: base,
+      });
+      setProject((p) => ({
+        ...forked,
+        ...saved,
+        root_path: picked,
+        name: base,
+        connections: p.connections,
+      }));
+      setExportMsg(`Project saved → ${picked}`);
+      setError(null);
+      await rememberRecentProject(picked);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
   }
 
   function applyLoadedProject(loaded: Project, pathHint?: string) {
@@ -3046,7 +3481,7 @@ function App() {
     });
     if (typeof path !== "string") return;
     try {
-      const loaded = await loadProject(path);
+      const loaded = await loadProject(path, { remember: true });
       applyLoadedProject(loaded, path);
       setExportMsg(`Opened ${path}`);
       await rememberRecentProject(path);
@@ -3099,7 +3534,7 @@ function App() {
         const path = await getLastProjectPath();
         if (cancelled) return;
         if (path) {
-          const loaded = await loadProject(path);
+          const loaded = await loadProject(path, { remember: true });
           if (cancelled) return;
           applyLoadedProject(loaded, path);
           setExportMsg(`Restored ${path}`);
@@ -3250,6 +3685,7 @@ function App() {
         project.outputs ?? [],
         true,
         sources,
+        projectRefContext(project),
       );
       setProject((p) => ({ ...p, last_dbt_export_path: result.path }));
       setExportFiles(result.files);
@@ -3377,7 +3813,7 @@ function App() {
       ? {
           hostQueryId: activeQueryId,
           joinStepIndex: selectedStepIndex,
-          rightQueryId: selectedStep.payload.right_query_id,
+          rightQueryId: targetKey(selectedStep.payload.right_query_id),
           leftOn: selectedStep.payload.left_on,
           rightOn: selectedStep.payload.right_on,
           joinType: selectedStep.payload.join_type,
@@ -3412,7 +3848,12 @@ function App() {
         q.id === hostId ? { ...q, steps: upstreamSteps } : q,
       ),
     };
-    void previewWorkspace(leftWs, connections, sources)
+    void previewWorkspace(
+      leftWs,
+      connections,
+      sources,
+      projectRefContext(project),
+    )
       .then((res) => {
         if (!cancelled) {
           setUpstreamColumnNames(res.columns.map((c) => c.name));
@@ -3729,6 +4170,66 @@ function App() {
       />
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {addRefPending && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setAddRefPending(null);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-ref-title"
+            className="w-full max-w-sm rounded-xl border border-slate-700 bg-[#0a1219] p-4 shadow-2xl shadow-black/50"
+          >
+            <h2
+              id="add-ref-title"
+              className="text-sm font-semibold text-teal-100"
+            >
+              Add reference
+            </h2>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Alias used in pickers and on the canvas. Does not change export
+              names.
+            </p>
+            <label className="mt-3 block text-[10px] uppercase tracking-wide text-slate-500">
+              Alias
+              <input
+                autoFocus
+                value={addRefPending.alias}
+                onChange={(e) =>
+                  setAddRefPending((p) =>
+                    p ? { ...p, alias: e.target.value } : p,
+                  )
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void confirmAddReference();
+                  if (e.key === "Escape") setAddRefPending(null);
+                }}
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
+              />
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-500"
+                onClick={() => setAddRefPending(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
+                onClick={() => void confirmAddReference()}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <OptionsDialog
         open={optionsOpen}
         settings={appSettings}
@@ -4057,6 +4558,14 @@ function App() {
                 onExport={() => void handleExportDbt()}
                 onRevealExport={() => void handleRevealExport()}
                 exportFiles={exportFiles}
+                referenceStatuses={refStatuses}
+                referenceCatalogs={refCatalogs}
+                onAddReference={() => void handleAddReference()}
+                onRefreshReference={(r) => void handleRefreshReference(r)}
+                onRelinkReference={(r) => void handleRelinkReference(r)}
+                onOpenReferenceOwner={(r) => void handleOpenReferenceOwner(r)}
+                onRemoveReference={(r) => void handleRemoveReference(r)}
+                onUseReferencedQuery={useReferencedQuery}
                 onAddConnection={() => openNewConnection("postgres")}
                 onAddSourceCsv={() => void addSourceOnlyCsv()}
                 onAddSourceParquet={() => void addSourceOnlyParquet()}
@@ -4477,6 +4986,10 @@ function App() {
                 onRemoveEdge={removeEdgeOnCanvas}
                 onRemoveQuery={removeQueryOnCanvas}
                 onDeriveQuery={deriveQueryFrom}
+                externalBoundaries={externalBoundaries}
+                selectedExternalKey={selectedExternalKey}
+                onSelectExternal={selectExternalBoundary}
+                onDeriveExternal={deriveFromExternalKey}
               />
             </div>
             <PanelResizeHandle
@@ -4875,12 +5388,78 @@ function App() {
               </div>
             )}
             <div className="flex min-h-0 flex-1 flex-col">
+              {selectedExternalKey ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-auto px-3 py-2">
+                  <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-sky-500">
+                    External · read-only
+                  </h3>
+                  {(() => {
+                    const b = externalBoundaries.find(
+                      (x) => x.key === selectedExternalKey,
+                    );
+                    const target = parseTargetKey(selectedExternalKey);
+                    if (!b || !target || !isExternalTarget(target)) {
+                      return (
+                        <p className="text-sm text-slate-600">
+                          External object unavailable.
+                        </p>
+                      );
+                    }
+                    return (
+                      <div className="space-y-3 text-sm text-slate-300">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                            Reference
+                          </div>
+                          <div className="font-semibold text-sky-200">
+                            {b.alias}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                            Object
+                          </div>
+                          <div className="font-mono text-xs">
+                            {b.kind} · {b.objectId}
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Definition is owned by the referenced project. Edit it
+                          there, then Update the reference.
+                        </p>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg bg-sky-500/15 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/25"
+                          onClick={() => deriveFromExternalKey(selectedExternalKey)}
+                        >
+                          Use in new query
+                        </button>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-sky-700 hover:text-sky-200"
+                          onClick={() =>
+                            void createLocalCopyOfExternal(selectedExternalKey)
+                          }
+                        >
+                          Create local copy
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
+              ) : (
+              <>
               <div className="flex min-h-0 flex-[1_1_50%] flex-col border-b border-[var(--line)] px-3 py-2">
                 <History
                   steps={activeQuery?.steps ?? []}
-                  queryNames={Object.fromEntries(
-                    queries.map((q) => [q.id, q.name]),
-                  )}
+                  queryNames={{
+                    ...Object.fromEntries(
+                      queries.map((q) => [q.id, q.name]),
+                    ),
+                    ...Object.fromEntries(
+                      externalBoundaries.map((b) => [b.key, b.label]),
+                    ),
+                  }}
                   selectedIndex={selectedStepIndex}
                   onSelect={selectStepAt}
                   onRemoveAt={removeStepAt}
@@ -4920,11 +5499,29 @@ function App() {
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                         >
                           <option value="">parent query…</option>
-                          {otherQueries.map((q) => (
-                            <option key={q.id} value={q.id}>
-                              {q.name}
-                            </option>
-                          ))}
+                          <optgroup label="This project">
+                            {otherQueries.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                          {Object.entries(refCatalogs).map(([rid, cat]) =>
+                            cat.queries.length > 0 ? (
+                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                {cat.queries.map((q) => (
+                                  <option
+                                    key={`${rid}:${q.id}`}
+                                    value={targetKey(
+                                      externalTarget(rid, "query", q.id),
+                                    )}
+                                  >
+                                    {cat.alias}.{q.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null,
+                          )}
                         </select>
                         <button
                           type="button"
@@ -4935,7 +5532,9 @@ function App() {
                               return;
                             replaceStepAt(selectedStepIndex, {
                               type: "FromQuery",
-                              payload: { query_id: fromQueryId },
+                              payload: {
+                                query_id: objectTargetFromPicker(fromQueryId),
+                              },
                             });
                           }}
                         >
@@ -5093,19 +5692,45 @@ function App() {
                         <select
                           value={joinRightId}
                           onChange={(e) => setJoinRightId(e.target.value)}
-                          disabled={otherQueries.length === 0}
+                          disabled={
+                            otherQueries.length === 0 &&
+                            Object.values(refCatalogs).every(
+                              (c) => c.queries.length === 0,
+                            )
+                          }
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
                         >
                           <option value="">right query…</option>
-                          {otherQueries.map((q) => (
-                            <option key={q.id} value={q.id}>
-                              {q.name}
-                            </option>
-                          ))}
+                          <optgroup label="This project">
+                            {otherQueries.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                          {Object.entries(refCatalogs).map(([rid, cat]) =>
+                            cat.queries.length > 0 ? (
+                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                {cat.queries.map((q) => (
+                                  <option
+                                    key={`${rid}:${q.id}`}
+                                    value={targetKey(
+                                      externalTarget(rid, "query", q.id),
+                                    )}
+                                  >
+                                    {cat.alias}.{q.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null,
+                          )}
                         </select>
-                        {otherQueries.length === 0 && (
+                        {otherQueries.length === 0 &&
+                          Object.values(refCatalogs).every(
+                            (c) => c.queries.length === 0,
+                          ) && (
                           <p className="text-[11px] text-amber-500/90">
-                            Need another query in the project to join.
+                            Need another query (local or referenced) to join.
                           </p>
                         )}
                         <label className="block text-[10px] uppercase tracking-wide text-slate-500">
@@ -5147,7 +5772,8 @@ function App() {
                             replaceStepAt(selectedStepIndex, {
                               type: "Join",
                               payload: {
-                                right_query_id: joinRightId,
+                                right_query_id:
+                                  objectTargetFromPicker(joinRightId),
                                 join_type: joinType,
                                 left_on,
                                 right_on,
@@ -5180,11 +5806,29 @@ function App() {
                           className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
                         >
                           <option value="">other query…</option>
-                          {otherQueries.map((q) => (
-                            <option key={q.id} value={q.id}>
-                              {q.name}
-                            </option>
-                          ))}
+                          <optgroup label="This project">
+                            {otherQueries.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {q.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                          {Object.entries(refCatalogs).map(([rid, cat]) =>
+                            cat.queries.length > 0 ? (
+                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                {cat.queries.map((q) => (
+                                  <option
+                                    key={`${rid}:${q.id}`}
+                                    value={targetKey(
+                                      externalTarget(rid, "query", q.id),
+                                    )}
+                                  >
+                                    {cat.alias}.{q.name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ) : null,
+                          )}
                         </select>
                         <button
                           type="button"
@@ -5195,7 +5839,11 @@ function App() {
                               return;
                             replaceStepAt(selectedStepIndex, {
                               type: "Append",
-                              payload: { other_query_ids: [appendOtherId] },
+                              payload: {
+                                other_query_ids: [
+                                  objectTargetFromPicker(appendOtherId),
+                                ],
+                              },
                             });
                           }}
                         >
@@ -5618,33 +6266,60 @@ function App() {
                         <label className="block text-[10px] text-slate-500">
                           KeyMap
                           <select
-                            value={selectedStep.payload.map_id}
+                            value={targetKey(selectedStep.payload.map_id)}
                             onChange={(e) => {
-                              const map_id = e.target.value;
-                              const map = (
-                                project.workspace.key_maps ?? []
-                              ).find((m) => m.id === map_id);
+                              const map_id = objectTargetFromPicker(
+                                e.target.value,
+                              );
+                              const localId =
+                                typeof map_id === "string" ? map_id : null;
+                              const map = localId
+                                ? (project.workspace.key_maps ?? []).find(
+                                    (m) => m.id === localId,
+                                  )
+                                : undefined;
                               replaceStepAt(selectedStepIndex, {
                                 type: "ApplyKeyMap",
                                 payload: {
                                   column: selectedStep.payload.column,
                                   map_id,
-                                  entries: map?.entries ?? selectedStep.payload.entries ?? [],
+                                  entries: map?.entries ?? [],
                                 },
                               });
                             }}
                             className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
                           >
-                            {(project.workspace.key_maps ?? []).length === 0 && (
-                              <option value={selectedStep.payload.map_id}>
-                                {selectedStep.payload.map_id}
+                            {(project.workspace.key_maps ?? []).length === 0 &&
+                              Object.values(refCatalogs).every(
+                                (c) => c.maps.length === 0,
+                              ) && (
+                              <option value={targetKey(selectedStep.payload.map_id)}>
+                                {targetKey(selectedStep.payload.map_id)}
                               </option>
                             )}
-                            {(project.workspace.key_maps ?? []).map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.name} ({m.entries.length} rows)
-                              </option>
-                            ))}
+                            <optgroup label="This project">
+                              {(project.workspace.key_maps ?? []).map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.name} ({m.entries.length} rows)
+                                </option>
+                              ))}
+                            </optgroup>
+                            {Object.entries(refCatalogs).map(([rid, cat]) =>
+                              cat.maps.length > 0 ? (
+                                <optgroup key={rid} label={`Ref · ${cat.alias}`}>
+                                  {cat.maps.map((m) => (
+                                    <option
+                                      key={`${rid}:${m.id}`}
+                                      value={targetKey(
+                                        externalTarget(rid, "mapping", m.id),
+                                      )}
+                                    >
+                                      {cat.alias}.{m.name}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ) : null,
+                            )}
                           </select>
                         </label>
                         <p className="font-mono text-[10px] text-slate-500">
@@ -5683,12 +6358,11 @@ function App() {
                           className="w-full rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
                           onClick={() => {
                             const maps = project.workspace.key_maps ?? [];
+                            const mid = targetKey(selectedStep.payload.map_id);
                             const map =
-                              maps.find(
-                                (m) => m.id === selectedStep.payload.map_id,
-                              ) ?? {
-                                id: selectedStep.payload.map_id,
-                                name: selectedStep.payload.map_id,
+                              maps.find((m) => m.id === mid) ?? {
+                                id: mid,
+                                name: mid,
                                 entries: selectedStep.payload.entries ?? [],
                               };
                             openKeyMapEditor(map, {
@@ -5727,6 +6401,8 @@ function App() {
                   </div>
                 </div>
               </div>
+              </>
+              )}
             </div>
           </aside>
           )}

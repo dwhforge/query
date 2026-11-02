@@ -9,7 +9,7 @@ import type {
   TransformationStep,
   Workspace,
 } from "../types/pipeline";
-import { slugify } from "../types/pipeline";
+import { slugify, targetKey } from "../types/pipeline";
 
 export type ApplySide = "left" | "right" | "both";
 
@@ -88,7 +88,7 @@ export function findApplyKeyMapIdForJoin(
           s.payload.columns,
         ).map(fold);
         if (cols.some((c) => names.has(c))) {
-          return s.payload.map_id;
+          return targetKey(s.payload.map_id);
         }
       }
     }
@@ -248,7 +248,11 @@ function upsertApplyStep(
   };
   const key = cols.map((c) => c.toLowerCase()).join("\0");
   const existing = next.findIndex((s, i) => {
-    if (i > at || s.type !== "ApplyKeyMap" || s.payload.map_id !== map.id) {
+    if (
+      i > at ||
+      s.type !== "ApplyKeyMap" ||
+      targetKey(s.payload.map_id) !== map.id
+    ) {
       return false;
     }
     const sc = applyKeymapColumns(s.payload.column, s.payload.columns)
@@ -391,7 +395,7 @@ export function syncApplyKeyMapEntries(
   return queries.map((q) => ({
     ...q,
     steps: q.steps.map((s) =>
-      s.type === "ApplyKeyMap" && s.payload.map_id === map.id
+      s.type === "ApplyKeyMap" && targetKey(s.payload.map_id) === map.id
         ? {
             ...s,
             payload: { ...s.payload, entries: snapEntries },
@@ -504,7 +508,7 @@ export function deleteKeyMapFromWorkspace(
   let removedSteps = 0;
   const queries = workspace.queries.map((q) => {
     const steps = q.steps.filter((s) => {
-      if (s.type === "ApplyKeyMap" && s.payload.map_id === mapId) {
+      if (s.type === "ApplyKeyMap" && targetKey(s.payload.map_id) === mapId) {
         removedSteps += 1;
         return false;
       }

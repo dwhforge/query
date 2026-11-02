@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReferenceStatus } from "../lib/bridge";
+import {
+  referenceStateLabel,
+  referenceStateTone,
+} from "../lib/projectRefs";
 import {
   isPublishedOutput,
   type ConnectionDef,
   type KeyMapDef,
   type Project,
+  type ProjectReference,
   type QueryDef,
   type SourceDef,
 } from "../types/pipeline";
@@ -21,6 +27,23 @@ interface ExplorerTreeProps {
   onExport: () => void;
   onRevealExport?: () => void;
   exportFiles?: string[];
+  referenceStatuses?: ReferenceStatus[];
+  /** Owner catalogs keyed by reference id (for browse + use-in-new-query). */
+  referenceCatalogs?: Record<
+    string,
+    {
+      alias: string;
+      queries: { id: string; name: string }[];
+      maps: { id: string; name: string }[];
+    }
+  >;
+  onAddReference: () => void;
+  onRefreshReference: (ref: ProjectReference) => void;
+  onRelinkReference: (ref: ProjectReference) => void;
+  onOpenReferenceOwner: (ref: ProjectReference) => void;
+  onRemoveReference: (ref: ProjectReference) => void;
+  /** Local derivation: FromQuery → referenced query (ADR-0025). */
+  onUseReferencedQuery: (referenceId: string, queryId: string, nameHint: string) => void;
   onAddConnection: () => void;
   /** Catalog only — no query. */
   onAddSourceCsv: () => void;
@@ -237,6 +260,14 @@ export function ExplorerTree({
   onExport,
   onRevealExport,
   exportFiles = [],
+  referenceStatuses = [],
+  referenceCatalogs = {},
+  onAddReference,
+  onRefreshReference,
+  onRelinkReference,
+  onOpenReferenceOwner,
+  onRemoveReference,
+  onUseReferencedQuery,
   onAddConnection,
   onAddSourceCsv,
   onAddSourceParquet,
@@ -261,12 +292,18 @@ export function ExplorerTree({
   const sourcesOpen = expanded.sources !== false;
   const queriesOpen = expanded.queries !== false;
   const keyMapsOpen = expanded.keyMaps !== false;
+  const referencesOpen = expanded.references !== false;
   const exportOpen = expanded.export !== false;
   const focus = project.workspace.focus_query_id;
   const keyMaps = project.workspace.key_maps ?? [];
+  const references = project.references ?? [];
+  const statusById = new Map(
+    referenceStatuses.map((s) => [s.reference_id, s] as const),
+  );
 
   const [sourcesMenuOpen, setSourcesMenuOpen] = useState(false);
   const [queriesMenuOpen, setQueriesMenuOpen] = useState(false);
+  const [refRowOpen, setRefRowOpen] = useState<Record<string, boolean>>({});
   const [renaming, setRenaming] = useState<
     { kind: "query" | "source" | "keymap"; id: string } | null
   >(null);
@@ -557,6 +594,35 @@ export function ExplorerTree({
                     </>
                   )}
                   {newSourceAndQueryItems}
+                  {references.some(
+                    (r) => (referenceCatalogs[r.id]?.queries.length ?? 0) > 0,
+                  ) && (
+                    <>
+                      <MenuDivider />
+                      <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                        From reference
+                      </div>
+                      {references.flatMap((r) => {
+                        const cat = referenceCatalogs[r.id];
+                        if (!cat?.queries.length) return [];
+                        return cat.queries.map((q) => (
+                          <MenuItem
+                            key={`${r.id}:${q.id}`}
+                            label={`${r.alias}.${q.name}`}
+                            hint="ref"
+                            onClick={() => {
+                              closeMenus();
+                              onUseReferencedQuery(
+                                r.id,
+                                q.id,
+                                `${r.alias}_${q.name}`,
+                              );
+                            }}
+                          />
+                        ));
+                      })}
+                    </>
+                  )}
                   <MenuDivider />
                   <MenuItem
                     label="SQL model"
@@ -711,6 +777,140 @@ export function ExplorerTree({
                       >
                         ×
                       </IconBtn>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div className="px-1">
+          <SectionHeader
+            title="References"
+            open={referencesOpen}
+            count={references.length || undefined}
+            onToggle={() => onToggle("references")}
+            actions={
+              <IconBtn title="Add reference to another project" onClick={onAddReference}>
+                +
+              </IconBtn>
+            }
+          />
+          {referencesOpen && (
+            <ul className="ml-3 border-l border-[var(--line)] pl-2">
+              {references.length === 0 && (
+                <li className="px-1.5 py-1 text-[11px] text-slate-600">
+                  No referenced projects
+                </li>
+              )}
+              {references.map((ref) => {
+                const st = statusById.get(ref.id);
+                const state = st?.state ?? "missing";
+                const canUpdate = state === "update_available";
+                const canRelink =
+                  state === "missing" || state === "identity_mismatch";
+                const cat = referenceCatalogs[ref.id];
+                const open = refRowOpen[ref.id] !== false;
+                const ownerQueries = cat?.queries ?? [];
+                return (
+                  <li
+                    key={ref.id}
+                    className="py-0.5"
+                    title={st?.message ?? ref.locator}
+                  >
+                    <div className="group/ref flex items-start gap-0.5">
+                      <button
+                        type="button"
+                        className="mt-1 w-3 shrink-0 text-[10px] text-slate-600 hover:text-slate-300"
+                        title={open ? "Collapse" : "Show owner queries"}
+                        onClick={() =>
+                          setRefRowOpen((m) => ({
+                            ...m,
+                            [ref.id]: !open,
+                          }))
+                        }
+                      >
+                        {open ? "▾" : "▸"}
+                      </button>
+                      <div className="min-w-0 flex-1 rounded-md px-1 py-1">
+                        <div className="truncate text-xs text-slate-200">
+                          {ref.alias}
+                        </div>
+                        <div
+                          className={`truncate text-[10px] ${referenceStateTone(state)}`}
+                        >
+                          {referenceStateLabel(state)}
+                          {ownerQueries.length > 0
+                            ? ` · ${ownerQueries.length} queries`
+                            : ""}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 flex-col gap-0.5 opacity-70 group-hover/ref:opacity-100">
+                        {canUpdate && (
+                          <IconBtn
+                            title="Update locked revision"
+                            onClick={() => onRefreshReference(ref)}
+                          >
+                            ↻
+                          </IconBtn>
+                        )}
+                        {canRelink && (
+                          <IconBtn
+                            title="Relink owner file"
+                            onClick={() => onRelinkReference(ref)}
+                          >
+                            ⤴
+                          </IconBtn>
+                        )}
+                        <IconBtn
+                          title="Open owner project file"
+                          onClick={() => onOpenReferenceOwner(ref)}
+                        >
+                          ↗
+                        </IconBtn>
+                        <IconBtn
+                          title="Remove reference"
+                          onClick={() => onRemoveReference(ref)}
+                        >
+                          ×
+                        </IconBtn>
+                      </div>
+                    </div>
+                    {open && (
+                      <ul className="ml-4 mt-0.5 border-l border-slate-800 pl-2">
+                        {ownerQueries.length === 0 && (
+                          <li className="px-1.5 py-1 text-[10px] text-slate-600">
+                            {state === "ready"
+                              ? "No queries in owner"
+                              : "Owner catalog unavailable"}
+                          </li>
+                        )}
+                        {ownerQueries.map((q) => (
+                          <li
+                            key={q.id}
+                            className="group/rq flex items-center gap-0.5"
+                          >
+                            <button
+                              type="button"
+                              title={`Use ${ref.alias}.${q.name} in a new local query`}
+                              onClick={() =>
+                                onUseReferencedQuery(
+                                  ref.id,
+                                  q.id,
+                                  `${ref.alias}_${q.name}`,
+                                )
+                              }
+                              className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-[11px] text-slate-300 hover:bg-sky-500/10 hover:text-sky-100"
+                            >
+                              <span className="truncate">{q.name}</span>
+                              <span className="ml-auto shrink-0 text-[9px] uppercase text-sky-600/80 group-hover/rq:text-sky-400">
+                                use
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
                     )}
                   </li>
                 );

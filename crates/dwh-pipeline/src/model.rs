@@ -7,6 +7,162 @@ fn default_pg_schema() -> String {
     "public".into()
 }
 
+/// Cross-project object kind ([ADR-0025](../../../docs/adr/0025-project-references.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectKind {
+    Source,
+    Query,
+    Mapping,
+}
+
+impl ObjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObjectKind::Source => "source",
+            ObjectKind::Query => "query",
+            ObjectKind::Mapping => "mapping",
+        }
+    }
+
+    pub fn tag(self) -> char {
+        match self {
+            ObjectKind::Source => 's',
+            ObjectKind::Query => 'q',
+            ObjectKind::Mapping => 'm',
+        }
+    }
+}
+
+/// Local id (bare string on disk) or a reference to an object in another project.
+///
+/// External form: `{ "scope": "reference", "reference_id", "kind", "id" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectTarget {
+    Local(String),
+    External {
+        reference_id: String,
+        kind: ObjectKind,
+        id: String,
+    },
+}
+
+impl ObjectTarget {
+    pub fn external(reference_id: impl Into<String>, kind: ObjectKind, id: impl Into<String>) -> Self {
+        ObjectTarget::External {
+            reference_id: reference_id.into(),
+            kind,
+            id: id.into(),
+        }
+    }
+
+    pub fn is_external(&self) -> bool {
+        matches!(self, ObjectTarget::External { .. })
+    }
+
+    /// Id the existing compilers understand. External targets must be lowered first.
+    pub fn compiler_id(&self) -> Result<&str, String> {
+        match self {
+            ObjectTarget::Local(id) => Ok(id.as_str()),
+            ObjectTarget::External {
+                reference_id,
+                kind,
+                id,
+            } => Err(format!(
+                "unresolved external {} '{id}' via reference '{reference_id}'",
+                kind.as_str()
+            )),
+        }
+    }
+}
+
+impl From<&str> for ObjectTarget {
+    fn from(id: &str) -> Self {
+        ObjectTarget::Local(id.to_string())
+    }
+}
+
+impl From<String> for ObjectTarget {
+    fn from(id: String) -> Self {
+        ObjectTarget::Local(id)
+    }
+}
+
+impl std::fmt::Display for ObjectTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObjectTarget::Local(id) => f.write_str(id),
+            ObjectTarget::External {
+                reference_id,
+                kind,
+                id,
+            } => write!(f, "reference:{reference_id}:{}:{id}", kind.as_str()),
+        }
+    }
+}
+
+impl Serialize for ObjectTarget {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ObjectTarget::Local(id) => serializer.serialize_str(id),
+            ObjectTarget::External {
+                reference_id,
+                kind,
+                id,
+            } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("scope", "reference")?;
+                map.serialize_entry("reference_id", reference_id)?;
+                map.serialize_entry("kind", kind)?;
+                map.serialize_entry("id", id)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(id) => Ok(ObjectTarget::Local(id)),
+            serde_json::Value::Object(map) => {
+                let scope = map.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+                if scope != "reference" {
+                    return Err(serde::de::Error::custom(
+                        "object target scope must be \"reference\" or a local id string",
+                    ));
+                }
+                let reference_id = map
+                    .get("reference_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let id = map.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if reference_id.is_empty() || id.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "external target needs reference_id and id",
+                    ));
+                }
+                let kind = map
+                    .get("kind")
+                    .cloned()
+                    .ok_or_else(|| serde::de::Error::custom("external target needs kind"))?;
+                let kind: ObjectKind = serde_json::from_value(kind).map_err(serde::de::Error::custom)?;
+                Ok(ObjectTarget::External {
+                    reference_id,
+                    kind,
+                    id,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "object target must be a string or a reference object",
+            )),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JoinType {
@@ -47,6 +203,9 @@ pub enum TransformationStep {
         #[serde(default = "default_pg_schema")]
         schema: String,
         table_name: String,
+        /// dbt `source()` name when it must differ from `schema` (external projects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_alias: Option<String>,
     },
     /// Read a relation from an attached DuckDB database file (read-only source).
     LoadDuckdb {
@@ -58,9 +217,12 @@ pub enum TransformationStep {
         #[serde(default = "default_pg_schema")]
         schema: String,
         table_name: String,
+        /// dbt `source()` name when it must differ from `schema` (external projects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_alias: Option<String>,
     },
     /// Start from another query’s output (`ref` in dbt). Must be the first step.
-    FromQuery { query_id: String },
+    FromQuery { query_id: ObjectTarget },
     /// Hand-written SQL as the query root (ready-made model body). Must be first.
     /// Dialect = author’s prod warehouse; DuckDB is preview-only.
     SqlModel { raw_sql: String },
@@ -89,12 +251,12 @@ pub enum TransformationStep {
     /// Keep first N rows after prior steps (typically after SortBy).
     Limit { n: u64 },
     Join {
-        right_query_id: String,
+        right_query_id: ObjectTarget,
         join_type: JoinType,
         left_on: Vec<String>,
         right_on: Vec<String>,
     },
-    Append { other_query_ids: Vec<String> },
+    Append { other_query_ids: Vec<ObjectTarget> },
     CustomSql { raw_sql: String },
     /// Deterministic key cleanup before Join (trim/case/spaces/zeros). Overwrites in place.
     NormalizeKey {
@@ -113,7 +275,7 @@ pub enum TransformationStep {
         /// Where COALESCE(map.to, …) is written (default: first of columns).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_column: Option<String>,
-        map_id: String,
+        map_id: ObjectTarget,
         #[serde(default)]
         entries: Vec<KeyMapEntry>,
     },
@@ -197,6 +359,9 @@ pub enum KeyMapStorage {
         /// Optional Postgres connection for read/write-back (UI / host).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection_id: Option<String>,
+        /// Database schema when `source` is only the dbt source name (external projects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        db_schema: Option<String>,
     },
 }
 
@@ -392,9 +557,7 @@ impl Workspace {
             matches!(
                 km.storage,
                 KeyMapStorage::Source {
-                    connection_id: Some(_),
-                    ..
-                }
+                    connection_id: Some(_), .. }
             )
         })
     }
@@ -410,9 +573,7 @@ impl Workspace {
                         ..
                     }
                     | TransformationStep::LoadPostgres {
-                        connection_id: Some(id),
-                        ..
-                    } => {
+                        connection_id: Some(id), .. } => {
                         if !ids.contains(id) {
                             ids.push(id.clone());
                         }
@@ -423,9 +584,7 @@ impl Workspace {
         }
         for km in &self.key_maps {
             if let KeyMapStorage::Source {
-                connection_id: Some(id),
-                ..
-            } = &km.storage
+                connection_id: Some(id), .. } = &km.storage
             {
                 if !ids.contains(id) {
                     ids.push(id.clone());
@@ -443,9 +602,7 @@ impl Workspace {
         let mut out = std::collections::HashMap::new();
         for km in &self.key_maps {
             if let KeyMapStorage::Source {
-                connection_id: Some(cid),
-                ..
-            } = &km.storage
+                connection_id: Some(cid), .. } = &km.storage
             {
                 let c = connections
                     .iter()
@@ -467,9 +624,7 @@ impl Workspace {
             for step in &mut q.steps {
                 if let TransformationStep::LoadPostgres {
                     connection_id,
-                    connection_string,
-                    ..
-                } = step
+                    connection_string, .. } = step
                 {
                     if let Some(cid) = connection_id {
                         let c = connections

@@ -166,6 +166,7 @@ pub fn join_key_fuzzy_suggest_on(
     if join_step_index == 0 {
         return Err("Join cannot be the first step (no left input)".into());
     }
+    let right_query_id = right_query_id.compiler_id()?;
     let rq = resolved
         .query(right_query_id)
         .ok_or_else(|| format!("missing right query '{right_query_id}'"))?;
@@ -177,7 +178,7 @@ pub fn join_key_fuzzy_suggest_on(
     let compiled = compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
     let left_query_name = host.name.clone();
     let right_query_name = rq.name.clone();
-    let right_query_id = right_query_id.clone();
+    let right_query_id = right_query_id.to_string();
     let left_on = left_on.clone();
     let right_on = right_on.clone();
     let left_lineage = summarize_lineage(&host.steps[..join_step_index]);
@@ -461,8 +462,7 @@ fn summarize_lineage(steps: &[TransformationStep]) -> String {
                 format!("LoadParquet({})", short_path(path))
             }
             TransformationStep::LoadPostgres {
-                schema, table_name, ..
-            } => format!("LoadPostgres({schema}.{table_name})"),
+                schema, table_name, .. } => format!("LoadPostgres({schema}.{table_name})"),
             TransformationStep::LoadDuckdb {
                 schema, table_name, ..
             } => format!("LoadDuckdb({schema}.{table_name})"),
@@ -492,7 +492,14 @@ fn summarize_lineage(steps: &[TransformationStep]) -> String {
                 right_on.join("+")
             ),
             TransformationStep::Append { other_query_ids } => {
-                format!("Append({})", other_query_ids.join(","))
+                format!(
+                    "Append({})",
+                    other_query_ids
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
             }
             TransformationStep::CustomSql { .. } => "CustomSql".into(),
             TransformationStep::NormalizeKey { columns, ops } => {
@@ -655,7 +662,7 @@ fn collect_alias_examples(workspace: &Workspace) -> Vec<FuzzyAliasExample> {
                 continue;
             }
             out.push(FuzzyAliasExample {
-                map_id: map.id.clone(),
+                map_id: map.id.clone().into(),
                 map_name: map.name.clone(),
                 from: truncate_chars(from, CONTEXT_VALUE_CHARS),
                 to: truncate_chars(to, CONTEXT_VALUE_CHARS),

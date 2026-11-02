@@ -250,9 +250,7 @@ fn compile_step(
         TransformationStep::LoadPostgres {
             connection_string,
             schema,
-            table_name,
-            ..
-        } => {
+            table_name, .. } => {
             // DuckDB 2.0+: ATTACH (TYPE postgres) then qualified relation — not postgres_scan.
             Ok(format!(
                 "SELECT * FROM {}",
@@ -263,9 +261,10 @@ fn compile_step(
             if !prev_step.is_empty() {
                 return Err("FromQuery must be the first step of a query".into());
             }
-            let src = last_cte.get(query_id).ok_or_else(|| {
+            let qid = query_id.compiler_id()?;
+            let src = last_cte.get(qid).ok_or_else(|| {
                 format!(
-                    "FromQuery: query '{query_id}' not compiled yet (check deps / cycles)"
+                    "FromQuery: query '{qid}' not compiled yet (check deps / cycles)"
                 )
             })?;
             Ok(format!("SELECT * FROM {src}"))
@@ -277,14 +276,15 @@ fn compile_step(
             Ok(substitute_query_placeholders(raw_sql, last_cte))
         }
         TransformationStep::ApplyKeyMap { map_id, .. } => {
-            if let Some(model) = key_map_ref_models.get(map_id) {
+            let map_key = map_id.compiler_id()?;
+            if let Some(model) = key_map_ref_models.get(map_key) {
                 let m = if model.trim().is_empty() {
                     "…".into()
                 } else {
                     model.trim().to_string()
                 };
                 return Err(format!(
-                    "ApplyKeyMap '{map_id}': storage=ref cannot be previewed in DuckDB \
+                    "ApplyKeyMap '{map_key}': storage=ref cannot be previewed in DuckDB \
                      (export joins {{{{ ref('{m}') }}}}). Local KeyMap cache is not the model — \
                      editing it does not change preview or the dbt relation. \
                      Use storage=seed or source for a previewable remap."
@@ -370,6 +370,7 @@ mod tests {
             source: "public".into(),
             table: "channel_map".into(),
             connection_id: Some("pg1".into()),
+            db_schema: None,
         };
         km.from_column = "alias".into();
         km.to_column = "canon".into();
@@ -567,7 +568,8 @@ mod tests {
             connection_string: "postgresql://u:p@localhost/db".into(),
             schema: "sales".into(),
             table_name: "orders".into(),
-        }];
+                        source_alias: None,
+                    }];
         let sql = PipelineCompiler::new(&steps).to_sql(true).unwrap();
         assert!(sql.contains("dwh_pg_"));
         assert!(sql.contains("\"sales\""));

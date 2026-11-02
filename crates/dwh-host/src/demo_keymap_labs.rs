@@ -64,7 +64,8 @@ fn load_pg(table: &str) -> TransformationStep {
         connection_string: String::new(),
         schema: PG_SCHEMA.into(),
         table_name: table.into(),
-    }
+                        source_alias: None,
+                    }
 }
 
 fn q(id: &str, steps: Vec<TransformationStep>) -> QueryDef {
@@ -112,7 +113,7 @@ pub fn demo_keymap_crosswalk(fixtures: &Path) -> Result<Workspace, String> {
                         column: "sku_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries: entries.clone(),
                     },
                     TransformationStep::RenameColumn {
@@ -181,7 +182,7 @@ pub fn demo_keymap_dual(fixtures: &Path) -> Result<Workspace, String> {
                         column: "brand".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map_sales.id.clone(),
+                        map_id: map_sales.id.clone().into(),
                         entries: sales_e,
                     },
                     TransformationStep::RenameColumn {
@@ -206,7 +207,7 @@ pub fn demo_keymap_dual(fixtures: &Path) -> Result<Workspace, String> {
                         column: "vendor_name".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map_spend.id.clone(),
+                        map_id: map_spend.id.clone().into(),
                         entries: spend_e,
                     },
                     TransformationStep::RenameColumn {
@@ -250,7 +251,7 @@ pub fn demo_keymap_codes(fixtures: &Path) -> Result<Workspace, String> {
                         column: "channel_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries: ch,
                     },
                 ],
@@ -287,7 +288,7 @@ pub fn demo_keymap_hop(fixtures: &Path) -> Result<Workspace, String> {
                         column: "store_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: m1.id.clone(),
+                        map_id: m1.id.clone().into(),
                         entries: e1,
                     },
                     TransformationStep::RenameColumn {
@@ -298,7 +299,7 @@ pub fn demo_keymap_hop(fixtures: &Path) -> Result<Workspace, String> {
                         column: "region_id".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: m2.id.clone(),
+                        map_id: m2.id.clone().into(),
                         entries: e2,
                     },
                     TransformationStep::RenameColumn {
@@ -350,7 +351,7 @@ pub fn demo_keymap_offer(fixtures: &Path) -> Result<Workspace, String> {
                         column: "ext_offer_id".into(),
                         columns: vec!["ext_offer_id".into(), "day".into()],
                         output_column: Some("offer_sk".into()),
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries: entries.clone(),
                     },
                     TransformationStep::Join {
@@ -388,7 +389,8 @@ pub fn demo_keymap_pg_crosswalk(_fixtures: &Path) -> Result<Workspace, String> {
         source: PG_SCHEMA.into(),
         table: "map_pos_to_wms".into(),
         connection_id: Some(PG_CONN.into()),
-    };
+            db_schema: None,
+        };
     map.from_column = "pos_sku".into();
     map.to_column = "wms_item".into();
     map.editable_columns = vec!["product_name".into(), "confidence".into()];
@@ -422,7 +424,7 @@ pub fn demo_keymap_pg_crosswalk(_fixtures: &Path) -> Result<Workspace, String> {
                         column: "sku_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries: vec![],
                     },
                     TransformationStep::RenameColumn {
@@ -466,7 +468,8 @@ pub fn demo_keymap_pg_dual(fixtures: &Path) -> Result<Workspace, String> {
         source: PG_SCHEMA.into(),
         table: "map_sales_alias".into(),
         connection_id: Some(PG_CONN.into()),
-    };
+            db_schema: None,
+        };
     map_sales.from_column = "alias_name".into();
     map_sales.to_column = "party_id".into();
     map_sales.editable_columns = vec!["note".into()];
@@ -477,7 +480,8 @@ pub fn demo_keymap_pg_dual(fixtures: &Path) -> Result<Workspace, String> {
         source: PG_SCHEMA.into(),
         table: "map_spend_alias".into(),
         connection_id: Some(PG_CONN.into()),
-    };
+            db_schema: None,
+        };
     map_spend.from_column = "legal_name".into();
     map_spend.to_column = "party_id".into();
     map_spend.editable_columns = vec!["note".into()];
@@ -514,7 +518,7 @@ pub fn demo_keymap_pg_dual(fixtures: &Path) -> Result<Workspace, String> {
                         column: "brand".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map_sales.id.clone(),
+                        map_id: map_sales.id.clone().into(),
                         entries: vec![],
                     },
                     TransformationStep::RenameColumn {
@@ -539,7 +543,7 @@ pub fn demo_keymap_pg_dual(fixtures: &Path) -> Result<Workspace, String> {
                         column: "vendor_name".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map_spend.id.clone(),
+                        map_id: map_spend.id.clone().into(),
                         entries: vec![],
                     },
                     TransformationStep::RenameColumn {
@@ -592,7 +596,7 @@ pub fn demo_keymap_ref(fixtures: &Path) -> Result<Workspace, String> {
                         column: "channel_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries,
                     },
                 ],
@@ -611,7 +615,8 @@ pub fn demo_keymap_mixed(fixtures: &Path) -> Result<Workspace, String> {
         source: PG_SCHEMA.into(),
         table: "map_pos_to_wms".into(),
         connection_id: Some(PG_CONN.into()),
-    };
+            db_schema: None,
+        };
     map.from_column = "pos_sku".into();
     map.to_column = "wms_item".into();
     map.editable_columns = vec!["product_name".into(), "confidence".into()];
@@ -637,7 +642,7 @@ pub fn demo_keymap_mixed(fixtures: &Path) -> Result<Workspace, String> {
                         column: "sku_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries: vec![],
                     },
                     TransformationStep::RenameColumn {
@@ -692,7 +697,7 @@ pub fn demo_keymap_parquet(fixtures: &Path) -> Result<Workspace, String> {
                         column: "sku_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries,
                     },
                     TransformationStep::RenameColumn {
@@ -733,7 +738,7 @@ pub fn demo_keymap_pg_seed(fixtures: &Path) -> Result<Workspace, String> {
                         column: "channel_code".into(),
                         columns: vec![],
                         output_column: None,
-                        map_id: map.id.clone(),
+                        map_id: map.id.clone().into(),
                         entries,
                     },
                 ],

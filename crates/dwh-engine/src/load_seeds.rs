@@ -45,9 +45,7 @@ pub fn collect_load_seeds(
             TransformationStep::LoadPostgres {
                 connection_string,
                 schema,
-                table_name,
-                ..
-            } => match describe_postgres_object(db, connection_string, schema, table_name) {
+                table_name, .. } => match describe_postgres_object(db, connection_string, schema, table_name) {
                 Ok(c) => c.into_iter().map(|col| col.name).collect::<Vec<_>>(),
                 Err(e) => {
                     diagnostics.push(LoadSeedDiagnostic {

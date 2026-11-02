@@ -1,9 +1,12 @@
 import type {
   ConnectionBinding,
   ConnectionDef,
+  KeyMapDef,
+  ObjectKind,
   PreviewResult,
   Project,
   ProjectReference,
+  QueryDef,
   SourceDef,
   TransformationStep,
   WarehouseDialect,
@@ -162,6 +165,16 @@ export function formatJoinPrepareStatusHint(s: JoinPrepareStatus): string {
   return `Ready · ${side(s.left_expensive, s.left_materialized, s.left_rows)} / ${side(s.right_expensive, s.right_materialized, s.right_rows)}`;
 }
 
+function refArgs(projectRef?: ProjectRefContext) {
+  return {
+    projectFile: projectRef?.projectFile,
+    projectUid: projectRef?.projectUid,
+    references: projectRef?.references ?? [],
+    connectionBindings: projectRef?.connectionBindings ?? [],
+    executionEngine: projectRef?.executionEngine,
+  };
+}
+
 export function prepareJoinInputs(
   workspace: Workspace,
   hostQueryId: string,
@@ -169,6 +182,7 @@ export function prepareJoinInputs(
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
   force = false,
+  projectRef?: ProjectRefContext,
 ): Promise<JoinPrepareResult> {
   return invoke<JoinPrepareResult>("prepare_join_inputs", {
     workspace,
@@ -177,6 +191,7 @@ export function prepareJoinInputs(
     connections,
     sources,
     force,
+    ...refArgs(projectRef),
   });
 }
 
@@ -186,6 +201,7 @@ export function joinPrepareStatus(
   joinStepIndex: number,
   sources: SourceDef[] = [],
   connections: ConnectionDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<JoinPrepareStatus> {
   return invoke<JoinPrepareStatus>("join_prepare_status", {
     workspace,
@@ -193,6 +209,7 @@ export function joinPrepareStatus(
     joinStepIndex,
     sources,
     connections,
+    ...refArgs(projectRef),
   });
 }
 
@@ -223,6 +240,7 @@ export function previewDbtModel(
   targetDialect: WarehouseDialect = "duckdb",
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<PreviewDbtModel> {
   return invoke<PreviewDbtModel>("preview_dbt_model", {
     workspace,
@@ -230,6 +248,7 @@ export function previewDbtModel(
     targetDialect,
     connections,
     sources,
+    ...refArgs(projectRef),
   });
 }
 
@@ -274,6 +293,7 @@ export function joinDiagnostics(
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<JoinDiagnostics> {
   return invoke<JoinDiagnostics>("join_diagnostics", {
     workspace,
@@ -281,6 +301,7 @@ export function joinDiagnostics(
     joinStepIndex,
     connections,
     sources,
+    ...refArgs(projectRef),
   });
 }
 
@@ -317,6 +338,7 @@ export function explainJoinRows(
   },
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<ExplainJoinRowsResult> {
   return invoke<ExplainJoinRowsResult>("explain_join_rows", {
     workspace,
@@ -326,6 +348,7 @@ export function explainJoinRows(
     previewOffsets: opts.previewOffsets ?? null,
     connections,
     sources,
+    ...refArgs(projectRef),
   });
 }
 
@@ -376,6 +399,7 @@ export function explainJoinKey(
   keyValues: unknown[],
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<ExplainJoinKeyResult> {
   return invoke<ExplainJoinKeyResult>("explain_join_key", {
     workspace,
@@ -385,6 +409,7 @@ export function explainJoinKey(
     keyValues,
     connections,
     sources,
+    ...refArgs(projectRef),
   });
 }
 
@@ -396,6 +421,7 @@ export function blameUnmatchedKey(
   keyValues: unknown[],
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<BlameUnmatchedKeyResult> {
   return invoke<BlameUnmatchedKeyResult>("blame_unmatched_key", {
     workspace,
@@ -405,6 +431,7 @@ export function blameUnmatchedKey(
     keyValues,
     connections,
     sources,
+    ...refArgs(projectRef),
   });
 }
 
@@ -434,6 +461,7 @@ export function joinKeyNearMiss(
   joinStepIndex: number,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
+  projectRef?: ProjectRefContext,
 ): Promise<JoinKeyNearMiss> {
   return invoke<JoinKeyNearMiss>("join_key_near_miss", {
     workspace,
@@ -441,6 +469,7 @@ export function joinKeyNearMiss(
     joinStepIndex,
     connections,
     sources,
+    ...refArgs(projectRef),
   });
 }
 
@@ -518,6 +547,7 @@ export function joinKeyFuzzySuggest(
   keyIndex?: number | null,
   /** Composite-map mode: Join key indices forming From + which slot is fuzzy. */
   composite?: { indices: number[]; fuzzySlot: number } | null,
+  projectRef?: ProjectRefContext,
 ): Promise<JoinKeyFuzzySuggest> {
   return invoke<JoinKeyFuzzySuggest>("join_key_fuzzy_suggest", {
     workspace,
@@ -532,6 +562,7 @@ export function joinKeyFuzzySuggest(
           compositeFuzzySlot: composite.fuzzySlot,
         }
       : {}),
+    ...refArgs(projectRef),
   });
 }
 
@@ -925,6 +956,31 @@ export function referenceConsumers(
   referenceId: string,
 ): Promise<string[]> {
   return invoke<string[]>("reference_consumers", { workspace, referenceId });
+}
+
+export type CopiedObject =
+  | { kind: "query"; query: QueryDef }
+  | { kind: "mapping"; key_map: KeyMapDef };
+
+/** Absolutize paths + rewrite deps via the host resolver (ADR-0025). */
+export function copyReferencedObject(
+  projectFile: string,
+  references: ProjectReference[],
+  referenceId: string,
+  kind: ObjectKind,
+  objectId: string,
+  newLocalId: string,
+  newName: string,
+): Promise<CopiedObject> {
+  return invoke<CopiedObject>("copy_referenced_object", {
+    projectFile,
+    references,
+    referenceId,
+    kind,
+    objectId,
+    newLocalId,
+    newName,
+  });
 }
 
 /** Load a project file. Pass `remember: true` for Open / Restore (session MRU). */

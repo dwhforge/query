@@ -2,7 +2,7 @@
 
 ## Status
 
-**Accepted** — implementation in flight under [`openspec/changes/project-references/`](../../openspec/changes/project-references/). Not merged into `openspec/specs/` until that change’s definition of done passes.
+**Accepted** — merged SoT: [`openspec/specs/project-references/`](../../openspec/specs/project-references/). Change record: [`openspec/changes/project-references/`](../../openspec/changes/project-references/).
 
 ## Context
 
@@ -88,7 +88,7 @@ Re-export of an unchanged closure is byte-stable for generated paths, `ref` targ
 ## Consequences
 
 - [ADR-0013](0013-project-persistence.md) still governs object ids. Only the project gains a global uid.
-- OpenSpec change: [`openspec/changes/project-references/`](../../openspec/changes/project-references/).
+- OpenSpec: [`openspec/specs/project-references/`](../../openspec/specs/project-references/) (change: [`openspec/changes/project-references/`](../../openspec/changes/project-references/)).
 - Release notes must state local-file scope, explicit update, the cycle restriction, read-only consumer behavior, the owner-save migration gate, and that live database rows are not pinned.
 
 ## Out of scope (first release)

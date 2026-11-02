@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ConnectionDef, Workspace } from "../types/pipeline";
+import type { ConnectionDef, SourceDef, Workspace } from "../types/pipeline";
 import {
   getLlmConfig,
   joinKeyFuzzySuggest,
@@ -7,6 +7,7 @@ import {
   setLlmConfig,
   type JoinKeyFuzzySuggest,
   type LlmConfig,
+  type ProjectRefContext,
 } from "../lib/bridge";
 import {
   joinKeyMapSystemPrompt,
@@ -98,12 +99,16 @@ export function JoinLensAuto({
   hostQueryId,
   joinStepIndex,
   connections,
+  sources = [],
+  projectRef,
   onAccept,
 }: {
   workspace: Workspace;
   hostQueryId: string;
   joinStepIndex: number;
   connections: ConnectionDef[];
+  sources?: SourceDef[];
+  projectRef?: ProjectRefContext;
   onAccept?: (
     fromValues: string[],
     toValues: string[],
@@ -180,9 +185,10 @@ export function JoinLensAuto({
           hostQueryId,
           joinStepIndex,
           connections,
-          [],
+          sources,
           compositeMode ? null : keyIndex,
           null,
+          projectRef,
         );
         if (cancelled) return;
         if (compositeMode && result.left_on.length > 1) {
@@ -191,7 +197,7 @@ export function JoinLensAuto({
             hostQueryId,
             joinStepIndex,
             connections,
-            [],
+            sources,
             null,
             {
               indices: result.left_on.map((_, i) => i),
@@ -200,6 +206,7 @@ export function JoinLensAuto({
                 Math.max(0, result.left_on.length - 1),
               ),
             },
+            projectRef,
           );
         }
         if (cancelled) return;

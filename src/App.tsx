@@ -82,7 +82,6 @@ import {
   newQueryFromExternal,
   parseTargetKey,
   resolveOwnerPath,
-  rewriteStepsForLocalCopy,
 } from "./lib/projectRefs";
 import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
@@ -148,6 +147,7 @@ import {
   type DbtSetupStatus,
   getGlobalConnections,
   getLastProjectPath,
+  copyReferencedObject,
   loadProject,
   loadDemoWorkspace,
   prepareJoinInputs,
@@ -862,6 +862,7 @@ function App() {
       selectedStepIndex,
       sources,
       connections,
+      projectRefContext(project),
     )
       .then((s) => {
         if (s.prepared) {
@@ -921,6 +922,7 @@ function App() {
       connections,
       sources,
       !!joinPrepareLabel,
+      projectRefContext(project),
     )
       .then((r) => {
         setJoinPrepareLabel(formatJoinPrepareHint(r));
@@ -985,6 +987,7 @@ function App() {
       selectedStepIndex,
       connections,
       sources,
+      projectRefContext(project),
     )
       .then((d) => {
         setJoinDiag(d);
@@ -1026,6 +1029,7 @@ function App() {
       projectDialect(project),
       connections,
       sources,
+      projectRefContext(project),
     )
       .then((m) => {
         if (!cancelled) {
@@ -1450,60 +1454,45 @@ function App() {
       setError("Unknown reference");
       return;
     }
-    try {
-      const owner = await loadProject(resolveOwnerPath(file, ref.locator));
-      if (target.kind === "query") {
-        const src = owner.workspace.queries.find((q) => q.id === target.id);
-        if (!src) {
-          setError(`Owner query '${target.id}' not found`);
-          return;
-        }
-        const name = `${src.name}_copy`;
-        const id = newQueryId(
-          name,
-          project.workspace.queries.map((q) => q.id),
-        );
-        const copy = {
-          ...src,
-          id,
-          name,
-          steps: rewriteStepsForLocalCopy(src.steps, ref.id),
-        };
-        setQueries((prev) => [...prev, copy]);
-        selectQuery(id);
-        return;
-      }
-      if (target.kind === "mapping") {
-        const src = (owner.workspace.key_maps ?? []).find(
-          (m) => m.id === target.id,
-        );
-        if (!src) {
-          setError(`Owner mapping '${target.id}' not found`);
-          return;
-        }
-        const id = newId(
-          "map",
-          `${src.name}_copy`,
-          (project.workspace.key_maps ?? []).map((m) => m.id),
-        );
-        const copy = {
-          ...src,
-          id,
-          name: `${src.name}_copy`,
-          entries: src.storage?.kind === "seed" ? [...src.entries] : [],
-        };
-        setProject((p) => ({
-          ...p,
-          workspace: {
-            ...p.workspace,
-            key_maps: [...(p.workspace.key_maps ?? []), copy],
-          },
-        }));
-        setSelectedKeyMapId(id);
-        openKeyMapEditor(copy);
-        return;
-      }
+    if (target.kind !== "query" && target.kind !== "mapping") {
       setError("Create local copy supports queries and mappings");
+      return;
+    }
+    try {
+      const id =
+        target.kind === "query"
+          ? newQueryId(
+              `${target.id}_copy`,
+              project.workspace.queries.map((q) => q.id),
+            )
+          : newId(
+              "map",
+              `${target.id}_copy`,
+              (project.workspace.key_maps ?? []).map((m) => m.id),
+            );
+      const copied = await copyReferencedObject(
+        file,
+        project.references ?? [],
+        ref.id,
+        target.kind,
+        target.id,
+        id,
+        "",
+      );
+      if (copied.kind === "query") {
+        setQueries((prev) => [...prev, copied.query]);
+        selectQuery(copied.query.id);
+        return;
+      }
+      setProject((p) => ({
+        ...p,
+        workspace: {
+          ...p.workspace,
+          key_maps: [...(p.workspace.key_maps ?? []), copied.key_map],
+        },
+      }));
+      setSelectedKeyMapId(copied.key_map.id);
+      openKeyMapEditor(copied.key_map);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     }
@@ -5200,6 +5189,7 @@ function App() {
                         rightOn={joinLensTarget.rightOn}
                         connections={connections}
                         sources={sources}
+                        projectRef={projectRefContext(project)}
                         columns={preview.columns}
                         rows={preview.rows}
                         joinDiag={joinDiag}

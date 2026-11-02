@@ -27,13 +27,14 @@ use dwh_engine::{
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
-    list_export_tree as walk_export_tree, make_project_reference,
+    copy_referenced_object, list_export_tree as walk_export_tree, make_project_reference,
     preview_dbt_model_sql_with_seeds_and_sources, push_key_map_to_export, reference_consumers,
     reference_statuses, refresh_reference, relink_reference, resolve_dbt_bin, resolve_operation,
     remove_key_map_from_export, sync_key_maps_from_export, ConnectionBinding, ConnectionDef,
-    DbtProducer, DbtTarget, ExecutionEngine, ExportResult, KeyMapDef, KeyMapSyncResult,
-    LoweredOperation, ObjectTarget, PreviewDbtModel, Project, ProjectReference, QueryDef,
-    ResolveInput, ResolveKind, SourceDef, TransformationStep, WarehouseDialect, Workspace,
+    CopiedObject, DbtProducer, DbtTarget, ExecutionEngine, ExportResult, KeyMapDef,
+    KeyMapSyncResult, LoweredOperation, ObjectKind, ObjectTarget, PreviewDbtModel, Project,
+    ProjectReference, QueryDef, ResolveInput, ResolveKind, SourceDef, TransformationStep,
+    WarehouseDialect, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -869,6 +870,16 @@ struct JoinDiagArgs {
     /// Which slot within `composite_indices` is fuzzy-scored (others exact).
     #[serde(default)]
     composite_fuzzy_slot: Option<usize>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -928,6 +939,16 @@ struct ExplainArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -941,6 +962,16 @@ struct ExplainKeyArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -954,6 +985,16 @@ struct BlameKeyArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 fn cites_external(ws: &Workspace) -> bool {
@@ -1019,6 +1060,35 @@ fn lower_for_operation(
     })
 }
 
+/// Join / model RPCs pin focus to the host (or model) query before lowering.
+fn lower_focused(
+    workspace: &Workspace,
+    focus_query_id: &str,
+    sources: &[SourceDef],
+    connections: &[ConnectionDef],
+    project_file: Option<&str>,
+    project_uid: Option<&str>,
+    references: &[ProjectReference],
+    connection_bindings: &[ConnectionBinding],
+    execution_engine: Option<WarehouseDialect>,
+) -> Result<(Workspace, Vec<SourceDef>), String> {
+    let mut ws = workspace.clone();
+    ws.focus_query_id = focus_query_id.to_string();
+    let lowered = lower_for_operation(
+        &ws,
+        sources,
+        connections,
+        project_file,
+        project_uid,
+        references,
+        connection_bindings,
+        execution_engine,
+        ResolveKind::Preview,
+        Vec::new(),
+    )?;
+    Ok((lowered.workspace, lowered.sources))
+}
+
 fn parse_join_side(side: &str) -> Result<JoinKeySide, String> {
     match side.trim().to_ascii_lowercase().as_str() {
         "left" => Ok(JoinKeySide::Left),
@@ -1036,6 +1106,16 @@ struct PreviewDbtArgs {
     connections: Option<Vec<ConnectionDef>>,
     #[serde(default)]
     sources: Option<Vec<dwh_pipeline::SourceDef>>,
+    #[serde(default)]
+    project_file: Option<String>,
+    #[serde(default)]
+    project_uid: Option<String>,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
 }
 
 #[derive(Deserialize)]
@@ -1174,6 +1254,19 @@ struct RefreshReferenceArgs {
 struct ReferenceConsumersArgs {
     workspace: Workspace,
     reference_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopyReferencedArgs {
+    project_file: String,
+    #[serde(default)]
+    references: Vec<ProjectReference>,
+    reference_id: String,
+    kind: ObjectKind,
+    object_id: String,
+    new_local_id: String,
+    new_name: String,
 }
 
 #[derive(Deserialize)]
@@ -1661,10 +1754,24 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let sources = a.sources.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
+                let (ws, sources) = match lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Err(e),
+                };
                 let out = match self.db.try_lock() {
                     Ok(db) => run_join_prepare_status(
                         &db,
-                        &a.workspace,
+                        &ws,
                         &sources,
                         &conns,
                         &a.host_query_id,
@@ -1731,9 +1838,20 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let out: JoinPrepareResult = run_prepare_join_inputs(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1763,10 +1881,21 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 // Upgrade live sides → TEMP (with progress) before anti-join scans.
                 run_ensure_join_sides(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1786,7 +1915,7 @@ impl HostState {
                 );
                 let out: JoinDiagnostics = run_join_diagnostics(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1809,10 +1938,21 @@ impl HostState {
                 let a: ExplainArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let keys = a.keys.unwrap_or_default();
                 let out: ExplainJoinRowsResult = run_explain_join_rows(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1826,10 +1966,21 @@ impl HostState {
                 let a: ExplainKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let side = parse_join_side(&a.side)?;
                 let out: ExplainJoinKeyResult = run_explain_join_key(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1843,10 +1994,21 @@ impl HostState {
                 let a: BlameKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let side = parse_join_side(&a.side)?;
                 let out: BlameUnmatchedKeyResult = run_blame_unmatched_key(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1860,9 +2022,20 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let out: JoinKeyNearMiss = run_join_key_near_miss(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1874,9 +2047,20 @@ impl HostState {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.host_query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine,
+                )?;
                 let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest_on(
                     &db,
-                    &a.workspace,
+                    &ws,
                     &conns,
                     &sources,
                     &a.host_query_id,
@@ -1947,12 +2131,23 @@ impl HostState {
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
-                let prepared = run_prepare_workspace(&db, &a.workspace, &conns, &sources)?;
+                let (ws, sources) = lower_focused(
+                    &a.workspace,
+                    &a.query_id,
+                    &sources,
+                    &conns,
+                    a.project_file.as_deref(),
+                    a.project_uid.as_deref(),
+                    &a.references,
+                    &a.connection_bindings,
+                    a.execution_engine.or(a.target_dialect),
+                )?;
+                let prepared = run_prepare_workspace(&db, &ws, &conns, &sources)?;
                 for w in &prepared.warnings {
                     eprintln!("[dwh] prepare warning: {w}");
                 }
                 let out: PreviewDbtModel = preview_dbt_model_sql_with_seeds_and_sources(
-                    &a.workspace,
+                    &ws,
                     &a.query_id,
                     dialect,
                     &prepared.seeds,
@@ -2197,6 +2392,21 @@ impl HostState {
                 let a: ReferenceConsumersArgs =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let out = reference_consumers(&a.workspace, &a.reference_id);
+                serde_json::to_value(out).map_err(|e| e.to_string())
+            }
+            "copy_referenced_object" => {
+                drop(db);
+                let a: CopyReferencedArgs =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let out: CopiedObject = copy_referenced_object(
+                    Path::new(&a.project_file),
+                    &a.references,
+                    &a.reference_id,
+                    a.kind,
+                    &a.object_id,
+                    &a.new_local_id,
+                    &a.new_name,
+                )?;
                 serde_json::to_value(out).map_err(|e| e.to_string())
             }
             "save_project" => {

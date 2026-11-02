@@ -25,6 +25,7 @@ import {
   type JoinKeyNearMiss,
   type JoinKeySide,
   type NearMissHypothesis,
+  type ProjectRefContext,
 } from "../lib/bridge";
 import {
   classifyJoinColumnOrigins,
@@ -437,6 +438,8 @@ export type JoinLensProps = {
   rightOn: string[];
   connections: ConnectionDef[];
   sources?: SourceDef[];
+  /** ADR-0025 reference lowering for join RPCs. */
+  projectRef?: ProjectRefContext;
   columns: ColumnMetadata[];
   rows: unknown[][];
   /** Opposite-probe candidates (unmatched samples). */
@@ -476,6 +479,7 @@ function JoinLensImpl({
   rightOn,
   connections,
   sources = [],
+  projectRef,
   columns,
   rows,
   joinDiag,
@@ -586,6 +590,7 @@ function JoinLensImpl({
           leftInputWs,
           connections,
           sources,
+          projectRef,
         );
         if (cancelled) return;
         setParentLeftCols(left.columns);
@@ -599,6 +604,7 @@ function JoinLensImpl({
           rightInputWs,
           connections,
           sources,
+          projectRef,
         );
         if (cancelled) return;
         setParentRightCols(right.columns);
@@ -623,6 +629,7 @@ function JoinLensImpl({
       joinStepIndex,
       sources,
       connections,
+      projectRef,
     )
       .then((s) => {
         setPrepareStatus(s);
@@ -725,6 +732,7 @@ function JoinLensImpl({
       connections,
       sources,
       force,
+      projectRef,
     )
       .then((r) => {
         setPrepared(true);
@@ -795,9 +803,19 @@ function JoinLensImpl({
           if (gen !== samplesLoadGenRef.current) return;
           right = await previewPreparedJoinSide("right", 50);
         } else if (leftInputWs && rightInputWs) {
-          left = await previewWorkspace(leftInputWs, connections, sources);
+          left = await previewWorkspace(
+            leftInputWs,
+            connections,
+            sources,
+            projectRef,
+          );
           if (gen !== samplesLoadGenRef.current) return;
-          right = await previewWorkspace(rightInputWs, connections, sources);
+          right = await previewWorkspace(
+            rightInputWs,
+            connections,
+            sources,
+            projectRef,
+          );
         }
         if (gen !== samplesLoadGenRef.current) return;
         if (left && right) {
@@ -859,6 +877,7 @@ function JoinLensImpl({
       joinStepIndex,
       connections,
       sources,
+      projectRef,
     )
       .then((r) => setNearMiss(r))
       .catch(() => setNearMiss(null))
@@ -984,6 +1003,7 @@ function JoinLensImpl({
       keys,
       connections,
       sources,
+      projectRef,
     )
       .then(async (ex) => {
         if (cancelled) return;
@@ -999,6 +1019,7 @@ function JoinLensImpl({
               keys,
               connections,
               sources,
+              projectRef,
             );
             if (!cancelled) setKeyBlame(blame);
           } catch (e) {
@@ -2016,6 +2037,8 @@ function JoinLensImpl({
             hostQueryId={hostQueryId}
             joinStepIndex={joinStepIndex}
             connections={connections}
+            sources={sources}
+            projectRef={projectRef}
             onAccept={
               onMapKey
                 ? (fromValues, toValues, opts) => {
@@ -2506,6 +2529,7 @@ function JoinLensImpl({
           joinStepIndex={joinStepIndex}
           connections={connections}
           sources={sources}
+          projectRef={projectRef}
           onClose={() => setFindRightParts(null)}
           onAccept={acceptFindRight}
         />

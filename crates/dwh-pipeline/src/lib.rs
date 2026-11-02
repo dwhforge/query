@@ -73,9 +73,10 @@ pub use model::{
 };
 pub use project::{ConnectionBinding, ProjectReference};
 pub use references::{
-    ensure_project_uid, fork_project_identity, make_project_reference, project_revision,
-    reference_consumers, reference_statuses, refresh_reference, relink_reference, resolve_operation,
-    LoweredOperation, ProvenanceRecord, ReferenceState, ReferenceStatus, ResolveInput, ResolveKind,
+    copy_referenced_object, ensure_project_uid, fork_project_identity, make_project_reference,
+    project_revision, reference_consumers, reference_statuses, refresh_reference, relink_reference,
+    resolve_operation, CopiedObject, LoweredOperation, ProvenanceRecord, ReferenceState,
+    ReferenceStatus, ResolveInput, ResolveKind,
 };
 pub use producers::{
     build_export_plan, build_export_plan_routed, dbt_model_name, dbt_model_names_published,

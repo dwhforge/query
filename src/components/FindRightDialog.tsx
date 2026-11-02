@@ -7,6 +7,7 @@ import {
   type FuzzyPair,
   type JoinKeyFuzzySuggest,
   type LlmConfig,
+  type ProjectRefContext,
 } from "../lib/bridge";
 import {
   joinKeyMapFocusUserMessage,
@@ -86,6 +87,7 @@ export function FindRightDialog({
   joinStepIndex,
   connections,
   sources = [],
+  projectRef,
   onClose,
   onAccept,
 }: {
@@ -97,6 +99,7 @@ export function FindRightDialog({
   joinStepIndex: number;
   connections: ConnectionDef[];
   sources?: SourceDef[];
+  projectRef?: ProjectRefContext;
   onClose: () => void;
   onAccept: (
     from: string,
@@ -183,6 +186,8 @@ export function FindRightDialog({
           connections,
           sources,
           keyIndex,
+          null,
+          projectRef,
         );
         if (cancelled) return;
         setReport(r);

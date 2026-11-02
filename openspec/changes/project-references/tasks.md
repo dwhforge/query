@@ -3,7 +3,7 @@
 ## 1. Contract
 - [x] 1.1 ADR-0025 Accepted, reconciled with ADR-0012/0013/0014/0015/0020/0022/0024
 - [x] 1.2 OpenSpec proposal, spec, design, tasks
-- [ ] 1.3 Merge delta into `openspec/specs/project-references/` when the fixture and UI scenarios pass
+- [x] 1.3 Merge delta into `openspec/specs/project-references/` when the fixture and UI scenarios pass
 
 ## 2. Identity and wire
 - [x] 2.1 `project_uid`, references, connection bindings; bare-string local targets
@@ -27,5 +27,5 @@
 - [x] 5.3 External boundary node and read-only inspector; local copy of one object
 
 ## 6. Done
-- [ ] 6.1 Fixture scenarios in the spec pass
+- [x] 6.1 Fixture scenarios in the spec pass
 - [x] 6.2 Release notes: local files, explicit update, cycles, read-only consumer, owner-save gate, live rows are not pinned

@@ -1239,6 +1239,17 @@ fn rewrite_placeholders(
     consumer: &str,
 ) -> Result<String, String> {
     let mut out = sql.to_string();
+    // Owner-local {{query:id}} must resolve in the owner's namespace first.
+    // Otherwise a same-named query on the consumer silently wins (wrong data).
+    for id in crate::graph::extract_query_placeholders_pub(sql) {
+        let target = ObjectTarget::from(id.as_str());
+        let cid = compiler_for(loaded, uid, &target, ObjectKind::Query, root_uid, consumer)?;
+        let from = format!("{{{{query:{id}}}}}");
+        let to = format!("{{{{query:{cid}}}}}");
+        if from != to {
+            out = out.replace(&from, &to);
+        }
+    }
     for (reference_id, object_id) in extract_xrefs(sql) {
         let target = ObjectTarget::external(reference_id.clone(), ObjectKind::Query, object_id.clone());
         let cid = compiler_for(loaded, uid, &target, ObjectKind::Query, root_uid, consumer)?;
@@ -1561,6 +1572,188 @@ pub fn provenance_document(records: &[ProvenanceRecord]) -> Result<String, Strin
 /// Placeholder extractor used by the resolver. The graph module keeps the compile-time one.
 pub fn extract_local_placeholders(sql: &str) -> Vec<String> {
     crate::graph::extract_query_placeholders_pub(sql)
+}
+
+/// Result of copying one external definition into the consumer (ADR-0025).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CopiedObject {
+    Query { query: QueryDef },
+    Mapping { key_map: KeyMapDef },
+}
+
+/// Copy one referenced query or mapping into local ids.
+///
+/// - Absolutizes owner-relative Load paths against the owner file.
+/// - Rewrites owner-local targets / `{{query:}}` to External on `reference_id`.
+/// - Refuses objects that already depend on a third-party reference (`External` /
+///   `{{xref:}}`) — those need their own reference on the consumer first.
+pub fn copy_referenced_object(
+    consumer_file: &Path,
+    references: &[ProjectReference],
+    reference_id: &str,
+    kind: ObjectKind,
+    object_id: &str,
+    new_local_id: &str,
+    new_name: &str,
+) -> Result<CopiedObject, String> {
+    let reference = references
+        .iter()
+        .find(|r| r.id == reference_id)
+        .ok_or_else(|| format!("unknown reference '{reference_id}'"))?;
+    let owner_path = resolve_locator(consumer_file, &reference.locator);
+    if !owner_path.is_file() {
+        return Err(format!(
+            "reference '{}' owner file missing ({})",
+            reference.alias, reference.locator
+        ));
+    }
+    let text = fs::read_to_string(&owner_path).map_err(|e| format!("read owner: {e}"))?;
+    let owner = Project::from_json(&text).map_err(|e| {
+        format!(
+            "reference '{}' owner file is not a DWHQuery project: {e}",
+            reference.alias
+        )
+    })?;
+    if !reference.expected_project_uid.is_empty()
+        && owner.project_uid != reference.expected_project_uid
+    {
+        return Err(format!(
+            "identity mismatch for reference '{}': file uid {} != {}",
+            reference.alias, owner.project_uid, reference.expected_project_uid
+        ));
+    }
+    match kind {
+        ObjectKind::Query => {
+            let src = owner
+                .workspace
+                .query(object_id)
+                .ok_or_else(|| format!("Owner query '{object_id}' not found"))?
+                .clone();
+            let steps = rewrite_steps_for_local_copy(&src.steps, reference_id)?;
+            let steps = absolutize_steps(Some(&owner_path), &steps);
+            let name = if new_name.trim().is_empty() {
+                format!("{}_copy", src.name)
+            } else {
+                new_name.to_string()
+            };
+            Ok(CopiedObject::Query {
+                query: QueryDef {
+                    id: new_local_id.to_string(),
+                    name,
+                    steps,
+                    execution: src.execution,
+                },
+            })
+        }
+        ObjectKind::Mapping => {
+            let mut map = owner
+                .workspace
+                .key_map(object_id)
+                .ok_or_else(|| format!("Owner mapping '{object_id}' not found"))?
+                .clone();
+            if map.is_seed_backed() {
+                if let Some(export) = owner.last_dbt_export_path.clone() {
+                    let seed = Path::new(&export)
+                        .join("seeds")
+                        .join(format!("{}.csv", key_map_seed_name(&map.id)));
+                    if seed.is_file() {
+                        let body = fs::read_to_string(&seed)
+                            .map_err(|e| format!("read seed {}: {e}", seed.display()))?;
+                        let (from_cols, to_col) = (map.from_columns_eff(), map.to_column.clone());
+                        map.entries =
+                            crate::emit::parse_key_map_seed_csv_cols(&body, &from_cols, &to_col)?;
+                    }
+                }
+            } else if matches!(map.storage, KeyMapStorage::Source { .. }) {
+                map.entries.clear();
+            }
+            let name = if new_name.trim().is_empty() {
+                format!("{}_copy", map.name)
+            } else {
+                new_name.to_string()
+            };
+            map.id = new_local_id.to_string();
+            map.name = name;
+            Ok(CopiedObject::Mapping { key_map: map })
+        }
+        ObjectKind::Source => Err("Create local copy supports queries and mappings".into()),
+    }
+}
+
+fn rewrite_steps_for_local_copy(
+    steps: &[TransformationStep],
+    reference_id: &str,
+) -> Result<Vec<TransformationStep>, String> {
+    steps
+        .iter()
+        .map(|s| rewrite_step_for_local_copy(s, reference_id))
+        .collect()
+}
+
+fn rewrite_step_for_local_copy(
+    step: &TransformationStep,
+    reference_id: &str,
+) -> Result<TransformationStep, String> {
+    let mut step = step.clone();
+    match &mut step {
+        TransformationStep::FromQuery { query_id } => {
+            *query_id = local_to_external(query_id, reference_id, ObjectKind::Query)?;
+        }
+        TransformationStep::Join { right_query_id, .. } => {
+            *right_query_id = local_to_external(right_query_id, reference_id, ObjectKind::Query)?;
+        }
+        TransformationStep::Append { other_query_ids } => {
+            for t in other_query_ids.iter_mut() {
+                *t = local_to_external(t, reference_id, ObjectKind::Query)?;
+            }
+        }
+        TransformationStep::ApplyKeyMap { map_id, entries, .. } => {
+            *map_id = local_to_external(map_id, reference_id, ObjectKind::Mapping)?;
+            entries.clear();
+        }
+        TransformationStep::SqlModel { raw_sql } | TransformationStep::CustomSql { raw_sql } => {
+            *raw_sql = rewrite_sql_for_local_copy(raw_sql, reference_id)?;
+        }
+        TransformationStep::DeriveColumn { expression, .. } => {
+            if expression.contains("{{xref:") || !extract_local_placeholders(expression).is_empty()
+            {
+                *expression = rewrite_sql_for_local_copy(expression, reference_id)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(step)
+}
+
+fn local_to_external(
+    target: &ObjectTarget,
+    reference_id: &str,
+    kind: ObjectKind,
+) -> Result<ObjectTarget, String> {
+    match target {
+        ObjectTarget::Local(id) => Ok(ObjectTarget::external(reference_id, kind, id)),
+        ObjectTarget::External { .. } => Err(
+            "Create local copy refuses objects that depend on another project reference; add that reference or use FromQuery"
+                .into(),
+        ),
+    }
+}
+
+fn rewrite_sql_for_local_copy(sql: &str, reference_id: &str) -> Result<String, String> {
+    if sql.contains("{{xref:") {
+        return Err(
+            "Create local copy refuses objects that depend on another project reference; add that reference or use FromQuery"
+                .into(),
+        );
+    }
+    let mut out = sql.to_string();
+    for id in extract_local_placeholders(sql) {
+        let from = format!("{{{{query:{id}}}}}");
+        let to = format!("{{{{xref:{reference_id}:query:{id}}}}}");
+        out = out.replace(&from, &to);
+    }
+    Ok(out)
 }
 
 // Silence unused import if a helper path changes.
@@ -2072,6 +2265,200 @@ mod tests {
         let consumers = reference_consumers(&ws, "ref_lib");
         assert_eq!(consumers.len(), 1);
         assert!(consumers[0].contains("Local"));
+    }
+
+    #[test]
+    fn owner_query_placeholder_does_not_collide_with_consumer() {
+        let dir = scratch();
+        let mut owner = bare_project("Owner", "uid-owner");
+        owner.workspace.queries.push(QueryDef {
+            id: "base".into(),
+            name: "base".into(),
+            steps: vec![TransformationStep::LoadCsv {
+                path: "owner_base.csv".into(),
+            }],
+            execution: Default::default(),
+        });
+        owner.workspace.queries.push(QueryDef {
+            id: "q_sql".into(),
+            name: "sql".into(),
+            steps: vec![TransformationStep::SqlModel {
+                raw_sql: "select * from {{query:base}}".into(),
+            }],
+            execution: Default::default(),
+        });
+        owner.workspace.focus_query_id = "q_sql".into();
+        let opath = write_proj(&dir, "o.dwhproj.json", &owner);
+
+        let mut consumer = bare_project("Consumer", "uid-c");
+        // Same local id as the owner's dependency — must not win after lower.
+        consumer.workspace.queries.push(QueryDef {
+            id: "base".into(),
+            name: "consumer_base".into(),
+            steps: vec![TransformationStep::LoadCsv {
+                path: "consumer_base.csv".into(),
+            }],
+            execution: Default::default(),
+        });
+        let cpath = write_proj(&dir, "c.dwhproj.json", &consumer);
+        let reference = make_project_reference(&cpath, &opath, "Lib").unwrap();
+        consumer.references = vec![reference.clone()];
+        consumer.workspace.queries.push(QueryDef {
+            id: "q_use".into(),
+            name: "use".into(),
+            steps: vec![TransformationStep::FromQuery {
+                query_id: ObjectTarget::external(&reference.id, ObjectKind::Query, "q_sql"),
+            }],
+            execution: Default::default(),
+        });
+        consumer.workspace.focus_query_id = "q_use".into();
+
+        let lowered = resolve_operation(&ResolveInput {
+            root_file: &cpath,
+            project_uid: "uid-c",
+            execution_engine: ExecutionEngine::Duckdb,
+            references: &consumer.references,
+            connection_bindings: &[],
+            workspace: &consumer.workspace,
+            sources: &[],
+            available_connections: &[],
+            kind: ResolveKind::Preview,
+        })
+        .unwrap();
+
+        let sql_q = lowered
+            .workspace
+            .queries
+            .iter()
+            .find(|q| {
+                matches!(
+                    q.steps.first(),
+                    Some(TransformationStep::SqlModel { .. })
+                )
+            })
+            .expect("lowered owner sql");
+        let TransformationStep::SqlModel { raw_sql } = &sql_q.steps[0] else {
+            panic!("expected SqlModel");
+        };
+        assert!(
+            !raw_sql.contains("{{query:base}}"),
+            "owner placeholder left raw: {raw_sql}"
+        );
+        let owner_base_id = external_compiler_id("uid-owner", ObjectKind::Query, "base");
+        assert!(
+            raw_sql.contains(&format!("{{{{query:{owner_base_id}}}}}")),
+            "expected rewrite to {owner_base_id}, got {raw_sql}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_copy_absolutizes_and_rewrites_deps() {
+        let dir = scratch();
+        let owner_dir = dir.join("owner");
+        fs::create_dir_all(&owner_dir).unwrap();
+        let mut owner = bare_project("Owner", "uid-owner");
+        owner.workspace.queries.push(QueryDef {
+            id: "dep".into(),
+            name: "dep".into(),
+            steps: vec![TransformationStep::LoadCsv {
+                path: "rel.csv".into(),
+            }],
+            execution: Default::default(),
+        });
+        owner.workspace.queries.push(QueryDef {
+            id: "q".into(),
+            name: "Q".into(),
+            steps: vec![
+                TransformationStep::FromQuery {
+                    query_id: "dep".into(),
+                },
+                TransformationStep::SqlModel {
+                    raw_sql: "select * from {{query:dep}}".into(),
+                },
+            ],
+            execution: Default::default(),
+        });
+        let opath = write_proj(&owner_dir, "o.dwhproj.json", &owner);
+        let consumer = bare_project("C", "uid-c");
+        let cpath = write_proj(&dir, "c.dwhproj.json", &consumer);
+        let reference = make_project_reference(&cpath, &opath, "Lib").unwrap();
+
+        let CopiedObject::Query { query } = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &reference.id,
+            ObjectKind::Query,
+            "q",
+            "q_local_copy",
+            "",
+        )
+        .unwrap() else {
+            panic!("expected query");
+        };
+        assert_eq!(query.id, "q_local_copy");
+        assert_eq!(query.name, "Q_copy");
+        match &query.steps[0] {
+            TransformationStep::FromQuery { query_id } => {
+                assert_eq!(
+                    query_id,
+                    &ObjectTarget::external(&reference.id, ObjectKind::Query, "dep")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match &query.steps[1] {
+            TransformationStep::SqlModel { raw_sql } => {
+                assert_eq!(
+                    raw_sql,
+                    &format!("select * from {{{{xref:{}:query:dep}}}}", reference.id)
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let CopiedObject::Query { query: dep_copy } = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &reference.id,
+            ObjectKind::Query,
+            "dep",
+            "dep_copy",
+            "",
+        )
+        .unwrap() else {
+            panic!("expected query");
+        };
+        match &dep_copy.steps[0] {
+            TransformationStep::LoadCsv { path } => {
+                assert!(
+                    Path::new(path).is_absolute(),
+                    "expected absolute path, got {path}"
+                );
+                assert!(path.ends_with("rel.csv"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Nested third-party External must refuse.
+        let mut nested = owner.clone();
+        nested.workspace.queries[1].steps = vec![TransformationStep::FromQuery {
+            query_id: ObjectTarget::external("other_ref", ObjectKind::Query, "x"),
+        }];
+        let npath = write_proj(&owner_dir, "n.dwhproj.json", &nested);
+        let nref = make_project_reference(&cpath, &npath, "Nested").unwrap();
+        let err = copy_referenced_object(
+            &cpath,
+            &[nref.clone()],
+            &nref.id,
+            ObjectKind::Query,
+            "q",
+            "bad",
+            "",
+        )
+        .unwrap_err();
+        assert!(err.contains("refuses"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

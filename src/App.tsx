@@ -1482,6 +1482,7 @@ function App() {
         {
           connectionBindings: project.connection_bindings ?? [],
           connections,
+          executionEngine: projectEngine(project),
         },
       );
       if (copied.kind === "query") {

@@ -1602,6 +1602,8 @@ pub enum CopiedObject {
 /// - Applies `connection_bindings` (same rules as resolve lowering).
 /// - Rewrites owner-local targets / `{{query:}}` to External on `reference_id`.
 /// - Seed maps use [`materialize_map_for_reference`] (no stale-entry fallback).
+/// - Runs the same [`check_dialect`] / relative-path refusal as resolve (opaque
+///   `read_csv('rel/…')` SQL is not rewritten — refuse and suggest Load / absolute).
 /// - Refuses objects that already depend on a third-party reference (`External` /
 ///   `{{xref:}}`) — those need their own reference on the consumer first.
 pub fn copy_referenced_object(
@@ -1609,6 +1611,7 @@ pub fn copy_referenced_object(
     references: &[ProjectReference],
     connection_bindings: &[ConnectionBinding],
     available_connections: &[String],
+    consumer_execution_engine: ExecutionEngine,
     reference_id: &str,
     kind: ObjectKind,
     object_id: &str,
@@ -1650,6 +1653,12 @@ pub fn copy_referenced_object(
                 .query(object_id)
                 .ok_or_else(|| format!("Owner query '{object_id}' not found"))?
                 .clone();
+            check_dialect(
+                &src,
+                owner.execution_engine,
+                consumer_execution_engine,
+                &owner_uid,
+            )?;
             let steps = rewrite_steps_for_local_copy(&src.steps, reference_id)?;
             let steps = absolutize_steps(Some(&owner_path), &steps);
             let steps = bind_steps(
@@ -2413,6 +2422,7 @@ mod tests {
             &[reference.clone()],
             &[],
             &[],
+            ExecutionEngine::Duckdb,
             &reference.id,
             ObjectKind::Query,
             "q",
@@ -2448,6 +2458,7 @@ mod tests {
             &[reference.clone()],
             &[],
             &[],
+            ExecutionEngine::Duckdb,
             &reference.id,
             ObjectKind::Query,
             "dep",
@@ -2480,6 +2491,7 @@ mod tests {
             &[nref.clone()],
             &[],
             &[],
+            ExecutionEngine::Duckdb,
             &nref.id,
             ObjectKind::Query,
             "q",
@@ -2532,6 +2544,7 @@ mod tests {
             &[reference.clone()],
             &bindings,
             &available,
+            ExecutionEngine::Duckdb,
             &reference.id,
             ObjectKind::Query,
             "q_pg",
@@ -2553,6 +2566,7 @@ mod tests {
             &[reference.clone()],
             &bindings,
             &available,
+            ExecutionEngine::Duckdb,
             &reference.id,
             ObjectKind::Mapping,
             "map_live",
@@ -2593,6 +2607,7 @@ mod tests {
             &[reference.clone()],
             &[],
             &[],
+            ExecutionEngine::Duckdb,
             &reference.id,
             ObjectKind::Mapping,
             "map_seed",
@@ -2602,6 +2617,64 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("authoritative seed missing"), "{err}");
         assert!(!err.contains("OLD"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_copy_refuses_opaque_relative_sql() {
+        let dir = scratch();
+        let mut owner = bare_project("Owner", "uid-owner");
+        owner.workspace.queries.push(QueryDef {
+            id: "q_opaque".into(),
+            name: "opaque".into(),
+            steps: vec![TransformationStep::SqlModel {
+                raw_sql: "select * from read_csv('data/products.csv')".into(),
+            }],
+            execution: Default::default(),
+        });
+        let opath = write_proj(&dir, "o.dwhproj.json", &owner);
+        let consumer = bare_project("C", "uid-c");
+        let cpath = write_proj(&dir, "c.dwhproj.json", &consumer);
+        let reference = make_project_reference(&cpath, &opath, "Lib").unwrap();
+
+        let err = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &[],
+            &[],
+            ExecutionEngine::Duckdb,
+            &reference.id,
+            ObjectKind::Query,
+            "q_opaque",
+            "q_copy",
+            "",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("relative file path") && err.contains("Load step"),
+            "{err}"
+        );
+
+        // Dialect mismatch on opaque SQL also refuses.
+        owner.execution_engine = ExecutionEngine::Postgres;
+        write_proj(&dir, "o.dwhproj.json", &owner);
+        let err2 = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &[],
+            &[],
+            ExecutionEngine::Duckdb,
+            &reference.id,
+            ObjectKind::Query,
+            "q_opaque",
+            "q_copy",
+            "",
+        )
+        .unwrap_err();
+        assert!(
+            err2.contains("requires postgres SQL") || err2.contains("relative file path"),
+            "{err2}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

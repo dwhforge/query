@@ -974,6 +974,7 @@ export function copyReferencedObject(
   opts?: {
     connectionBindings?: ConnectionBinding[];
     connections?: ConnectionDef[];
+    executionEngine?: WarehouseDialect;
   },
 ): Promise<CopiedObject> {
   return invoke<CopiedObject>("copy_referenced_object", {
@@ -981,6 +982,7 @@ export function copyReferencedObject(
     references,
     connectionBindings: opts?.connectionBindings ?? [],
     connections: opts?.connections ?? [],
+    executionEngine: opts?.executionEngine,
     referenceId,
     kind,
     objectId,

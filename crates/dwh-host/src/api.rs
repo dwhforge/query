@@ -1266,6 +1266,8 @@ struct CopyReferencedArgs {
     connection_bindings: Vec<ConnectionBinding>,
     #[serde(default)]
     connections: Vec<ConnectionDef>,
+    #[serde(default)]
+    execution_engine: Option<WarehouseDialect>,
     reference_id: String,
     kind: ObjectKind,
     object_id: String,
@@ -2408,6 +2410,9 @@ impl HostState {
                     &a.references,
                     &a.connection_bindings,
                     &available,
+                    ExecutionEngine::from_dialect(
+                        a.execution_engine.unwrap_or(WarehouseDialect::Duckdb),
+                    ),
                     &a.reference_id,
                     a.kind,
                     &a.object_id,

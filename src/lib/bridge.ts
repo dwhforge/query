@@ -962,7 +962,7 @@ export type CopiedObject =
   | { kind: "query"; query: QueryDef }
   | { kind: "mapping"; key_map: KeyMapDef };
 
-/** Absolutize paths + rewrite deps via the host resolver (ADR-0025). */
+/** Absolutize paths, bind connections, rewrite deps (ADR-0025). */
 export function copyReferencedObject(
   projectFile: string,
   references: ProjectReference[],
@@ -971,10 +971,16 @@ export function copyReferencedObject(
   objectId: string,
   newLocalId: string,
   newName: string,
+  opts?: {
+    connectionBindings?: ConnectionBinding[];
+    connections?: ConnectionDef[];
+  },
 ): Promise<CopiedObject> {
   return invoke<CopiedObject>("copy_referenced_object", {
     projectFile,
     references,
+    connectionBindings: opts?.connectionBindings ?? [],
+    connections: opts?.connections ?? [],
     referenceId,
     kind,
     objectId,

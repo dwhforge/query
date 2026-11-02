@@ -5,6 +5,7 @@ import type {
   ProjectReference,
   QueryDef,
   TransformationStep,
+  Workspace,
 } from "../types/pipeline";
 import {
   externalTarget,
@@ -13,6 +14,43 @@ import {
   targetKey,
 } from "../types/pipeline";
 import type { ReferenceState } from "./bridge";
+
+/** Ephemeral local id for preview/describe of an external right/parent. */
+export const EXT_FOCUS_QUERY_ID = "__ext_focus__";
+
+/**
+ * Focus a workspace on a local query id, or wrap an external ObjectTarget in a
+ * temporary FromQuery so `focus_query_id` stays a real local compiler id
+ * (never the display key `xref:…`).
+ */
+export function workspaceFocusingObject(
+  workspace: Workspace,
+  target: ObjectTarget,
+): Workspace {
+  if (typeof target === "string") {
+    const parsed = parseTargetKey(target);
+    if (parsed && isExternalTarget(parsed)) {
+      return workspaceFocusingObject(workspace, parsed);
+    }
+    return { ...workspace, focus_query_id: target };
+  }
+  if (!isExternalTarget(target)) {
+    return workspace;
+  }
+  const wrap: QueryDef = {
+    id: EXT_FOCUS_QUERY_ID,
+    name: targetKey(target),
+    steps: [{ type: "FromQuery", payload: { query_id: target } }],
+  };
+  return {
+    ...workspace,
+    focus_query_id: EXT_FOCUS_QUERY_ID,
+    queries: [
+      ...workspace.queries.filter((q) => q.id !== EXT_FOCUS_QUERY_ID),
+      wrap,
+    ],
+  };
+}
 
 /** Resolve a reference locator against the consumer project file. */
 export function resolveOwnerPath(

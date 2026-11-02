@@ -41,6 +41,7 @@ import {
   mapEntryFromLabel,
   wiredMapKeyLabels,
 } from "../lib/joinMapEffect";
+import { workspaceFocusingObject } from "../lib/projectRefs";
 import { FindRightDialog } from "./FindRightDialog";
 import { JoinLensAuto } from "./JoinLensAuto";
 import { PreviewTable } from "./PreviewTable";
@@ -563,7 +564,8 @@ function JoinLensImpl({
 
   const rightInputWs = useMemo((): Workspace | null => {
     if (!rightQueryId) return null;
-    return { ...workspace, focus_query_id: rightQueryId };
+    // Display key may be `xref:…` — wrap External in a local FromQuery focus.
+    return workspaceFocusingObject(workspace, rightQueryId);
   }, [workspace, rightQueryId]);
 
   // Schema refresh only when the Join identity changes — not on every workspace

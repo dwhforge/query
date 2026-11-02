@@ -82,6 +82,7 @@ import {
   newQueryFromExternal,
   parseTargetKey,
   resolveOwnerPath,
+  workspaceFocusingObject,
 } from "./lib/projectRefs";
 import { HiveParquetDialog } from "./components/HiveParquetDialog";
 import {
@@ -1478,6 +1479,10 @@ function App() {
         target.id,
         id,
         "",
+        {
+          connectionBindings: project.connection_bindings ?? [],
+          connections,
+        },
       );
       if (copied.kind === "query") {
         setQueries((prev) => [...prev, copied.query]);
@@ -2331,10 +2336,15 @@ function App() {
           ),
         };
       } else if (kind === "right") {
-        ws = {
-          ...project.workspace,
-          focus_query_id: joinDiag.right_query_id,
-        };
+        const joinStep =
+          activeQuery?.steps[joinDiag.join_step_index] ??
+          project.workspace.queries.find((q) => q.id === activeQueryId)
+            ?.steps[joinDiag.join_step_index];
+        const rightTarget =
+          joinStep?.type === "Join"
+            ? joinStep.payload.right_query_id
+            : joinDiag.right_query_id;
+        ws = workspaceFocusingObject(project.workspace, rightTarget);
       } else {
         // output = host through Join inclusive
         ws = {
@@ -2402,10 +2412,9 @@ function App() {
             ),
           }
         : null;
-    const rightWs: Workspace = {
-      ...project.workspace,
-      focus_query_id: rightQueryId,
-    };
+    const rightWs: Workspace | null = rightQueryId
+      ? workspaceFocusingObject(project.workspace, rightQueryId)
+      : null;
 
     // Schema only — avoid LIMIT 50 scans just to populate Join column pickers.
     const pref = projectRefContext(project);
@@ -2414,7 +2423,7 @@ function App() {
           () => null,
         )
       : null;
-    const rightRes = rightQueryId
+    const rightRes = rightWs
       ? await describeWorkspace(rightWs, connections, sources, pref).catch(
           () => null,
         )

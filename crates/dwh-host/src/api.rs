@@ -1262,6 +1262,10 @@ struct CopyReferencedArgs {
     project_file: String,
     #[serde(default)]
     references: Vec<ProjectReference>,
+    #[serde(default)]
+    connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)]
+    connections: Vec<ConnectionDef>,
     reference_id: String,
     kind: ObjectKind,
     object_id: String,
@@ -2398,9 +2402,12 @@ impl HostState {
                 drop(db);
                 let a: CopyReferencedArgs =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let available: Vec<String> = a.connections.iter().map(|c| c.id.clone()).collect();
                 let out: CopiedObject = copy_referenced_object(
                     Path::new(&a.project_file),
                     &a.references,
+                    &a.connection_bindings,
+                    &available,
                     &a.reference_id,
                     a.kind,
                     &a.object_id,

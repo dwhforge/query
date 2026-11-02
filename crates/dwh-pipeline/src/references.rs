@@ -882,27 +882,7 @@ impl<'a> Resolver<'a> {
                     "referenced object unavailable: owner {uid} mapping '{map_id}' missing; consumer '{consumer}'"
                 )
             })?;
-        if map.is_seed_backed() {
-            if let Some(export) = project.project.last_dbt_export_path.clone() {
-                let seed = Path::new(&export)
-                    .join("seeds")
-                    .join(format!("{}.csv", key_map_seed_name(&map.id)));
-                if !seed.is_file() {
-                    return Err(format!(
-                        "authoritative seed missing for mapping '{}' ({}); consumer '{consumer}'",
-                        map.id,
-                        seed.display()
-                    ));
-                }
-                let body = fs::read_to_string(&seed)
-                    .map_err(|e| format!("read seed {}: {e}", seed.display()))?;
-                let (from_cols, to_col) = (map.from_columns_eff(), map.to_column.clone());
-                map.entries = crate::emit::parse_key_map_seed_csv_cols(&body, &from_cols, &to_col)?;
-            }
-        } else if matches!(map.storage, KeyMapStorage::Source { .. }) {
-            // Live rows stay in the database. Do not keep a dictionary snapshot.
-            map.entries.clear();
-        }
+        materialize_map_for_reference(&mut map, &project.project, consumer)?;
         let revision = project.revision.clone();
         self.done.insert(key);
         self.maps.push(IncludedMap {
@@ -1574,6 +1554,40 @@ pub fn extract_local_placeholders(sql: &str) -> Vec<String> {
     crate::graph::extract_query_placeholders_pub(sql)
 }
 
+/// Materialize mapping rows the same way for resolve and Create local copy.
+///
+/// - Seed + `last_dbt_export_path`: CSV is authoritative — missing file is an error
+///   (no fallback to cached `entries`).
+/// - Seed without export yet: project `entries` remain SoT.
+/// - Source storage: clear cached dictionary rows (live table is SoT).
+fn materialize_map_for_reference(
+    map: &mut KeyMapDef,
+    owner: &Project,
+    consumer_label: &str,
+) -> Result<(), String> {
+    if map.is_seed_backed() {
+        if let Some(export) = owner.last_dbt_export_path.as_deref() {
+            let seed = Path::new(export)
+                .join("seeds")
+                .join(format!("{}.csv", key_map_seed_name(&map.id)));
+            if !seed.is_file() {
+                return Err(format!(
+                    "authoritative seed missing for mapping '{}' ({}); consumer '{consumer_label}'",
+                    map.id,
+                    seed.display()
+                ));
+            }
+            let body = fs::read_to_string(&seed)
+                .map_err(|e| format!("read seed {}: {e}", seed.display()))?;
+            let (from_cols, to_col) = (map.from_columns_eff(), map.to_column.clone());
+            map.entries = crate::emit::parse_key_map_seed_csv_cols(&body, &from_cols, &to_col)?;
+        }
+    } else if matches!(map.storage, KeyMapStorage::Source { .. }) {
+        map.entries.clear();
+    }
+    Ok(())
+}
+
 /// Result of copying one external definition into the consumer (ADR-0025).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1585,12 +1599,16 @@ pub enum CopiedObject {
 /// Copy one referenced query or mapping into local ids.
 ///
 /// - Absolutizes owner-relative Load paths against the owner file.
+/// - Applies `connection_bindings` (same rules as resolve lowering).
 /// - Rewrites owner-local targets / `{{query:}}` to External on `reference_id`.
+/// - Seed maps use [`materialize_map_for_reference`] (no stale-entry fallback).
 /// - Refuses objects that already depend on a third-party reference (`External` /
 ///   `{{xref:}}`) — those need their own reference on the consumer first.
 pub fn copy_referenced_object(
     consumer_file: &Path,
     references: &[ProjectReference],
+    connection_bindings: &[ConnectionBinding],
+    available_connections: &[String],
     reference_id: &str,
     kind: ObjectKind,
     object_id: &str,
@@ -1623,6 +1641,8 @@ pub fn copy_referenced_object(
             reference.alias, owner.project_uid, reference.expected_project_uid
         ));
     }
+    let owner_uid = owner.project_uid.clone();
+    let consumer_label = format!("local copy of {reference_id}/{object_id}");
     match kind {
         ObjectKind::Query => {
             let src = owner
@@ -1632,6 +1652,13 @@ pub fn copy_referenced_object(
                 .clone();
             let steps = rewrite_steps_for_local_copy(&src.steps, reference_id)?;
             let steps = absolutize_steps(Some(&owner_path), &steps);
+            let steps = bind_steps(
+                &owner_uid,
+                new_local_id,
+                &steps,
+                connection_bindings,
+                available_connections,
+            )?;
             let name = if new_name.trim().is_empty() {
                 format!("{}_copy", src.name)
             } else {
@@ -1652,21 +1679,18 @@ pub fn copy_referenced_object(
                 .key_map(object_id)
                 .ok_or_else(|| format!("Owner mapping '{object_id}' not found"))?
                 .clone();
-            if map.is_seed_backed() {
-                if let Some(export) = owner.last_dbt_export_path.clone() {
-                    let seed = Path::new(&export)
-                        .join("seeds")
-                        .join(format!("{}.csv", key_map_seed_name(&map.id)));
-                    if seed.is_file() {
-                        let body = fs::read_to_string(&seed)
-                            .map_err(|e| format!("read seed {}: {e}", seed.display()))?;
-                        let (from_cols, to_col) = (map.from_columns_eff(), map.to_column.clone());
-                        map.entries =
-                            crate::emit::parse_key_map_seed_csv_cols(&body, &from_cols, &to_col)?;
-                    }
-                }
-            } else if matches!(map.storage, KeyMapStorage::Source { .. }) {
-                map.entries.clear();
+            materialize_map_for_reference(&mut map, &owner, &consumer_label)?;
+            if let KeyMapStorage::Source {
+                connection_id, ..
+            } = &mut map.storage
+            {
+                *connection_id = bind_connection(
+                    &owner_uid,
+                    connection_id.as_deref(),
+                    object_id,
+                    connection_bindings,
+                    available_connections,
+                )?;
             }
             let name = if new_name.trim().is_empty() {
                 format!("{}_copy", map.name)
@@ -2387,6 +2411,8 @@ mod tests {
         let CopiedObject::Query { query } = copy_referenced_object(
             &cpath,
             &[reference.clone()],
+            &[],
+            &[],
             &reference.id,
             ObjectKind::Query,
             "q",
@@ -2420,6 +2446,8 @@ mod tests {
         let CopiedObject::Query { query: dep_copy } = copy_referenced_object(
             &cpath,
             &[reference.clone()],
+            &[],
+            &[],
             &reference.id,
             ObjectKind::Query,
             "dep",
@@ -2450,6 +2478,8 @@ mod tests {
         let err = copy_referenced_object(
             &cpath,
             &[nref.clone()],
+            &[],
+            &[],
             &nref.id,
             ObjectKind::Query,
             "q",
@@ -2458,6 +2488,120 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("refuses"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_copy_applies_connection_bindings() {
+        let dir = scratch();
+        let mut owner = bare_project("Owner", "uid-owner");
+        owner.workspace.queries.push(QueryDef {
+            id: "q_pg".into(),
+            name: "pg".into(),
+            steps: vec![TransformationStep::LoadPostgres {
+                schema: "public".into(),
+                table_name: "t".into(),
+                connection_id: Some("owner_pg".into()),
+                connection_string: String::new(),
+                source_alias: None,
+            }],
+            execution: Default::default(),
+        });
+        let mut map = KeyMapDef::new("map_live", "live");
+        map.storage = KeyMapStorage::Source {
+            source: "public".into(),
+            table: "dict".into(),
+            connection_id: Some("owner_pg".into()),
+            db_schema: None,
+        };
+        map.entries = vec![KeyMapEntry::pair("a", "1")];
+        owner.workspace.key_maps.push(map);
+        let opath = write_proj(&dir, "o.dwhproj.json", &owner);
+        let consumer = bare_project("C", "uid-c");
+        let cpath = write_proj(&dir, "c.dwhproj.json", &consumer);
+        let reference = make_project_reference(&cpath, &opath, "Lib").unwrap();
+        let bindings = [ConnectionBinding {
+            owner_project_uid: "uid-owner".into(),
+            owner_connection_id: "owner_pg".into(),
+            local_connection_id: "consumer_pg".into(),
+        }];
+        let available = ["consumer_pg".to_string()];
+
+        let CopiedObject::Query { query } = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &bindings,
+            &available,
+            &reference.id,
+            ObjectKind::Query,
+            "q_pg",
+            "q_copy",
+            "",
+        )
+        .unwrap() else {
+            panic!("expected query");
+        };
+        match &query.steps[0] {
+            TransformationStep::LoadPostgres { connection_id, .. } => {
+                assert_eq!(connection_id.as_deref(), Some("consumer_pg"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let CopiedObject::Mapping { key_map } = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &bindings,
+            &available,
+            &reference.id,
+            ObjectKind::Mapping,
+            "map_live",
+            "map_copy",
+            "",
+        )
+        .unwrap() else {
+            panic!("expected mapping");
+        };
+        assert!(key_map.entries.is_empty());
+        match &key_map.storage {
+            KeyMapStorage::Source { connection_id, .. } => {
+                assert_eq!(connection_id.as_deref(), Some("consumer_pg"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_copy_refuses_missing_authoritative_seed() {
+        let dir = scratch();
+        let mut owner = bare_project("Owner", "uid-owner");
+        let mut map = KeyMapDef::new("map_seed", "seed");
+        map.storage = KeyMapStorage::Seed;
+        map.entries = vec![KeyMapEntry::pair("A", "OLD")];
+        owner.workspace.key_maps.push(map);
+        let opath = write_proj(&dir, "o.dwhproj.json", &owner);
+        let consumer = bare_project("C", "uid-c");
+        let cpath = write_proj(&dir, "c.dwhproj.json", &consumer);
+        let reference = make_project_reference(&cpath, &opath, "Lib").unwrap();
+        // After lock: point at an export that never wrote the seed CSV.
+        owner.last_dbt_export_path = Some(dir.join("export").to_string_lossy().into());
+        write_proj(&dir, "o.dwhproj.json", &owner);
+
+        let err = copy_referenced_object(
+            &cpath,
+            &[reference.clone()],
+            &[],
+            &[],
+            &reference.id,
+            ObjectKind::Mapping,
+            "map_seed",
+            "map_copy",
+            "",
+        )
+        .unwrap_err();
+        assert!(err.contains("authoritative seed missing"), "{err}");
+        assert!(!err.contains("OLD"));
         let _ = fs::remove_dir_all(&dir);
     }
 

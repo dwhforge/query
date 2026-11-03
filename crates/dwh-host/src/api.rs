@@ -784,6 +784,10 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
 }
 
 fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
+    if name.trim().eq_ignore_ascii_case("mapping_quality") {
+        let cache = crate::secrets_io::dwh_home_dir()?.join("demos");
+        return crate::demo_mapping_quality::load(&cache);
+    }
     let fixtures = find_fixtures_dir()?;
     use crate::demo_keymap_labs as labs;
     match name.trim().to_ascii_lowercase().as_str() {

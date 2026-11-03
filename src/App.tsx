@@ -97,6 +97,19 @@ import {
 import { JoinLens } from "./components/JoinLens";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { KeyMapEditor } from "./components/KeyMapEditor";
+import { MappingQualityOverview } from "./components/mapping-quality/MappingQualityOverview";
+import {
+  QUALITY_INSPECTION,
+  QUALITY_JOIN,
+  QUALITY_SAMPLE_COLUMN,
+  QUALITY_TAB,
+  isFullQualityJoin,
+  isMappingQualityLab,
+  isQualityInspectionQuery,
+  qualityInspectionQuery,
+  stripQualityInspectionQueries,
+  upsertQualityInspection,
+} from "./lib/mappingQuality";
 import {
   applyKeyMapToWorkspace,
   applyNormalizeToWorkspace,
@@ -457,6 +470,18 @@ function App() {
     maximizeBottomDock();
   }
 
+  /** Canvas from the quality lab without scheduling the 100K join preview/IPC. */
+  function openMappingQualityCanvas() {
+    if (isFullQualityJoin(activeQueryId)) {
+      setActiveQueryId("quality_catalog");
+      setSelectedStepIndex(0);
+      setJoinLensOn(false);
+      setPreview(null);
+    }
+    setCenterTab("canvas");
+    setSelectedKeyMapId(null);
+  }
+
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(
     null,
@@ -540,6 +565,15 @@ function App() {
   const [joinLensOn, setJoinLensOn] = useState(true);
   /** Bump to switch Join Lens into Probe (from Data diag banner). */
   const [forceProbeNonce, setForceProbeNonce] = useState(0);
+  /** Bump after mapping-quality Inspect so Join Lens auto-runs Load sides. */
+  const [autoPrepareNonce, setAutoPrepareNonce] = useState(0);
+  /** Pin Join Lens This-row to overview sample (commercial_sku), not join ON. */
+  const [lensFocusHint, setLensFocusHint] = useState<{
+    column: string;
+    value: string;
+  } | null>(null);
+  /** Inspect clicked — keep progress until Join Lens prepare takes over. */
+  const qualityHandoffRef = useRef(false);
   /** Open KeyMap editor tabs (VS Code–style, beside Pipeline canvas). */
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
   /** Center workspace tab: canvas or open KeyMap id. */
@@ -695,7 +729,8 @@ function App() {
         return {
           ...p,
           sources: syncSourcesFromQueries(p.sources, nextQueries),
-          workspace: { queries: nextQueries, focus_query_id: focus },
+          // Preserve key_maps and other workspace fields (mapping-quality lab, etc.).
+          workspace: { ...p.workspace, queries: nextQueries, focus_query_id: focus },
         };
       });
     },
@@ -745,9 +780,14 @@ function App() {
     [project],
   );
 
+  const centerTabRef = useRef(centerTab);
+  centerTabRef.current = centerTab;
+
   const debouncedPreview = useMemo(
     () =>
       debounce((ws: Workspace, conns: ConnectionDef[], srcs: SourceDef[]) => {
+        // Pending debounce can fire after switching to the quality overview tab.
+        if (centerTabRef.current === QUALITY_TAB) return;
         void runPreview(ws, conns, srcs);
       }, 150),
     [runPreview],
@@ -765,13 +805,69 @@ function App() {
 
   useEffect(() => {
     // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
-    if (overlayOpen || !dataWorkspace) return;
+    // Mapping quality overview owns preview while its tab is open (same preemptible lane).
+    if (overlayOpen || centerTab === QUALITY_TAB || !dataWorkspace) return;
+    // Full 100K lab Join serializes ~95k map rows into IPC — never auto-preview on tab switch.
+    // Use Mapping quality tab or Inspect a cell (bounded sample query) instead.
+    const previewFocus =
+      dataWorkspace.focus_query_id || activeQueryId || focusQueryId;
+    if (isFullQualityJoin(previewFocus)) {
+      setLoading(false);
+      return;
+    }
     debouncedPreview(dataWorkspace, connections, sources);
-  }, [dataWorkspace, connections, sources, debouncedPreview, overlayOpen]);
+  }, [
+    dataWorkspace,
+    connections,
+    sources,
+    debouncedPreview,
+    overlayOpen,
+    centerTab,
+    activeQueryId,
+    focusQueryId,
+  ]);
+
+  // Free the preview lane when the quality overview takes over.
+  useEffect(() => {
+    if (centerTab !== QUALITY_TAB) return;
+    previewReqIdRef.current += 1;
+    setLoading(false);
+    cancelHeavyQuery();
+  }, [centerTab]);
+
+  // Join Lens Load sides after Inspect — keep the global bar in sync.
+  useEffect(() => {
+    if (!lensPrepareBusy) {
+      if (qualityHandoffRef.current) return;
+      setOpProgress((cur) =>
+        cur?.kind === "prepare" || cur?.kind === "quality" ? null : cur,
+      );
+      return;
+    }
+    qualityHandoffRef.current = false;
+    setOpProgress({
+      kind: "prepare",
+      phase: "Loading join sides for sample…",
+      percent: 8,
+    });
+    const poll = window.setInterval(() => {
+      void joinPrepareProgress()
+        .then((p) => {
+          if (!p.active && p.fraction <= 0) return;
+          setOpProgress({
+            kind: "prepare",
+            phase: p.message || p.stage || "Loading join sides…",
+            percent: Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
+          });
+        })
+        .catch(() => {});
+    }, 250);
+    return () => window.clearInterval(poll);
+  }, [lensPrepareBusy]);
 
   // Schema-aware Join: column lists from truncated preview (left before Join, full right).
   useEffect(() => {
-    if (overlayOpen) return;
+    if (overlayOpen || centerTab === QUALITY_TAB) return;
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -780,6 +876,13 @@ function App() {
       return;
     }
     const hostId = activeQueryId;
+    // Skip full lab Join — describe/prepare would ship the 95k-row map on every tab switch.
+    if (isFullQualityJoin(hostId)) {
+      setJoinLeftColumns([]);
+      setJoinRightColumns([]);
+      setJoinColsLoading(false);
+      return;
+    }
     const rightId = joinRightId || targetKey(step.payload.right_query_id);
     if (!hostId || !rightId) {
       setJoinLeftColumns([]);
@@ -812,6 +915,7 @@ function App() {
     project.workspace,
     connections,
     overlayOpen,
+    centerTab,
   ]);
 
   // Clear stale diagnostics when leaving Join / changing keys — do not auto-run
@@ -840,9 +944,13 @@ function App() {
 
   useEffect(() => {
     if (!joinDiagIdentity) return;
+    if (isFullQualityJoin(activeQueryId)) {
+      setJoinPrepareLabel(null);
+      return;
+    }
     refreshJoinPrepareStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [joinDiagIdentity, sources]);
+  }, [joinDiagIdentity, sources, activeQueryId]);
 
   function refreshJoinPrepareStatus() {
     const step =
@@ -2147,7 +2255,7 @@ function App() {
       } else if (id === "keymap_pg_seed" || id === "keymap_mixed") {
         engine = "duckdb";
         destKind = "postgres";
-      } else if (id === "keymap_parquet") {
+      } else if (id === "keymap_parquet" || id === "mapping_quality") {
         engine = "duckdb";
         destKind = "duckdb";
       }
@@ -2179,6 +2287,8 @@ function App() {
             : {}),
         }),
       );
+      setKeyMapTabs([]);
+      setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
       setActiveQueryId(ws.focus_query_id);
       setSelectedStepIndex(
         ws.queries.find((q) => q.id === ws.focus_query_id)?.steps.length
@@ -2677,7 +2787,7 @@ function App() {
       return {
         ...p,
         sources: syncSourcesFromQueries(p.sources, scrubbed),
-        workspace: { queries: scrubbed, focus_query_id: focus },
+        workspace: { ...p.workspace, queries: scrubbed, focus_query_id: focus },
         canvas: { positions },
       };
     });
@@ -2770,6 +2880,23 @@ function App() {
     loadStepIntoEditor(step);
   }
 
+  function projectWithoutEphemeralInspect(p: typeof project) {
+    const workspace = stripQualityInspectionQueries(p.workspace);
+    const positions = { ...(p.canvas?.positions ?? {}) };
+    for (const id of Object.keys(positions)) {
+      if (isQualityInspectionQuery(id)) delete positions[id];
+    }
+    const outputs = (p.outputs ?? []).filter(
+      (id) => !isQualityInspectionQuery(id),
+    );
+    return {
+      ...p,
+      workspace,
+      canvas: { ...p.canvas, positions },
+      outputs,
+    };
+  }
+
   async function writeProjectTo(path: string) {
     try {
       const base =
@@ -2778,16 +2905,18 @@ function App() {
           .pop()
           ?.replace(/\.dwhproj\.json$/i, "")
           .replace(/\.json$/i, "") ?? project.name;
+      const persisted = projectWithoutEphemeralInspect(project);
       const saved = await saveProject(path, {
-        ...project,
+        ...persisted,
         root_path: path,
         name: base,
       });
+      // Keep the live Inspect node in the session; only the file omits it.
       setProject((p) => ({
         ...p,
-        ...saved,
         root_path: path,
         name: base,
+        project_uid: saved.project_uid ?? p.project_uid,
         connections: p.connections,
       }));
       setExportMsg(`Project saved → ${path}`);
@@ -2836,16 +2965,17 @@ function App() {
           .pop()
           ?.replace(/\.dwhproj\.json$/i, "")
           .replace(/\.json$/i, "") ?? forked.name;
+      const persisted = projectWithoutEphemeralInspect(forked);
       const saved = await saveProject(picked, {
-        ...forked,
+        ...persisted,
         root_path: picked,
         name: base,
       });
       setProject((p) => ({
         ...forked,
-        ...saved,
         root_path: picked,
         name: base,
+        project_uid: saved.project_uid ?? forked.project_uid,
         connections: p.connections,
       }));
       setExportMsg(`Project saved → ${picked}`);
@@ -3672,7 +3802,7 @@ function App() {
       });
       const result = await exportDbt(
         project.name.replace(/\s+/g, "_").toLowerCase() || "dwh_rs_query",
-        workspace,
+        stripQualityInspectionQueries(workspace),
         dir,
         project.dbt_target,
         eng,
@@ -3740,7 +3870,8 @@ function App() {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape" && centerTab !== "canvas") {
         e.preventDefault();
-        closeKeyMapTab(centerTab);
+        if (centerTab === QUALITY_TAB) openMappingQualityCanvas();
+        else closeKeyMapTab(centerTab);
         return;
       }
       const tag = (e.target as HTMLElement)?.tagName;
@@ -3806,6 +3937,7 @@ function App() {
 
   const joinLensTarget =
     activeQueryId &&
+    !isFullQualityJoin(activeQueryId) &&
     selectedStepIndex !== null &&
     selectedStep?.type === "Join" &&
     selectedStep.payload.left_on.length > 0
@@ -4647,8 +4779,12 @@ function App() {
                 role="tab"
                 aria-selected={centerTab === "canvas"}
                 onClick={() => {
-                  setCenterTab("canvas");
-                  setSelectedKeyMapId(null);
+                  if (isMappingQualityLab(project.workspace)) {
+                    openMappingQualityCanvas();
+                  } else {
+                    setCenterTab("canvas");
+                    setSelectedKeyMapId(null);
+                  }
                 }}
                 className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] transition ${
                   centerTab === "canvas"
@@ -4658,6 +4794,13 @@ function App() {
               >
                 Pipeline canvas
               </button>
+              {isMappingQualityLab(project.workspace) && (
+                <button type="button" role="tab" aria-selected={centerTab === QUALITY_TAB}
+                  onClick={() => { setCenterTab(QUALITY_TAB); setSelectedKeyMapId(null); }}
+                  className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[12px] ${centerTab === QUALITY_TAB ? "bg-[#10251f] text-teal-100" : "text-slate-400 hover:text-teal-200"}`}>
+                  ◈ Mapping quality · Prototype
+                </button>
+              )}
               {keyMapTabs.map((tab) => {
                 const on = centerTab === tab.map.id;
                 return (
@@ -4729,6 +4872,67 @@ function App() {
               </div>
             )}
 
+            {isMappingQualityLab(project.workspace) && (
+              <div className={centerTab === QUALITY_TAB ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={centerTab !== QUALITY_TAB}>
+                <MappingQualityOverview
+                  active={centerTab === QUALITY_TAB}
+                  workspace={project.workspace}
+                  connections={project.connections}
+                  sources={project.sources}
+                  onProgress={(state) => {
+                    if (!state) {
+                      setOpProgress((cur) =>
+                        cur?.kind === "quality" ? null : cur,
+                      );
+                      return;
+                    }
+                    setOpProgress({
+                      kind: "quality",
+                      phase: state.phase,
+                      percent: state.percent,
+                    });
+                  }}
+                  onCanvas={() => openMappingQualityCanvas()}
+                  onInspect={(keys) => {
+                    try {
+                      const orderedKeys = [...new Set(keys)]
+                        .sort((a, b) => a.localeCompare(b))
+                        .slice(0, 24);
+                      const sample = qualityInspectionQuery(
+                        project.workspace,
+                        orderedKeys,
+                      );
+                      const focusValue = orderedKeys[0] ?? "";
+                      setQueries((queries) =>
+                        upsertQualityInspection(queries, sample),
+                      );
+                      setActiveQueryId(QUALITY_INSPECTION);
+                      setSelectedStepIndex(sample.steps.length - 1);
+                      setDiagView(null);
+                      setLensFocusHint(
+                        focusValue
+                          ? {
+                              column: QUALITY_SAMPLE_COLUMN,
+                              value: focusValue,
+                            }
+                          : null,
+                      );
+                      qualityHandoffRef.current = true;
+                      setOpProgress({
+                        kind: "quality",
+                        phase: `Opening ${orderedKeys.length} sample keys in Join Lens…`,
+                        percent: 15,
+                      });
+                      focusJoinLensLayout();
+                      // After preview mounts Join Lens — auto Load sides (left TEMP).
+                      setAutoPrepareNonce((n) => n + 1);
+                    } catch (reason) {
+                      setError(String(reason));
+                    }
+                  }}
+                />
+              </div>
+            )}
             {keyMapTabs.map((keyMapEditor) => (
               <div
                 key={keyMapEditor.map.id}
@@ -5205,6 +5409,8 @@ function App() {
                         joinDiag={joinDiag}
                         joinDiagLoading={joinDiagLoading}
                         forceProbeNonce={forceProbeNonce}
+                        autoPrepareNonce={autoPrepareNonce}
+                        focusResultHint={lensFocusHint}
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
                         onPrepareBusy={setLensPrepareBusy}
@@ -5215,6 +5421,18 @@ function App() {
                         columns={preview.columns}
                         rows={preview.rows}
                       />
+                    ) : isFullQualityJoin(activeQueryId) ? (
+                      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-slate-500">
+                        <p>
+                          Full lab Join ({QUALITY_JOIN}) skips auto-preview —
+                          shipping the 95k-row map on every tab switch freezes
+                          the UI.
+                        </p>
+                        <p className="text-[12px] text-slate-600">
+                          Use the Mapping quality tab for aggregates, or Inspect
+                          a cell for a bounded sample in Join Lens.
+                        </p>
+                      </div>
                     ) : (
                       <div className="flex h-full items-center justify-center text-slate-600">
                         Waiting for preview…
@@ -5254,6 +5472,7 @@ function App() {
             </div>
           </section>
 
+          {centerTab !== QUALITY_TAB && <>
           <PanelResizeHandle
             collapsedRail={inspectorCollapsed}
             aria-label={
@@ -6406,6 +6625,7 @@ function App() {
             </div>
           </aside>
           )}
+          </>}
         </div>
       )}
     </div>

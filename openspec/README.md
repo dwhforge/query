@@ -29,3 +29,5 @@ Active changes:
 - ~~[`changes/keymap-composite/`](changes/keymap-composite/)~~ — **merged** → [`specs/keymap-composite-*/`](specs/) ([ADR-0024](../docs/adr/0024-keymap-composite.md))
 
 Review order: proposal → specs → design → tasks. Implement only after that review (`openspec apply` / agent apply).
+
+- ~~[`changes/mapping-quality-overview/`](changes/mapping-quality-overview/)~~ — **prototype implemented**, contract merged → [`specs/mapping-quality-overview/`](specs/mapping-quality-overview/) ([ADR-0026](../docs/adr/0026-mapping-quality-overview.md))

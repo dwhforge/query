@@ -448,6 +448,16 @@ export type JoinLensProps = {
   joinDiagLoading?: boolean;
   /** Bump to force Probe mode (e.g. from Data-banner "Open in Probe"). */
   forceProbeNonce?: number;
+  /**
+   * Bump after opening a sample Join (e.g. mapping-quality Inspect) to start
+   * Load sides once preview is on screen — left TEMP for expensive inputs.
+   */
+  autoPrepareNonce?: number;
+  /**
+   * Pin This-row to a result column value (e.g. commercial_sku from overview
+   * samples). Join ON keys are the wrong focus after ApplyKeyMap.
+   */
+  focusResultHint?: { column: string; value: string } | null;
   /** Apply near-miss → insert NormalizeKey before Join. */
   onApplyNearMiss?: (hyp: NearMissHypothesis) => void;
   /**
@@ -486,6 +496,8 @@ function JoinLensImpl({
   joinDiag,
   joinDiagLoading = false,
   forceProbeNonce = 0,
+  autoPrepareNonce = 0,
+  focusResultHint = null,
   onApplyNearMiss,
   onMapKey,
   onPrepareBusy,
@@ -781,6 +793,37 @@ function JoinLensImpl({
         setPreparePhase(null);
       });
   }
+
+  // Mapping-quality Inspect (and similar): JoinLens mounts only after preview
+  // rows exist, so starting Load sides here does not race the first preview.
+  // Engine materializes expensive sides only (left for Derive/ApplyKeyMap; cheap
+  // CSV right stays live).
+  const autoPreparedForNonceRef = useRef(0);
+  useEffect(() => {
+    if (!enabled || !autoPrepareNonce) return;
+    if (autoPreparedForNonceRef.current === autoPrepareNonce) return;
+    if (!hostQueryId || joinStepIndex < 1) return;
+    autoPreparedForNonceRef.current = autoPrepareNonce;
+    runPrepare(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per nonce
+  }, [enabled, autoPrepareNonce, hostQueryId, joinStepIndex]);
+
+  // Overview samples are commercial_sku values; Join ON is canonical_key after map.
+  const focusHintAppliedRef = useRef("");
+  useEffect(() => {
+    if (!enabled || !focusResultHint || !rows.length || !columns.length) return;
+    const stamp = `${hostQueryId}|${focusResultHint.column}|${focusResultHint.value}|${rows.length}`;
+    if (focusHintAppliedRef.current === stamp) return;
+    const col = columns.findIndex(
+      (column) => column.name === focusResultHint.column,
+    );
+    if (col < 0) return;
+    const want = focusResultHint.value;
+    const idx = rows.findIndex((row) => String(row[col] ?? "") === want);
+    if (idx < 0) return;
+    focusHintAppliedRef.current = stamp;
+    setActiveIndex(idx);
+  }, [enabled, focusResultHint, rows, columns, hostQueryId]);
 
   function loadLinkedSamples(opts?: {
     forcePrepared?: boolean;

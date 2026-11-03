@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReferenceStatus } from "../lib/bridge";
+import { isQualityInspectionQuery } from "../lib/mappingQuality";
 import {
   referenceStateLabel,
   referenceStateTone,
@@ -647,6 +648,7 @@ export function ExplorerTree({
                 const active = q.id === activeQueryId;
                 const isFocus = q.id === focus;
                 const published = isPublishedOutput(project, q.id);
+                const ephemeral = isQualityInspectionQuery(q.id);
                 const editing =
                   renaming?.kind === "query" && renaming.id === q.id;
                 return (
@@ -667,18 +669,32 @@ export function ExplorerTree({
                         type="button"
                         onClick={() => onSelectQuery(q.id)}
                         onDoubleClick={(e) => {
+                          if (ephemeral) return;
                           e.stopPropagation();
                           setRenaming({ kind: "query", id: q.id });
                         }}
-                        title="Double-click to rename"
+                        title={
+                          ephemeral
+                            ? "Ephemeral sample Inspect — session only, not saved"
+                            : "Double-click to rename"
+                        }
                         className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-xs ${
-                          active
-                            ? "bg-teal-500/15 text-teal-100"
-                            : "text-slate-300 hover:bg-slate-800/80"
+                          ephemeral
+                            ? active
+                              ? "bg-amber-500/15 text-amber-100"
+                              : "text-amber-200/80 hover:bg-amber-950/40"
+                            : active
+                              ? "bg-teal-500/15 text-teal-100"
+                              : "text-slate-300 hover:bg-slate-800/80"
                         }`}
                       >
                         <span className="truncate">{q.name}</span>
                         <span className="ml-auto flex shrink-0 items-center gap-1">
+                          {ephemeral && (
+                            <span className="text-[9px] uppercase tracking-wide text-amber-400/90">
+                              temp
+                            </span>
+                          )}
                           {published && (
                             <span
                               className="text-[9px] text-amber-400/90"

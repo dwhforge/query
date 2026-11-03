@@ -153,6 +153,7 @@ export const HELP_SECTIONS: HelpSection[] = [
     id: "demos",
     title: "Demos (Help → Load demo)",
     bullets: [
+      "Mapping quality — 100,000 commercial positions, 2,400 production products and 95,000 seed links. Opens an overview prototype: family/grade flows, declared decision basis, concentration and actual sample-key drill-down into Join Lens. Offline; generated in the app demo cache. Scores are synthetic annotations, not a live LLM result.",
       "Sales — medallion, join, rollups, top-N",
       "Union — Append of same-grain feeds",
       "SQL hybrid — SqlModel + CustomSql window",

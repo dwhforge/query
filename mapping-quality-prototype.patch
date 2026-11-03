@@ -1,0 +1,2138 @@
+diff --git a/crates/dwh-host/src/api.rs b/crates/dwh-host/src/api.rs
+index 09f5cf4..bd50003 100644
+--- a/crates/dwh-host/src/api.rs
++++ b/crates/dwh-host/src/api.rs
+@@ -784,6 +784,10 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
+ }
+ 
+ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
++    if name.trim().eq_ignore_ascii_case("mapping_quality") {
++        let cache = crate::secrets_io::dwh_home_dir()?.join("demos");
++        return crate::demo_mapping_quality::load(&cache);
++    }
+     let fixtures = find_fixtures_dir()?;
+     use crate::demo_keymap_labs as labs;
+     match name.trim().to_ascii_lowercase().as_str() {
+diff --git a/crates/dwh-host/src/demo_mapping_quality/data.rs b/crates/dwh-host/src/demo_mapping_quality/data.rs
+new file mode 100644
+index 0000000..e94c65b
+--- /dev/null
++++ b/crates/dwh-host/src/demo_mapping_quality/data.rs
+@@ -0,0 +1,157 @@
++//! Deterministic moderate-scale data. Regenerate privately, then publish the complete directory.
++use std::fs::{self, File};
++use std::io::{self, BufWriter, Write};
++use std::path::{Path, PathBuf};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++const FAMILIES: [&str; 6] = ["Urea", "NPK", "Ammonia", "Sulfur", "Methanol", "Phosphate"];
++const VERSION: &str = "mapping-quality-v1";
++pub const POSITIONS: usize = 100_000;
++
++pub struct Files {
++    pub commercial: PathBuf,
++    pub catalog: PathBuf,
++    pub mapping: PathBuf,
++}
++fn files(root: &Path) -> Files {
++    Files {
++        commercial: root.join("commercial.csv"),
++        catalog: root.join("catalog.csv"),
++        mapping: root.join("mapping.csv"),
++    }
++}
++fn complete(root: &Path) -> bool {
++    let files = files(root);
++    root.join("complete").is_file()
++        && files.commercial.is_file()
++        && files.catalog.is_file()
++        && files.mapping.is_file()
++}
++
++pub fn ensure(cache: &Path) -> io::Result<Files> {
++    fs::create_dir_all(cache)?;
++    let destination = cache.join(VERSION);
++    if complete(&destination) {
++        return Ok(files(&destination));
++    }
++    // Never overwrite an incomplete/user-edited cache silently.
++    if destination.exists() {
++        return Err(io::Error::other(
++            "Incomplete demo cache; rename it before regenerating",
++        ));
++    }
++    let nonce = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_err(io::Error::other)?
++        .as_nanos();
++    let staging = cache.join(format!(".{VERSION}-{}-{nonce}", std::process::id()));
++    fs::create_dir(&staging)?;
++    if let Err(error) = generate(&staging) {
++        let _ = fs::remove_dir_all(&staging);
++        return Err(error);
++    }
++    if let Err(error) = fs::rename(&staging, &destination) {
++        let _ = fs::remove_dir_all(&staging);
++        if !complete(&destination) {
++            return Err(error);
++        }
++    }
++    Ok(files(&destination))
++}
++
++fn canonical(family: usize, grade: &str, number: usize) -> String {
++    format!("P{family}-{grade}-{number:03}")
++}
++
++fn generate(root: &Path) -> io::Result<()> {
++    let paths = files(root);
++    let mut commercial = BufWriter::new(File::create(paths.commercial)?);
++    let mut catalog = BufWriter::new(File::create(paths.catalog)?);
++    let mut mapping = BufWriter::new(File::create(paths.mapping)?);
++    writeln!(commercial, "commercial_sku,source_family,source_grade,packaging,decision_method,similarity_score,runner_up_gap,revenue")?;
++    writeln!(
++        catalog,
++        "product_id,target_family,target_grade,product_name"
++    )?;
++    writeln!(mapping, "from,to")?;
++    for (family, name) in FAMILIES.iter().enumerate() {
++        for grade in ["A", "B"] {
++            for product in 0..200 {
++                writeln!(
++                    catalog,
++                    "{},{name},{grade},{name} grade {grade} product {product}",
++                    canonical(family, grade, product)
++                )?;
++            }
++        }
++    }
++    for i in 0..POSITIONS {
++        let grade = if (i / 6) % 2 == 0 { "A" } else { "B" };
++        let (source_family, source_grade, target_family, target_grade, product, method, score, gap) =
++            match i {
++                0..40_000 => (i % 6, grade, i % 6, grade, (i / 12) % 200, "rule", "", ""),
++                40_000..55_000 => (1, "B", 1, "A", i % 200, "rule", "", ""),
++                55_000..65_000 => (3, "A", 0, "A", i % 200, "manual", "", ""),
++                65_000..75_000 => (
++                    2,
++                    if i % 2 == 0 { "A" } else { "B" },
++                    2,
++                    "A",
++                    0,
++                    "manual",
++                    "",
++                    "",
++                ),
++                75_000..85_000 => (4, grade, 4, grade, i % 200, "fuzzy", "0.89", "0.12"),
++                85_000..95_000 => (5, grade, 5, grade, i % 200, "fuzzy", "0.93", "0.005"),
++                _ => (i % 6, grade, i % 6, grade, i % 200, "none", "", ""),
++            };
++        let sku = format!("C{i:06}");
++        let package = ["bulk", "bag_25kg", "bag_50kg", "big_bag"][(i / 2400) % 4];
++        let revenue = (100 + i % 500) * 10;
++        writeln!(
++            commercial,
++            "{sku},{},{source_grade},{package},{method},{score},{gap},{revenue}",
++            FAMILIES[source_family]
++        )?;
++        if i < 95_000 {
++            writeln!(
++                mapping,
++                "{sku},{}",
++                canonical(target_family, target_grade, product)
++            )?;
++        }
++    }
++    commercial.flush()?;
++    catalog.flush()?;
++    mapping.flush()?;
++    fs::write(root.join("complete"), format!("{VERSION}\n{POSITIONS}\n"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn generation_is_complete_and_reusable() {
++        let root = std::env::temp_dir().join(format!("dwh-quality-data-{}", std::process::id()));
++        let first = ensure(&root).unwrap();
++        let second = ensure(&root).unwrap();
++        assert_eq!(first.commercial, second.commercial);
++        assert_eq!(
++            fs::read_to_string(first.commercial)
++                .unwrap()
++                .lines()
++                .count(),
++            POSITIONS + 1
++        );
++        assert_eq!(
++            fs::read_to_string(first.mapping).unwrap().lines().count(),
++            95_001
++        );
++        assert_eq!(
++            fs::read_to_string(first.catalog).unwrap().lines().count(),
++            2_401
++        );
++        fs::remove_dir_all(root).unwrap();
++    }
++}
+diff --git a/crates/dwh-host/src/demo_mapping_quality/mod.rs b/crates/dwh-host/src/demo_mapping_quality/mod.rs
+new file mode 100644
+index 0000000..f09747f
+--- /dev/null
++++ b/crates/dwh-host/src/demo_mapping_quality/mod.rs
+@@ -0,0 +1,145 @@
++//! Self-contained, offline Mapping Quality lab. No changes to Join Lens or matching policy.
++mod data;
++
++use dwh_pipeline::{JoinType, KeyMapDef, QueryDef, TransformationStep as Step, Workspace};
++use std::path::Path;
++
++pub const JOIN_QUERY: &str = "quality_joined";
++pub const SUMMARY_QUERY: &str = "quality_summary";
++pub const TARGETS_QUERY: &str = "quality_targets";
++pub const MAP_ID: &str = "map_quality_products";
++
++fn query(id: &str, steps: Vec<Step>) -> QueryDef {
++    QueryDef {
++        id: id.into(),
++        name: id.into(),
++        steps,
++        execution: Default::default(),
++    }
++}
++
++/// Stable ids are a prototype UI contract, not a new project IR or universal profiler.
++pub fn load(cache: &Path) -> Result<Workspace, String> {
++    let files = data::ensure(cache).map_err(|error| format!("Mapping quality demo: {error}"))?;
++    let entries = dwh_pipeline::parse_key_map_seed_csv(
++        &std::fs::read_to_string(&files.mapping).map_err(|error| error.to_string())?,
++    )?;
++    let mut map = KeyMapDef::new(MAP_ID, "Commercial products → production catalog");
++    map.entries = entries.clone();
++    Ok(Workspace {
++        queries: vec![
++            query(
++                "quality_commercial",
++                vec![Step::LoadCsv {
++                    path: files.commercial.to_string_lossy().into_owned(),
++                }],
++            ),
++            query(
++                "quality_catalog",
++                vec![Step::LoadCsv {
++                    path: files.catalog.to_string_lossy().into_owned(),
++                }],
++            ),
++            query(
++                JOIN_QUERY,
++                vec![
++                    Step::FromQuery {
++                        query_id: "quality_commercial".into(),
++                    },
++                    Step::DeriveColumn {
++                        name: "canonical_key".into(),
++                        expression: "commercial_sku".into(),
++                        mode: Default::default(),
++                        op: None,
++                        sql_dialect: None,
++                    },
++                    Step::ApplyKeyMap {
++                        column: "canonical_key".into(),
++                        columns: vec![],
++                        output_column: None,
++                        map_id: MAP_ID.into(),
++                        entries,
++                    },
++                    Step::Join {
++                        right_query_id: "quality_catalog".into(),
++                        join_type: JoinType::Left,
++                        left_on: vec!["canonical_key".into()],
++                        right_on: vec!["product_id".into()],
++                    },
++                ],
++            ),
++            query(
++                SUMMARY_QUERY,
++                vec![Step::SqlModel {
++                    raw_sql: SUMMARY_SQL.into(),
++                }],
++            ),
++            query(
++                TARGETS_QUERY,
++                vec![Step::SqlModel {
++                    raw_sql: TARGETS_SQL.into(),
++                }],
++            ),
++        ],
++        focus_query_id: JOIN_QUERY.into(),
++        key_maps: vec![map],
++    })
++}
++
++// Differences are observations, not verdicts. The decision basis is an explicit
++// synthetic annotation; these scores were not produced by a real matcher or LLM.
++const SUMMARY_SQL: &str = r#"
++WITH observed AS (
++ SELECT *,
++ CASE WHEN target_family IS NULL THEN 'unmapped'
++      WHEN source_family <> target_family THEN 'family_difference'
++      WHEN source_grade <> target_grade THEN 'grade_difference'
++      WHEN TRY_CAST(runner_up_gap AS DOUBLE) < 0.03 THEN 'close_alternative'
++      WHEN decision_method = 'fuzzy' THEN 'similarity_only'
++      ELSE 'aligned_attributes' END AS signal
++ FROM {{query:quality_joined}}
++)
++SELECT source_family, COALESCE(target_family, 'Unmapped') AS target_family,
++       source_grade, COALESCE(target_grade, '—') AS target_grade,
++       decision_method, signal, COUNT(*) AS positions, SUM(COUNT(*)) OVER() AS total_positions,
++       SUM(revenue) AS revenue,
++       to_json(list_sort(list(commercial_sku))[1:6]) AS sample_keys
++FROM observed
++GROUP BY 1,2,3,4,5,6
++ORDER BY 1,2,3,4,5,6
++"#;
++
++const TARGETS_SQL: &str = r#"
++SELECT canonical_key, target_family, target_grade, COUNT(*) AS positions,
++       COUNT(DISTINCT source_grade) AS source_grades,
++       COUNT(DISTINCT packaging) AS packaging_variants,
++       SUM(revenue) AS revenue,
++       to_json(list_sort(list(commercial_sku))[1:6]) AS sample_keys
++FROM {{query:quality_joined}}
++WHERE target_family IS NOT NULL
++GROUP BY 1,2,3
++ORDER BY positions DESC, canonical_key
++LIMIT 12
++"#;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn lab_has_real_mapping_and_compilable_projections() {
++        let root = std::env::temp_dir().join(format!("dwh-quality-test-{}", std::process::id()));
++        let workspace = load(&root).expect("generate lab");
++        assert_eq!(workspace.key_maps[0].entries.len(), 95_000);
++        assert_eq!(dwh_pipeline::topo_queries(&workspace).unwrap().len(), 5);
++        for id in [SUMMARY_QUERY, TARGETS_QUERY] {
++            let mut selected = workspace.clone();
++            selected.focus_query_id = id.into();
++            let sql = dwh_pipeline::GraphCompiler::new(&selected)
++                .to_sql(false)
++                .unwrap();
++            assert!(!sql.contains("{{query:"));
++            assert!(sql.contains("read_csv"));
++        }
++        std::fs::remove_dir_all(root).unwrap();
++    }
++}
+diff --git a/crates/dwh-host/src/lib.rs b/crates/dwh-host/src/lib.rs
+index 556aed9..d409e8f 100644
+--- a/crates/dwh-host/src/lib.rs
++++ b/crates/dwh-host/src/lib.rs
+@@ -2,6 +2,7 @@ pub mod api;
+ pub mod connections_io;
+ pub mod dbt_setup;
+ pub mod demo_keymap_labs;
++pub mod demo_mapping_quality;
+ pub mod llm;
+ pub mod secrets_io;
+ pub mod settings_io;
+diff --git a/crates/dwh-host/tests/mapping_quality.rs b/crates/dwh-host/tests/mapping_quality.rs
+new file mode 100644
+index 0000000..8375225
+--- /dev/null
++++ b/crates/dwh-host/tests/mapping_quality.rs
+@@ -0,0 +1,65 @@
++//! Full-input acceptance test for Help → Mapping quality (requires the normal DuckDB runtime).
++use dwh_host::demo_mapping_quality::{self, SUMMARY_QUERY, TARGETS_QUERY};
++use std::collections::BTreeMap;
++
++#[test]
++fn mapping_quality_counts_all_positions_and_preserves_patterns() {
++    let root = std::env::temp_dir().join(format!("dwh-quality-engine-{}", std::process::id()));
++    let mut workspace = demo_mapping_quality::load(&root).unwrap();
++    let session = dwh_engine::DbSession::new().unwrap();
++    workspace.focus_query_id = SUMMARY_QUERY.into();
++    let result = dwh_engine::preview_workspace(&session, &workspace, &[], &[]).unwrap();
++    let column = |name: &str| {
++        result
++            .columns
++            .iter()
++            .position(|column| column.name == name)
++            .unwrap()
++    };
++    let positions = column("positions");
++    let signal = column("signal");
++    let total = column("total_positions");
++    let mut counts = BTreeMap::<String, u64>::new();
++    for row in &result.rows {
++        assert_eq!(row[total].as_u64().unwrap(), 100_000);
++        *counts
++            .entry(row[signal].as_str().unwrap().into())
++            .or_default() += row[positions].as_u64().unwrap();
++    }
++    assert_eq!(counts.values().sum::<u64>(), 100_000);
++    assert_eq!(counts["unmapped"], 5_000);
++    assert_eq!(counts["family_difference"], 10_000);
++    assert_eq!(counts["grade_difference"], 20_000);
++    assert_eq!(counts["close_alternative"], 10_000);
++    assert_eq!(counts["similarity_only"], 10_000);
++    assert_eq!(counts["aligned_attributes"], 45_000);
++    assert!(
++        result.rows.len() < 100,
++        "the UI gets aggregates, not dictionary rows"
++    );
++    workspace.focus_query_id = TARGETS_QUERY.into();
++    let hotspots = dwh_engine::preview_workspace(&session, &workspace, &[], &[]).unwrap();
++    assert_eq!(hotspots.rows.len(), 12);
++    let field = |name: &str| {
++        hotspots
++            .columns
++            .iter()
++            .position(|column| column.name == name)
++            .unwrap()
++    };
++    assert_eq!(
++        hotspots.rows[0][field("positions")].as_u64().unwrap(),
++        10_017
++    );
++    assert_eq!(
++        hotspots.rows[0][field("source_grades")].as_u64().unwrap(),
++        2
++    );
++    assert_eq!(
++        hotspots.rows[0][field("packaging_variants")]
++            .as_u64()
++            .unwrap(),
++        4
++    );
++    std::fs::remove_dir_all(root).unwrap();
++}
+diff --git a/docs/adr/0026-mapping-quality-overview.md b/docs/adr/0026-mapping-quality-overview.md
+new file mode 100644
+index 0000000..8b88075
+--- /dev/null
++++ b/docs/adr/0026-mapping-quality-overview.md
+@@ -0,0 +1,43 @@
++# ADR-0026 — Mapping quality overview prototype
++
++## Status
++
++Accepted — prototype implemented (2026-11-03); contract merged to `openspec/specs/mapping-quality-overview/`.
++
++## Context
++
++Join Lens already supports local investigation and individual mapping decisions.
++A second list/card editor with drag-and-drop does not provide a distinct product
++capability. The missing task is understanding the structure and evidence of the
++whole mapping, including fully resolved but questionable regions.
++
++## Decision
++
++Introduce an isolated Help lab and overview tab. Preserve Join Lens unchanged.
++The lab generates 100000 commercial positions, 2400 catalog products and 95000
++seed links locally without Python, network access or a database service.
++
++The overview uses full-input DuckDB SQL aggregates for family/grade correspondence,
++declared decision basis and target concentration. Only aggregate rows, top targets
++and bounded exact-key samples reach the UI. A window total verifies that the
++preview has not silently truncated the aggregate. No global quality score is
++invented. Attribute differences and concentration are observations, not errors.
++
++Inspecting a region creates a normal query filtered to at most 24 actual sample
++keys and opens its real Join in the existing Lens. This is explicitly a sample,
++not the full selected cohort. The original Join is never changed.
++
++This is a configured prototype for its lab schema, not automatic arbitrary-map
++profiling, a second editing store, a new matcher, or new mapping cardinalities.
++Decision methods/scores are fixture annotations, not live matcher/LLM output.
++The rejected visual-card editor patch is not a prerequisite and is not included.
++
++## Consequences
++
++- Offline sample is available in Help → Mapping labs.
++- Generated CSV files stay in the application demo cache; incomplete caches fail
++  explicitly instead of being silently overwritten.
++- Existing seed semantics remain. The prototype does not solve general seed-scale
++  transport: current workspace snapshots and seed SQL still contain mapping rows.
++- Overview queries are DuckDB SQL models; demo execution is explicitly DuckDB.
++- OpenSpec: `openspec/changes/mapping-quality-overview/`.
+diff --git a/docs/mapping-quality-lab.md b/docs/mapping-quality-lab.md
+new file mode 100644
+index 0000000..8aeaf6c
+--- /dev/null
++++ b/docs/mapping-quality-lab.md
+@@ -0,0 +1,52 @@
++# Mapping quality lab (prototype)
++
++Open **Help → Mapping labs → Mapping quality — 100K products · overview prototype**.
++The app generates offline CSVs in `~/.dwhforge-query/demos/mapping-quality-v1/`.
++No Python, network request, Postgres or LLM is required. Reopening reuses these
++files; an incomplete cache reports an error rather than silently replacing it.
++
++The workspace contains 100000 commercial positions, 2400 canonical products and
++95000 seed links. It opens the **Mapping quality · Prototype** tab.
++
++## What to discover
++
++- **Family view:** find the off-diagonal Sulfur → Urea flow. Compare count with
++  share-of-source-group; a global percentage can hide a local systematic issue.
++- **Family + grade:** find NPK B → NPK A. Coverage did not preserve this distinction.
++- **Decision basis:** see that accepted fuzzy links can have a close alternative.
++  These method/score/gap fields are declared synthetic annotations, not outputs
++  from a matcher that ran during loading.
++- **Concentration:** inspect the largest Ammonia target. It absorbs 10000 extra
++  positions and combines source grades, while legitimate packaging convergence
++  appears elsewhere. Concentration alone does not mean the mapping is wrong.
++- **Revenue exposure:** synthetic revenue changes the weighting, not the inferred
++  probability of an error.
++
++Select a matrix cell or target, then **Inspect sample keys in Join Lens**. The app
++creates a normal query with at most 24 exact keys and opens its Join. Return via
++the overview workspace tab. Neither selecting a cell nor inspecting samples edits
++a mapping. Use existing KeyMap editing/Save/Apply workflows for changes.
++
++## Scope and limits
++
++The SQL projections scan all source rows and use the actual applied seed mapping.
++The browser receives 32 aggregate groups (for the unedited fixture), the top 12
++targets and bounded samples. A window total prevents a truncated preview from
++being presented as a whole-dataset overview. Sample rows are illustrative, not
++proof that every member of a region is correct.
++
++This prototype is configured for the lab's named queries and attributes, not an
++automatic profiler for arbitrary mappings. It preserves current 1/N → 1 mapping
++semantics. There is no new LLM integration or drag-and-drop editor.
++
++The current application still serializes the full seed map in the workspace and
++compiles seed rows into SQL. Chart aggregation bounds displayed data, not this
++existing transport cost. Native integration should be measured on the user's
++machine before making performance guarantees.
++
++The color strips use a primary-signal partition: no catalog partner, different
++family, different grade, close alternative, similarity basis, aligned attributes
++(in that order). They are not independent overlapping risk counts. Decision
++annotations describe the fixture's original choices, not new matcher execution.
++
++Full native acceptance: `cargo test -p dwh-host --test mapping_quality`.
+diff --git a/openspec/README.md b/openspec/README.md
+index 1bf56fb..a3dfba9 100644
+--- a/openspec/README.md
++++ b/openspec/README.md
+@@ -29,3 +29,5 @@ Active changes:
+ - ~~[`changes/keymap-composite/`](changes/keymap-composite/)~~ — **merged** → [`specs/keymap-composite-*/`](specs/) ([ADR-0024](../docs/adr/0024-keymap-composite.md))
+ 
+ Review order: proposal → specs → design → tasks. Implement only after that review (`openspec apply` / agent apply).
++
++- ~~[`changes/mapping-quality-overview/`](changes/mapping-quality-overview/)~~ — **prototype implemented**, contract merged → [`specs/mapping-quality-overview/`](specs/mapping-quality-overview/) ([ADR-0026](../docs/adr/0026-mapping-quality-overview.md))
+diff --git a/openspec/changes/mapping-quality-overview/design.md b/openspec/changes/mapping-quality-overview/design.md
+new file mode 100644
+index 0000000..23659b6
+--- /dev/null
++++ b/openspec/changes/mapping-quality-overview/design.md
+@@ -0,0 +1,17 @@
++# Design
++
++`demo_mapping_quality/data.rs` owns deterministic generation and atomic cache
++publication. Its sibling module constructs an ordinary Workspace using current
++LoadCsv/DeriveColumn/ApplyKeyMap/Join/SqlModel steps. There is no new IR.
++
++Two projection models emit at most a small number of matrix groups and 12 target
++hotspots. The React overview uses the existing preview RPC. `mappingQuality.ts`
++validates completeness, groups dimensions and constructs bounded inspection
++queries. Only stable lab ids enable the prototype tab.
++
++Full seed rows still exist in the workspace and generated SQL under existing
++semantics. Bounding chart data does not make that underlying transport free.
++
++The UI interprets family/grade mismatches and declared evidence. Similarity gaps
++are illustrative fixture values; no matcher has run and no learned correctness
++probability is displayed.
+diff --git a/openspec/changes/mapping-quality-overview/proposal.md b/openspec/changes/mapping-quality-overview/proposal.md
+new file mode 100644
+index 0000000..d508f2a
+--- /dev/null
++++ b/openspec/changes/mapping-quality-overview/proposal.md
+@@ -0,0 +1,11 @@
++# Whole-mapping quality lab
++
++Provide a distinct macro view next to the existing local Join Lens. Show patterns
++that coverage alone hides, using a reproducible 100K-position offline Help lab.
++
++In scope: deterministic Rust data generation, genuine seed mapping/Join, full-data
++aggregates, family/grade/basis matrix, row-share/revenue views, target concentration,
++exact sample-key drill-down and a persistent workspace overview tab.
++
++Out of scope: replacement of Join Lens, the rejected card editor, new LLM calls,
++a universal quality classifier, general metadata binding and new mapping IR.
+diff --git a/openspec/changes/mapping-quality-overview/specs/mapping-quality-overview/spec.md b/openspec/changes/mapping-quality-overview/specs/mapping-quality-overview/spec.md
+new file mode 100644
+index 0000000..0585ddd
+--- /dev/null
++++ b/openspec/changes/mapping-quality-overview/specs/mapping-quality-overview/spec.md
+@@ -0,0 +1,34 @@
++# Spec: mapping-quality-overview
++
++## ADDED Requirements
++
++### Requirement: Offline moderate-scale Help lab
++Help SHALL expose a mapping-quality lab with 100000 source positions, 2400 catalog products and 95000 seed links. Generation SHALL be deterministic and require no external services. Incomplete cached generations SHALL fail explicitly.
++
++#### Scenario: First load
++- **WHEN** the lab is selected in Help
++- **THEN** CSV inputs are generated locally and a real DWHQ mapping workspace opens with DuckDB execution
++- **AND** the overview opens in its own workspace tab
++
++### Requirement: Global observations, not coverage-only verdicts
++The overview SHALL display family/grade correspondence, declared decision basis and target concentration. It SHALL distinguish observations from correctness assertions and label synthetic scores as annotations.
++
++#### Scenario: Fully mapped but inconsistent region
++- **GIVEN** accepted links crossing family/grade boundaries
++- **WHEN** the user explores the matrix
++- **THEN** those links remain observable despite high catalog coverage
++
++### Requirement: Aggregates retain full-input scope
++Projection SQL SHALL aggregate the complete input. The UI SHALL reject truncated/incomplete aggregate results using a reported window total. Target lists and sample keys SHALL be bounded.
++
++#### Scenario: Aggregate preview is truncated
++- **WHEN** visible aggregate counts do not sum to the reported total
++- **THEN** the UI displays an error rather than presenting a partial matrix as global
++
++### Requirement: Explicit local drill-down
++Selecting a cell or target SHALL expose actual sample keys. Inspect SHALL create an ordinary query filtered to at most 24 unique keys and open its Join in the existing Lens without modifying the original Join.
++
++#### Scenario: Inspect a matrix region
++- **WHEN** Inspect samples is chosen
++- **THEN** the sample query uses exact keys from that aggregate
++- **AND** the UI clearly distinguishes sample investigation from full-data coverage
+diff --git a/openspec/changes/mapping-quality-overview/tasks.md b/openspec/changes/mapping-quality-overview/tasks.md
+new file mode 100644
+index 0000000..2698421
+--- /dev/null
++++ b/openspec/changes/mapping-quality-overview/tasks.md
+@@ -0,0 +1,15 @@
++# Tasks
++
++- [x] Add deterministic Rust lab generator and workspace projections.
++- [x] Add Help entry and separate overview tab with DuckDB preset.
++- [x] Implement matrix dimensions, normalization, concentration and sample drill-down.
++- [x] Add completeness/inspection tests and generator/workspace tests.
++- [x] Verify actual DuckDB aggregates, frontend build and browser interactions.
++- [x] Merge capability contract into openspec/specs and document limits.
++
++Validation: all TS assertions and production build passed; generator and workspace
++module tests passed against the real pipeline crate in an isolated check harness;
++its emitted SQL ran in DuckDB 2.0.0 over the complete 100K fixture and all expected
++counts were asserted. Browser interactions used those computed aggregates.
++`cargo check -p dwh-host --tests` was blocked by libduckdb-sys download
++(Connection refused), so native host acceptance is supplied but not claimed run.
+diff --git a/openspec/specs/mapping-quality-overview/spec.md b/openspec/specs/mapping-quality-overview/spec.md
+new file mode 100644
+index 0000000..eab60d5
+--- /dev/null
++++ b/openspec/specs/mapping-quality-overview/spec.md
+@@ -0,0 +1,34 @@
++# Spec: mapping-quality-overview
++
++## Requirements
++
++### Requirement: Offline moderate-scale Help lab
++Help SHALL expose a mapping-quality lab with 100000 source positions, 2400 catalog products and 95000 seed links. Generation SHALL be deterministic and require no external services. Incomplete cached generations SHALL fail explicitly.
++
++#### Scenario: First load
++- **WHEN** the lab is selected in Help
++- **THEN** CSV inputs are generated locally and a real DWHQ mapping workspace opens with DuckDB execution
++- **AND** the overview opens in its own workspace tab
++
++### Requirement: Global observations, not coverage-only verdicts
++The overview SHALL display family/grade correspondence, declared decision basis and target concentration. It SHALL distinguish observations from correctness assertions and label synthetic scores as annotations.
++
++#### Scenario: Fully mapped but inconsistent region
++- **GIVEN** accepted links crossing family/grade boundaries
++- **WHEN** the user explores the matrix
++- **THEN** those links remain observable despite high catalog coverage
++
++### Requirement: Aggregates retain full-input scope
++Projection SQL SHALL aggregate the complete input. The UI SHALL reject truncated/incomplete aggregate results using a reported window total. Target lists and sample keys SHALL be bounded.
++
++#### Scenario: Aggregate preview is truncated
++- **WHEN** visible aggregate counts do not sum to the reported total
++- **THEN** the UI displays an error rather than presenting a partial matrix as global
++
++### Requirement: Explicit local drill-down
++Selecting a cell or target SHALL expose actual sample keys. Inspect SHALL create an ordinary query filtered to at most 24 unique keys and open its Join in the existing Lens without modifying the original Join.
++
++#### Scenario: Inspect a matrix region
++- **WHEN** Inspect samples is chosen
++- **THEN** the sample query uses exact keys from that aggregate
++- **AND** the UI clearly distinguishes sample investigation from full-data coverage
+diff --git a/src/App.tsx b/src/App.tsx
+index 33d3084..25e696a 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -97,6 +97,8 @@ import {
+ import { JoinLens } from "./components/JoinLens";
+ import { JoinKeyEditor } from "./components/JoinKeyEditor";
+ import { KeyMapEditor } from "./components/KeyMapEditor";
++import { MappingQualityOverview } from "./components/mapping-quality/MappingQualityOverview";
++import { QUALITY_TAB, isMappingQualityLab, qualityInspectionQuery } from "./lib/mappingQuality";
+ import {
+   applyKeyMapToWorkspace,
+   applyNormalizeToWorkspace,
+@@ -2147,7 +2149,7 @@ function App() {
+       } else if (id === "keymap_pg_seed" || id === "keymap_mixed") {
+         engine = "duckdb";
+         destKind = "postgres";
+-      } else if (id === "keymap_parquet") {
++      } else if (id === "keymap_parquet" || id === "mapping_quality") {
+         engine = "duckdb";
+         destKind = "duckdb";
+       }
+@@ -2179,6 +2181,8 @@ function App() {
+             : {}),
+         }),
+       );
++      setKeyMapTabs([]);
++      setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
+       setActiveQueryId(ws.focus_query_id);
+       setSelectedStepIndex(
+         ws.queries.find((q) => q.id === ws.focus_query_id)?.steps.length
+@@ -3740,7 +3744,8 @@ function App() {
+     function onKey(e: KeyboardEvent) {
+       if (e.key === "Escape" && centerTab !== "canvas") {
+         e.preventDefault();
+-        closeKeyMapTab(centerTab);
++        if (centerTab === QUALITY_TAB) setCenterTab("canvas");
++        else closeKeyMapTab(centerTab);
+         return;
+       }
+       const tag = (e.target as HTMLElement)?.tagName;
+@@ -4658,6 +4663,13 @@ function App() {
+               >
+                 Pipeline canvas
+               </button>
++              {isMappingQualityLab(project.workspace) && (
++                <button type="button" role="tab" aria-selected={centerTab === QUALITY_TAB}
++                  onClick={() => { setCenterTab(QUALITY_TAB); setSelectedKeyMapId(null); }}
++                  className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[12px] ${centerTab === QUALITY_TAB ? "bg-[#10251f] text-teal-100" : "text-slate-400 hover:text-teal-200"}`}>
++                  ◈ Mapping quality · Prototype
++                </button>
++              )}
+               {keyMapTabs.map((tab) => {
+                 const on = centerTab === tab.map.id;
+                 return (
+@@ -4729,6 +4741,23 @@ function App() {
+               </div>
+             )}
+ 
++            {isMappingQualityLab(project.workspace) && (
++              <div className={centerTab === QUALITY_TAB ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={centerTab !== QUALITY_TAB}>
++                <MappingQualityOverview workspace={project.workspace} connections={project.connections} sources={project.sources}
++                  onCanvas={() => setCenterTab("canvas")}
++                  onInspect={(keys) => {
++                    try {
++                      const sample = qualityInspectionQuery(project.workspace, keys);
++                      sample.id = newQueryId("quality_inspection", project.workspace.queries.map((query) => query.id));
++                      setQueries((queries) => [...queries, sample]);
++                      setActiveQueryId(sample.id);
++                      setSelectedStepIndex(sample.steps.length - 1);
++                      setCenterTab("canvas"); setBottomTab("data"); setDiagView(null); setJoinLensOn(true);
++                    } catch (reason) { setError(String(reason)); }
++                  }}
++                />
++              </div>
++            )}
+             {keyMapTabs.map((keyMapEditor) => (
+               <div
+                 key={keyMapEditor.map.id}
+@@ -5254,6 +5283,7 @@ function App() {
+             </div>
+           </section>
+ 
++          {centerTab !== QUALITY_TAB && <>
+           <PanelResizeHandle
+             collapsedRail={inspectorCollapsed}
+             aria-label={
+@@ -6406,6 +6436,7 @@ function App() {
+             </div>
+           </aside>
+           )}
++          </>}
+         </div>
+       )}
+     </div>
+diff --git a/src/components/AppMenu.tsx b/src/components/AppMenu.tsx
+index 47fb402..7740674 100644
+--- a/src/components/AppMenu.tsx
++++ b/src/components/AppMenu.tsx
+@@ -477,6 +477,10 @@ export function AppMenu({
+           />
+           <Sep />
+           <SubLabel>Mapping labs</SubLabel>
++          <Item
++            label="Mapping quality — 100K products · overview prototype"
++            onClick={() => run(() => onLoadDemo("mapping_quality"))}
++          />
+           <Item
+             label="F&B hub — seed · daily → month"
+             onClick={() => run(() => onLoadDemo("keymap"))}
+diff --git a/src/components/EmptyHero.tsx b/src/components/EmptyHero.tsx
+index ea029c9..c276762 100644
+--- a/src/components/EmptyHero.tsx
++++ b/src/components/EmptyHero.tsx
+@@ -4,6 +4,7 @@ import { emptyKeyMap } from "../lib/keyMap";
+ import { KeyMapEditor } from "./KeyMapEditor";
+ 
+ export type DemoId =
++  | "mapping_quality"
+   | "sales"
+   | "union"
+   | "sql"
+diff --git a/src/components/mapping-quality/MappingQualityOverview.tsx b/src/components/mapping-quality/MappingQualityOverview.tsx
+new file mode 100644
+index 0000000..a24342b
+--- /dev/null
++++ b/src/components/mapping-quality/MappingQualityOverview.tsx
+@@ -0,0 +1,496 @@
++import { useEffect, useMemo, useRef, useState } from "react";
++import { previewWorkspace } from "../../lib/bridge";
++import type { ConnectionDef, SourceDef, Workspace } from "../../types/pipeline";
++import {
++  axes,
++  parseQualitySummary,
++  parseQualityTargets,
++  QUALITY_SUMMARY,
++  QUALITY_TARGETS,
++  SIGNALS,
++  type QualityCell,
++  type QualityDimension,
++  type QualityTarget,
++} from "../../lib/mappingQuality";
++import "./mapping-quality.css";
++
++type Props = {
++  workspace: Workspace;
++  connections: ConnectionDef[];
++  sources: SourceDef[];
++  onInspect: (keys: string[]) => void;
++  onCanvas: () => void;
++};
++const count = (value: number) => value.toLocaleString("en-US");
++const percent = (part: number, total: number) =>
++  total ? `${((100 * part) / total).toFixed(1)}%` : "0%";
++
++/** Prototype projection viewer: aggregates scan the full data; only bounded samples reach the UI. */
++export function MappingQualityOverview({
++  workspace,
++  connections,
++  sources,
++  onInspect,
++  onCanvas,
++}: Props) {
++  const [cells, setCells] = useState<QualityCell[]>([]);
++  const [targets, setTargets] = useState<QualityTarget[]>([]);
++  const [busy, setBusy] = useState(true);
++  const [error, setError] = useState<string | null>(null);
++  const [dimension, setDimension] = useState<QualityDimension>("family");
++  const [measure, setMeasure] = useState("count");
++  const [selection, setSelection] = useState<{
++    row: string;
++    column: string;
++  } | null>(null);
++  const [target, setTarget] = useState<QualityTarget | null>(null);
++  const [revision, setRevision] = useState(0);
++  const request = useRef(0);
++  useEffect(() => {
++    const token = ++request.current;
++    setBusy(true);
++    setError(null);
++    setCells([]);
++    setTargets([]);
++    setSelection(null);
++    setTarget(null);
++    // Existing preview RPC executes SQL aggregates over the complete input, not a preview sample.
++    void Promise.all([
++      previewWorkspace(
++        { ...workspace, focus_query_id: QUALITY_SUMMARY },
++        connections,
++        sources,
++      ),
++      previewWorkspace(
++        { ...workspace, focus_query_id: QUALITY_TARGETS },
++        connections,
++        sources,
++      ),
++    ])
++      .then(([summary, hotspots]) => {
++        if (token !== request.current) return;
++        const parsed = parseQualitySummary(summary);
++        const parsedTargets = parseQualityTargets(hotspots);
++        setCells(parsed);
++        setTargets(parsedTargets);
++      })
++      .catch((reason) => {
++        if (token === request.current) setError(String(reason));
++      })
++      .finally(() => {
++        if (token === request.current) setBusy(false);
++      });
++    return () => {
++      request.current++;
++    };
++  }, [workspace, connections, sources, revision]);
++
++  const total = cells.reduce((sum, cell) => sum + cell.positions, 0);
++  const totalRevenue = cells.reduce((sum, cell) => sum + cell.revenue, 0);
++  const signalCounts = useMemo(() => {
++    const result = new Map<string, number>();
++    for (const cell of cells)
++      result.set(cell.signal, (result.get(cell.signal) ?? 0) + cell.positions);
++    return result;
++  }, [cells]);
++  const matrix = useMemo(() => {
++    const result = new Map<string, QualityCell[]>();
++    const rows = new Set<string>(),
++      columns = new Set<string>();
++    for (const cell of cells) {
++      const [row, column] = axes(cell, dimension);
++      rows.add(row);
++      columns.add(column);
++      const key = JSON.stringify([row, column]);
++      const existing = result.get(key) ?? [];
++      existing.push(cell);
++      result.set(key, existing);
++    }
++    return {
++      cells: result,
++      rows: [...rows].sort(),
++      columns: [...columns].sort(),
++    };
++  }, [cells, dimension]);
++  const selected = selection
++    ? (matrix.cells.get(JSON.stringify([selection.row, selection.column])) ??
++      [])
++    : cells;
++  const selectedCount =
++    target?.positions ??
++    selected.reduce((sum, cell) => sum + cell.positions, 0);
++  const selectedRevenue = selected.reduce((sum, cell) => sum + cell.revenue, 0);
++  const sampleKeys =
++    target?.samples ??
++    [...new Set(selected.flatMap((cell) => cell.samples))].slice(0, 24);
++  const rowTotals = new Map(
++    matrix.rows.map((row) => [
++      row,
++      cells
++        .filter((cell) => axes(cell, dimension)[0] === row)
++        .reduce((sum, cell) => sum + cell.positions, 0),
++    ]),
++  );
++  const different =
++    (signalCounts.get("family_difference") ?? 0) +
++    (signalCounts.get("grade_difference") ?? 0);
++
++  return (
++    <section className="quality-overview">
++      <header className="quality-header">
++        <div>
++          <span className="quality-kicker">
++            Mapping observatory / prototype
++          </span>
++          <h1>Coverage is only the beginning.</h1>
++          <p>
++            See what your crosswalk preserves, collapses and leaves uncertain.
++          </p>
++        </div>
++        <div className="quality-header-actions">
++          <button onClick={onCanvas}>Pipeline & Join Lens ↗</button>
++          <button
++            disabled={busy}
++            onClick={() => setRevision((value) => value + 1)}
++          >
++            Refresh analysis
++          </button>
++        </div>
++      </header>
++      <div className="quality-context">
++        Offline Help lab · 100,000 commercial positions → 2,400 catalog products
++        · all-data aggregates · synthetic decision annotations
++      </div>
++      {busy ? (
++        <div role="status" className="quality-loading">
++          <div className="quality-orbit" />
++          <h2>Reading the whole mapping</h2>
++          <p>
++            Aggregating families, grades and decision evidence in DuckDB.
++            <br />
++            No individual product cloud is being sent to the screen.
++          </p>
++          <button onClick={onCanvas}>Keep working in the pipeline</button>
++        </div>
++      ) : error ? (
++        <div role="alert" className="quality-loading">
++          <h2>Analysis is unavailable</h2>
++          <p>{error}</p>
++          <button onClick={() => setRevision((value) => value + 1)}>
++            Retry
++          </button>
++        </div>
++      ) : (
++        <>
++          <div className="quality-stats">
++            <div>
++              <small>Commercial positions</small>
++              <strong>{count(total)}</strong>
++              <span>Full input, not a sample</span>
++            </div>
++            <div>
++              <small>Catalog coverage</small>
++              <strong className="quality-mint">
++                {percent(total - (signalCounts.get("unmapped") ?? 0), total)}
++              </strong>
++              <span>Having a partner is not proof of quality</span>
++            </div>
++            <div>
++              <small>Different family or grade</small>
++              <strong className="quality-amber">{count(different)}</strong>
++              <span>Observed differences to investigate</span>
++            </div>
++            <div>
++              <small>Close alternative</small>
++              <strong className="quality-lilac">
++                {count(signalCounts.get("close_alternative") ?? 0)}
++              </strong>
++              <span>Accepted links with a small declared gap</span>
++            </div>
++          </div>
++          <div className="quality-layout">
++            <div className="quality-main">
++              <div className="quality-matrix-toolbar">
++                <div>
++                  <span className="quality-kicker">
++                    Structure of correspondence
++                  </span>
++                  <h2>
++                    {dimension === "basis"
++                      ? "What supports the decisions?"
++                      : "Where do the products go?"}
++                  </h2>
++                </div>
++                <div className="quality-controls">
++                  <select
++                    aria-label="Overview dimension"
++                    value={dimension}
++                    onChange={(event) => {
++                      setDimension(event.target.value as QualityDimension);
++                      setSelection(null);
++                      setTarget(null);
++                    }}
++                  >
++                    <option value="family">Product families</option>
++                    <option value="grade">Family + grade</option>
++                    <option value="basis">Decision basis</option>
++                  </select>
++                  <select
++                    aria-label="Overview measure"
++                    value={measure}
++                    onChange={(event) => setMeasure(event.target.value)}
++                  >
++                    <option value="count">Position count</option>
++                    <option value="share">Share of source group</option>
++                    <option value="revenue">Revenue exposure</option>
++                  </select>
++                </div>
++              </div>
++              <p className="quality-axis-note">
++                Rows:{" "}
++                {dimension === "basis"
++                  ? "declared decision method"
++                  : "commercial classification"}{" "}
++                · Columns:{" "}
++                {dimension === "basis"
++                  ? "observed signal"
++                  : "production classification"}
++                . Select a cell to inspect its composition.
++              </p>
++              <div className="quality-matrix-scroll">
++                <table className="quality-matrix">
++                  <thead>
++                    <tr>
++                      <th>FROM / TO</th>
++                      {matrix.columns.map((column) => (
++                        <th key={column}>{column}</th>
++                      ))}
++                      <th>Total</th>
++                    </tr>
++                  </thead>
++                  <tbody>
++                    {matrix.rows.map((row) => (
++                      <tr key={row}>
++                        <th>{row}</th>
++                        {matrix.columns.map((column) => {
++                          const group =
++                            matrix.cells.get(JSON.stringify([row, column])) ??
++                            [];
++                          const positions = group.reduce(
++                            (sum, cell) => sum + cell.positions,
++                            0,
++                          );
++                          const revenue = group.reduce(
++                            (sum, cell) => sum + cell.revenue,
++                            0,
++                          );
++                          const active =
++                            selection?.row === row &&
++                            selection.column === column;
++                          const dim = selection && !active;
++                          const value =
++                            measure === "share"
++                              ? percent(positions, rowTotals.get(row) ?? 0)
++                              : measure === "revenue"
++                                ? `$${(revenue / 1e6).toFixed(2)}m`
++                                : count(positions);
++                          return (
++                            <td key={column}>
++                              <button
++                                disabled={!positions}
++                                className={`${active ? "active" : ""} ${dim ? "dimmed" : ""}`}
++                                aria-label={`${row} to ${column}: ${count(positions)} positions`}
++                                aria-pressed={active}
++                                onClick={() => {
++                                  setSelection(active ? null : { row, column });
++                                  setTarget(null);
++                                }}
++                                style={{
++                                  background: positions
++                                    ? `rgba(67, 170, 153, ${0.06 + (0.25 * positions) / (rowTotals.get(row) || 1)})`
++                                    : undefined,
++                                }}
++                              >
++                                <strong>{positions ? value : "·"}</strong>
++                                <div className="quality-cell-signals">
++                                  {group.map((cell, index) => (
++                                    <span
++                                      key={index}
++                                      style={{
++                                        width: `${(100 * cell.positions) / positions}%`,
++                                        background: SIGNALS[cell.signal]!.color,
++                                      }}
++                                    />
++                                  ))}
++                                </div>
++                              </button>
++                            </td>
++                          );
++                        })}
++                        <td className="quality-total">
++                          {count(rowTotals.get(row) ?? 0)}
++                        </td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </table>
++              </div>
++              <div className="quality-legend">
++                {Object.entries(SIGNALS).map(([key, signal]) => (
++                  <span key={key} title={signal.explanation}>
++                    <i style={{ background: signal.color }} />
++                    {signal.label}
++                  </span>
++                ))}
++              </div>
++              <div className="quality-reading">
++                <strong>Look beyond the diagonal.</strong>
++                <span>
++                  Different packaging can legitimately converge. Different
++                  grades can disappear into the same target. Neither a dense
++                  cell nor a high similarity score establishes correctness.
++                </span>
++              </div>
++              <div className="quality-target-head">
++                <div>
++                  <span className="quality-kicker">Concentration lens</span>
++                  <h2>What gets absorbed into one product?</h2>
++                </div>
++                <span>Top 12 targets across the full dataset</span>
++              </div>
++              <div className="quality-target-list">
++                {targets.map((item) => (
++                  <button
++                    key={item.key}
++                    className={target?.key === item.key ? "active" : ""}
++                    onClick={() => {
++                      setTarget(target?.key === item.key ? null : item);
++                      setSelection(null);
++                    }}
++                  >
++                    <div>
++                      <strong>{item.key}</strong>
++                      <small>
++                        {item.family} · grade {item.grade}
++                      </small>
++                    </div>
++                    <div className="quality-target-track">
++                      <span
++                        style={{
++                          width: `${(100 * item.positions) / (targets[0]?.positions || 1)}%`,
++                        }}
++                      />
++                    </div>
++                    <div>
++                      <b>{count(item.positions)}</b>
++                      <small
++                        className={item.sourceGrades > 1 ? "quality-amber" : ""}
++                      >
++                        {item.sourceGrades} source grades · {item.packages} pack
++                        types
++                      </small>
++                    </div>
++                  </button>
++                ))}
++              </div>
++            </div>
++            <aside className="quality-inspector">
++              <span className="quality-kicker">Read the pattern</span>
++              <h2>
++                {target
++                  ? target.key
++                  : selection
++                    ? `${selection.row} → ${selection.column}`
++                    : "A connected mapping can still lose meaning."}
++              </h2>
++              <strong className="quality-selection-total">
++                {count(selectedCount)}
++              </strong>
++              <p>
++                positions{" "}
++                {target
++                  ? "converging on this target"
++                  : selection
++                    ? "in this cell"
++                    : "in the current analysis"}
++              </p>
++              {target ? (
++                <div className="quality-explanation">
++                  <p>
++                    <b>{target.sourceGrades} distinct source grades</b> feed one
++                    target grade ({target.grade}).
++                  </p>
++                  <p>
++                    <b>{target.packages} packaging variants</b> are combined
++                    here.
++                  </p>
++                  <p>
++                    Packaging convergence may be intended. Grade convergence
++                    needs business interpretation. Concentration alone is not an
++                    error.
++                  </p>
++                </div>
++              ) : (
++                <>
++                  <div className="quality-breakdown">
++                    {Object.entries(SIGNALS).map(([key, signal]) => {
++                      const amount = selected
++                        .filter((cell) => cell.signal === key)
++                        .reduce((sum, cell) => sum + cell.positions, 0);
++                      return amount ? (
++                        <div key={key}>
++                          <span>
++                            <i style={{ background: signal.color }} />
++                            {signal.label}
++                          </span>
++                          <b>{count(amount)}</b>
++                          <div
++                            style={{
++                              width: percent(amount, selectedCount),
++                              background: signal.color,
++                            }}
++                          />
++                          <small>{signal.explanation}</small>
++                        </div>
++                      ) : null;
++                    })}
++                  </div>
++                  <p className="quality-exposure">
++                    Synthetic revenue exposure: <b>${count(selectedRevenue)}</b>{" "}
++                    ({percent(selectedRevenue, totalRevenue)} of input). This
++                    measures scale, not estimated error.
++                  </p>
++                </>
++              )}
++              <button
++                className="quality-primary"
++                disabled={!sampleKeys.length}
++                onClick={() => onInspect(sampleKeys)}
++              >
++                Inspect {sampleKeys.length} sample keys in Join Lens ↗
++              </button>
++              <p className="quality-sample-note">
++                Drill-down creates a normal sample query with these exact keys.
++                The overview remains an all-data aggregate. Samples illustrate a
++                group; they do not certify every member.
++              </p>
++              <details>
++                <summary>Sample keys</summary>
++                <code>{sampleKeys.join(", ")}</code>
++              </details>
++              <div className="quality-prototype-note">
++                <strong>Prototype boundary</strong>
++                <p>
++                  These projections are configured for this Help lab. Methods
++                  and similarity scores are fixture annotations. No LLM has run,
++                  no correctness score has been invented, and no mapping is
++                  changed by selecting a cell.
++                </p>
++              </div>
++            </aside>
++          </div>
++        </>
++      )}
++    </section>
++  );
++}
+diff --git a/src/components/mapping-quality/mapping-quality.css b/src/components/mapping-quality/mapping-quality.css
+new file mode 100644
+index 0000000..5c4dc1e
+--- /dev/null
++++ b/src/components/mapping-quality/mapping-quality.css
+@@ -0,0 +1,507 @@
++.quality-overview {
++  flex: 1;
++  min-height: 0;
++  overflow: auto;
++  background: #080f16;
++  color: #e0e9ef;
++  font-size: 12px;
++}
++.quality-overview button,
++.quality-overview select {
++  border: 1px solid #304353;
++  background: #14222e;
++  color: inherit;
++  padding: 8px 12px;
++  border-radius: 6px;
++  font: inherit;
++}
++.quality-overview button {
++  cursor: pointer;
++}
++.quality-overview button:hover {
++  border-color: #5adbbd;
++}
++.quality-overview button:disabled {
++  cursor: default;
++  opacity: 0.4;
++}
++.quality-overview :focus-visible {
++  outline: 2px solid #70edcb;
++  outline-offset: 3px;
++}
++.quality-header {
++  display: flex;
++  justify-content: space-between;
++  gap: 24px;
++  align-items: center;
++  padding: 26px 28px 20px;
++}
++.quality-kicker {
++  color: #59dfbd;
++  text-transform: uppercase;
++  letter-spacing: 1.8px;
++  font:
++    9px ui-monospace,
++    monospace;
++}
++.quality-header h1 {
++  font-size: 29px;
++  letter-spacing: -1px;
++  line-height: 1.2;
++  margin: 7px 0 10px;
++  font-weight: 550;
++}
++.quality-header p {
++  color: #8da2b3;
++  font-size: 12px;
++}
++.quality-header-actions {
++  display: flex;
++  gap: 8px;
++  flex-wrap: wrap;
++}
++.quality-context {
++  padding: 10px 28px;
++  border-top: 1px solid #1a3036;
++  border-bottom: 1px solid #1a3036;
++  background: #0b1d21;
++  color: #83aaa9;
++  font:
++    10px ui-monospace,
++    monospace;
++}
++.quality-stats {
++  display: grid;
++  grid-template-columns: repeat(4, 1fr);
++  gap: 1px;
++  background: #22313b;
++  border-bottom: 1px solid #22313b;
++}
++.quality-stats > div {
++  background: #0e1822;
++  padding: 20px 26px;
++  display: flex;
++  flex-direction: column;
++  gap: 7px;
++}
++.quality-stats small {
++  font-size: 10px;
++  color: #9aaebe;
++}
++.quality-stats strong {
++  font-size: 30px;
++  font-weight: 500;
++  letter-spacing: -1px;
++}
++.quality-stats span {
++  font-size: 10px;
++  color: #718798;
++}
++.quality-mint {
++  color: #57dfbc;
++}
++.quality-amber {
++  color: #ffb870 !important;
++}
++.quality-lilac {
++  color: #b8a0ff;
++}
++.quality-layout {
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) 300px;
++}
++.quality-main {
++  padding: 25px;
++  min-width: 0;
++}
++.quality-matrix-toolbar {
++  display: flex;
++  justify-content: space-between;
++  gap: 20px;
++  align-items: center;
++}
++.quality-overview h2 {
++  font-size: 18px;
++  letter-spacing: -0.3px;
++  font-weight: 550;
++  margin: 7px 0 12px;
++}
++.quality-controls {
++  display: flex;
++  gap: 7px;
++  flex-wrap: wrap;
++}
++.quality-controls select {
++  font-size: 11px;
++}
++.quality-axis-note {
++  color: #7f95a7;
++  font-size: 10px;
++  margin: 0 0 17px;
++  line-height: 1.7;
++}
++.quality-matrix-scroll {
++  overflow: auto;
++  border: 1px solid #263a47;
++  border-radius: 9px;
++  background: radial-gradient(#182d38 0.7px, transparent 0.7px) 0 0/13px 13px;
++}
++.quality-matrix {
++  border-collapse: separate;
++  border-spacing: 5px;
++  width: 100%;
++  min-width: 620px;
++}
++.quality-matrix th {
++  padding: 8px;
++  font-size: 10px;
++  font-weight: 450;
++  color: #9bafbf;
++  text-align: center;
++  min-width: 76px;
++  max-width: 150px;
++}
++.quality-matrix th:first-child {
++  position: sticky;
++  left: 0;
++  background: #0c1721;
++  text-align: left;
++  min-width: 110px;
++  z-index: 1;
++}
++.quality-matrix thead th:first-child {
++  color: #557889;
++  font:
++    9px ui-monospace,
++    monospace;
++}
++.quality-matrix td {
++  padding: 0;
++  min-width: 76px;
++}
++.quality-matrix td button {
++  position: relative;
++  border-radius: 5px;
++  width: 100%;
++  height: 57px;
++  padding: 8px 6px 12px;
++  border: 1px solid #2d465344;
++  transition:
++    opacity 0.2s,
++    box-shadow 0.2s,
++    transform 0.2s;
++}
++.quality-matrix td button strong {
++  font:
++    12px ui-monospace,
++    monospace;
++  font-weight: 450;
++}
++.quality-matrix td button.active {
++  border-color: #64ebc7;
++  box-shadow:
++    0 0 0 2px #64ebc71c,
++    0 0 25px #64ebc719;
++  transform: translateY(-2px);
++}
++.quality-matrix td button.dimmed {
++  opacity: 0.4;
++}
++.quality-matrix td button.dimmed:hover {
++  opacity: 1;
++}
++.quality-cell-signals {
++  display: flex;
++  position: absolute;
++  bottom: 3px;
++  left: 3px;
++  right: 3px;
++  height: 4px;
++  overflow: hidden;
++  border-radius: 2px;
++}
++.quality-cell-signals span {
++  height: 100%;
++}
++.quality-total {
++  text-align: center;
++  font:
++    10px ui-monospace,
++    monospace;
++  color: #7693a5;
++}
++.quality-legend {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 10px 16px;
++  margin: 17px 0;
++  font-size: 9px;
++  color: #8da6b7;
++}
++.quality-legend i,
++.quality-breakdown i {
++  display: inline-block;
++  width: 6px;
++  height: 6px;
++  border-radius: 50%;
++  margin-right: 6px;
++}
++.quality-reading {
++  display: flex;
++  gap: 15px;
++  padding: 14px 17px;
++  border-left: 2px solid #5e9f9b;
++  background: #101f2a;
++  border-radius: 0 6px 6px 0;
++  color: #9ab0bf;
++  font-size: 11px;
++  line-height: 1.7;
++}
++.quality-reading strong {
++  color: #d3e5ea;
++  min-width: 140px;
++}
++.quality-target-head {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 15px;
++  margin-top: 30px;
++}
++.quality-target-head > span {
++  font-size: 10px;
++  color: #718b9e;
++}
++.quality-target-list {
++  border: 1px solid #263a47;
++  border-radius: 8px;
++  overflow: hidden;
++}
++.quality-target-list > button {
++  display: flex;
++  align-items: center;
++  gap: 18px;
++  width: 100%;
++  text-align: left;
++  border-radius: 0;
++  border: 0;
++  border-bottom: 1px solid #1f313e;
++  padding: 12px 14px;
++  background: #0c1721;
++}
++.quality-target-list > button.active {
++  background: #17312e;
++  box-shadow: inset 3px 0 #57dfbc;
++}
++.quality-target-list > button > div:first-child {
++  width: 145px;
++}
++.quality-target-list strong {
++  font:
++    11px ui-monospace,
++    monospace;
++}
++.quality-target-list small {
++  display: block;
++  margin-top: 5px;
++  font-size: 9px;
++  color: #819aab;
++}
++.quality-target-list > button > div:last-child {
++  width: 160px;
++  text-align: right;
++}
++.quality-target-list b {
++  font:
++    12px ui-monospace,
++    monospace;
++}
++.quality-target-track {
++  flex: 1;
++  height: 7px;
++  background: #1b2d3b;
++  border-radius: 10px;
++  overflow: hidden;
++}
++.quality-target-track > span {
++  display: block;
++  height: 100%;
++  background: linear-gradient(90deg, #3c7885, #6fe5c3);
++  min-width: 2px;
++  border-radius: 10px;
++}
++.quality-inspector {
++  padding: 25px 22px;
++  background: #0e1822;
++  border-left: 1px solid #263a47;
++  min-width: 0;
++}
++.quality-inspector h2 {
++  line-height: 1.5;
++  font-size: 18px;
++  overflow-wrap: anywhere;
++}
++.quality-selection-total {
++  font:
++    30px ui-monospace,
++    monospace;
++  font-weight: 400;
++  display: block;
++  margin-top: 20px;
++}
++.quality-inspector p {
++  font-size: 11px;
++  color: #8ea5b7;
++  line-height: 1.8;
++  margin: 9px 0 20px;
++}
++.quality-breakdown > div {
++  display: grid;
++  grid-template-columns: 1fr auto;
++  gap: 8px;
++  margin: 17px 0;
++}
++.quality-breakdown span {
++  font-size: 10px;
++  color: #c0d0da;
++}
++.quality-breakdown b {
++  font:
++    10px ui-monospace,
++    monospace;
++}
++.quality-breakdown > div > div {
++  height: 3px;
++  grid-column: 1/-1;
++  max-width: 100%;
++  min-width: 2px;
++}
++.quality-breakdown small {
++  grid-column: 1/-1;
++  color: #718c9e;
++  font-size: 10px;
++  line-height: 1.6;
++}
++.quality-exposure {
++  border-top: 1px solid #263a47;
++  padding-top: 14px;
++}
++.quality-overview .quality-primary {
++  background: #58dfbb;
++  border-color: #58dfbb;
++  color: #06261e;
++  width: 100%;
++  font-weight: 650;
++  padding: 11px;
++}
++.quality-overview .quality-primary:hover {
++  background: #8af4d5;
++}
++.quality-inspector .quality-sample-note {
++  font-size: 10px;
++  color: #748e9f;
++}
++.quality-inspector details {
++  color: #9bb4c5;
++  font-size: 10px;
++}
++.quality-inspector code {
++  display: block;
++  margin-top: 10px;
++  line-height: 1.8;
++  overflow-wrap: anywhere;
++}
++.quality-prototype-note {
++  margin-top: 30px;
++  padding: 14px;
++  border: 1px solid #2a4051;
++  border-radius: 8px;
++}
++.quality-prototype-note strong {
++  font-size: 10px;
++  color: #a7bacc;
++}
++.quality-prototype-note p {
++  margin: 7px 0 0;
++  font-size: 10px;
++}
++.quality-explanation {
++  padding: 12px 0;
++  border-top: 1px solid #263a47;
++  margin-top: 18px;
++}
++.quality-loading {
++  text-align: center;
++  padding: 70px 25px;
++  color: #9db5c5;
++}
++.quality-loading p {
++  line-height: 1.9;
++  font-size: 12px;
++  max-width: 650px;
++  margin: 12px auto 25px;
++  overflow-wrap: anywhere;
++}
++.quality-orbit {
++  margin: 0 auto 25px;
++  width: 46px;
++  height: 46px;
++  border: 1px solid #2e635c;
++  border-top: 2px solid #65eaca;
++  border-radius: 50%;
++  animation: quality-spin 1s linear infinite;
++}
++@keyframes quality-spin {
++  to {
++    transform: rotate(360deg);
++  }
++}
++@media (prefers-reduced-motion: reduce) {
++  .quality-orbit {
++    animation: none;
++  }
++  .quality-matrix td button {
++    transition: none;
++  }
++}
++@media (max-width: 1100px) {
++  .quality-layout {
++    grid-template-columns: minmax(0, 1fr) 250px;
++  }
++  .quality-main {
++    padding: 18px;
++  }
++  .quality-inspector {
++    padding: 20px 15px;
++  }
++  .quality-header {
++    padding: 20px;
++  }
++  .quality-header h1 {
++    font-size: 24px;
++  }
++  .quality-stats > div {
++    padding: 16px;
++  }
++}
++@media (max-width: 800px) {
++  .quality-layout {
++    display: block;
++  }
++  .quality-inspector {
++    border-top: 1px solid #263a47;
++    border-left: 0;
++  }
++  .quality-stats {
++    grid-template-columns: 1fr 1fr;
++  }
++  .quality-header,
++  .quality-matrix-toolbar {
++    align-items: flex-start;
++    flex-direction: column;
++  }
++  .quality-reading {
++    flex-direction: column;
++    gap: 4px;
++  }
++}
+diff --git a/src/help/userGuide.ts b/src/help/userGuide.ts
+index d894b61..2bbe890 100644
+--- a/src/help/userGuide.ts
++++ b/src/help/userGuide.ts
+@@ -153,6 +153,7 @@ export const HELP_SECTIONS: HelpSection[] = [
+     id: "demos",
+     title: "Demos (Help → Load demo)",
+     bullets: [
++      "Mapping quality — 100,000 commercial positions, 2,400 production products and 95,000 seed links. Opens an overview prototype: family/grade flows, declared decision basis, concentration and actual sample-key drill-down into Join Lens. Offline; generated in the app demo cache. Scores are synthetic annotations, not a live LLM result.",
+       "Sales — medallion, join, rollups, top-N",
+       "Union — Append of same-grain feeds",
+       "SQL hybrid — SqlModel + CustomSql window",
+diff --git a/src/lib/mappingQuality.test.ts b/src/lib/mappingQuality.test.ts
+new file mode 100644
+index 0000000..32a7827
+--- /dev/null
++++ b/src/lib/mappingQuality.test.ts
+@@ -0,0 +1,120 @@
++import {
++  axes,
++  parseQualitySummary,
++  qualityInspectionQuery,
++} from "./mappingQuality";
++import type { PreviewResult, Workspace } from "../types/pipeline";
++function assert(value: unknown, message: string) {
++  if (!value) throw new Error(message);
++}
++function rejects(fn: () => unknown) {
++  let rejected = false;
++  try {
++    fn();
++  } catch {
++    rejected = true;
++  }
++  assert(rejected, "must reject invalid/incomplete input");
++}
++const result: PreviewResult = {
++  columns: [
++    "source_family",
++    "target_family",
++    "source_grade",
++    "target_grade",
++    "decision_method",
++    "signal",
++    "positions",
++    "revenue",
++    "sample_keys",
++    "total_positions",
++  ].map((name) => ({ name, type: "VARCHAR" })),
++  rows: [
++    [
++      "Urea",
++      "Urea",
++      "A",
++      "A",
++      "rule",
++      "aligned_attributes",
++      90,
++      1000,
++      '["C1","C2"]',
++      100,
++    ],
++    [
++      "Sulfur",
++      "Urea",
++      "A",
++      "A",
++      "manual",
++      "family_difference",
++      10,
++      400,
++      '["C3"]',
++      100,
++    ],
++  ],
++  sql: "",
++};
++const cells = parseQualitySummary(result);
++assert(
++  cells.reduce((sum, c) => sum + c.positions, 0) === 100,
++  "counts cover whole aggregate",
++);
++assert(axes(cells[0]!, "grade")[0] === "Urea · A", "grade view retains family");
++assert(
++  axes(cells[1]!, "basis")[0] === "manual",
++  "decision basis is separate from similarity",
++);
++rejects(() =>
++  parseQualitySummary({ ...result, rows: result.rows.slice(0, 1) }),
++);
++rejects(() =>
++  parseQualitySummary({
++    ...result,
++    rows: [[...result.rows[0]!.slice(0, 6), null, ...result.rows[0]!.slice(7)]],
++  }),
++);
++const workspace: Workspace = {
++  focus_query_id: "quality_joined",
++  key_maps: [],
++  queries: [
++    {
++      id: "quality_joined",
++      name: "join",
++      steps: [
++        { type: "FromQuery", payload: { query_id: "raw" } },
++        {
++          type: "Join",
++          payload: {
++            right_query_id: "catalog",
++            join_type: "left",
++            left_on: ["key"],
++            right_on: ["id"],
++          },
++        },
++      ],
++    },
++  ],
++};
++const before = JSON.stringify(workspace);
++const sample = qualityInspectionQuery(workspace, [
++  "a'b",
++  ...Array.from({ length: 30 }, (_, i) => String(i)),
++]);
++assert(
++  sample.steps[1]?.type === "Filter" &&
++    sample.steps[1].payload.condition.includes("a''b"),
++  "quote exact sample keys",
++);
++assert(
++  sample.steps[sample.steps.length - 1]?.type === "Join",
++  "drill-down remains a real Join",
++);
++assert(
++  JSON.stringify(workspace) === before,
++  "drill-down must not mutate the original Join",
++);
++rejects(() => qualityInspectionQuery(workspace, []));
++console.log("mappingQuality.test.ts: ok");
+diff --git a/src/lib/mappingQuality.ts b/src/lib/mappingQuality.ts
+new file mode 100644
+index 0000000..907ed8c
+--- /dev/null
++++ b/src/lib/mappingQuality.ts
+@@ -0,0 +1,187 @@
++import type { PreviewResult, QueryDef, Workspace } from "../types/pipeline";
++
++export const QUALITY_JOIN = "quality_joined";
++export const QUALITY_SUMMARY = "quality_summary";
++export const QUALITY_TARGETS = "quality_targets";
++export const QUALITY_MAP = "map_quality_products";
++export const QUALITY_TAB = "mapping-quality-overview";
++export function isMappingQualityLab(workspace: Workspace): boolean {
++  const ids = new Set(workspace.queries.map((query) => query.id));
++  return (
++    [QUALITY_JOIN, QUALITY_SUMMARY, QUALITY_TARGETS].every((id) =>
++      ids.has(id),
++    ) && (workspace.key_maps ?? []).some((map) => map.id === QUALITY_MAP)
++  );
++}
++
++export type QualityCell = {
++  sourceFamily: string;
++  targetFamily: string;
++  sourceGrade: string;
++  targetGrade: string;
++  method: string;
++  signal: string;
++  positions: number;
++  revenue: number;
++  samples: string[];
++};
++export type QualityTarget = {
++  key: string;
++  family: string;
++  grade: string;
++  positions: number;
++  sourceGrades: number;
++  packages: number;
++  samples: string[];
++};
++export const SIGNALS: Record<
++  string,
++  { label: string; color: string; explanation: string }
++> = {
++  aligned_attributes: {
++    label: "Aligned attributes",
++    color: "#57dfbc",
++    explanation:
++      "Family and grade agree. This is evidence of consistency, not proof of identity.",
++  },
++  grade_difference: {
++    label: "Grade differences",
++    color: "#ffb870",
++    explanation:
++      "Mapped source and target grades differ. Check whether grade is a required distinction.",
++  },
++  family_difference: {
++    label: "Family differences",
++    color: "#f3829d",
++    explanation:
++      "The mapping crosses product families. This can be intentional; inspect the actual positions.",
++  },
++  close_alternative: {
++    label: "Close alternative",
++    color: "#b8a0ff",
++    explanation:
++      "The declared runner-up gap is below 0.03. These accepted links deserve attention even though coverage is high.",
++  },
++  similarity_only: {
++    label: "Similarity basis",
++    color: "#8daeff",
++    explanation:
++      "Declared fuzzy decisions with aligned attributes. A similarity score is not a probability of correctness.",
++  },
++  unmapped: {
++    label: "Without catalog partner",
++    color: "#8195aa",
++    explanation:
++      "No target catalog row was found after applying the map. This is an exact observation for this dataset.",
++  },
++};
++function records(result: PreviewResult): Record<string, unknown>[] {
++  return result.rows.map((row) =>
++    Object.fromEntries(
++      result.columns.map((column, index) => [column.name, row[index]]),
++    ),
++  );
++}
++function number(value: unknown): number {
++  if (value == null || typeof value === "boolean" || value === "")
++    throw new Error("Missing aggregate value.");
++  const parsed = Number(value);
++  if (!Number.isFinite(parsed) || parsed < 0)
++    throw new Error("Invalid aggregate returned by the quality projection.");
++  return parsed;
++}
++function samples(value: unknown): string[] {
++  const parsed: unknown = typeof value === "string" ? JSON.parse(value) : value;
++  if (
++    !Array.isArray(parsed) ||
++    !parsed.every((item) => typeof item === "string")
++  )
++    throw new Error("Invalid sample keys.");
++  return parsed.slice(0, 6);
++}
++export function parseQualitySummary(result: PreviewResult): QualityCell[] {
++  const rows = records(result);
++  const cells = rows.map((row) => {
++    const signal = String(row.signal);
++    if (!SIGNALS[signal]) throw new Error("Unknown quality signal.");
++    return {
++      sourceFamily: String(row.source_family),
++      targetFamily: String(row.target_family),
++      sourceGrade: String(row.source_grade),
++      targetGrade: String(row.target_grade),
++      method: String(row.decision_method),
++      signal,
++      positions: number(row.positions),
++      revenue: number(row.revenue),
++      samples: samples(row.sample_keys),
++    };
++  });
++  const total = cells.reduce((sum, cell) => sum + cell.positions, 0);
++  if (
++    !rows.length ||
++    rows.some((row) => number(row.total_positions) !== total)
++  ) {
++    throw new Error(
++      "The aggregate result is incomplete. A truncated preview cannot represent the whole mapping.",
++    );
++  }
++  return cells;
++}
++export function parseQualityTargets(result: PreviewResult): QualityTarget[] {
++  return records(result).map((row) => ({
++    key: String(row.canonical_key),
++    family: String(row.target_family),
++    grade: String(row.target_grade),
++    positions: number(row.positions),
++    sourceGrades: number(row.source_grades),
++    packages: number(row.packaging_variants),
++    samples: samples(row.sample_keys),
++  }));
++}
++export type QualityDimension = "family" | "grade" | "basis";
++export function axes(
++  cell: QualityCell,
++  dimension: QualityDimension,
++): [string, string] {
++  if (dimension === "grade")
++    return [
++      `${cell.sourceFamily} · ${cell.sourceGrade}`,
++      `${cell.targetFamily} · ${cell.targetGrade}`,
++    ];
++  if (dimension === "basis") return [cell.method, SIGNALS[cell.signal]!.label];
++  return [cell.sourceFamily, cell.targetFamily];
++}
++/** Creates an ordinary, explicit sample query. No full-row transfer or silent Join mutation. */
++export function qualityInspectionQuery(
++  workspace: Workspace,
++  keys: string[],
++): QueryDef {
++  const template = workspace.queries.find((query) => query.id === QUALITY_JOIN);
++  if (
++    !template ||
++    template.steps[0]?.type !== "FromQuery" ||
++    template.steps[template.steps.length - 1]?.type !== "Join"
++  ) {
++    throw new Error(
++      "The lab Join was changed. Reload the demo before using sample drill-down.",
++    );
++  }
++  const bounded = [...new Set(keys)].slice(0, 24);
++  if (!bounded.length) throw new Error("No sample keys in this selection.");
++  const literals = bounded
++    .map((key) => `'${key.replace(/'/g, "''")}'`)
++    .join(", ");
++  return {
++    ...template,
++    id: "quality_inspection",
++    name: `Quality inspection · ${bounded.length} sample keys`,
++    steps: [
++      template.steps[0],
++      {
++        type: "Filter",
++        payload: { condition: `"commercial_sku" IN (${literals})` },
++      },
++      ...template.steps.slice(1),
++    ],
++  };
++}

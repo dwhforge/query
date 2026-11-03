@@ -4,6 +4,7 @@ import { emptyKeyMap } from "../lib/keyMap";
 import { KeyMapEditor } from "./KeyMapEditor";
 
 export type DemoId =
+  | "mapping_quality"
   | "sales"
   | "union"
   | "sql"

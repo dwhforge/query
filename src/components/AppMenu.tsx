@@ -478,6 +478,10 @@ export function AppMenu({
           <Sep />
           <SubLabel>Mapping labs</SubLabel>
           <Item
+            label="Mapping quality — 100K products · overview prototype"
+            onClick={() => run(() => onLoadDemo("mapping_quality"))}
+          />
+          <Item
             label="F&B hub — seed · daily → month"
             onClick={() => run(() => onLoadDemo("keymap"))}
           />

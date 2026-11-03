@@ -67,7 +67,11 @@ export function stripQualityInspectionQueries(
  * Ignores inspection queries and other canvas edits so returning to the tab
  * does not rebuild a finished analysis.
  */
-export function qualityProjectionCacheKey(workspace: Workspace): string {
+/** Cache key must change when map *content* or projection deps change (not only row count). */
+export function qualityProjectionCacheKey(
+  workspace: Workspace,
+  opts?: { mapId?: string; hostQueryId?: string },
+): string {
   const byId = new Map(workspace.queries.map((query) => [query.id, query]));
   const slim = (id: string) => {
     const query = byId.get(id);
@@ -82,6 +86,7 @@ export function qualityProjectionCacheKey(workspace: Workspace): string {
             column: step.payload.column,
             columns: step.payload.columns,
             output_column: step.payload.output_column,
+            as_of_column: step.payload.as_of_column,
             map_id: step.payload.map_id,
             entryCount: step.payload.entries?.length ?? 0,
           },
@@ -89,15 +94,33 @@ export function qualityProjectionCacheKey(workspace: Workspace): string {
       }),
     };
   };
-  const map = (workspace.key_maps ?? []).find((item) => item.id === QUALITY_MAP);
+  const mapFingerprints = (workspace.key_maps ?? []).map((map) => ({
+    id: map.id,
+    time_mode: map.time_mode ?? "none",
+    rows: [...map.entries]
+      .map((e) => {
+        const from = (
+          e.from_parts?.length ? e.from_parts.join("\0") : e.from
+        ).trim();
+        const attrs = Object.entries(e.attrs ?? {})
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, v]) => `${k}=${v}`)
+          .join(";");
+        return `${from}\t${e.to}\t${attrs}`;
+      })
+      .sort()
+      .join("\n"),
+  }));
+  const host = opts?.hostQueryId;
   return JSON.stringify({
     commercial: slim("quality_commercial"),
     catalog: slim("quality_catalog"),
     join: slim(QUALITY_JOIN),
     summary: slim(QUALITY_SUMMARY),
     targets: slim(QUALITY_TARGETS),
-    mapId: map?.id ?? null,
-    mapCount: map?.entries.length ?? 0,
+    host: host ? slim(host) : null,
+    focusMapId: opts?.mapId ?? null,
+    mapFingerprints,
   });
 }
 
@@ -160,6 +183,12 @@ export const SIGNALS: Record<
     color: "#8195aa",
     explanation:
       "No target catalog row was found after applying the map. This is an exact observation for this dataset.",
+  },
+  attribute_difference: {
+    label: "Attribute differences",
+    color: "#f0c674",
+    explanation:
+      "Chosen left/right attributes differ after ApplyKeyMap. Inspect whether the difference is expected.",
   },
 };
 function records(result: PreviewResult): Record<string, unknown>[] {

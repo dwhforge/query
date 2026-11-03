@@ -136,14 +136,55 @@ export function keyMapSeedName(mapId: string): string {
   return id.startsWith("map_") ? id : `map_${id}`;
 }
 
-/** Trim From parts; reject empty to / duplicate tuples (ADR-0024). */
+export type ValidateKeyMapOpts = {
+  /** ADR-0028: duplicate From allowed when ranges do not overlap. */
+  timeMode?: "none" | "range_scd";
+  validFromColumn?: string;
+  validToColumn?: string;
+};
+
+/** Parse SCD bound: ISO date `YYYY-MM-DD` or timestamp `YYYY-MM-DD[ T]HH:MM[:SS]`. */
+export function parseScdBound(raw: string): number | null {
+  const s = raw.trim();
+  if (!s) return null;
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (dateOnly) {
+    const t = Date.UTC(
+      Number(dateOnly[1]),
+      Number(dateOnly[2]) - 1,
+      Number(dateOnly[3]),
+    );
+    return Number.isFinite(t) ? t : null;
+  }
+  const ts =
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(s);
+  if (ts) {
+    const t = Date.UTC(
+      Number(ts[1]),
+      Number(ts[2]) - 1,
+      Number(ts[3]),
+      Number(ts[4]),
+      Number(ts[5]),
+      Number(ts[6] ?? 0),
+    );
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
+/** Trim From parts; reject empty to / duplicate tuples (ADR-0024 / ADR-0028). */
 export function validateKeyMapEntries(
   entries: KeyMapEntry[],
   arity = 1,
+  opts?: ValidateKeyMapOpts,
 ): { ok: true; entries: KeyMapEntry[] } | { ok: false; error: string } {
   const n = Math.max(1, arity);
+  const range = opts?.timeMode === "range_scd";
+  const vfCol = opts?.validFromColumn?.trim() || "valid_from";
+  const vtCol = opts?.validToColumn?.trim() || "valid_to";
   const cleaned: KeyMapEntry[] = [];
   const seen = new Set<string>();
+  const ranges = new Map<string, { from: number; to: number | null }[]>();
   for (const e of entries) {
     let parts = fromPartsEff(e).map((p) => p.trim());
     if (parts.length === 1 && n > 1) {
@@ -170,7 +211,53 @@ export function validateKeyMapEntries(
       };
     }
     const key = tupleKey(parts);
-    if (seen.has(key)) {
+    if (range) {
+      const vfRaw = (e.attrs?.[vfCol] ?? "").trim();
+      if (!vfRaw) {
+        return {
+          ok: false,
+          error: `Range SCD requires ${vfCol} for From ${JSON.stringify(parts)}`,
+        };
+      }
+      const vf = parseScdBound(vfRaw);
+      if (vf == null) {
+        return {
+          ok: false,
+          error: `Invalid ${vfCol} '${vfRaw}' (use YYYY-MM-DD or timestamp)`,
+        };
+      }
+      const vtRaw = (e.attrs?.[vtCol] ?? "").trim();
+      let vt: number | null = null;
+      if (vtRaw) {
+        vt = parseScdBound(vtRaw);
+        if (vt == null) {
+          return {
+            ok: false,
+            error: `Invalid ${vtCol} '${vtRaw}' (use YYYY-MM-DD or timestamp)`,
+          };
+        }
+        if (vt <= vf) {
+          return {
+            ok: false,
+            error: `${vtCol} must be > ${vfCol} for From ${JSON.stringify(parts)}`,
+          };
+        }
+      }
+      const list = ranges.get(key) ?? [];
+      for (const other of list) {
+        // Half-open [from,to): overlap if intervals intersect
+        const aEnd = other.to ?? Number.POSITIVE_INFINITY;
+        const bEnd = vt ?? Number.POSITIVE_INFINITY;
+        if (other.from < bEnd && vf < aEnd) {
+          return {
+            ok: false,
+            error: `Overlapping ranges for From ${JSON.stringify(parts)}`,
+          };
+        }
+      }
+      list.push({ from: vf, to: vt });
+      ranges.set(key, list);
+    } else if (seen.has(key)) {
       return {
         ok: false,
         error: `Duplicate From ${JSON.stringify(parts)}`,

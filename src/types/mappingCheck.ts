@@ -8,6 +8,7 @@ export type CheckDeltaAttribution =
   | "mapping_changed"
   | "inputs_changed"
   | "both_changed"
+  | "definition_changed"
   | "unchanged"
   | "limited";
 
@@ -70,6 +71,8 @@ export type FrozenRemapPreview = {
   check_id: string;
   map_id: string;
   expected_map_revision: string;
+  /** Snapshotted at preview — confirm refuses if inputs moved (ADR-0027). */
+  expected_input_revisions: CheckInputRevision[];
   changes: { from: string; to: string }[];
   previewed_at: string;
 };

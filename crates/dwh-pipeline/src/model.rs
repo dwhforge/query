@@ -531,8 +531,8 @@ impl KeyMapDef {
         // External relations may have empty local entries (SoT is the table).
         if matches!(self.storage, KeyMapStorage::Seed) || !self.entries.is_empty() {
             let mut seen = std::collections::HashSet::new();
-            // from_key → list of (valid_from, valid_to_opt) for overlap checks
-            let mut ranges: std::collections::BTreeMap<Vec<String>, Vec<(String, Option<String>)>> =
+            // from_key → list of (valid_from_epoch, valid_to_epoch_opt) for overlap checks
+            let mut ranges: std::collections::BTreeMap<Vec<String>, Vec<(i64, Option<i64>)>> =
                 std::collections::BTreeMap::new();
             for e in &self.entries {
                 let parts = e.from_parts_eff();
@@ -554,7 +554,7 @@ impl KeyMapDef {
                     ));
                 }
                 if range {
-                    let vf = e
+                    let vf_raw = e
                         .attrs
                         .get(&vf_col)
                         .map(|s| s.trim().to_string())
@@ -565,16 +565,33 @@ impl KeyMapDef {
                                 self.id, key
                             )
                         })?;
-                    let vt = e
+                    let vf = parse_scd_bound(&vf_raw).map_err(|err| {
+                        format!(
+                            "KeyMap '{}': invalid {vf_col} '{vf_raw}' for from {:?}: {err}",
+                            self.id, key
+                        )
+                    })?;
+                    let vt_raw = e
                         .attrs
                         .get(&vt_col)
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty());
-                    if let Some(ref end) = vt {
-                        if end.as_str() <= vf.as_str() {
-                            return Err(format!(
-                                "KeyMap '{}': {vt_col} must be > {vf_col} for from {:?} ({vf} .. {end})",
+                    let vt = match &vt_raw {
+                        None => None,
+                        Some(end) => Some(parse_scd_bound(end).map_err(|err| {
+                            format!(
+                                "KeyMap '{}': invalid {vt_col} '{end}' for from {:?}: {err}",
                                 self.id, key
+                            )
+                        })?),
+                    };
+                    if let Some(end) = vt {
+                        if end <= vf {
+                            return Err(format!(
+                                "KeyMap '{}': {vt_col} must be > {vf_col} for from {:?} ({vf_raw} .. {})",
+                                self.id,
+                                key,
+                                vt_raw.as_deref().unwrap_or("")
                             ));
                         }
                     }
@@ -588,21 +605,17 @@ impl KeyMapDef {
             }
             if range {
                 for (key, mut ivals) in ranges {
+                    // ivals: (epoch_secs, Option<epoch_secs>)
                     ivals.sort_by(|a, b| a.0.cmp(&b.0));
                     for w in ivals.windows(2) {
                         let (a_from, a_to) = &w[0];
                         let (b_from, _) = &w[1];
-                        // Half-open: [a_from, a_to) overlaps [b_from, …) if a_to is open or a_to > b_from.
-                        let overlaps = match a_to {
-                            None => true,
-                            Some(end) => end.as_str() > b_from.as_str(),
-                        };
-                        if overlaps {
+                        let a_end = a_to.unwrap_or(i64::MAX);
+                        // Half-open [from,to): overlap if a_from < b_end && b_from < a_end
+                        if *a_from < i64::MAX && *b_from < a_end {
                             return Err(format!(
-                                "KeyMap '{}': overlapping ranges for from {:?} ({a_from}..{:?} vs {b_from}..)",
-                                self.id,
-                                key,
-                                a_to.as_deref()
+                                "KeyMap '{}': overlapping ranges for from {:?} (epochs {a_from}..{a_end} vs {b_from}..)",
+                                self.id, key
                             ));
                         }
                     }
@@ -615,6 +628,91 @@ impl KeyMapDef {
     pub fn is_seed_backed(&self) -> bool {
         matches!(self.storage, KeyMapStorage::Seed)
     }
+}
+
+/// Parse SCD bound as UTC epoch seconds. Accepts `YYYY-MM-DD` or `YYYY-MM-DD[ T]HH:MM[:SS]`.
+pub fn parse_scd_bound(raw: &str) -> Result<i64, String> {
+    let s = raw.trim();
+    let (date, time) = if let Some((d, t)) = s.split_once('T').or_else(|| s.split_once(' ')) {
+        (d, Some(t.trim()))
+    } else {
+        (s, None)
+    };
+    let dp: Vec<&str> = date.split('-').collect();
+    if dp.len() != 3 {
+        return Err("expected YYYY-MM-DD or timestamp".into());
+    }
+    let y: i32 = dp[0]
+        .parse()
+        .map_err(|_| "invalid year".to_string())?;
+    let m: u32 = dp[1]
+        .parse()
+        .map_err(|_| "invalid month".to_string())?;
+    let d: u32 = dp[2]
+        .parse()
+        .map_err(|_| "invalid day".to_string())?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return Err("month/day out of range".into());
+    }
+    let mut secs = civil_days_utc(y, m, d)? * 86_400;
+    if let Some(t) = time {
+        let t = t.trim_end_matches('Z');
+        let tp: Vec<&str> = t.split(':').collect();
+        if tp.len() < 2 || tp.len() > 3 {
+            return Err("expected HH:MM[:SS]".into());
+        }
+        let hh: i64 = tp[0].parse().map_err(|_| "invalid hour".to_string())?;
+        let mm: i64 = tp[1].parse().map_err(|_| "invalid minute".to_string())?;
+        let ss: i64 = if tp.len() == 3 {
+            tp[2]
+                .split('.')
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .map_err(|_| "invalid second".to_string())?
+        } else {
+            0
+        };
+        if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=60).contains(&ss) {
+            return Err("time out of range".into());
+        }
+        secs += hh * 3600 + mm * 60 + ss;
+    }
+    Ok(secs)
+}
+
+#[cfg(test)]
+mod scd_bound_tests {
+    use super::parse_scd_bound;
+
+    #[test]
+    fn rejects_lexicographic_fruit() {
+        assert!(parse_scd_bound("apple").is_err());
+        assert!(parse_scd_bound("banana").is_err());
+    }
+
+    #[test]
+    fn date_order() {
+        let a = parse_scd_bound("2024-01-01").unwrap();
+        let b = parse_scd_bound("2024-06-01").unwrap();
+        assert!(a < b);
+    }
+}
+
+/// Days since Unix epoch (UTC), Howard Hinnant civil-from-days inverse.
+fn civil_days_utc(y: i32, m: u32, d: u32) -> Result<i64, String> {
+    let mut y = y;
+    let m = m as i32;
+    let d = d as i32;
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = (yoe * 365 + yoe / 4 - yoe / 100 + doy as u32) as i64;
+    Ok(era as i64 * 146_097 + doe - 719_468)
 }
 
 /// Deterministic normalize ops (near-miss Apply → NormalizeKey). Order = nest order.

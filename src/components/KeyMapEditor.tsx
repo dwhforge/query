@@ -179,6 +179,14 @@ export function KeyMapEditor({
   ];
   const fromCols = fromColumnsEff(map);
   const arity = fromCols.length;
+  const validateOpts = {
+    timeMode: map.time_mode === "range_scd" ? ("range_scd" as const) : ("none" as const),
+    validFromColumn: map.valid_from_column ?? "valid_from",
+    validToColumn: map.valid_to_column ?? "valid_to",
+  };
+  function validateEntries(entries: typeof map.entries) {
+    return validateKeyMapEntries(entries, arity, validateOpts);
+  }
   const saving = saveInFlight || storeRef.current.isSaveInFlight();
 
   useEffect(() => {
@@ -447,7 +455,7 @@ export function KeyMapEditor({
   const virtualRows = virtualizer.getVirtualItems();
 
   function setEntries(entries: KeyMapEntry[]) {
-    const v = validateKeyMapEntries(entries, arity);
+    const v = validateEntries(entries);
     if (!v.ok) {
       setError(v.error);
       onChange({ ...map, entries });
@@ -489,7 +497,7 @@ export function KeyMapEditor({
       bumpDirty();
       // Allow temporarily invalid From/To in the view (draft store keeps them).
       setError(null);
-      const v = validateKeyMapEntries(next, arity);
+      const v = validateEntries(next);
       if (!v.ok) {
         setError(v.error);
         onChange({ ...map, entries: next });
@@ -505,7 +513,7 @@ export function KeyMapEditor({
       return;
     }
 
-    const v = validateKeyMapEntries(next, arity);
+    const v = validateEntries(next);
     if (!v.ok) {
       setError(v.error);
       onChange({ ...map, entries: next });
@@ -1644,7 +1652,7 @@ export function KeyMapEditor({
           : ["left", "right", "both"];
 
         const runApply = (side: ApplySide) => {
-          const v = validateKeyMapEntries(map.entries, arity);
+          const v = validateEntries(map.entries);
           if (!v.ok) {
             setError(v.error);
             return;

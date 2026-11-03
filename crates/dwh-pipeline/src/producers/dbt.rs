@@ -399,8 +399,23 @@ pub fn build_export_plan_routed(
                 seeds_cfg.push_str(&format!("        {fc}: varchar\n"));
             }
             seeds_cfg.push_str(&format!("        {to_col}: varchar\n"));
+            let temporal: std::collections::HashSet<String> = workspace
+                .key_map(map_id)
+                .filter(|m| m.is_range_scd())
+                .map(|m| {
+                    [m.valid_from_col_eff(), m.valid_to_col_eff()]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default();
             for ec in &extras {
-                seeds_cfg.push_str(&format!("        {ec}: varchar\n"));
+                // ADR-0028: SCD bounds are dates, not varchar (avoid string compare vs event time).
+                let ty = if temporal.contains(ec) {
+                    "date"
+                } else {
+                    "varchar"
+                };
+                seeds_cfg.push_str(&format!("        {ec}: {ty}\n"));
             }
         }
     }

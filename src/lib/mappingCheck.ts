@@ -19,9 +19,10 @@ import {
   QUALITY_SAMPLE_COLUMN,
   isMappingQualityLab,
   parseQualitySummary,
-  qualityInspectionQuery,
+  type QualityCell,
 } from "./mappingQuality";
 import type { PreviewResult } from "../types/pipeline";
+import { fromColumnsEff, fromPartsEff } from "./keyMap";
 
 export type {
   CheckAggregateCell,
@@ -47,15 +48,29 @@ export function newCheckRunId(): string {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Semantic map fingerprint — links, attrs, SCD bounds, schema, storage (ADR-0027/0028). */
 export function keyMapRevision(map: KeyMapDef | undefined | null): string {
   if (!map) return "missing_map";
   const rows = [...map.entries]
     .map((e) => {
       const from = (e.from_parts?.length ? e.from_parts.join("\0") : e.from).trim();
-      return `${from}\t${e.to.trim()}`;
+      const attrs = Object.entries(e.attrs ?? {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k}=${v}`)
+        .join(";");
+      return `${from}\t${e.to.trim()}\t${attrs}`;
     })
     .sort();
-  return `map:${map.id}:n=${rows.length}:h=${fnv1a(rows.join("\n"))}`;
+  const schema = JSON.stringify({
+    from_columns: fromColumnsEff(map),
+    to_column: map.to_column ?? "to",
+    editable_columns: map.editable_columns ?? [],
+    time_mode: map.time_mode ?? "none",
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
+  });
+  return `map:${map.id}:n=${rows.length}:h=${fnv1a(rows.join("\n") + "|" + schema)}`;
 }
 
 export function checkDefinitionRevision(check: MappingCheck): string {
@@ -64,14 +79,24 @@ export function checkDefinitionRevision(check: MappingCheck): string {
     input_refs: check.input_refs,
     group_attributes: check.group_attributes,
     projection: check.projection,
+    cohort_predicate: check.cohort_predicate,
   });
   return `def:${fnv1a(payload)}`;
 }
 
+/**
+ * Honest input versioning (ADR-0027).
+ * Path-only file loads and live Postgres cannot prove content identity → limited.
+ */
 export function inputRevisionForQuery(
   workspace: Workspace,
   queryId: string,
+  seen = new Set<string>(),
 ): CheckInputRevision {
+  if (seen.has(queryId)) {
+    return { ref_id: queryId, revision: `cycle:${queryId}` };
+  }
+  seen.add(queryId);
   const q = workspace.queries.find((x) => x.id === queryId);
   if (!q) {
     return {
@@ -80,37 +105,66 @@ export function inputRevisionForQuery(
       unknown_reason: "query missing",
     };
   }
-  const loads = q.steps.filter(
-    (s) =>
-      s.type === "LoadCsv" ||
-      s.type === "LoadParquet" ||
-      s.type === "LoadPostgres" ||
-      s.type === "LoadDuckdb",
-  );
-  if (!loads.length) {
-    return {
-      ref_id: queryId,
-      revision: `steps:${fnv1a(JSON.stringify(q.steps))}`,
-    };
-  }
-  const parts: string[] = [];
-  let unknown: string | undefined;
-  for (const step of loads) {
+  for (const step of q.steps) {
     if (step.type === "LoadCsv" || step.type === "LoadParquet") {
-      parts.push(`${step.type}:${step.payload.path}`);
-    } else if (step.type === "LoadPostgres") {
-      unknown = "postgres relation version not tracked";
-      parts.push(
-        `LoadPostgres:${step.payload.schema}.${step.payload.table}`,
+      return {
+        ref_id: queryId,
+        revision: null,
+        unknown_reason: `${step.type} content version not tracked (path-only)`,
+      };
+    }
+    if (step.type === "LoadPostgres") {
+      return {
+        ref_id: queryId,
+        revision: null,
+        unknown_reason: "postgres relation version not tracked",
+      };
+    }
+    if (step.type === "LoadDuckdb") {
+      return {
+        ref_id: queryId,
+        revision: null,
+        unknown_reason: "duckdb file content version not tracked",
+      };
+    }
+    if (step.type === "FromQuery") {
+      const upstream = inputRevisionForQuery(
+        workspace,
+        String(step.payload.query_id),
+        seen,
       );
-    } else if (step.type === "LoadDuckdb") {
-      parts.push(`LoadDuckdb:${step.payload.path}:${step.payload.table}`);
+      if (upstream.revision == null) {
+        return {
+          ref_id: queryId,
+          revision: null,
+          unknown_reason:
+            upstream.unknown_reason ??
+            `upstream ${upstream.ref_id} has no reliable version`,
+        };
+      }
+    }
+    if (step.type === "Join") {
+      const right = inputRevisionForQuery(
+        workspace,
+        String(step.payload.right_query_id),
+        seen,
+      );
+      if (right.revision == null) {
+        return {
+          ref_id: queryId,
+          revision: null,
+          unknown_reason:
+            right.unknown_reason ??
+            `join right ${right.ref_id} has no reliable version`,
+        };
+      }
     }
   }
-  if (unknown) {
-    return { ref_id: queryId, revision: null, unknown_reason: unknown };
-  }
-  return { ref_id: queryId, revision: `loads:${fnv1a(parts.join("|"))}` };
+  // No fragile external loads: fingerprint the full step graph for this query.
+  return {
+    ref_id: queryId,
+    revision: `steps:${fnv1a(JSON.stringify(q.steps))}`,
+  };
 }
 
 export function collectInputRevisions(
@@ -145,6 +199,9 @@ export function attributeDelta(
   ) {
     return "limited";
   }
+  if (prev.check_definition_revision !== next.check_definition_revision) {
+    return "definition_changed";
+  }
   const mapChanged = prev.map_revision !== next.map_revision;
   const inputsChanged =
     JSON.stringify(prev.input_revisions) !==
@@ -163,8 +220,10 @@ export function deltaLabel(a: CheckDeltaAttribution): string {
       return "Inputs changed";
     case "both_changed":
       return "Mapping and inputs changed";
+    case "definition_changed":
+      return "Check definition changed";
     case "unchanged":
-      return "No map/input revision change";
+      return "No map/input/definition revision change";
     case "limited":
       return "Limited comparability";
   }
@@ -173,6 +232,8 @@ export function deltaLabel(a: CheckDeltaAttribution): string {
 export function assertRemapConfirmable(
   freeze: FrozenRemapPreview,
   map: KeyMapDef | undefined,
+  workspace?: Workspace,
+  check?: MappingCheck,
 ): void {
   if (!map || map.id !== freeze.map_id) {
     throw new Error("KeyMap missing or mismatched — refresh the remap preview.");
@@ -183,19 +244,42 @@ export function assertRemapConfirmable(
       "KeyMap changed since preview — run a new preview before confirming.",
     );
   }
+  if (workspace && check && freeze.expected_input_revisions?.length) {
+    const now = collectInputRevisions(workspace, check);
+    const hadKnown = freeze.expected_input_revisions.some((r) => r.revision != null);
+    // When versions were known at preview, refuse if they moved. Path-only/unknown
+    // inputs stay mapping-gated only (comparability already limited on CheckRun).
+    if (
+      hadKnown &&
+      JSON.stringify(now) !== JSON.stringify(freeze.expected_input_revisions)
+    ) {
+      throw new Error(
+        "Inputs changed since preview — run a new preview before confirming.",
+      );
+    }
+  }
   if (!freeze.changes.length) {
     throw new Error("No From→To changes in the frozen preview.");
   }
 }
 
+/** v1 batch remap: static arity-1 only (ADR-0027 review — refuse composite/SCD). */
 export function applyFrozenRemapToMap(
   map: KeyMapDef,
   freeze: FrozenRemapPreview,
+  workspace?: Workspace,
+  check?: MappingCheck,
 ): KeyMapDef {
-  assertRemapConfirmable(freeze, map);
+  assertRemapConfirmable(freeze, map, workspace, check);
+  const arity = fromColumnsEff(map).length;
+  if (arity > 1 || map.time_mode === "range_scd") {
+    throw new Error(
+      "Frozen batch remap v1 supports only static arity-1 maps (not composite / range SCD).",
+    );
+  }
   const byFrom = new Map(freeze.changes.map((c) => [c.from.trim(), c.to]));
   const entries = map.entries.map((e) => {
-    const hit = byFrom.get(e.from.trim());
+    const hit = byFrom.get(fromPartsEff(e)[0]?.trim() || e.from.trim());
     if (hit == null) return e;
     byFrom.delete(e.from.trim());
     return { ...e, to: hit };
@@ -290,6 +374,66 @@ export function cellsFromQualitySummary(
   return { cells, total };
 }
 
+/**
+ * Cohort predicate for selected matrix cells (group dimensions), not sample IN-list.
+ * Samples remain illustration / Lens focus only (ADR-0027).
+ */
+export function cohortPredicateFromCells(cells: QualityCell[]): string {
+  if (!cells.length) throw new Error("No cells for cohort predicate.");
+  const parts = cells.map((c) => {
+    const target =
+      c.targetFamily === "Unmapped" || c.targetFamily === "—"
+        ? `"target_family" IS NULL`
+        : eqSql("target_family", c.targetFamily);
+    const gradeTarget =
+      c.targetGrade === "—" || c.targetGrade === "Unmapped"
+        ? `("target_grade" IS NULL OR CAST("target_grade" AS VARCHAR) = '—')`
+        : eqSql("target_grade", c.targetGrade);
+    return `(${eqSql("source_family", c.sourceFamily)} AND ${target} AND ${eqSql("source_grade", c.sourceGrade)} AND ${gradeTarget} AND ${eqSql("decision_method", c.method)})`;
+  });
+  // Deduplicate identical cell predicates
+  return [...new Set(parts)].join(" OR ");
+}
+
+/** Attrs-projection cohort: equality on left/right attr values of selected cells. */
+export function cohortPredicateFromAttrCells(
+  leftAttr: string,
+  rightAttr: string,
+  cells: QualityCell[],
+): string {
+  if (!cells.length) throw new Error("No cells for cohort predicate.");
+  const parts = cells.map((c) => {
+    const right =
+      c.targetFamily === "Unmapped"
+        ? `${quoteIdent(rightAttr)} IS NULL`
+        : eqSql(rightAttr, c.targetFamily);
+    return `(${eqSql(leftAttr, c.sourceFamily)} AND ${right})`;
+  });
+  return [...new Set(parts)].join(" OR ");
+}
+
+/**
+ * Illustrative sample keys only — never substitutes for the cohort predicate.
+ * @deprecated Prefer cohortPredicateFromCells; kept for focus/lens helpers.
+ */
+export function cohortPredicateFromSamples(
+  sampleColumn: string,
+  keys: string[],
+): string {
+  const bounded = [...new Set(keys)]
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 24);
+  if (!bounded.length) throw new Error("No sample keys for illustration list.");
+  const literals = bounded
+    .map((key) => `'${key.replace(/'/g, "''")}'`)
+    .join(", ");
+  return `${quoteIdent(sampleColumn)} IN (${literals})`;
+}
+
+/**
+ * Ephemeral Inspect: post-join cohort filter (ADR-0027).
+ * Sample keys are not the cohort — they only order/focus Lens.
+ */
 export function cohortInspectionQuery(
   workspace: Workspace,
   check: MappingCheck,
@@ -297,15 +441,46 @@ export function cohortInspectionQuery(
   if (!check.cohort_predicate.trim()) {
     throw new Error("Select a matrix cell (cohort) before opening Join Lens.");
   }
+  const sampleColumn =
+    check.projection.kind === "attrs"
+      ? check.projection.sample_column
+      : QUALITY_SAMPLE_COLUMN;
+  const pred = check.cohort_predicate.trim();
+
+  // Lab: wrap joined result so derived signal/attrs are filterable.
   if (check.projection.kind === "lab_v1" || isMappingQualityLab(workspace)) {
-    const keys = parseInListPredicate(
-      check.cohort_predicate,
-      QUALITY_SAMPLE_COLUMN,
-    );
-    if (keys?.length) {
-      return qualityInspectionQuery(workspace, keys);
+    if (!workspace.queries.some((q) => q.id === QUALITY_JOIN)) {
+      throw new Error("Lab Join missing — reload the mapping quality demo.");
     }
+    return {
+      id: QUALITY_INSPECTION,
+      name: "Check cohort · ephemeral",
+      steps: [
+        {
+          type: "SqlModel",
+          payload: {
+            raw_sql: `
+WITH observed AS (
+  SELECT *,
+    CASE WHEN target_family IS NULL THEN 'unmapped'
+         WHEN source_family <> target_family THEN 'family_difference'
+         WHEN source_grade <> target_grade THEN 'grade_difference'
+         WHEN TRY_CAST(runner_up_gap AS DOUBLE) < 0.03 THEN 'close_alternative'
+         WHEN decision_method = 'fuzzy' THEN 'similarity_only'
+         ELSE 'aligned_attributes' END AS signal
+  FROM {{query:${QUALITY_JOIN}}}
+)
+SELECT * FROM observed
+WHERE ${pred}
+ORDER BY ${quoteIdent(sampleColumn)}
+`.trim(),
+          },
+        },
+      ],
+      execution: "local",
+    };
   }
+
   const hostId =
     check.projection.kind === "attrs"
       ? check.projection.host_query_id
@@ -314,54 +489,35 @@ export function cohortInspectionQuery(
   if (!template || template.steps[template.steps.length - 1]?.type !== "Join") {
     throw new Error("Check host query must end with a Join.");
   }
-  const sampleColumn =
-    check.projection.kind === "attrs"
-      ? check.projection.sample_column
-      : QUALITY_SAMPLE_COLUMN;
-  const rest = template.steps.slice(1).map((step) => {
+  // Attrs: Filter after Join so right-side attributes exist.
+  const body = template.steps.map((step) => {
     if (step.type !== "ApplyKeyMap") return step;
     return { ...step, payload: { ...step.payload, entries: [] } };
   });
   return {
     ...template,
     id: QUALITY_INSPECTION,
-    name: `Check cohort · ephemeral`,
+    name: "Check cohort · ephemeral",
     steps: [
-      template.steps[0]!,
-      {
-        type: "Filter",
-        payload: { condition: check.cohort_predicate.trim() },
-      },
+      ...body,
+      { type: "Filter", payload: { condition: pred } },
       {
         type: "SortBy",
         payload: { column: sampleColumn, descending: false },
       },
-      ...rest,
     ],
   };
-}
-
-export function cohortPredicateFromSamples(
-  sampleColumn: string,
-  keys: string[],
-): string {
-  const bounded = [...new Set(keys)]
-    .sort((a, b) => a.localeCompare(b))
-    .slice(0, 24);
-  if (!bounded.length) throw new Error("No sample keys for cohort predicate.");
-  const literals = bounded
-    .map((key) => `'${key.replace(/'/g, "''")}'`)
-    .join(", ");
-  return `"${sampleColumn}" IN (${literals})`;
 }
 
 export function attrsSummarySql(
   hostQueryId: string,
   leftAttr: string,
   rightAttr: string,
+  sampleColumn: string,
 ): string {
   const L = quoteIdent(leftAttr);
   const R = quoteIdent(rightAttr);
+  const S = quoteIdent(sampleColumn);
   return `
 WITH observed AS (
   SELECT *,
@@ -379,38 +535,19 @@ SELECT CAST(${L} AS VARCHAR) AS source_family,
        COUNT(*) AS positions,
        SUM(COUNT(*)) OVER() AS total_positions,
        0::DOUBLE AS revenue,
-       to_json(list_sort(list(CAST(${L} AS VARCHAR)))[1:6]) AS sample_keys
+       to_json(list_sort(list(CAST(${S} AS VARCHAR)))[1:6]) AS sample_keys
 FROM observed
 GROUP BY 1,2,3,4,5,6
 ORDER BY 1,2
 `.trim();
 }
 
-function parseInListPredicate(
-  predicate: string,
-  column: string,
-): string[] | null {
-  const re = new RegExp(
-    `^\\s*"?${escapeReg(column)}"?\\s+IN\\s*\\((.*)\\)\\s*$`,
-    "i",
-  );
-  const m = predicate.trim().match(re);
-  if (!m?.[1]) return null;
-  const keys: string[] = [];
-  const lit = /'((?:[^']|'')*)'/g;
-  let hit: RegExpExecArray | null;
-  while ((hit = lit.exec(m[1]))) {
-    keys.push(hit[1].replace(/''/g, "'"));
-  }
-  return keys.length ? keys : null;
+function eqSql(column: string, value: string): string {
+  return `CAST(${quoteIdent(column)} AS VARCHAR) = '${value.replace(/'/g, "''")}'`;
 }
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
-}
-
-function escapeReg(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function fnv1a(s: string): number {

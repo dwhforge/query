@@ -3,14 +3,19 @@ import {
   assertRemapConfirmable,
   attributeDelta,
   buildCheckRun,
-  cohortPredicateFromSamples,
+  checkDefinitionRevision,
+  cohortPredicateFromCells,
+  collectInputRevisions,
   deltaLabel,
+  inputRevisionForQuery,
   keyMapRevision,
   labMappingCheck,
   upsertAllowDecision,
 } from "./mappingCheck";
 import type { CheckRun } from "../types/mappingCheck";
 import type { KeyMapDef, Workspace } from "../types/pipeline";
+import { parseQualitySummary, SIGNALS } from "./mappingQuality";
+import { validateKeyMapEntries } from "./keyMap";
 
 function assert(v: unknown, msg: string) {
   if (!v) throw new Error(msg);
@@ -34,6 +39,12 @@ const r2 = keyMapRevision({
   ],
 });
 assert(r1 !== r2, "map revision changes when links change");
+
+const rAttrs = keyMapRevision({
+  ...map,
+  entries: [{ from: "a", to: "1", attrs: { reason: "x" } }, { from: "b", to: "2" }],
+});
+assert(rAttrs !== r1, "map revision changes when attrs change");
 
 const check = labMappingCheck();
 const ws: Workspace = {
@@ -69,6 +80,13 @@ const ws: Workspace = {
   ],
 };
 
+const fileRev = inputRevisionForQuery(ws, "quality_commercial");
+assert(fileRev.revision == null, "CSV path-only → unknown revision");
+assert(
+  collectInputRevisions(ws, check).some((r) => r.revision == null),
+  "lab inputs limited",
+);
+
 const runA = buildCheckRun({
   check,
   workspace: ws,
@@ -85,6 +103,8 @@ const runA = buildCheckRun({
   ],
   totalPositions: 10,
 });
+assert(runA.comparability.kind === "limited", "file loads → limited comparability");
+
 const runB: CheckRun = {
   ...buildCheckRun({
     check,
@@ -96,17 +116,43 @@ const runB: CheckRun = {
   input_revisions: runA.input_revisions,
   comparability: { kind: "full" },
 };
-assert(attributeDelta(runA, runB) === "mapping_changed", "Δ maps to mapping");
-assert(deltaLabel("limited").includes("Limited"), "limited label");
+// With limited runs, Δ is limited
+assert(attributeDelta(runA, runB) === "limited", "limited Δ when comparability limited");
+
+const runFullA: CheckRun = { ...runA, comparability: { kind: "full" } };
+const runFullB: CheckRun = {
+  ...runB,
+  comparability: { kind: "full" },
+  check_definition_revision: runA.check_definition_revision,
+};
+assert(attributeDelta(runFullA, runFullB) === "mapping_changed", "Δ maps to mapping");
+
+const check2 = { ...check, cohort_predicate: `"source_family" = 'X'` };
+assert(
+  checkDefinitionRevision(check) !== checkDefinitionRevision(check2),
+  "cohort in definition revision",
+);
+const runDef: CheckRun = {
+  ...runFullB,
+  map_revision: runFullA.map_revision,
+  input_revisions: runFullA.input_revisions,
+  check_definition_revision: checkDefinitionRevision(check2),
+};
+assert(
+  attributeDelta(runFullA, runDef) === "definition_changed",
+  "definition change attributed",
+);
+assert(deltaLabel("definition_changed").includes("definition"), "definition label");
 
 const freeze = {
   check_id: check.id,
   map_id: map.id,
   expected_map_revision: r1,
+  expected_input_revisions: collectInputRevisions(ws, check),
   changes: [{ from: "a", to: "9" }],
   previewed_at: new Date().toISOString(),
 };
-assertRemapConfirmable(freeze, map);
+assertRemapConfirmable(freeze, map, ws, check);
 try {
   assertRemapConfirmable(
     { ...freeze, expected_map_revision: "stale" },
@@ -116,8 +162,26 @@ try {
 } catch (e) {
   assert(String(e).includes("preview"), "stale remap refused");
 }
-const next = applyFrozenRemapToMap(map, freeze);
+const next = applyFrozenRemapToMap(map, freeze, ws, check);
 assert(next.entries.find((e) => e.from === "a")?.to === "9", "remap applied");
+
+const scdMap: KeyMapDef = {
+  ...map,
+  time_mode: "range_scd",
+  entries: [
+    {
+      from: "a",
+      to: "1",
+      attrs: { valid_from: "2024-01-01", valid_to: "2024-06-01" },
+    },
+  ],
+};
+try {
+  applyFrozenRemapToMap(scdMap, { ...freeze, map_id: scdMap.id, expected_map_revision: keyMapRevision(scdMap) });
+  throw new Error("SCD batch should refuse");
+} catch (e) {
+  assert(String(e).includes("arity-1") || String(e).includes("SCD") || String(e).includes("static"), "SCD remap refused");
+}
 
 const allowed = upsertAllowDecision(check, '["Urea","Sulfur"]', "intentional");
 assert(allowed.allow_decisions.length === 1, "allow on check");
@@ -128,7 +192,74 @@ try {
   assert(String(e).includes("explanation"), "allow needs explanation");
 }
 
-const pred = cohortPredicateFromSamples("commercial_sku", ["b", "a"]);
-assert(pred.includes("'a'") && pred.includes("'b'"), "predicate from samples");
+const pred = cohortPredicateFromCells([
+  {
+    sourceFamily: "Urea",
+    targetFamily: "Urea",
+    sourceGrade: "A",
+    targetGrade: "A",
+    method: "exact",
+    signal: "aligned_attributes",
+    positions: 3,
+    revenue: 0,
+    samples: ["k1", "k2"],
+  },
+]);
+assert(pred.includes("source_family") && pred.includes("Urea"), "cohort from group dims");
+assert(!pred.includes("IN ("), "cohort is not sample IN-list");
+
+assert(SIGNALS.attribute_difference, "attribute_difference signal registered");
+const fakeSummary = {
+  columns: [
+    { name: "source_family" },
+    { name: "target_family" },
+    { name: "source_grade" },
+    { name: "target_grade" },
+    { name: "decision_method" },
+    { name: "signal" },
+    { name: "positions" },
+    { name: "total_positions" },
+    { name: "revenue" },
+    { name: "sample_keys" },
+  ],
+  rows: [
+    ["A", "B", "—", "—", "rule", "attribute_difference", 2, 2, 0, '["x"]'],
+  ],
+  sql: "",
+  truncated: false,
+};
+const parsed = parseQualitySummary(fakeSummary as never);
+assert(parsed[0]?.signal === "attribute_difference", "parser accepts attribute_difference");
+
+const scdOk = validateKeyMapEntries(
+  [
+    {
+      from: "sku",
+      to: "item",
+      attrs: { valid_from: "2024-01-01", valid_to: "2024-06-01" },
+    },
+    {
+      from: "sku",
+      to: "item2",
+      attrs: { valid_from: "2024-06-01", valid_to: "" },
+    },
+  ],
+  1,
+  { timeMode: "range_scd" },
+);
+assert(scdOk.ok, "non-overlapping SCD From duplicates allowed");
+
+const scdBad = validateKeyMapEntries(
+  [
+    {
+      from: "sku",
+      to: "item",
+      attrs: { valid_from: "apple", valid_to: "banana" },
+    },
+  ],
+  1,
+  { timeMode: "range_scd" },
+);
+assert(!scdBad.ok, "non-date SCD bounds rejected");
 
 console.log("mappingCheck.test.ts: ok");

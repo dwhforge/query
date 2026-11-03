@@ -101,13 +101,11 @@ import { MappingQualityOverview } from "./components/mapping-quality/MappingQual
 import {
   QUALITY_INSPECTION,
   QUALITY_JOIN,
-  QUALITY_MAP,
   QUALITY_SAMPLE_COLUMN,
   QUALITY_TAB,
   isFullQualityJoin,
   isMappingQualityLab,
   isQualityInspectionQuery,
-  qualityInspectionQuery,
   stripQualityInspectionQueries,
   upsertQualityInspection,
 } from "./lib/mappingQuality";
@@ -117,7 +115,9 @@ import {
   attributeDelta,
   buildCheckRun,
   cohortInspectionQuery,
-  cohortPredicateFromSamples,
+  cohortPredicateFromAttrCells,
+  cohortPredicateFromCells,
+  collectInputRevisions,
   deltaLabel,
   ensureLabCheck,
   keyMapRevision,
@@ -3537,12 +3537,26 @@ function App() {
       const map = (project.workspace.key_maps ?? []).find(
         (m) => m.id === frozenRemap.map_id,
       );
-      assertRemapConfirmable(frozenRemap, map);
+      const check =
+        (project.mapping_checks ?? []).find(
+          (c) => c.id === frozenRemap.check_id,
+        ) ?? labMappingCheck();
+      assertRemapConfirmable(
+        frozenRemap,
+        map,
+        project.workspace,
+        check,
+      );
       if (!frozenRemap.changes.length) {
         setError("Stage at least one From→To in Join Lens before confirming.");
         return;
       }
-      const nextMap = applyFrozenRemapToMap(map!, frozenRemap);
+      const nextMap = applyFrozenRemapToMap(
+        map!,
+        frozenRemap,
+        project.workspace,
+        check,
+      );
       setProject((p) => ({
         ...p,
         workspace: {
@@ -5073,6 +5087,7 @@ function App() {
                     const map = (project.workspace.key_maps ?? []).find(
                       (m) => m.id === check.map_id,
                     );
+                    // Explicit user recalculation always creates a CheckRun (ADR-0027).
                     const run = buildCheckRun({
                       check,
                       workspace: project.workspace,
@@ -5087,8 +5102,6 @@ function App() {
                       })),
                       totalPositions,
                     });
-                    const fp = `${check.id}|${run.map_revision}|${JSON.stringify(run.input_revisions)}|${run.total_positions}`;
-                    if (lastCheckRunFingerprint.current === fp) return;
                     const prev = (project.mapping_check_runs ?? [])
                       .filter((r) => r.check_id === check.id)
                       .at(-1);
@@ -5106,7 +5119,7 @@ function App() {
                         `CheckRun recorded · ${run.total_positions.toLocaleString()} positions`,
                       );
                     }
-                    lastCheckRunFingerprint.current = fp;
+                    lastCheckRunFingerprint.current = run.id;
                     setProject((p) => ({
                       ...p,
                       mapping_checks:
@@ -5141,20 +5154,24 @@ function App() {
                       setError(String(reason));
                     }
                   }}
-                  onInspect={(keys) => {
+                  onInspect={({ cohortCells, samples }) => {
                     try {
                       const check = activeMappingCheck ?? labMappingCheck();
                       const sampleColumn =
                         check.projection.kind === "attrs"
                           ? check.projection.sample_column
                           : QUALITY_SAMPLE_COLUMN;
-                      const orderedKeys = [...new Set(keys)]
+                      const orderedKeys = [...new Set(samples)]
                         .sort((a, b) => a.localeCompare(b))
                         .slice(0, 24);
-                      const predicate = cohortPredicateFromSamples(
-                        sampleColumn,
-                        orderedKeys,
-                      );
+                      const predicate =
+                        check.projection.kind === "attrs"
+                          ? cohortPredicateFromAttrCells(
+                              check.projection.left_attr,
+                              check.projection.right_attr,
+                              cohortCells,
+                            )
+                          : cohortPredicateFromCells(cohortCells);
                       setProject((p) => {
                         const checks =
                           check.id === "check_lab_quality"
@@ -5169,16 +5186,10 @@ function App() {
                           ),
                         };
                       });
-                      const sample =
-                        check.projection.kind === "lab_v1"
-                          ? qualityInspectionQuery(
-                              project.workspace,
-                              orderedKeys,
-                            )
-                          : cohortInspectionQuery(project.workspace, {
-                              ...check,
-                              cohort_predicate: predicate,
-                            });
+                      const sample = cohortInspectionQuery(project.workspace, {
+                        ...check,
+                        cohort_predicate: predicate,
+                      });
                       const focusValue = orderedKeys[0] ?? "";
                       setQueries((queries) =>
                         upsertQualityInspection(queries, sample),
@@ -5199,6 +5210,10 @@ function App() {
                           check_id: check.id,
                           map_id: map.id,
                           expected_map_revision: keyMapRevision(map),
+                          expected_input_revisions: collectInputRevisions(
+                            project.workspace,
+                            { ...check, cohort_predicate: predicate },
+                          ),
                           changes: [],
                           previewed_at: new Date().toISOString(),
                         });
@@ -5206,7 +5221,11 @@ function App() {
                       qualityHandoffRef.current = true;
                       setOpProgress({
                         kind: "quality",
-                        phase: `Opening check cohort (${orderedKeys.length} sample keys)…`,
+                        phase: `Opening check cohort${
+                          orderedKeys.length
+                            ? ` (${orderedKeys.length} sample keys)`
+                            : ""
+                        }…`,
                         percent: 15,
                       });
                       focusJoinLensLayout();

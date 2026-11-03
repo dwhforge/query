@@ -23,7 +23,11 @@ type Props = {
   workspace: Workspace;
   connections: ConnectionDef[];
   sources: SourceDef[];
-  onInspect: (keys: string[]) => void;
+  /** Cohort = group predicate; samples only illustrate / focus Lens (ADR-0027). */
+  onInspect: (payload: {
+    cohortCells: QualityCell[];
+    samples: string[];
+  }) => void;
   onCanvas: () => void;
   /** Surface long overview / handoff work in the app progress bar. */
   onProgress?: (state: { phase: string; percent: number } | null) => void;
@@ -93,8 +97,12 @@ export function MappingQualityOverview({
   };
 
   const projectionKey = useMemo(
-    () => qualityProjectionCacheKey(workspace),
-    [workspace],
+    () =>
+      qualityProjectionCacheKey(workspace, {
+        hostQueryId:
+          projection.kind === "attrs" ? projection.host_query_id : undefined,
+      }),
+    [workspace, projection],
   );
   const stamp = `${projectionKey}#${revision}`;
   const hasFreshCache = cacheStamp === stamp && cells.length > 0;
@@ -147,6 +155,7 @@ export function MappingQualityOverview({
             projection.host_query_id,
             projection.left_attr,
             projection.right_attr,
+            projection.sample_column,
           );
           summaryWs = {
             ...workspace,
@@ -643,10 +652,19 @@ export function MappingQualityOverview({
               )}
               <button
                 className="quality-primary"
-                disabled={!sampleKeys.length || (!selection && !target)}
-                onClick={() => onInspect(sampleKeys)}
+                disabled={!selected.length || (!selection && !target)}
+                onClick={() =>
+                  onInspect({
+                    cohortCells: selected,
+                    samples: sampleKeys,
+                  })
+                }
               >
-                Inspect {sampleKeys.length} sample keys in Join Lens ↗
+                Inspect cohort
+                {sampleKeys.length
+                  ? ` · ${sampleKeys.length} sample keys`
+                  : ""}{" "}
+                in Join Lens ↗
               </button>
               {onAllowDifference && (selection || target) && (
                 <div className="quality-allow">

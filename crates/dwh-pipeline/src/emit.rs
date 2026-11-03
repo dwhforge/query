@@ -582,16 +582,18 @@ fn emit_apply_key_map(
         .collect();
     if let Some(((vf_col, vt_col), as_of)) = scd {
         let q_as = quote_ident(as_of);
+        // Cast both sides to DATE so varchar seed bounds compare as temporal (ADR-0028).
         if seed_relation.is_some() {
             let q_vf = quote_ident(vf_col);
             let q_vt = quote_ident(vt_col);
-            // ADR-0028 half-open: event >= from AND (to IS NULL OR event < to)
             join_parts.push(format!(
-                "t.{q_as} >= m.{q_vf} AND (m.{q_vt} IS NULL OR t.{q_as} < m.{q_vt})"
+                "CAST(t.{q_as} AS DATE) >= CAST(m.{q_vf} AS DATE) \
+                 AND (m.{q_vt} IS NULL OR CAST(t.{q_as} AS DATE) < CAST(m.{q_vt} AS DATE))"
             ));
         } else {
             join_parts.push(format!(
-                "t.{q_as} >= m.valid_from_val AND (m.valid_to_val IS NULL OR t.{q_as} < m.valid_to_val)"
+                "CAST(t.{q_as} AS DATE) >= CAST(m.valid_from_val AS DATE) \
+                 AND (m.valid_to_val IS NULL OR CAST(t.{q_as} AS DATE) < CAST(m.valid_to_val AS DATE))"
             ));
         }
     }
@@ -1949,10 +1951,10 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains(">= m.valid_from_val")
+            sql.contains("CAST(t.\"event_day\" AS DATE) >= CAST(m.valid_from_val AS DATE)")
                 && sql.contains("valid_to_val IS NULL OR")
-                && sql.contains("< m.valid_to_val"),
-            "half-open predicate: {sql}"
+                && sql.contains("CAST(t.\"event_day\" AS DATE) < CAST(m.valid_to_val AS DATE)"),
+            "half-open DATE predicate: {sql}"
         );
     }
 

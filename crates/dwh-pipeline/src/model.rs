@@ -656,7 +656,7 @@ pub fn parse_scd_bound(raw: &str) -> Result<i64, String> {
     }
     let mut secs = civil_days_utc(y, m, d)? * 86_400;
     if let Some(t) = time {
-        let t = t.trim();
+        // No trim of the time part — must match TS exact regex (no space after T/ ).
         let t = if let Some(stripped) = t.strip_suffix('Z') {
             stripped
         } else {
@@ -685,7 +685,8 @@ pub fn parse_scd_bound(raw: &str) -> Result<i64, String> {
         let hh: i64 = t[0..2].parse().map_err(|_| "invalid hour".to_string())?;
         let mm: i64 = t[3..5].parse().map_err(|_| "invalid minute".to_string())?;
         let ss: i64 = t[6..8].parse().map_err(|_| "invalid second".to_string())?;
-        if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=60).contains(&ss) {
+        // Align with TS: seconds 00–59 only (no leap-second 60).
+        if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=59).contains(&ss) {
             return Err("time out of range".into());
         }
         secs += hh * 3600 + mm * 60 + ss;
@@ -756,6 +757,8 @@ mod scd_bound_tests {
         assert!(parse_scd_bound("+03:00").is_err());
         assert!(parse_scd_bound("abc+").is_err());
         assert!(parse_scd_bound("2026-11-03T10:00:00.100Z").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:60").is_err());
+        assert!(parse_scd_bound("2026-11-03T 10:00:00").is_err());
     }
 
     #[test]

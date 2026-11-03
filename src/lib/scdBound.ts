@@ -82,7 +82,7 @@ export function parseScdBoundDetailed(raw: string): ScdBoundParse {
   if (!validCivil(y, m, d)) {
     return { ok: false, error: `invalid calendar date ${s}` };
   }
-  if (hh > 23 || mm > 59 || ss > 60) {
+  if (hh > 23 || mm > 59 || ss > 59) {
     return { ok: false, error: `time out of range in ${s}` };
   }
   const epochMs = Date.UTC(y, m - 1, d, hh, mm, ss, 0);

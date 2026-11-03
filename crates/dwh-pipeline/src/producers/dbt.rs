@@ -409,9 +409,9 @@ pub fn build_export_plan_routed(
                 })
                 .unwrap_or_default();
             for ec in &extras {
-                // ADR-0028: SCD bounds are dates, not varchar (avoid string compare vs event time).
+                // ADR-0028: SCD bounds are timestamps (date-only → midnight); not varchar.
                 let ty = if temporal.contains(ec) {
-                    "date"
+                    "timestamp"
                 } else {
                     "varchar"
                 };

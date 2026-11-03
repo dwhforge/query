@@ -115,6 +115,7 @@ import {
   attributeDelta,
   buildCheckRun,
   cohortInspectionQuery,
+  cohortPredicateForTarget,
   cohortPredicateFromAttrCells,
   cohortPredicateFromCells,
   collectInputRevisions,
@@ -4553,6 +4554,14 @@ function App() {
                 {frozenRemap.changes.length} staged From→To · locked map
                 revision {frozenRemap.expected_map_revision.slice(0, 24)}…
               </span>
+              {frozenRemap.expected_input_revisions.every(
+                (r) => r.revision == null,
+              ) && (
+                <p className="mt-1 text-[11px] text-amber-200/70">
+                  Input versions unknown — confirm is mapping-gated only; file /
+                  live source changes will not invalidate this preview.
+                </p>
+              )}
             </div>
             <div className="flex shrink-0 gap-2">
               <button
@@ -5154,24 +5163,27 @@ function App() {
                       setError(String(reason));
                     }
                   }}
-                  onInspect={({ cohortCells, samples }) => {
+                  onInspect={(payload) => {
                     try {
                       const check = activeMappingCheck ?? labMappingCheck();
                       const sampleColumn =
                         check.projection.kind === "attrs"
                           ? check.projection.sample_column
                           : QUALITY_SAMPLE_COLUMN;
+                      const samples = payload.samples;
                       const orderedKeys = [...new Set(samples)]
                         .sort((a, b) => a.localeCompare(b))
                         .slice(0, 24);
                       const predicate =
-                        check.projection.kind === "attrs"
-                          ? cohortPredicateFromAttrCells(
-                              check.projection.left_attr,
-                              check.projection.right_attr,
-                              cohortCells,
-                            )
-                          : cohortPredicateFromCells(cohortCells);
+                        payload.kind === "target"
+                          ? cohortPredicateForTarget(payload.targetKey)
+                          : check.projection.kind === "attrs"
+                            ? cohortPredicateFromAttrCells(
+                                check.projection.left_attr,
+                                check.projection.right_attr,
+                                payload.cohortCells,
+                              )
+                            : cohortPredicateFromCells(payload.cohortCells);
                       setProject((p) => {
                         const checks =
                           check.id === "check_lab_quality"

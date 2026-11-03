@@ -143,34 +143,8 @@ export type ValidateKeyMapOpts = {
   validToColumn?: string;
 };
 
-/** Parse SCD bound: ISO date `YYYY-MM-DD` or timestamp `YYYY-MM-DD[ T]HH:MM[:SS]`. */
-export function parseScdBound(raw: string): number | null {
-  const s = raw.trim();
-  if (!s) return null;
-  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (dateOnly) {
-    const t = Date.UTC(
-      Number(dateOnly[1]),
-      Number(dateOnly[2]) - 1,
-      Number(dateOnly[3]),
-    );
-    return Number.isFinite(t) ? t : null;
-  }
-  const ts =
-    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(s);
-  if (ts) {
-    const t = Date.UTC(
-      Number(ts[1]),
-      Number(ts[2]) - 1,
-      Number(ts[3]),
-      Number(ts[4]),
-      Number(ts[5]),
-      Number(ts[6] ?? 0),
-    );
-    return Number.isFinite(t) ? t : null;
-  }
-  return null;
-}
+export { parseScdBound, parseScdBoundDetailed } from "./scdBound";
+import { parseScdBound } from "./scdBound";
 
 /** Trim From parts; reject empty to / duplicate tuples (ADR-0024 / ADR-0028). */
 export function validateKeyMapEntries(
@@ -223,7 +197,7 @@ export function validateKeyMapEntries(
       if (vf == null) {
         return {
           ok: false,
-          error: `Invalid ${vfCol} '${vfRaw}' (use YYYY-MM-DD or timestamp)`,
+          error: `Invalid ${vfCol} '${vfRaw}' (YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[Z])`,
         };
       }
       const vtRaw = (e.attrs?.[vtCol] ?? "").trim();
@@ -233,7 +207,7 @@ export function validateKeyMapEntries(
         if (vt == null) {
           return {
             ok: false,
-            error: `Invalid ${vtCol} '${vtRaw}' (use YYYY-MM-DD or timestamp)`,
+            error: `Invalid ${vtCol} '${vtRaw}' (YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[Z])`,
           };
         }
         if (vt <= vf) {

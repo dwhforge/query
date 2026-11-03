@@ -67,15 +67,43 @@ export function stripQualityInspectionQueries(
  * Ignores inspection queries and other canvas edits so returning to the tab
  * does not rebuild a finished analysis.
  */
-/** Cache key must change when map *content* or projection deps change (not only row count). */
+/** Cache key must change when map *content*, schema, or projection deps change. */
 export function qualityProjectionCacheKey(
   workspace: Workspace,
-  opts?: { mapId?: string; hostQueryId?: string },
+  opts?: {
+    mapId?: string;
+    hostQueryId?: string;
+    projection?: {
+      kind: string;
+      host_query_id?: string;
+      left_attr?: string;
+      right_attr?: string;
+      sample_column?: string;
+    };
+  },
 ): string {
   const byId = new Map(workspace.queries.map((query) => [query.id, query]));
-  const slim = (id: string) => {
+  const slimDeep = (id: string, depth = 0): unknown => {
+    if (depth > 6) return { id, truncated: true };
     const query = byId.get(id);
     if (!query) return null;
+    const deps: unknown[] = [];
+    for (const step of query.steps) {
+      if (step.type === "FromQuery") {
+        deps.push(slimDeep(String(step.payload.query_id), depth + 1));
+      } else if (step.type === "Join") {
+        deps.push(slimDeep(String(step.payload.right_query_id), depth + 1));
+      } else if (step.type === "Append") {
+        for (const oid of step.payload.other_query_ids ?? []) {
+          deps.push(slimDeep(String(oid), depth + 1));
+        }
+      } else if (step.type === "SqlModel") {
+        const sql = step.payload.raw_sql ?? "";
+        for (const m of sql.matchAll(/\{\{\s*query:([a-zA-Z0-9_]+)\s*\}\}/g)) {
+          deps.push(slimDeep(m[1]!, depth + 1));
+        }
+      }
+    }
     return {
       id: query.id,
       steps: query.steps.map((step) => {
@@ -92,11 +120,18 @@ export function qualityProjectionCacheKey(
           },
         };
       }),
+      deps,
     };
   };
   const mapFingerprints = (workspace.key_maps ?? []).map((map) => ({
     id: map.id,
     time_mode: map.time_mode ?? "none",
+    from_columns: map.from_columns ?? map.from_column ?? null,
+    to_column: map.to_column ?? "to",
+    editable_columns: map.editable_columns ?? [],
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
     rows: [...map.entries]
       .map((e) => {
         const from = (
@@ -111,15 +146,16 @@ export function qualityProjectionCacheKey(
       .sort()
       .join("\n"),
   }));
-  const host = opts?.hostQueryId;
+  const host = opts?.hostQueryId ?? opts?.projection?.host_query_id;
   return JSON.stringify({
-    commercial: slim("quality_commercial"),
-    catalog: slim("quality_catalog"),
-    join: slim(QUALITY_JOIN),
-    summary: slim(QUALITY_SUMMARY),
-    targets: slim(QUALITY_TARGETS),
-    host: host ? slim(host) : null,
+    commercial: slimDeep("quality_commercial"),
+    catalog: slimDeep("quality_catalog"),
+    join: slimDeep(QUALITY_JOIN),
+    summary: slimDeep(QUALITY_SUMMARY),
+    targets: slimDeep(QUALITY_TARGETS),
+    host: host ? slimDeep(host) : null,
     focusMapId: opts?.mapId ?? null,
+    projection: opts?.projection ?? null,
     mapFingerprints,
   });
 }

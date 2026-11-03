@@ -630,55 +630,91 @@ impl KeyMapDef {
     }
 }
 
-/// Parse SCD bound as UTC epoch seconds. Accepts `YYYY-MM-DD` or `YYYY-MM-DD[ T]HH:MM[:SS]`.
+/// Parse SCD bound as UTC epoch seconds.
+/// Formats: `YYYY-MM-DD` (midnight) or `YYYY-MM-DD[T ]HH:MM:SS[.fff][Z]`.
+/// Timezone offsets rejected. Calendar-invalid dates rejected.
 pub fn parse_scd_bound(raw: &str) -> Result<i64, String> {
     let s = raw.trim();
+    if s.is_empty() {
+        return Err("empty bound".into());
+    }
+    if s.contains('+')
+        || (s.matches('-').count() > 2 && s.rfind('-').map(|i| i > 10).unwrap_or(false))
+    {
+        // Allow date dashes; reject trailing ±HH:MM offsets.
+        if s[10..].contains('+') || s[10..].contains('-') {
+            return Err("timezone offsets not supported (use UTC / Z)".into());
+        }
+    }
     let (date, time) = if let Some((d, t)) = s.split_once('T').or_else(|| s.split_once(' ')) {
         (d, Some(t.trim()))
     } else {
         (s, None)
     };
+    if date.len() != 10 {
+        return Err("expected YYYY-MM-DD or timestamp".into());
+    }
     let dp: Vec<&str> = date.split('-').collect();
     if dp.len() != 3 {
         return Err("expected YYYY-MM-DD or timestamp".into());
     }
-    let y: i32 = dp[0]
-        .parse()
-        .map_err(|_| "invalid year".to_string())?;
-    let m: u32 = dp[1]
-        .parse()
-        .map_err(|_| "invalid month".to_string())?;
-    let d: u32 = dp[2]
-        .parse()
-        .map_err(|_| "invalid day".to_string())?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return Err("month/day out of range".into());
+    let y: i32 = dp[0].parse().map_err(|_| "invalid year".to_string())?;
+    let m: u32 = dp[1].parse().map_err(|_| "invalid month".to_string())?;
+    let d: u32 = dp[2].parse().map_err(|_| "invalid day".to_string())?;
+    if !valid_civil(y, m, d) {
+        return Err(format!("invalid calendar date {date}"));
     }
     let mut secs = civil_days_utc(y, m, d)? * 86_400;
     if let Some(t) = time {
-        let t = t.trim_end_matches('Z');
-        let tp: Vec<&str> = t.split(':').collect();
-        if tp.len() < 2 || tp.len() > 3 {
-            return Err("expected HH:MM[:SS]".into());
+        let t = if let Some(stripped) = t.strip_suffix('Z') {
+            stripped
+        } else {
+            t
+        };
+        // Require HH:MM:SS[.fff] — no bare HH:MM, no trailing garbage.
+        let (hms, frac) = match t.split_once('.') {
+            Some((hms, frac)) => {
+                if frac.is_empty() || !frac.chars().all(|c| c.is_ascii_digit()) {
+                    return Err("invalid fractional seconds".into());
+                }
+                (hms, Some(frac))
+            }
+            None => (t, None),
+        };
+        let tp: Vec<&str> = hms.split(':').collect();
+        if tp.len() != 3 {
+            return Err("expected HH:MM:SS[.fff][Z]".into());
         }
         let hh: i64 = tp[0].parse().map_err(|_| "invalid hour".to_string())?;
         let mm: i64 = tp[1].parse().map_err(|_| "invalid minute".to_string())?;
-        let ss: i64 = if tp.len() == 3 {
-            tp[2]
-                .split('.')
-                .next()
-                .unwrap_or("0")
-                .parse()
-                .map_err(|_| "invalid second".to_string())?
-        } else {
-            0
-        };
+        let ss: i64 = tp[2].parse().map_err(|_| "invalid second".to_string())?;
         if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=60).contains(&ss) {
             return Err("time out of range".into());
         }
+        let _ = frac; // truncate to whole seconds for epoch-sec identity with validators
         secs += hh * 3600 + mm * 60 + ss;
     }
     Ok(secs)
+}
+
+fn days_in_month(y: i32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn valid_civil(y: i32, m: u32, d: u32) -> bool {
+    (1..=12).contains(&m) && d >= 1 && d <= days_in_month(y, m)
 }
 
 #[cfg(test)]
@@ -696,6 +732,24 @@ mod scd_bound_tests {
         let a = parse_scd_bound("2024-01-01").unwrap();
         let b = parse_scd_bound("2024-06-01").unwrap();
         assert!(a < b);
+    }
+
+    #[test]
+    fn rejects_invalid_calendar_and_garbage() {
+        assert!(parse_scd_bound("2026-02-31").is_err());
+        assert!(parse_scd_bound("2026-13-01").is_err());
+        assert!(parse_scd_bound("2026-11-03T25:00:00").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:00garbage").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:00+03:00").is_err());
+    }
+
+    #[test]
+    fn timestamp_keeps_time_of_day() {
+        let a = parse_scd_bound("2026-11-03T10:00:00").unwrap();
+        let b = parse_scd_bound("2026-11-03T11:00:00").unwrap();
+        assert_eq!(b - a, 3600);
+        let noonish = parse_scd_bound("2026-11-03T10:30:00").unwrap();
+        assert!(noonish > a && noonish < b);
     }
 }
 

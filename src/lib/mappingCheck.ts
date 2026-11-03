@@ -87,6 +87,7 @@ export function checkDefinitionRevision(check: MappingCheck): string {
 /**
  * Honest input versioning (ADR-0027).
  * Path-only file loads and live Postgres cannot prove content identity → limited.
+ * Known upstream revisions are folded into the digest (not only null-checked).
  */
 export function inputRevisionForQuery(
   workspace: Workspace,
@@ -105,65 +106,85 @@ export function inputRevisionForQuery(
       unknown_reason: "query missing",
     };
   }
+  const depRevs: string[] = [];
+  const noteLimited = (reason: string): CheckInputRevision => ({
+    ref_id: queryId,
+    revision: null,
+    unknown_reason: reason,
+  });
+
+  const takeDep = (dep: CheckInputRevision): CheckInputRevision | null => {
+    if (dep.revision == null) {
+      return noteLimited(
+        dep.unknown_reason ??
+          `dependency ${dep.ref_id} has no reliable version`,
+      );
+    }
+    depRevs.push(`${dep.ref_id}=${dep.revision}`);
+    return null;
+  };
+
   for (const step of q.steps) {
     if (step.type === "LoadCsv" || step.type === "LoadParquet") {
-      return {
-        ref_id: queryId,
-        revision: null,
-        unknown_reason: `${step.type} content version not tracked (path-only)`,
-      };
+      return noteLimited(
+        `${step.type} content version not tracked (path-only)`,
+      );
     }
     if (step.type === "LoadPostgres") {
-      return {
-        ref_id: queryId,
-        revision: null,
-        unknown_reason: "postgres relation version not tracked",
-      };
+      return noteLimited("postgres relation version not tracked");
     }
     if (step.type === "LoadDuckdb") {
-      return {
-        ref_id: queryId,
-        revision: null,
-        unknown_reason: "duckdb file content version not tracked",
-      };
+      return noteLimited("duckdb file content version not tracked");
     }
     if (step.type === "FromQuery") {
-      const upstream = inputRevisionForQuery(
-        workspace,
-        String(step.payload.query_id),
-        seen,
+      const fail = takeDep(
+        inputRevisionForQuery(
+          workspace,
+          String(step.payload.query_id),
+          seen,
+        ),
       );
-      if (upstream.revision == null) {
-        return {
-          ref_id: queryId,
-          revision: null,
-          unknown_reason:
-            upstream.unknown_reason ??
-            `upstream ${upstream.ref_id} has no reliable version`,
-        };
-      }
+      if (fail) return fail;
     }
     if (step.type === "Join") {
-      const right = inputRevisionForQuery(
-        workspace,
-        String(step.payload.right_query_id),
-        seen,
+      const fail = takeDep(
+        inputRevisionForQuery(
+          workspace,
+          String(step.payload.right_query_id),
+          seen,
+        ),
       );
-      if (right.revision == null) {
-        return {
-          ref_id: queryId,
-          revision: null,
-          unknown_reason:
-            right.unknown_reason ??
-            `join right ${right.ref_id} has no reliable version`,
-        };
+      if (fail) return fail;
+    }
+    if (step.type === "Append") {
+      for (const oid of step.payload.other_query_ids ?? []) {
+        const fail = takeDep(
+          inputRevisionForQuery(workspace, String(oid), seen),
+        );
+        if (fail) return fail;
+      }
+    }
+    if (step.type === "SqlModel") {
+      const sql = step.payload.raw_sql ?? "";
+      const placeholders = [
+        ...sql.matchAll(/\{\{\s*query:([a-zA-Z0-9_]+)\s*\}\}/g),
+      ].map((m) => m[1]!);
+      // Unresolved / non-query placeholders → limited rather than silent miss.
+      if (/\{\{/.test(sql) && placeholders.length === 0) {
+        return noteLimited(
+          "SqlModel has placeholders that are not {{query:id}}",
+        );
+      }
+      for (const pid of placeholders) {
+        const fail = takeDep(inputRevisionForQuery(workspace, pid, seen));
+        if (fail) return fail;
       }
     }
   }
-  // No fragile external loads: fingerprint the full step graph for this query.
+  depRevs.sort();
   return {
     ref_id: queryId,
-    revision: `steps:${fnv1a(JSON.stringify(q.steps))}`,
+    revision: `steps:${fnv1a(JSON.stringify(q.steps))}|deps:${fnv1a(depRevs.join("|"))}`,
   };
 }
 
@@ -410,6 +431,13 @@ export function cohortPredicateFromAttrCells(
     return `(${eqSql(leftAttr, c.sourceFamily)} AND ${right})`;
   });
   return [...new Set(parts)].join(" OR ");
+}
+
+/** Concentration-lens target: cohort = rows converging on this canonical key. */
+export function cohortPredicateForTarget(targetKey: string): string {
+  const k = targetKey.trim();
+  if (!k) throw new Error("Empty target key for cohort.");
+  return eqSql("canonical_key", k);
 }
 
 /**

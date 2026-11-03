@@ -4,6 +4,7 @@ import {
   attributeDelta,
   buildCheckRun,
   checkDefinitionRevision,
+  cohortPredicateForTarget,
   cohortPredicateFromCells,
   collectInputRevisions,
   deltaLabel,
@@ -16,6 +17,7 @@ import type { CheckRun } from "../types/mappingCheck";
 import type { KeyMapDef, Workspace } from "../types/pipeline";
 import { parseQualitySummary, SIGNALS } from "./mappingQuality";
 import { validateKeyMapEntries } from "./keyMap";
+import { parseScdBound } from "./scdBound";
 
 function assert(v: unknown, msg: string) {
   if (!v) throw new Error(msg);
@@ -261,5 +263,49 @@ const scdBad = validateKeyMapEntries(
   { timeMode: "range_scd" },
 );
 assert(!scdBad.ok, "non-date SCD bounds rejected");
+
+assert(parseScdBound("2026-02-31") == null, "reject Feb 31");
+assert(parseScdBound("2026-11-03T25:00:00") == null, "reject hour 25");
+assert(parseScdBound("2026-11-03T10:00:00garbage") == null, "reject garbage");
+assert(parseScdBound("2026-11-03T10:00:00+03:00") == null, "reject offset");
+const t0 = parseScdBound("2026-11-03T10:00:00")!;
+const t1 = parseScdBound("2026-11-03T11:00:00")!;
+assert(t1 - t0 === 3600_000, "timestamp keeps hour precision");
+
+const up: Workspace = {
+  focus_query_id: "down",
+  key_maps: [],
+  queries: [
+    {
+      id: "up",
+      name: "up",
+      steps: [{ type: "SqlModel", payload: { raw_sql: "SELECT 1 AS k" } }],
+    },
+    {
+      id: "down",
+      name: "down",
+      steps: [{ type: "FromQuery", payload: { query_id: "up" } }],
+    },
+  ],
+};
+const d1 = inputRevisionForQuery(up, "down");
+const up2: Workspace = {
+  ...up,
+  queries: [
+    {
+      id: "up",
+      name: "up",
+      steps: [{ type: "SqlModel", payload: { raw_sql: "SELECT 2 AS k" } }],
+    },
+    up.queries[1]!,
+  ],
+};
+const d2 = inputRevisionForQuery(up2, "down");
+assert(d1.revision && d2.revision && d1.revision !== d2.revision, "upstream in digest");
+
+assert(
+  cohortPredicateForTarget("SKU-1").includes("canonical_key"),
+  "target cohort",
+);
 
 console.log("mappingCheck.test.ts: ok");

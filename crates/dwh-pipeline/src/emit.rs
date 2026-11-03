@@ -582,18 +582,18 @@ fn emit_apply_key_map(
         .collect();
     if let Some(((vf_col, vt_col), as_of)) = scd {
         let q_as = quote_ident(as_of);
-        // Cast both sides to DATE so varchar seed bounds compare as temporal (ADR-0028).
+        // Timestamp-aware half-open (ADR-0028): keep time-of-day; date-only bounds = midnight UTC.
         if seed_relation.is_some() {
             let q_vf = quote_ident(vf_col);
             let q_vt = quote_ident(vt_col);
             join_parts.push(format!(
-                "CAST(t.{q_as} AS DATE) >= CAST(m.{q_vf} AS DATE) \
-                 AND (m.{q_vt} IS NULL OR CAST(t.{q_as} AS DATE) < CAST(m.{q_vt} AS DATE))"
+                "CAST(t.{q_as} AS TIMESTAMP) >= CAST(m.{q_vf} AS TIMESTAMP) \
+                 AND (m.{q_vt} IS NULL OR CAST(t.{q_as} AS TIMESTAMP) < CAST(m.{q_vt} AS TIMESTAMP))"
             ));
         } else {
             join_parts.push(format!(
-                "CAST(t.{q_as} AS DATE) >= CAST(m.valid_from_val AS DATE) \
-                 AND (m.valid_to_val IS NULL OR CAST(t.{q_as} AS DATE) < CAST(m.valid_to_val AS DATE))"
+                "CAST(t.{q_as} AS TIMESTAMP) >= CAST(m.valid_from_val AS TIMESTAMP) \
+                 AND (m.valid_to_val IS NULL OR CAST(t.{q_as} AS TIMESTAMP) < CAST(m.valid_to_val AS TIMESTAMP))"
             ));
         }
     }
@@ -1951,10 +1951,12 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("CAST(t.\"event_day\" AS DATE) >= CAST(m.valid_from_val AS DATE)")
+            sql.contains("CAST(t.\"event_day\" AS TIMESTAMP) >= CAST(m.valid_from_val AS TIMESTAMP)")
                 && sql.contains("valid_to_val IS NULL OR")
-                && sql.contains("CAST(t.\"event_day\" AS DATE) < CAST(m.valid_to_val AS DATE)"),
-            "half-open DATE predicate: {sql}"
+                && sql.contains(
+                    "CAST(t.\"event_day\" AS TIMESTAMP) < CAST(m.valid_to_val AS TIMESTAMP)"
+                ),
+            "half-open TIMESTAMP predicate: {sql}"
         );
     }
 

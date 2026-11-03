@@ -17,17 +17,26 @@ import {
 } from "../../lib/mappingQuality";
 import "./mapping-quality.css";
 
+export type CohortInspectPayload =
+  | {
+      kind: "matrix";
+      cohortCells: QualityCell[];
+      samples: string[];
+    }
+  | {
+      kind: "target";
+      targetKey: string;
+      samples: string[];
+    };
+
 type Props = {
   /** Only fetch while the overview tab is visible — shares the host preview lane with canvas. */
   active: boolean;
   workspace: Workspace;
   connections: ConnectionDef[];
   sources: SourceDef[];
-  /** Cohort = group predicate; samples only illustrate / focus Lens (ADR-0027). */
-  onInspect: (payload: {
-    cohortCells: QualityCell[];
-    samples: string[];
-  }) => void;
+  /** Cohort = group/target predicate; samples only illustrate / focus Lens (ADR-0027). */
+  onInspect: (payload: CohortInspectPayload) => void;
   onCanvas: () => void;
   /** Surface long overview / handoff work in the app progress bar. */
   onProgress?: (state: { phase: string; percent: number } | null) => void;
@@ -101,6 +110,16 @@ export function MappingQualityOverview({
       qualityProjectionCacheKey(workspace, {
         hostQueryId:
           projection.kind === "attrs" ? projection.host_query_id : undefined,
+        projection:
+          projection.kind === "attrs"
+            ? {
+                kind: projection.kind,
+                host_query_id: projection.host_query_id,
+                left_attr: projection.left_attr,
+                right_attr: projection.right_attr,
+                sample_column: projection.sample_column,
+              }
+            : { kind: projection.kind },
       }),
     [workspace, projection],
   );
@@ -652,13 +671,25 @@ export function MappingQualityOverview({
               )}
               <button
                 className="quality-primary"
-                disabled={!selected.length || (!selection && !target)}
-                onClick={() =>
+                disabled={
+                  (!selection && !target) ||
+                  (selection ? !selected.length : !target)
+                }
+                onClick={() => {
+                  if (target) {
+                    onInspect({
+                      kind: "target",
+                      targetKey: target.key,
+                      samples: sampleKeys,
+                    });
+                    return;
+                  }
                   onInspect({
+                    kind: "matrix",
                     cohortCells: selected,
                     samples: sampleKeys,
-                  })
-                }
+                  });
+                }}
               >
                 Inspect cohort
                 {sampleKeys.length

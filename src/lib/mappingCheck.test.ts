@@ -178,11 +178,18 @@ const scdMap: KeyMapDef = {
     },
   ],
 };
-try {
-  applyFrozenRemapToMap(scdMap, { ...freeze, map_id: scdMap.id, expected_map_revision: keyMapRevision(scdMap) });
-  throw new Error("SCD batch should refuse");
-} catch (e) {
-  assert(String(e).includes("arity-1") || String(e).includes("SCD") || String(e).includes("static"), "SCD remap refused");
+{
+  let refused = false;
+  try {
+    applyFrozenRemapToMap(scdMap, {
+      ...freeze,
+      map_id: scdMap.id,
+      expected_map_revision: keyMapRevision(scdMap),
+    });
+  } catch (e) {
+    refused = /static arity-1|not composite \/ range SCD/i.test(String(e));
+  }
+  assert(refused, "SCD batch remap refused by applyFrozenRemapToMap");
 }
 
 const allowed = upsertAllowDecision(check, '["Urea","Sulfur"]', "intentional");
@@ -268,6 +275,8 @@ assert(parseScdBound("2026-02-31") == null, "reject Feb 31");
 assert(parseScdBound("2026-11-03T25:00:00") == null, "reject hour 25");
 assert(parseScdBound("2026-11-03T10:00:00garbage") == null, "reject garbage");
 assert(parseScdBound("2026-11-03T10:00:00+03:00") == null, "reject offset");
+assert(parseScdBound("+") == null, "reject lone +");
+assert(parseScdBound("2026-11-03T10:00:00.100Z") == null, "reject fractional v1");
 const t0 = parseScdBound("2026-11-03T10:00:00")!;
 const t1 = parseScdBound("2026-11-03T11:00:00")!;
 assert(t1 - t0 === 3600_000, "timestamp keeps hour precision");

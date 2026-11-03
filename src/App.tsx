@@ -4554,12 +4554,13 @@ function App() {
                 {frozenRemap.changes.length} staged From→To · locked map
                 revision {frozenRemap.expected_map_revision.slice(0, 24)}…
               </span>
-              {frozenRemap.expected_input_revisions.every(
+              {frozenRemap.expected_input_revisions.some(
                 (r) => r.revision == null,
               ) && (
                 <p className="mt-1 text-[11px] text-amber-200/70">
-                  Input versions unknown — confirm is mapping-gated only; file /
-                  live source changes will not invalidate this preview.
+                  Some inputs are not versioned — confirm is mapping-gated for
+                  those; file / live source changes may not invalidate this
+                  preview.
                 </p>
               )}
             </div>

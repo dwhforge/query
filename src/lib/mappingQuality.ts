@@ -83,27 +83,32 @@ export function qualityProjectionCacheKey(
   },
 ): string {
   const byId = new Map(workspace.queries.map((query) => [query.id, query]));
-  const slimDeep = (id: string, depth = 0): unknown => {
-    if (depth > 6) return { id, truncated: true };
+  const slimDeep = (
+    id: string,
+    visiting = new Set<string>(),
+  ): unknown => {
+    if (visiting.has(id)) return { id, cycle: true };
     const query = byId.get(id);
     if (!query) return null;
+    visiting.add(id);
     const deps: unknown[] = [];
     for (const step of query.steps) {
       if (step.type === "FromQuery") {
-        deps.push(slimDeep(String(step.payload.query_id), depth + 1));
+        deps.push(slimDeep(String(step.payload.query_id), visiting));
       } else if (step.type === "Join") {
-        deps.push(slimDeep(String(step.payload.right_query_id), depth + 1));
+        deps.push(slimDeep(String(step.payload.right_query_id), visiting));
       } else if (step.type === "Append") {
         for (const oid of step.payload.other_query_ids ?? []) {
-          deps.push(slimDeep(String(oid), depth + 1));
+          deps.push(slimDeep(String(oid), visiting));
         }
       } else if (step.type === "SqlModel") {
         const sql = step.payload.raw_sql ?? "";
         for (const m of sql.matchAll(/\{\{\s*query:([a-zA-Z0-9_]+)\s*\}\}/g)) {
-          deps.push(slimDeep(m[1]!, depth + 1));
+          deps.push(slimDeep(m[1]!, visiting));
         }
       }
     }
+    visiting.delete(id);
     return {
       id: query.id,
       steps: query.steps.map((step) => {

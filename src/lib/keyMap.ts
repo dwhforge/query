@@ -197,7 +197,7 @@ export function validateKeyMapEntries(
       if (vf == null) {
         return {
           ok: false,
-          error: `Invalid ${vfCol} '${vfRaw}' (YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[Z])`,
+          error: `Invalid ${vfCol} '${vfRaw}' (YYYY-MM-DD or HH:MM:SS; no fractional seconds)`,
         };
       }
       const vtRaw = (e.attrs?.[vtCol] ?? "").trim();
@@ -207,7 +207,7 @@ export function validateKeyMapEntries(
         if (vt == null) {
           return {
             ok: false,
-            error: `Invalid ${vtCol} '${vtRaw}' (YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[Z])`,
+            error: `Invalid ${vtCol} '${vtRaw}' (YYYY-MM-DD or HH:MM:SS; no fractional seconds)`,
           };
         }
         if (vt <= vf) {

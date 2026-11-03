@@ -1,7 +1,7 @@
 /**
- * Shared SCD bound parsing (ADR-0028).
- * Formats: `YYYY-MM-DD` (UTC midnight) or `YYYY-MM-DD[T ]HH:MM:SS[.fff]`.
- * No timezone offsets — reject `+03:00` / trailing garbage. Trailing `Z` = UTC ok.
+ * Shared SCD bound parsing (ADR-0028) — must match Rust `parse_scd_bound`.
+ * Formats: `YYYY-MM-DD` (UTC midnight) or `YYYY-MM-DD[T ]HH:MM:SS[Z]`.
+ * v1: no fractional seconds, no timezone offsets (trailing Z = UTC ok).
  */
 
 export type ScdBoundParse =
@@ -10,7 +10,7 @@ export type ScdBoundParse =
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TS_RE =
-  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z?$/;
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})Z?$/;
 
 function daysInMonth(y: number, m: number): number {
   if (m === 2) {
@@ -36,7 +36,12 @@ export function parseScdBound(raw: string): number | null {
 export function parseScdBoundDetailed(raw: string): ScdBoundParse {
   const s = raw.trim();
   if (!s) return { ok: false, error: "empty bound" };
-  // Reject explicit offsets / named zones early.
+
+  // Reject fractional seconds before other matches (v1 contract).
+  if (/\.\d/.test(s)) {
+    return { ok: false, error: "fractional seconds not supported in v1" };
+  }
+  // Reject explicit numeric offsets (not trailing Z).
   if (/[+-]\d{2}:?\d{2}$/.test(s) || /[+-]\d{4}$/.test(s)) {
     return { ok: false, error: "timezone offsets not supported (use UTC / Z)" };
   }
@@ -50,7 +55,6 @@ export function parseScdBoundDetailed(raw: string): ScdBoundParse {
       return { ok: false, error: `invalid calendar date ${s}` };
     }
     const epochMs = Date.UTC(y, m - 1, d);
-    // Round-trip guard against Date.UTC overflow (e.g. Feb 31 → Mar)
     const rt = new Date(epochMs);
     if (
       rt.getUTCFullYear() !== y ||
@@ -66,7 +70,7 @@ export function parseScdBoundDetailed(raw: string): ScdBoundParse {
   if (!ts) {
     return {
       ok: false,
-      error: "expected YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[.fff][Z]",
+      error: "expected YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[Z]",
     };
   }
   const y = Number(ts[1]);
@@ -75,20 +79,13 @@ export function parseScdBoundDetailed(raw: string): ScdBoundParse {
   const hh = Number(ts[4]);
   const mm = Number(ts[5]);
   const ss = Number(ts[6]);
-  const frac = ts[7] ?? "";
   if (!validCivil(y, m, d)) {
     return { ok: false, error: `invalid calendar date ${s}` };
   }
   if (hh > 23 || mm > 59 || ss > 60) {
     return { ok: false, error: `time out of range in ${s}` };
   }
-  if (frac && !/^\d+$/.test(frac)) {
-    return { ok: false, error: `invalid fractional seconds in ${s}` };
-  }
-  const ms = frac
-    ? Number((frac + "000").slice(0, 3)) // truncate to ms
-    : 0;
-  const epochMs = Date.UTC(y, m - 1, d, hh, mm, ss, ms);
+  const epochMs = Date.UTC(y, m - 1, d, hh, mm, ss, 0);
   const rt = new Date(epochMs);
   if (
     rt.getUTCFullYear() !== y ||

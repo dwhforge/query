@@ -15,6 +15,14 @@ export function summarizeError(raw: string): string {
   if (/DuckDB hit its memory_limit/i.test(plain)) {
     return plain.split("Detail:")[0].trim().slice(0, 320);
   }
+  // PG KeyMap labs: schema is created by scripts/examples/load_postgres.py, not by demo load.
+  if (
+    /Catalog Error:.*schema ["']?keymap_demo["']? does not exist/i.test(plain) ||
+    (/Catalog Error:.*does not exist/i.test(plain) &&
+      /keymap_demo\./i.test(plain))
+  ) {
+    return "Postgres schema keymap_demo is missing — run: python scripts/examples/load_postgres.py (DSN dwh_tests, connection conn_postgres).";
+  }
   const prefer = lines.find((l) =>
     /IO Error:|Runtime Error:|Compilation Error:|Database Error:|Parsing Error:|Catalog Error:|Binder Error:|Encountered an error|memory_limit|Out of Memory/i.test(
       l,

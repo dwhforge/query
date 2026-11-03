@@ -275,10 +275,23 @@ pub enum TransformationStep {
         /// Where COALESCE(map.to, …) is written (default: first of columns).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_column: Option<String>,
+        /// Fact event-time column for range SCD maps ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of_column: Option<String>,
         map_id: ObjectTarget,
         #[serde(default)]
         entries: Vec<KeyMapEntry>,
     },
+}
+
+/// Optional effectivity mode for a KeyMap ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyMapTimeMode {
+    #[default]
+    None,
+    /// Rows carry valid_from / valid_to; Apply uses half-open range predicate.
+    RangeScd,
 }
 
 /// One From→To alias row. Unique by trimmed From **tuple** within a [`KeyMapDef`].
@@ -393,9 +406,23 @@ pub struct KeyMapDef {
     /// Column on the map relation used as To (default `to`).
     #[serde(default = "default_to_col")]
     pub to_column: String,
-    /// Extra WH columns editable in the KeyMap UI (not From/To). Empty = from/to only.
+    /// Extra columns editable in the KeyMap UI (not From/To). Empty = from/to only.
+    /// Seed export includes these after `to` ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub editable_columns: Vec<String>,
+    /// Effectivity mode (default none = classic unique From).
+    #[serde(default, skip_serializing_if = "is_time_mode_none")]
+    pub time_mode: KeyMapTimeMode,
+    /// Map column for range start when `time_mode = range_scd` (default `valid_from`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from_column: Option<String>,
+    /// Map column for range end when `time_mode = range_scd` (default `valid_to`; NULL = open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_to_column: Option<String>,
+}
+
+fn is_time_mode_none(m: &KeyMapTimeMode) -> bool {
+    matches!(m, KeyMapTimeMode::None)
 }
 
 impl KeyMapDef {
@@ -409,7 +436,52 @@ impl KeyMapDef {
             from_columns: vec![],
             to_column: default_to_col(),
             editable_columns: vec![],
+            time_mode: KeyMapTimeMode::None,
+            valid_from_column: None,
+            valid_to_column: None,
         }
+    }
+
+    pub fn valid_from_col_eff(&self) -> String {
+        self.valid_from_column
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("valid_from")
+            .to_string()
+    }
+
+    pub fn valid_to_col_eff(&self) -> String {
+        self.valid_to_column
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("valid_to")
+            .to_string()
+    }
+
+    /// Seed / relation columns after From+To: range bounds (if any) then editable attrs.
+    pub fn stewardship_columns(&self) -> Vec<String> {
+        let mut cols = Vec::new();
+        if matches!(self.time_mode, KeyMapTimeMode::RangeScd) {
+            cols.push(self.valid_from_col_eff());
+            cols.push(self.valid_to_col_eff());
+        }
+        for c in &self.editable_columns {
+            let t = c.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if cols.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                continue;
+            }
+            cols.push(t.to_string());
+        }
+        cols
+    }
+
+    pub fn is_range_scd(&self) -> bool {
+        matches!(self.time_mode, KeyMapTimeMode::RangeScd)
     }
 
     /// Effective From column names on the map relation ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
@@ -453,9 +525,15 @@ impl KeyMapDef {
             ));
         }
         let n = from_cols.len();
+        let range = self.is_range_scd();
+        let vf_col = self.valid_from_col_eff();
+        let vt_col = self.valid_to_col_eff();
         // External relations may have empty local entries (SoT is the table).
         if matches!(self.storage, KeyMapStorage::Seed) || !self.entries.is_empty() {
             let mut seen = std::collections::HashSet::new();
+            // from_key → list of (valid_from, valid_to_opt) for overlap checks
+            let mut ranges: std::collections::BTreeMap<Vec<String>, Vec<(String, Option<String>)>> =
+                std::collections::BTreeMap::new();
             for e in &self.entries {
                 let parts = e.from_parts_eff();
                 if parts.len() != n {
@@ -475,11 +553,59 @@ impl KeyMapDef {
                         self.id, key
                     ));
                 }
-                if !seen.insert(key.clone()) {
+                if range {
+                    let vf = e
+                        .attrs
+                        .get(&vf_col)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "KeyMap '{}': range SCD requires {vf_col} for from {:?}",
+                                self.id, key
+                            )
+                        })?;
+                    let vt = e
+                        .attrs
+                        .get(&vt_col)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    if let Some(ref end) = vt {
+                        if end.as_str() <= vf.as_str() {
+                            return Err(format!(
+                                "KeyMap '{}': {vt_col} must be > {vf_col} for from {:?} ({vf} .. {end})",
+                                self.id, key
+                            ));
+                        }
+                    }
+                    ranges.entry(key).or_default().push((vf, vt));
+                } else if !seen.insert(key.clone()) {
                     return Err(format!(
                         "KeyMap '{}': duplicate from tuple {:?}",
                         self.id, key
                     ));
+                }
+            }
+            if range {
+                for (key, mut ivals) in ranges {
+                    ivals.sort_by(|a, b| a.0.cmp(&b.0));
+                    for w in ivals.windows(2) {
+                        let (a_from, a_to) = &w[0];
+                        let (b_from, _) = &w[1];
+                        // Half-open: [a_from, a_to) overlaps [b_from, …) if a_to is open or a_to > b_from.
+                        let overlaps = match a_to {
+                            None => true,
+                            Some(end) => end.as_str() > b_from.as_str(),
+                        };
+                        if overlaps {
+                            return Err(format!(
+                                "KeyMap '{}': overlapping ranges for from {:?} ({a_from}..{:?} vs {b_from}..)",
+                                self.id,
+                                key,
+                                a_to.as_deref()
+                            ));
+                        }
+                    }
                 }
             }
         }

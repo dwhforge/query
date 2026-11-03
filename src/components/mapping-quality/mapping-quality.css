@@ -479,6 +479,28 @@
     11px ui-monospace,
     monospace;
 }
+.quality-allow {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.quality-allow label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #9db5c5;
+  font-size: 11px;
+}
+.quality-allow textarea {
+  border: 1px solid #304353;
+  background: #0d1820;
+  color: inherit;
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  resize: vertical;
+}
 @keyframes quality-spin {
   to {
     transform: rotate(360deg);

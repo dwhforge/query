@@ -292,6 +292,8 @@ mod tests {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         };
         let (disk, secrets) = project_for_disk(&p);
         assert!(disk.root_path.is_none());

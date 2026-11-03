@@ -22,12 +22,13 @@ The workspace contains 100000 commercial positions, 2400 canonical products and
 - **Revenue exposure:** synthetic revenue changes the weighting, not the inferred
   probability of an error.
 
-Select a matrix cell or target, then **Inspect sample keys in Join Lens**. The app
-reuses one ephemeral sample query (TEMP on the canvas / Explorer — not written on
-Save or dbt Export) with at most 24 exact keys and opens its Join. Later Inspects
-replace that same node. Return via the overview workspace tab. Neither selecting a
-cell nor inspecting samples edits a mapping. Use existing KeyMap editing/Save/Apply
-workflows for changes.
+Select a matrix cell or target, then **Inspect sample keys in Join Lens**. The lab
+seeds a durable **MappingCheck** ([ADR-0027](adr/0027-mapping-quality-checks.md)):
+cohort predicate on the check, ephemeral TEMP query for Lens, optional allow-difference
+on the check (does not change links), and staged remap confirm locked to a map
+revision. Recalculate records a **CheckRun** with attributed Δ. Later Inspects replace
+the same TEMP node. Neither selecting a cell nor allowing a difference edits the
+KeyMap — only Confirm into KeyMap / existing Save·Apply does.
 
 ## Scope and limits
 

@@ -101,6 +101,7 @@ import { MappingQualityOverview } from "./components/mapping-quality/MappingQual
 import {
   QUALITY_INSPECTION,
   QUALITY_JOIN,
+  QUALITY_MAP,
   QUALITY_SAMPLE_COLUMN,
   QUALITY_TAB,
   isFullQualityJoin,
@@ -110,6 +111,22 @@ import {
   stripQualityInspectionQueries,
   upsertQualityInspection,
 } from "./lib/mappingQuality";
+import {
+  applyFrozenRemapToMap,
+  assertRemapConfirmable,
+  attributeDelta,
+  buildCheckRun,
+  cohortInspectionQuery,
+  cohortPredicateFromSamples,
+  deltaLabel,
+  ensureLabCheck,
+  keyMapRevision,
+  labMappingCheck,
+  newCheckId,
+  upsertAllowDecision,
+  type FrozenRemapPreview,
+} from "./lib/mappingCheck";
+import type { MappingCheck } from "./types/mappingCheck";
 import {
   applyKeyMapToWorkspace,
   applyNormalizeToWorkspace,
@@ -482,6 +499,54 @@ function App() {
     setSelectedKeyMapId(null);
   }
 
+  function handleNewMappingCheck() {
+    const maps = project.workspace.key_maps ?? [];
+    const map = maps[0];
+    if (!map) {
+      setError("Add a KeyMap before creating a mapping check.");
+      return;
+    }
+    const host =
+      queries.find(
+        (q) => q.steps.length > 0 && q.steps[q.steps.length - 1]?.type === "Join",
+      ) ?? null;
+    const join = host?.steps[host.steps.length - 1];
+    if (!host || join?.type !== "Join") {
+      setError("Need a query whose last step is Join (ApplyKeyMap host).");
+      return;
+    }
+    const left = join.payload.left_on[0] ?? "key";
+    const right = join.payload.right_on[0] ?? "id";
+    const check: MappingCheck = {
+      id: newCheckId((project.mapping_checks ?? []).map((c) => c.id)),
+      name: `Check · ${map.name}`,
+      map_id: map.id,
+      input_refs: [host.id],
+      group_attributes: [left, right],
+      cohort_predicate: "",
+      projection: {
+        kind: "attrs",
+        host_query_id: host.id,
+        left_attr: left,
+        right_attr: right,
+        sample_column: left,
+      },
+      allow_decisions: [],
+    };
+    setProject((p) => ({
+      ...p,
+      mapping_checks: [...(p.mapping_checks ?? []), check],
+    }));
+    setCenterTab(QUALITY_TAB);
+    setCheckDeltaNote(`Created ${check.name} · attrs ${left} ↔ ${right}`);
+    setError(null);
+  }
+
+  const activeMappingCheck: MappingCheck | null =
+    (project.mapping_checks ?? []).find((c) => c.id === "check_lab_quality") ??
+    (project.mapping_checks ?? []).at(-1) ??
+    null;
+
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(
     null,
@@ -574,6 +639,13 @@ function App() {
   } | null>(null);
   /** Inspect clicked — keep progress until Join Lens prepare takes over. */
   const qualityHandoffRef = useRef(false);
+  /** ADR-0027 frozen batch remap (session). */
+  const [frozenRemap, setFrozenRemap] = useState<FrozenRemapPreview | null>(
+    null,
+  );
+  const [checkDeltaNote, setCheckDeltaNote] = useState<string | null>(null);
+  const [checkAllowNote, setCheckAllowNote] = useState<string | null>(null);
+  const lastCheckRunFingerprint = useRef<string | null>(null);
   /** Open KeyMap editor tabs (VS Code–style, beside Pipeline canvas). */
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
   /** Center workspace tab: canvas or open KeyMap id. */
@@ -2270,6 +2342,12 @@ function App() {
           dbt_target: appSettings.default_dbt_target,
           execution_engine: engine,
           target_dialect: engine,
+          mapping_checks:
+            id === "mapping_quality"
+              ? ensureLabCheck([])
+              : (p.mapping_checks ?? []),
+          mapping_check_runs:
+            id === "mapping_quality" ? [] : (p.mapping_check_runs ?? []),
           ...(destKind
             ? {
                 destination: {
@@ -2287,6 +2365,12 @@ function App() {
             : {}),
         }),
       );
+      if (id === "mapping_quality") {
+        lastCheckRunFingerprint.current = null;
+        setCheckDeltaNote(null);
+        setCheckAllowNote(null);
+        setFrozenRemap(null);
+      }
       setKeyMapTabs([]);
       setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
       setActiveQueryId(ws.focus_query_id);
@@ -3447,6 +3531,38 @@ function App() {
     });
   }
 
+  function confirmFrozenCheckRemap() {
+    if (!frozenRemap) return;
+    try {
+      const map = (project.workspace.key_maps ?? []).find(
+        (m) => m.id === frozenRemap.map_id,
+      );
+      assertRemapConfirmable(frozenRemap, map);
+      if (!frozenRemap.changes.length) {
+        setError("Stage at least one From→To in Join Lens before confirming.");
+        return;
+      }
+      const nextMap = applyFrozenRemapToMap(map!, frozenRemap);
+      setProject((p) => ({
+        ...p,
+        workspace: {
+          ...p.workspace,
+          key_maps: (p.workspace.key_maps ?? []).map((m) =>
+            m.id === nextMap.id ? nextMap : m,
+          ),
+        },
+      }));
+      setFrozenRemap(null);
+      setExportMsg(
+        `Check remap confirmed · ${frozenRemap.changes.length} link(s) via KeyMap`,
+      );
+      setCenterTab(QUALITY_TAB);
+      lastCheckRunFingerprint.current = null;
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   function handleMapKeyFromLens(
     side: "left" | "right",
     fromValues: string[],
@@ -3458,6 +3574,22 @@ function App() {
     },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
+    // ADR-0027: stage concrete From→To against the frozen check preview.
+    if (frozenRemap && opts?.toValues?.length) {
+      setFrozenRemap((prev) => {
+        if (!prev) return prev;
+        const staged = [...prev.changes];
+        for (let i = 0; i < fromValues.length; i++) {
+          const from = fromValues[i]?.trim();
+          const to = opts.toValues?.[i]?.trim();
+          if (!from || to == null || to === "") continue;
+          const idx = staged.findIndex((c) => c.from === from);
+          if (idx >= 0) staged[idx] = { from, to };
+          else staged.push({ from, to });
+        }
+        return { ...prev, changes: staged };
+      });
+    }
     const {
       leftOn: lensLeftOn,
       rightOn: lensRightOn,
@@ -4292,6 +4424,7 @@ function App() {
           handleSetTargetDialect(d)
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
+        onNewMappingCheck={() => handleNewMappingCheck()}
         onOpenHelp={() => setHelpOpen(true)}
         onZoomIn={() => void windowAction("zoom-in")}
         onZoomOut={() => void windowAction("zoom-out")}
@@ -4390,6 +4523,43 @@ function App() {
         }}
       />
       {opProgress && <OpProgress state={opProgress} />}
+
+      {frozenRemap && (
+        <div
+          className="fixed inset-x-0 bottom-0 z-[81] border-t border-amber-800/50 bg-[#140f08]/95 px-4 py-3 shadow-[0_-8px_32px_rgba(0,0,0,0.45)] backdrop-blur-sm"
+          role="status"
+        >
+          <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-3 text-[12px]">
+            <div className="min-w-0 text-amber-100/90">
+              <span className="font-medium text-amber-50">
+                Check remap preview
+              </span>
+              <span className="mx-2 text-amber-500/80">·</span>
+              <span className="text-amber-200/80">
+                {frozenRemap.changes.length} staged From→To · locked map
+                revision {frozenRemap.expected_map_revision.slice(0, 24)}…
+              </span>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                className="rounded border border-amber-700/60 px-2.5 py-1 text-amber-100 hover:bg-amber-500/10"
+                onClick={() => setFrozenRemap(null)}
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                className="rounded border border-amber-400/50 bg-amber-500/15 px-2.5 py-1 font-medium text-amber-50 hover:bg-amber-500/25 disabled:opacity-40"
+                disabled={!frozenRemap.changes.length}
+                onClick={() => confirmFrozenCheckRemap()}
+              >
+                Confirm into KeyMap
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {mapPickPending && (
         <div
@@ -4794,11 +4964,12 @@ function App() {
               >
                 Pipeline canvas
               </button>
-              {isMappingQualityLab(project.workspace) && (
+              {(isMappingQualityLab(project.workspace) ||
+                (project.mapping_checks?.length ?? 0) > 0) && (
                 <button type="button" role="tab" aria-selected={centerTab === QUALITY_TAB}
                   onClick={() => { setCenterTab(QUALITY_TAB); setSelectedKeyMapId(null); }}
                   className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[12px] ${centerTab === QUALITY_TAB ? "bg-[#10251f] text-teal-100" : "text-slate-400 hover:text-teal-200"}`}>
-                  ◈ Mapping quality · Prototype
+                  ◈ Mapping quality
                 </button>
               )}
               {keyMapTabs.map((tab) => {
@@ -4872,10 +5043,12 @@ function App() {
               </div>
             )}
 
-            {isMappingQualityLab(project.workspace) && (
+            {(isMappingQualityLab(project.workspace) ||
+              (project.mapping_checks?.length ?? 0) > 0) && (
               <div className={centerTab === QUALITY_TAB ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={centerTab !== QUALITY_TAB}>
                 <MappingQualityOverview
                   active={centerTab === QUALITY_TAB}
+                  projection={activeMappingCheck?.projection ?? { kind: "lab_v1" }}
                   workspace={project.workspace}
                   connections={project.connections}
                   sources={project.sources}
@@ -4893,15 +5066,119 @@ function App() {
                     });
                   }}
                   onCanvas={() => openMappingQualityCanvas()}
+                  deltaNote={checkDeltaNote}
+                  allowNote={checkAllowNote}
+                  onCheckRun={({ cells, totalPositions }) => {
+                    const check = activeMappingCheck ?? labMappingCheck();
+                    const map = (project.workspace.key_maps ?? []).find(
+                      (m) => m.id === check.map_id,
+                    );
+                    const run = buildCheckRun({
+                      check,
+                      workspace: project.workspace,
+                      map,
+                      cells: cells.map((c) => ({
+                        row: c.sourceFamily,
+                        column: c.targetFamily,
+                        signal: c.signal,
+                        positions: c.positions,
+                        revenue: c.revenue,
+                        samples: c.samples,
+                      })),
+                      totalPositions,
+                    });
+                    const fp = `${check.id}|${run.map_revision}|${JSON.stringify(run.input_revisions)}|${run.total_positions}`;
+                    if (lastCheckRunFingerprint.current === fp) return;
+                    const prev = (project.mapping_check_runs ?? [])
+                      .filter((r) => r.check_id === check.id)
+                      .at(-1);
+                    if (prev) {
+                      const attr = attributeDelta(prev, run);
+                      setCheckDeltaNote(
+                        `${deltaLabel(attr)}${
+                          run.comparability.kind === "limited"
+                            ? ` (${run.comparability.reason})`
+                            : ""
+                        } · positions ${prev.total_positions} → ${run.total_positions}`,
+                      );
+                    } else {
+                      setCheckDeltaNote(
+                        `CheckRun recorded · ${run.total_positions.toLocaleString()} positions`,
+                      );
+                    }
+                    lastCheckRunFingerprint.current = fp;
+                    setProject((p) => ({
+                      ...p,
+                      mapping_checks:
+                        check.id === "check_lab_quality"
+                          ? ensureLabCheck(p.mapping_checks ?? [])
+                          : (p.mapping_checks?.some((c) => c.id === check.id)
+                              ? p.mapping_checks
+                              : [...(p.mapping_checks ?? []), check]),
+                      mapping_check_runs: [
+                        ...(p.mapping_check_runs ?? []),
+                        run,
+                      ].slice(-20),
+                    }));
+                  }}
+                  onAllowDifference={(groupKey, explanation) => {
+                    try {
+                      const checkId = activeMappingCheck?.id ?? "check_lab_quality";
+                      setProject((p) => {
+                        const checks =
+                          checkId === "check_lab_quality"
+                            ? ensureLabCheck(p.mapping_checks ?? [])
+                            : (p.mapping_checks ?? []);
+                        const next = checks.map((c) =>
+                          c.id === checkId
+                            ? upsertAllowDecision(c, groupKey, explanation)
+                            : c,
+                        );
+                        return { ...p, mapping_checks: next };
+                      });
+                      setCheckAllowNote(`Allowed · ${groupKey}`);
+                    } catch (reason) {
+                      setError(String(reason));
+                    }
+                  }}
                   onInspect={(keys) => {
                     try {
+                      const check = activeMappingCheck ?? labMappingCheck();
+                      const sampleColumn =
+                        check.projection.kind === "attrs"
+                          ? check.projection.sample_column
+                          : QUALITY_SAMPLE_COLUMN;
                       const orderedKeys = [...new Set(keys)]
                         .sort((a, b) => a.localeCompare(b))
                         .slice(0, 24);
-                      const sample = qualityInspectionQuery(
-                        project.workspace,
+                      const predicate = cohortPredicateFromSamples(
+                        sampleColumn,
                         orderedKeys,
                       );
+                      setProject((p) => {
+                        const checks =
+                          check.id === "check_lab_quality"
+                            ? ensureLabCheck(p.mapping_checks ?? [])
+                            : (p.mapping_checks ?? []);
+                        return {
+                          ...p,
+                          mapping_checks: checks.map((c) =>
+                            c.id === check.id
+                              ? { ...c, cohort_predicate: predicate }
+                              : c,
+                          ),
+                        };
+                      });
+                      const sample =
+                        check.projection.kind === "lab_v1"
+                          ? qualityInspectionQuery(
+                              project.workspace,
+                              orderedKeys,
+                            )
+                          : cohortInspectionQuery(project.workspace, {
+                              ...check,
+                              cohort_predicate: predicate,
+                            });
                       const focusValue = orderedKeys[0] ?? "";
                       setQueries((queries) =>
                         upsertQualityInspection(queries, sample),
@@ -4911,20 +5188,28 @@ function App() {
                       setDiagView(null);
                       setLensFocusHint(
                         focusValue
-                          ? {
-                              column: QUALITY_SAMPLE_COLUMN,
-                              value: focusValue,
-                            }
+                          ? { column: sampleColumn, value: focusValue }
                           : null,
                       );
+                      const map = (project.workspace.key_maps ?? []).find(
+                        (m) => m.id === check.map_id,
+                      );
+                      if (map) {
+                        setFrozenRemap({
+                          check_id: check.id,
+                          map_id: map.id,
+                          expected_map_revision: keyMapRevision(map),
+                          changes: [],
+                          previewed_at: new Date().toISOString(),
+                        });
+                      }
                       qualityHandoffRef.current = true;
                       setOpProgress({
                         kind: "quality",
-                        phase: `Opening ${orderedKeys.length} sample keys in Join Lens…`,
+                        phase: `Opening check cohort (${orderedKeys.length} sample keys)…`,
                         percent: 15,
                       });
                       focusJoinLensLayout();
-                      // After preview mounts Join Lens — auto Load sides (left TEMP).
                       setAutoPrepareNonce((n) => n + 1);
                     } catch (reason) {
                       setError(String(reason));
@@ -6482,6 +6767,28 @@ function App() {
                             className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
                           />
                         </label>
+                        {(() => {
+                          const mid = targetKey(selectedStep.payload.map_id);
+                          const km = (project.workspace.key_maps ?? []).find(
+                            (m) => m.id === mid,
+                          );
+                          if (km?.time_mode !== "range_scd") return null;
+                          return (
+                            <label className="block text-[10px] text-slate-500">
+                              As-of (fact event time) — required for SCD
+                              <input
+                                list="inspector-cols"
+                                defaultValue={
+                                  selectedStep.payload.as_of_column ?? ""
+                                }
+                                key={`akm-asof-${selectedStepIndex}-${selectedStep.payload.as_of_column ?? ""}`}
+                                id="apply-keymap-asof"
+                                placeholder="event_date"
+                                className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
+                              />
+                            </label>
+                          );
+                        })()}
                         <label className="block text-[10px] text-slate-500">
                           KeyMap
                           <select
@@ -6501,6 +6808,8 @@ function App() {
                                 type: "ApplyKeyMap",
                                 payload: {
                                   column: selectedStep.payload.column,
+                                  as_of_column:
+                                    selectedStep.payload.as_of_column,
                                   map_id,
                                   entries: map?.entries ?? [],
                                 },
@@ -6559,13 +6868,20 @@ function App() {
                             const el = document.getElementById(
                               "apply-keymap-col",
                             ) as HTMLInputElement | null;
+                            const asOfEl = document.getElementById(
+                              "apply-keymap-asof",
+                            ) as HTMLInputElement | null;
                             const column =
                               el?.value.trim() || selectedStep.payload.column;
+                            const as_of_column =
+                              asOfEl?.value.trim() ||
+                              selectedStep.payload.as_of_column;
                             replaceStepAt(selectedStepIndex, {
                               type: "ApplyKeyMap",
                               payload: {
                                 ...selectedStep.payload,
                                 column,
+                                as_of_column: as_of_column || undefined,
                               },
                             });
                           }}

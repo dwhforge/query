@@ -28,6 +28,8 @@ pub struct EmitSchemaOpts<'a> {
     pub key_map_relations: Option<&'a HashMap<String, String>>,
     /// ApplyKeyMap: map_id → (from_columns, to_column) on the map relation.
     pub key_map_columns: Option<&'a HashMap<String, (Vec<String>, String)>>,
+    /// ApplyKeyMap range SCD: map_id → (valid_from_col, valid_to_col) on the map relation.
+    pub key_map_range: Option<&'a HashMap<String, (String, String)>>,
 }
 
 /// Emit a mid-chain / transform step. `relations` maps query_id → SQL relation
@@ -261,6 +263,7 @@ pub fn emit_transform_step_ex(
             column,
             columns,
             output_column,
+            as_of_column,
             map_id,
             entries,
         } => {
@@ -293,6 +296,22 @@ pub fn emit_transform_step_ex(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(fact_cols[0].as_str());
+            let range = opts
+                .key_map_range
+                .and_then(|m| m.get(map_key))
+                .map(|(vf, vt)| (vf.as_str(), vt.as_str()));
+            if range.is_some() {
+                let as_of = as_of_column
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if as_of.is_none() {
+                    return Err(format!(
+                        "ApplyKeyMap '{map_key}': range SCD map requires as_of_column \
+                         (fact event-time) — ADR-0028"
+                    ));
+                }
+            }
             emit_apply_key_map(
                 dialect,
                 prev,
@@ -303,6 +322,11 @@ pub fn emit_transform_step_ex(
                 &from_cols,
                 to_col,
                 opts.prev_columns,
+                as_of_column
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+                range,
             )
         }
         TransformationStep::LoadCsv { .. }
@@ -457,12 +481,15 @@ fn emit_apply_key_map(
     from_cols: &[String],
     to_col: &str,
     prev_columns: Option<&[String]>,
+    as_of_column: Option<&str>,
+    range_cols: Option<(&str, &str)>,
 ) -> Result<String, String> {
     let q_out = quote_ident(output_column);
     let q_to = quote_ident(to_col);
     let n = fact_cols.len();
     debug_assert_eq!(n, from_cols.len());
     let out_exists = output_column_exists_on_prev(output_column, fact_cols, prev_columns)?;
+    let scd = range_cols.zip(as_of_column);
 
     let map_sql = if let Some(rel) = seed_relation {
         format!("{rel} AS m")
@@ -497,6 +524,7 @@ fn emit_apply_key_map(
         };
     } else {
         let aliases: Vec<String> = (0..n).map(|i| format!("from_val_{i}")).collect();
+        let (vf_name, vt_name) = range_cols.unwrap_or(("", ""));
         let values = entries
             .iter()
             .map(|e| {
@@ -510,16 +538,38 @@ fn emit_apply_key_map(
                     cells.push("''".into());
                 }
                 cells.push(format!("'{}'", escape_sql_string(&e.to)));
+                if range_cols.is_some() {
+                    let vf = e
+                        .attrs
+                        .get(vf_name)
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("");
+                    let vt = e
+                        .attrs
+                        .get(vt_name)
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty());
+                    cells.push(format!("'{}'", escape_sql_string(vf)));
+                    match vt {
+                        Some(v) => cells.push(format!("'{}'", escape_sql_string(v))),
+                        None => cells.push("NULL".into()),
+                    }
+                }
                 format!("({})", cells.join(", "))
             })
             .collect::<Vec<_>>()
             .join(", ");
         let mut alias_list = aliases.clone();
         alias_list.push("to_val".into());
+        if range_cols.is_some() {
+            alias_list.push("valid_from_val".into());
+            alias_list.push("valid_to_val".into());
+        }
         format!("(VALUES {values}) AS m({})", alias_list.join(", "))
     };
 
-    let join_on = (0..n)
+    let mut join_parts: Vec<String> = (0..n)
         .map(|i| {
             let qf = quote_ident(&fact_cols[i]);
             if seed_relation.is_some() {
@@ -529,8 +579,23 @@ fn emit_apply_key_map(
                 format!("CAST(t.{qf} AS VARCHAR) = m.from_val_{i}")
             }
         })
-        .collect::<Vec<_>>()
-        .join(" AND ");
+        .collect();
+    if let Some(((vf_col, vt_col), as_of)) = scd {
+        let q_as = quote_ident(as_of);
+        if seed_relation.is_some() {
+            let q_vf = quote_ident(vf_col);
+            let q_vt = quote_ident(vt_col);
+            // ADR-0028 half-open: event >= from AND (to IS NULL OR event < to)
+            join_parts.push(format!(
+                "t.{q_as} >= m.{q_vf} AND (m.{q_vt} IS NULL OR t.{q_as} < m.{q_vt})"
+            ));
+        } else {
+            join_parts.push(format!(
+                "t.{q_as} >= m.valid_from_val AND (m.valid_to_val IS NULL OR t.{q_as} < m.valid_to_val)"
+            ));
+        }
+    }
+    let join_on = join_parts.join(" AND ");
 
     // Overwrite existing col: COALESCE(map, original). New col (ADR-0024): map value only.
     let out_expr = if out_exists {
@@ -612,11 +677,24 @@ pub fn key_map_seed_csv_cols(
     from_cols: &[String],
     to_col: &str,
 ) -> String {
+    key_map_seed_csv_full(entries, from_cols, to_col, &[])
+}
+
+/// Seed CSV including stewardship extras (attrs / SCD bounds) after To ([ADR-0028]).
+pub fn key_map_seed_csv_full(
+    entries: &[KeyMapEntry],
+    from_cols: &[String],
+    to_col: &str,
+    extra_cols: &[String],
+) -> String {
     let mut wtr = csv::WriterBuilder::new()
         .flexible(true)
         .from_writer(vec![]);
     let mut header: Vec<&str> = from_cols.iter().map(|s| s.as_str()).collect();
     header.push(to_col);
+    for c in extra_cols {
+        header.push(c.as_str());
+    }
     wtr.write_record(&header).expect("csv header write");
     let n = from_cols.len().max(1);
     for e in entries {
@@ -630,6 +708,9 @@ pub fn key_map_seed_csv_cols(
             })
             .collect();
         row.push(e.to.clone());
+        for c in extra_cols {
+            row.push(e.attrs.get(c).cloned().unwrap_or_default());
+        }
         wtr.write_record(&row).expect("csv row write");
     }
     let bytes = wtr.into_inner().expect("csv flush");
@@ -747,18 +828,21 @@ pub fn parse_key_map_seed_csv_cols(
     from_cols: &[String],
     to_col: &str,
 ) -> Result<Vec<KeyMapEntry>, String> {
+    parse_key_map_seed_csv_full(body, from_cols, to_col, &[])
+}
+
+/// Parse seed with optional stewardship columns after To ([ADR-0028]).
+/// When `extra_cols` is empty, trailing header columns beyond From+To are treated as attrs
+/// if a matching header row is present.
+pub fn parse_key_map_seed_csv_full(
+    body: &str,
+    from_cols: &[String],
+    to_col: &str,
+    extra_cols: &[String],
+) -> Result<Vec<KeyMapEntry>, String> {
     let n = from_cols.len();
     if n == 0 {
         return Err("parse_key_map_seed_csv_cols: from_cols empty".into());
-    }
-    if n == 1 {
-        return parse_key_map_seed_csv_mode(
-            body,
-            KeyMapCsvMode::Header {
-                from_col: from_cols[0].as_str(),
-                to_col,
-            },
-        );
     }
     let mut rdr = csv::ReaderBuilder::new()
         .flexible(true)
@@ -776,7 +860,7 @@ pub fn parse_key_map_seed_csv_cols(
             n + 1
         ));
     }
-    let header_ok = (0..n).all(|i| {
+    let header_from_to = (0..n).all(|i| {
         first
             .get(i)
             .unwrap_or("")
@@ -787,6 +871,27 @@ pub fn parse_key_map_seed_csv_cols(
         .unwrap_or("")
         .trim()
         .eq_ignore_ascii_case(to_col);
+    let extras: Vec<String> = if !extra_cols.is_empty() {
+        extra_cols.to_vec()
+    } else if header_from_to && first.len() > n + 1 {
+        (n + 1..first.len())
+            .map(|i| first.get(i).unwrap_or("").trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        vec![]
+    };
+    let header_ok = header_from_to
+        && (extras.is_empty()
+            || (first.len() >= n + 1 + extras.len()
+                && extras.iter().enumerate().all(|(i, c)| {
+                    first
+                        .get(n + 1 + i)
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case(c.trim())
+                })));
+    let allow_dup_from = !extras.is_empty(); // SCD / attrs maps may repeat From
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut push_row = |rec: &csv::StringRecord, lineno: usize| -> Result<(), String> {
@@ -806,17 +911,34 @@ pub fn parse_key_map_seed_csv_cols(
                 parts
             ));
         }
-        if !seen.insert(parts.clone()) {
+        if !allow_dup_from && !seen.insert(parts.clone()) {
             return Err(format!(
                 "key map seed: duplicate from tuple {:?} (line {lineno})",
                 parts
             ));
         }
-        entries.push(KeyMapEntry::parts(parts, to));
+        let mut entry = KeyMapEntry::parts(parts, to);
+        for (i, c) in extras.iter().enumerate() {
+            let v = rec.get(n + 1 + i).unwrap_or("").to_string();
+            if !v.is_empty() {
+                entry.attrs.insert(c.clone(), v);
+            }
+        }
+        entries.push(entry);
         Ok(())
     };
     let mut lineno = 1usize;
     if !header_ok {
+        // Arity-1 without known extras: fall back to classic single-from parser.
+        if n == 1 && extras.is_empty() {
+            return parse_key_map_seed_csv_mode(
+                body,
+                KeyMapCsvMode::Header {
+                    from_col: from_cols[0].as_str(),
+                    to_col,
+                },
+            );
+        }
         push_row(&first, lineno)?;
     }
     for rec in records {
@@ -1577,6 +1699,7 @@ mod tests {
             column: "channel".into(),
             columns: vec![],
             output_column: None,
+            as_of_column: None,
             map_id: "ch".into(),
             entries: vec![KeyMapEntry {
                 from: "web".into(),
@@ -1600,6 +1723,7 @@ mod tests {
             column: String::new(),
             columns: vec!["ext_id".into(), "day".into()],
             output_column: Some("ext_id".into()),
+            as_of_column: None,
             map_id: "offers".into(),
             entries: vec![KeyMapEntry::parts(
                 vec!["OFF-42".into(), "2024-06-01".into()],
@@ -1636,6 +1760,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            as_of_column: None,
             map_id: "m".into(),
             entries: vec![KeyMapEntry::pair("OLD", "NEW")],
         };
@@ -1669,6 +1794,7 @@ mod tests {
             column: String::new(),
             columns: vec!["ext_offer_id".into(), "day".into()],
             output_column: Some("offer_sk".into()),
+            as_of_column: None,
             map_id: "offers".into(),
             entries: vec![KeyMapEntry::parts(
                 vec!["OF-100".into(), "2024-06-01".into()],
@@ -1712,6 +1838,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            as_of_column: None,
             map_id: "m".into(),
             entries: vec![KeyMapEntry::pair("OLD", "NEW")],
         };
@@ -1766,5 +1893,92 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].from, "001");
+    }
+
+    #[test]
+    fn seed_csv_attrs_roundtrip() {
+        use crate::model::KeyMapEntry;
+        let mut e = KeyMapEntry::pair("A", "B");
+        e.attrs.insert("reason".into(), "merge".into());
+        let body = key_map_seed_csv_full(
+            &[e],
+            &["from".into()],
+            "to",
+            &["reason".into()],
+        );
+        assert!(body.contains("reason"), "{body}");
+        let back = parse_key_map_seed_csv_full(
+            &body,
+            &["from".into()],
+            "to",
+            &["reason".into()],
+        )
+        .unwrap();
+        assert_eq!(back[0].attrs.get("reason").map(String::as_str), Some("merge"));
+    }
+
+    #[test]
+    fn apply_key_map_range_scd_half_open() {
+        use crate::model::KeyMapEntry;
+        let mut e = KeyMapEntry::pair("sku1", "item1");
+        e.attrs.insert("valid_from".into(), "2024-01-01".into());
+        e.attrs.insert("valid_to".into(), "2024-06-01".into());
+        let step = TransformationStep::ApplyKeyMap {
+            column: "sku".into(),
+            columns: vec![],
+            output_column: None,
+            as_of_column: Some("event_day".into()),
+            map_id: "scd".into(),
+            entries: vec![e],
+        };
+        let mut range = HashMap::new();
+        range.insert("scd".into(), ("valid_from".into(), "valid_to".into()));
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_range: Some(&range),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            sql.contains("valid_from_val") && sql.contains("event_day"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(">= m.valid_from_val")
+                && sql.contains("valid_to_val IS NULL OR")
+                && sql.contains("< m.valid_to_val"),
+            "half-open predicate: {sql}"
+        );
+    }
+
+    #[test]
+    fn apply_key_map_range_requires_as_of() {
+        let step = TransformationStep::ApplyKeyMap {
+            column: "sku".into(),
+            columns: vec![],
+            output_column: None,
+            as_of_column: None,
+            map_id: "scd".into(),
+            entries: vec![],
+        };
+        let mut range = HashMap::new();
+        range.insert("scd".into(), ("valid_from".into(), "valid_to".into()));
+        let err = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_range: Some(&range),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("as_of_column"), "{err}");
     }
 }

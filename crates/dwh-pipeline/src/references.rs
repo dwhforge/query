@@ -625,6 +625,8 @@ impl<'a> Resolver<'a> {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         };
         // Keep the caller's published list off the owner-facing fingerprint.
         let _ = &mut project;
@@ -1844,6 +1846,8 @@ mod tests {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         }
     }
 
@@ -2702,6 +2706,7 @@ mod tests {
                     column: "sku".into(),
                     columns: vec![],
                     output_column: None,
+                    as_of_column: None,
                     map_id: "map_live".into(),
                     entries: vec![],
                 },
@@ -2721,6 +2726,7 @@ mod tests {
                     column: "sku".into(),
                     columns: vec![],
                     output_column: None,
+                    as_of_column: None,
                     map_id: ObjectTarget::external(&reference.id, ObjectKind::Mapping, "map_live"),
                     entries: vec![],
                 }],

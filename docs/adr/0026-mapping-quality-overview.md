@@ -40,4 +40,7 @@ The rejected visual-card editor patch is not a prerequisite and is not included.
 - Existing seed semantics remain. The prototype does not solve general seed-scale
   transport: current workspace snapshots and seed SQL still contain mapping rows.
 - Overview queries are DuckDB SQL models; demo execution is explicitly DuckDB.
-- OpenSpec: `openspec/changes/mapping-quality-overview/`.
+- OpenSpec: `openspec/changes/mapping-quality-overview/` (merged to
+  `openspec/specs/mapping-quality-overview/`).
+- Closed stewardship loop (saved check, cohort predicate, attributed recompute) is
+  **not** in this ADR — see Proposed [ADR-0027](0027-mapping-quality-checks.md).

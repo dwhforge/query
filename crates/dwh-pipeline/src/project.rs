@@ -136,6 +136,13 @@ pub struct Project {
     /// Visual pipeline editor layout (ADR-0007).
     #[serde(default)]
     pub canvas: Option<CanvasLayout>,
+    /// Durable mapping quality checks ([ADR-0027](../../../docs/adr/0027-mapping-quality-checks.md)).
+    /// Opaque JSON so the TS app owns the detailed shape during v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mapping_checks: Vec<serde_json::Value>,
+    /// CheckRun results ([ADR-0027](../../../docs/adr/0027-mapping-quality-checks.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mapping_check_runs: Vec<serde_json::Value>,
 }
 
 impl Project {
@@ -280,6 +287,8 @@ mod tests {
                     .into_iter()
                     .collect(),
             }),
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         };
         let json = p.to_json_pretty().unwrap();
         let back = Project::from_json(&json).unwrap();

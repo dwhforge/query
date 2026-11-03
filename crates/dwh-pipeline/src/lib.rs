@@ -42,9 +42,10 @@ pub use dialect::{
 };
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
-    key_map_seed_csv_cols, key_map_seed_csv_named, key_map_seed_name, normalize_column_expr,
-    normalize_key_column_expr, parse_key_map_seed_csv, parse_key_map_seed_csv_cols,
-    parse_key_map_seed_csv_mode, rename_select_list, resolve_source_column, select_list_aligned,
+    key_map_seed_csv_cols, key_map_seed_csv_full, key_map_seed_csv_named, key_map_seed_name,
+    normalize_column_expr, normalize_key_column_expr, parse_key_map_seed_csv,
+    parse_key_map_seed_csv_cols, parse_key_map_seed_csv_full, parse_key_map_seed_csv_mode,
+    rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
     validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,
 };
@@ -68,7 +69,8 @@ pub use export_manifest::{
 };
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{
-    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, ObjectKind,
+    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, KeyMapTimeMode,
+    NormalizeOp, ObjectKind,
     ObjectTarget, QueryDef, TransformationStep, Workspace,
 };
 pub use project::{ConnectionBinding, ProjectReference};

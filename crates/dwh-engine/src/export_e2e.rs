@@ -364,6 +364,8 @@ mod tests {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         };
         let owner_path = owner_dir.join("lib.dwhproj.json");
         fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
@@ -392,6 +394,8 @@ mod tests {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         };
         fs::write(&consumer_path, consumer.to_json_pretty().unwrap()).unwrap();
         let reference =
@@ -408,6 +412,7 @@ mod tests {
                     column: "system_code".into(),
                     columns: vec!["system_code".into(), "product_code".into()],
                     output_column: Some("canonical_id".into()),
+                    as_of_column: None,
                     map_id: ObjectTarget::external(
                         &reference.id,
                         ObjectKind::Mapping,

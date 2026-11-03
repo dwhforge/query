@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cancelRunningQuery, previewWorkspace } from "../../lib/bridge";
+import { attrsSummarySql } from "../../lib/mappingCheck";
+import type { MappingCheckProjection } from "../../types/mappingCheck";
 import type { ConnectionDef, SourceDef, Workspace } from "../../types/pipeline";
 import {
   axes,
@@ -25,6 +27,17 @@ type Props = {
   onCanvas: () => void;
   /** Surface long overview / handoff work in the app progress bar. */
   onProgress?: (state: { phase: string; percent: number } | null) => void;
+  /** ADR-0027: persist a CheckRun after a successful full aggregate. */
+  onCheckRun?: (payload: {
+    cells: QualityCell[];
+    totalPositions: number;
+  }) => void;
+  /** ADR-0027: mark observed difference as allowed (does not change KeyMap). */
+  onAllowDifference?: (groupKey: string, explanation: string) => void;
+  allowNote?: string | null;
+  deltaNote?: string | null;
+  /** ADR-0027 projection; default lab_v1. */
+  projection?: MappingCheckProjection;
 };
 const count = (value: number) => value.toLocaleString("en-US");
 const percent = (part: number, total: number) =>
@@ -45,6 +58,11 @@ export function MappingQualityOverview({
   onInspect,
   onCanvas,
   onProgress,
+  onCheckRun,
+  onAllowDifference,
+  allowNote,
+  deltaNote,
+  projection = { kind: "lab_v1" },
 }: Props) {
   const [cells, setCells] = useState<QualityCell[]>([]);
   const [targets, setTargets] = useState<QualityTarget[]>([]);
@@ -67,6 +85,9 @@ export function MappingQualityOverview({
   busyRef.current = busy;
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
+  const onCheckRunRef = useRef(onCheckRun);
+  onCheckRunRef.current = onCheckRun;
+  const [allowText, setAllowText] = useState("");
   const reportProgress = (state: { phase: string; percent: number } | null) => {
     onProgressRef.current?.(state);
   };
@@ -115,29 +136,57 @@ export function MappingQualityOverview({
       const load = async () => {
         setLoadPhase("matrix");
         reportProgress({
-          phase: "Aggregating family/grade matrix (full input)…",
+          phase: "Aggregating mapping check matrix (full input)…",
           percent: 18,
         });
+        let summaryWs = workspace;
+        if (projection.kind === "lab_v1") {
+          summaryWs = { ...workspace, focus_query_id: QUALITY_SUMMARY };
+        } else {
+          const sql = attrsSummarySql(
+            projection.host_query_id,
+            projection.left_attr,
+            projection.right_attr,
+          );
+          summaryWs = {
+            ...workspace,
+            focus_query_id: "__check_summary__",
+            queries: [
+              ...workspace.queries.filter((q) => q.id !== "__check_summary__"),
+              {
+                id: "__check_summary__",
+                name: "check_summary",
+                steps: [{ type: "SqlModel", payload: { raw_sql: sql } }],
+              },
+            ],
+          };
+        }
         const summary = await previewWorkspace(
-          { ...workspace, focus_query_id: QUALITY_SUMMARY },
+          summaryWs,
           connections,
           sources,
         );
         if (token !== request.current) return null;
-        setLoadPhase("targets");
-        reportProgress({
-          phase: "Ranking concentrated targets…",
-          percent: 62,
-        });
-        const hotspots = await previewWorkspace(
-          { ...workspace, focus_query_id: QUALITY_TARGETS },
-          connections,
-          sources,
-        );
-        if (token !== request.current) return null;
+        let targets: QualityTarget[] = [];
+        if (projection.kind === "lab_v1") {
+          setLoadPhase("targets");
+          reportProgress({
+            phase: "Ranking concentrated targets…",
+            percent: 62,
+          });
+          const hotspots = await previewWorkspace(
+            { ...workspace, focus_query_id: QUALITY_TARGETS },
+            connections,
+            sources,
+          );
+          if (token !== request.current) return null;
+          targets = parseQualityTargets(hotspots);
+        } else {
+          setLoadPhase("targets");
+        }
         return {
           cells: parseQualitySummary(summary),
-          targets: parseQualityTargets(hotspots),
+          targets,
         };
       };
       let lastError: unknown = null;
@@ -160,6 +209,13 @@ export function MappingQualityOverview({
           setBusy(false);
           setElapsedMs(Date.now() - started);
           reportProgress(null);
+          onCheckRunRef.current?.({
+            cells: parsed.cells,
+            totalPositions: parsed.cells.reduce(
+              (sum, cell) => sum + cell.positions,
+              0,
+            ),
+          });
           return;
         } catch (reason) {
           lastError = reason;
@@ -180,7 +236,7 @@ export function MappingQualityOverview({
     };
     // hasFreshCache intentionally gates the fetch; stamp captures projection+revision.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- workspace via stamp/projectionKey
-  }, [active, hasFreshCache, stamp, connections, sources]);
+  }, [active, hasFreshCache, stamp, connections, sources, projection]);
 
   const total = cells.reduce((sum, cell) => sum + cell.positions, 0);
   const totalRevenue = cells.reduce((sum, cell) => sum + cell.revenue, 0);
@@ -257,6 +313,8 @@ export function MappingQualityOverview({
       <div className="quality-context">
         Offline Help lab · 100,000 commercial positions → 2,400 catalog products
         · all-data aggregates · synthetic decision annotations
+        {deltaNote ? ` · ${deltaNote}` : ""}
+        {allowNote ? ` · ${allowNote}` : ""}
       </div>
       {busy ? (
         <div role="status" className="quality-loading">
@@ -590,10 +648,39 @@ export function MappingQualityOverview({
               >
                 Inspect {sampleKeys.length} sample keys in Join Lens ↗
               </button>
+              {onAllowDifference && (selection || target) && (
+                <div className="quality-allow">
+                  <label>
+                    Allow observed difference (does not change KeyMap)
+                    <textarea
+                      value={allowText}
+                      onChange={(e) => setAllowText(e.target.value)}
+                      rows={2}
+                      placeholder="Explain why this difference is acceptable…"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={!allowText.trim()}
+                    onClick={() => {
+                      const groupKey = target
+                        ? `target:${target.key}`
+                        : JSON.stringify([
+                            selection!.row,
+                            selection!.column,
+                          ]);
+                      onAllowDifference(groupKey, allowText);
+                      setAllowText("");
+                    }}
+                  >
+                    Record allow decision
+                  </button>
+                </div>
+              )}
               <p className="quality-sample-note">
                 {!selection && !target
-                  ? "Select a matrix cell or concentrated target first. Inspect opens those exact commercial_sku samples in Join Lens — not the join ON key."
-                  : "Drill-down reuses one ephemeral sample query (TEMP on the canvas — not saved). Exact commercial_sku keys; This-row pins to the first sample. The overview stays an all-data aggregate."}
+                  ? "Select a matrix cell or concentrated target first. Inspect opens the check cohort in Join Lens (predicate, not join ON)."
+                  : "Cohort = check predicate (samples illustrate it). Ephemeral query is TEMP — not saved. Accept links only via KeyMap; Allow records a check decision."}
               </p>
               <details>
                 <summary>Sample keys</summary>

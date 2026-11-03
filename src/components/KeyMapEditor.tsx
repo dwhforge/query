@@ -163,7 +163,20 @@ export function KeyMapEditor({
   const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
-  const editableCols = map.editable_columns ?? [];
+  const rangeCols =
+    map.time_mode === "range_scd"
+      ? [
+          map.valid_from_column?.trim() || "valid_from",
+          map.valid_to_column?.trim() || "valid_to",
+        ]
+      : [];
+  /** Grid attr columns = SCD bounds (if any) + editable attrs (ADR-0028). */
+  const editableCols = [
+    ...rangeCols,
+    ...(map.editable_columns ?? []).filter(
+      (c) => !rangeCols.some((r) => r.toLowerCase() === c.toLowerCase()),
+    ),
+  ];
   const fromCols = fromColumnsEff(map);
   const arity = fromCols.length;
   const saving = saveInFlight || storeRef.current.isSaveInFlight();
@@ -1055,12 +1068,159 @@ export function KeyMapEditor({
           />
         </label>
       </div>
+      <div className="space-y-2 border-t border-slate-800/80 pt-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className={labelClass}>Attribute columns</span>
+          <button
+            type="button"
+            onClick={() => {
+              const base = `attr_${(map.editable_columns ?? []).length + 1}`;
+              const name =
+                (map.editable_columns ?? []).includes("reason") ||
+                (map.editable_columns ?? []).length > 0
+                  ? base
+                  : "reason";
+              if ((map.editable_columns ?? []).includes(name)) return;
+              onChange({
+                ...map,
+                editable_columns: [...(map.editable_columns ?? []), name],
+              });
+            }}
+            className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
+          >
+            + Attr
+          </button>
+        </div>
+        {(map.editable_columns ?? []).length === 0 ? (
+          <p className="text-[11px] text-slate-500">
+            Optional — e.g. reason, confidence. Not used in Join ON (ADR-0028).
+          </p>
+        ) : (
+          (map.editable_columns ?? []).map((col, i) => (
+            <div key={`attr-${i}`} className="flex gap-1">
+              <input
+                value={col}
+                onChange={(e) => {
+                  const next = [...(map.editable_columns ?? [])];
+                  const prev = next[i]!;
+                  next[i] = e.target.value;
+                  onChange({
+                    ...map,
+                    editable_columns: next,
+                    entries: map.entries.map((row) => {
+                      if (!row.attrs || !(prev in row.attrs)) return row;
+                      const attrs = { ...row.attrs };
+                      const v = attrs[prev];
+                      delete attrs[prev];
+                      if (e.target.value.trim()) attrs[e.target.value] = v ?? "";
+                      return { ...row, attrs };
+                    }),
+                  });
+                }}
+                className={`${fieldClass} mt-0 font-mono`}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const removed = (map.editable_columns ?? [])[i];
+                  onChange({
+                    ...map,
+                    editable_columns: (map.editable_columns ?? []).filter(
+                      (_, j) => j !== i,
+                    ),
+                    entries: map.entries.map((row) => {
+                      if (!row.attrs || !removed) return row;
+                      const attrs = { ...row.attrs };
+                      delete attrs[removed];
+                      return { ...row, attrs };
+                    }),
+                  });
+                }}
+                className="rounded border border-slate-700 px-2 text-slate-500 hover:text-rose-300"
+                aria-label="Remove attribute column"
+              >
+                ×
+              </button>
+            </div>
+          ))
+        )}
+        <label className={labelClass}>
+          Time mode
+          <select
+            value={map.time_mode === "range_scd" ? "range_scd" : "none"}
+            onChange={(e) => {
+              const mode = e.target.value as "none" | "range_scd";
+              onChange({
+                ...map,
+                time_mode: mode === "none" ? undefined : mode,
+                valid_from_column:
+                  mode === "range_scd"
+                    ? map.valid_from_column ?? "valid_from"
+                    : undefined,
+                valid_to_column:
+                  mode === "range_scd"
+                    ? map.valid_to_column ?? "valid_to"
+                    : undefined,
+              });
+            }}
+            className={fieldClass}
+          >
+            <option value="none">None (unique From → To)</option>
+            <option value="range_scd">
+              Range SCD (valid_from / valid_to, half-open)
+            </option>
+          </select>
+        </label>
+        {map.time_mode === "range_scd" && (
+          <div className="grid grid-cols-2 gap-2">
+            <label className={labelClass}>
+              valid_from column
+              <input
+                value={map.valid_from_column ?? "valid_from"}
+                onChange={(e) =>
+                  onChange({ ...map, valid_from_column: e.target.value })
+                }
+                className={`${fieldClass} font-mono`}
+              />
+            </label>
+            <label className={labelClass}>
+              valid_to column
+              <input
+                value={map.valid_to_column ?? "valid_to"}
+                onChange={(e) =>
+                  onChange({ ...map, valid_to_column: e.target.value })
+                }
+                className={`${fieldClass} font-mono`}
+              />
+            </label>
+            <p className="col-span-2 text-[11px] leading-snug text-slate-500">
+              Apply needs a fact <span className="font-mono">as_of_column</span>.
+              Predicate:{" "}
+              <span className="font-mono text-slate-400">
+                event &gt;= from AND (to IS NULL OR event &lt; to)
+              </span>
+              .
+            </p>
+          </div>
+        )}
+      </div>
       <p className="text-[11px] leading-snug text-slate-500">
         Mapping relation column names. Arity {arity}: uniqueness is the match{" "}
-        <span className="font-mono text-slate-400">key</span> (ADR-0024).
-        Default seed header is{" "}
+        <span className="font-mono text-slate-400">key</span>
+        {map.time_mode === "range_scd" ? " + non-overlapping ranges" : ""}{" "}
+        (ADR-0024/0028). Seed header:{" "}
         <span className="font-mono text-slate-400">
-          {fromCols.join(",")},{map.to_column ?? "to"}
+          {[
+            ...fromCols,
+            map.to_column ?? "to",
+            ...(map.time_mode === "range_scd"
+              ? [
+                  map.valid_from_column ?? "valid_from",
+                  map.valid_to_column ?? "valid_to",
+                ]
+              : []),
+            ...(map.editable_columns ?? []),
+          ].join(",")}
         </span>
         .
       </p>

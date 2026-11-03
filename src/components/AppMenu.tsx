@@ -45,6 +45,7 @@ export interface AppMenuProps {
   /** Legacy: sets both engine and destination to the same dialect. */
   onSetTargetDialect: (d: WarehouseDialect) => void;
   onLoadDemo: (id: DemoId) => void;
+  onNewMappingCheck?: () => void;
   onOpenHelp: () => void;
   onZoomIn?: () => void;
   onZoomOut?: () => void;
@@ -237,6 +238,7 @@ export function AppMenu({
   onSetDestinationKind,
   onSetDestinationConnection,
   onLoadDemo,
+  onNewMappingCheck,
   onOpenHelp,
   onZoomIn,
   onZoomOut,
@@ -476,6 +478,13 @@ export function AppMenu({
             onClick={() => run(() => onLoadDemo("right"))}
           />
           <Sep />
+          <SubLabel>Mapping quality</SubLabel>
+          {onNewMappingCheck && (
+            <Item
+              label="New mapping check… (Join host + KeyMap)"
+              onClick={() => run(() => onNewMappingCheck())}
+            />
+          )}
           <SubLabel>Mapping labs</SubLabel>
           <Item
             label="Mapping quality — 100K products · overview prototype"

@@ -401,6 +401,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            as_of_column: None,
             map_id: "m".into(),
             entries: vec![],
         };
@@ -424,6 +425,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            as_of_column: None,
             map_id: "m".into(),
             entries: vec![],
         };

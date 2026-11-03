@@ -519,6 +519,8 @@ function JoinLensImpl({
    * samplesLoaded=true (auto Show rows never retries).
    */
   const samplesLoadGenRef = useRef(0);
+  /** Gen of the load currently in flight (0 = none). Used to free the auto-attempt gate on abort. */
+  const activeSamplesGenRef = useRef(0);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
   const [searchLeft, setSearchLeft] = useState("");
@@ -639,10 +641,12 @@ function JoinLensImpl({
         if (s.prepared) {
           setPrepareHint(formatJoinPrepareStatusHint(s));
           // One auto attempt per Join revision — do not retry on every status poll.
+          // samplesError means the attempt finished; wait for manual Retry.
           const id = joinParentsKey;
           if (
             !samplesLoaded &&
             !samplesLoading &&
+            !samplesError &&
             autoSamplesAttemptedRef.current !== id
           ) {
             autoSamplesAttemptedRef.current = id;
@@ -676,26 +680,33 @@ function JoinLensImpl({
     autoSamplesAttemptedRef.current = "";
   }, [hostQueryId, joinStepIndex]);
 
-  // Small joins: auto-load This-row parent samples (same size heuristic as auto-diag).
+  // Small joins / prepared sides: auto-load This-row parent samples.
+  // Also recovers when an earlier attempt was aborted (gen bump) while the
+  // attempt gate stayed set — otherwise UI sits on “loading parents…” forever.
   useEffect(() => {
     if (!enabled || sideMode !== "linked") return;
     if (!hostQueryId || joinStepIndex < 1) return;
-    if (samplesLoaded || samplesLoading) return;
+    if (samplesLoaded || samplesLoading || samplesError) return;
+    const preparedReady = !!prepareStatus?.prepared;
+    const autoOk = shouldAutoLoadJoinParents(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      prepareStatus,
+    );
+    if (!preparedReady && !autoOk) return;
     const id = joinParentsKey;
-    if (autoSamplesAttemptedRef.current === id) return;
-    if (
-      !shouldAutoLoadJoinParents(
-        workspace,
-        hostQueryId,
-        joinStepIndex,
-        prepareStatus,
-      )
-    ) {
-      return;
+    if (autoSamplesAttemptedRef.current === id) {
+      // Stale gate with nothing in flight: free and retry once.
+      if (activeSamplesGenRef.current === 0) {
+        autoSamplesAttemptedRef.current = "";
+      } else {
+        return;
+      }
     }
     autoSamplesAttemptedRef.current = id;
     void loadLinkedSamples({
-      forcePrepared: !!prepareStatus?.prepared,
+      forcePrepared: preparedReady,
       reason: "auto",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadLinkedSamples closes over latest prepared/inputs
@@ -707,6 +718,7 @@ function JoinLensImpl({
     prepareStatus,
     samplesLoaded,
     samplesLoading,
+    samplesError,
   ]);
 
   function runPrepare(force = false) {
@@ -787,6 +799,7 @@ function JoinLensImpl({
     }
     const usePrepared = opts?.forcePrepared || prepared;
     const gen = ++samplesLoadGenRef.current;
+    activeSamplesGenRef.current = gen;
     setSamplesError(null);
     setSamplesLoading(true);
     setLeftSideLoading(true);
@@ -841,7 +854,16 @@ function JoinLensImpl({
               : "Failed to load parent rows.";
         // Keep autoSamplesAttemptedRef — one auto try per Join revision.
       } finally {
-        if (gen !== samplesLoadGenRef.current) return;
+        if (gen !== samplesLoadGenRef.current) {
+          // Aborted (wipe/cancel/newer load). Free the auto-attempt gate only if
+          // we were still the active starter — otherwise a newer load owns it.
+          if (activeSamplesGenRef.current === gen) {
+            activeSamplesGenRef.current = 0;
+            autoSamplesAttemptedRef.current = "";
+          }
+          return;
+        }
+        activeSamplesGenRef.current = 0;
         setLeftSideLoading(false);
         setRightSideLoading(false);
         setSamplesLoading(false);
@@ -1446,11 +1468,13 @@ function JoinLensImpl({
     joinStepIndex,
     prepareStatus,
   );
-  const parentsPendingHint = prepared
-    ? "Prepared — loading parents…"
-    : autoLoadParents
-      ? "Loading parents…"
-      : "Large join — Show rows or Load sides for parents";
+  const parentsPendingHint = samplesLoading
+    ? "Loading parents…"
+    : prepared
+      ? "Prepared — click Show rows for parents"
+      : autoLoadParents
+        ? "Click Show rows for parents"
+        : "Large join — Show rows or Load sides for parents";
 
   const leftEmpty =
     sideMode === "linked"
@@ -2171,9 +2195,7 @@ function JoinLensImpl({
                   ? "Retry"
                   : samplesLoaded
                     ? "Reload rows"
-                    : autoLoadParents
-                      ? "Loading rows…"
-                      : "Show rows"}
+                    : "Show rows"}
             </button>
           )}
           {sideMode === "linked" && samplesError && !samplesLoading && (

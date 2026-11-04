@@ -1,0 +1,63 @@
+{
+  "format_version": 1,
+  "id": "proj_mapping_create_smoke",
+  "name": "mapping-create-smoke",
+  "project_uid": "00000000-0000-4000-8000-0000000000e2",
+  "references": [],
+  "connection_bindings": [],
+  "connections": [],
+  "sources": [],
+  "workspace": {
+    "queries": [
+      {
+        "id": "supplier_products",
+        "name": "supplier_products",
+        "steps": [
+          {
+            "type": "LoadCsv",
+            "payload": { "path": "data/supplier.csv" }
+          },
+          {
+            "type": "SelectColumns",
+            "payload": { "columns": ["product_name", "category"] }
+          }
+        ],
+        "execution": "local"
+      },
+      {
+        "id": "catalog_products",
+        "name": "catalog_products",
+        "steps": [
+          {
+            "type": "LoadCsv",
+            "payload": { "path": "data/catalog.csv" }
+          },
+          {
+            "type": "SelectColumns",
+            "payload": { "columns": ["name"] }
+          }
+        ],
+        "execution": "local"
+      },
+      {
+        "id": "catalog_wide",
+        "name": "catalog_wide",
+        "steps": [
+          {
+            "type": "LoadCsv",
+            "payload": { "path": "data/catalog.csv" }
+          }
+        ],
+        "execution": "local"
+      }
+    ],
+    "focus_query_id": "supplier_products",
+    "key_maps": []
+  },
+  "dbt_target": "v1",
+  "execution_engine": "duckdb",
+  "destination": { "kind": "duckdb", "duckdb_path": "local.duckdb" },
+  "outputs": [],
+  "materialization": "table",
+  "target_dialect": "duckdb"
+}

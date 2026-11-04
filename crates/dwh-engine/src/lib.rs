@@ -45,7 +45,8 @@ pub use join_near_miss::{
 pub use join_prepare::{
     clear_join_prepare, clear_prepare_progress, ensure_join_sides_materialized,
     format_prepare_hint, get_prepare_progress, join_prepare_status, prepare_join_inputs,
-    prepare_join_inputs_with_progress, preview_prepared_join_side, set_prepare_progress,
+    prepare_join_inputs_with_progress, preview_prepared_join_side,
+    preview_prepared_join_side_filtered, set_prepare_progress,
     JoinPrepareProgress, JoinPrepareResult, JoinPrepareStatus,
 };
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};

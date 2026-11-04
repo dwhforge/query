@@ -10,6 +10,11 @@
     "build": "tsc && node scripts/vite-build-electron.mjs",
     "preview": "vite preview",
     "host:build": "cargo build -p dwh-host --release",
+    "types:generate": "bash scripts/export-ts-types.sh",
+    "types:check": "bash scripts/check-generated-types.sh",
+    "test:unit": "node scripts/run-unit-tests.mjs",
+    "test:e2e:electron": "node scripts/run-electron-e2e.mjs",
+    "capture:website": "node scripts/run-website-capture.mjs",
     "electron:dev": "npm run host:build && node scripts/electron-dev.mjs",
     "electron:pack": "npm run host:build && npm run build && node scripts/pack-portable-electron.mjs",
     "start": "npm run electron:dev"
@@ -23,6 +28,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.1",
     "@tailwindcss/vite": "^4.1.13",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

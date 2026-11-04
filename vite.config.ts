@@ -11,6 +11,15 @@ export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
   // Relative asset URLs for Electron file:// / asar load.
   base: electron || process.env.DWH_ELECTRON_BUILD === "1" ? "./" : "/",
+  // Test / capture builds share renderer fixture hooks (not production packs).
+  // DWH_CAPTURE=1 → website shot workflow; DWH_E2E=1 → Playwright smoke.
+  define: {
+    "import.meta.env.DWH_E2E": JSON.stringify(
+      process.env.DWH_E2E === "1" || process.env.DWH_CAPTURE === "1"
+        ? "1"
+        : (process.env.DWH_E2E ?? ""),
+    ),
+  },
   clearScreen: false,
   server: {
     port: 1420,

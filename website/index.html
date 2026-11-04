@@ -6,12 +6,12 @@
     <title>DWHForge Query — Build visually. Verify on real data. Ship dbt.</title>
     <meta
       name="description"
-      content="Local desktop workbench: connect Postgres and files, investigate joins, export a runnable dbt project. Compute stays local; optional LLM assist sends limited key context to your chosen endpoint."
+      content="Local desktop workbench: create KeyMaps from queries, investigate joins, export a runnable dbt project. Compute stays local; optional LLM assist sends limited key context to your chosen endpoint."
     />
     <meta property="og:title" content="DWHForge Query" />
     <meta
       property="og:description"
-      content="Build visually. Verify on real data. Ship dbt. Local-first workbench for data engineers."
+      content="Build visually. Verify on real data. Ship dbt. Create maps from queries, Join Lens, quality overview—local-first for data engineers."
     />
     <meta property="og:image" content="assets/welcome.png" />
     <meta property="og:type" content="website" />
@@ -66,8 +66,8 @@
       <section class="hero wrap">
         <div class="hero-copy">
           <p class="hero-chip">
-            <span class="chip-dot"></span> Warehouse joins · dirty keys · dbt you
-            keep
+            <span class="chip-dot"></span> Create maps from queries · Join Lens ·
+            dbt you keep
           </p>
           <h1 class="hero-brand" aria-label="DWHForge Query">
             <span class="brand-stem">DWHForge</span>
@@ -133,9 +133,10 @@
               <div class="feature-body">
                 <h3>Investigate joins where you build them</h3>
                 <p>
-                  Join Lens, clean-up for near-miss keys, and editable mappings
-                  turn dirty aliases into inspectable steps—stored as a seed,
-                  warehouse table, or existing dbt model.
+                  Create a KeyMap from two local queries, diagnose misses in Join
+                  Lens, clean near-miss keys, and edit From→To (including
+                  composite keys)—stored as a seed, warehouse table, or existing
+                  dbt model.
                   <a href="#mapping">See the mapping toolkit →</a>
                 </p>
               </div>
@@ -212,12 +213,32 @@
             </h2>
             <p class="section-lede">
               When sales says <code>SBUX</code> and the dimension says
-              <code>STARBUCKS CORP</code>, you need diagnosis, an editable
-              From→To mapping, and a place that dictionary lives—not silent fuzzy
-              ON.
+              <code>STARBUCKS CORP</code>, you need a map you author from real
+              queries, diagnosis in Join Lens, and a place that dictionary
+              lives—not silent fuzzy ON.
             </p>
           </div>
           <ul class="feature-list mapping-toolkit">
+            <li>
+              <div class="feature-body">
+                <h3>Create mapping from queries</h3>
+                <p>
+                  Pick two local queries, source key(s) and a target column, then
+                  optionally restore columns dropped by a last Fields step.
+                  Review the plan and commit all-or-nothing into a seed KeyMap—the
+                  existing editor opens for stewardship. Create does not Apply,
+                  Join, Check, export, or warehouse-Save.
+                  <br /><br />
+                  Intent is stored as typed
+                  <code>authoring_context</code> on the map
+                  (<a
+                    href="https://github.com/dwhforge/query/blob/main/docs/adr/0034-keymap-authoring-context.md"
+                    >ADR-0034</a
+                  >). Cancel leaves the project unchanged.
+                </p>
+              </div>
+              <button type="button" class="feature-shot" data-shot="create-mapping" hidden></button>
+            </li>
             <li>
               <div class="feature-body">
                 <h3>Join Lens</h3>
@@ -249,12 +270,32 @@
                 <h3>Mapping editor</h3>
                 <p>
                   First-class tab next to the pipeline. Maintain alias → canonical
-                  ID like a dimension table. Add unmatched values from Join Lens
-                  with one gesture; <strong>Apply to left / right</strong> (or
-                  both) wires the map onto the Join.
+                  ID like a dimension table—including
+                  <strong>composite From</strong> when uniqueness needs a tuple
+                  (offer id + day), not a glued string. Add unmatched values from
+                  Join Lens with one gesture;
+                  <strong>Apply to left / right</strong> (or both) wires the map
+                  onto the Join.
                 </p>
               </div>
               <button type="button" class="feature-shot" data-shot="add-to-map" hidden></button>
+            </li>
+            <li>
+              <div class="feature-body">
+                <h3>Mapping quality overview</h3>
+                <p>
+                  Help lab aggregates family/grade correspondence, decision basis,
+                  and target concentration over a large offline fixture—observations,
+                  not a fake global score. Inspect a region into Join Lens; save a
+                  <strong>MappingCheck</strong>, remap with a frozen revision, and
+                  compare <strong>CheckRun</strong> deltas.
+                  <a
+                    href="https://github.com/dwhforge/query/blob/main/docs/mapping-quality-lab.md"
+                    >Lab walkthrough →</a
+                  >
+                </p>
+              </div>
+              <button type="button" class="feature-shot" data-shot="mapping-quality" hidden></button>
             </li>
             <li>
               <div class="feature-body">
@@ -326,8 +367,18 @@
             >
             <a
               class="btn btn-ghost"
+              href="https://github.com/dwhforge/query/blob/main/docs/adr/0034-keymap-authoring-context.md"
+              >ADR-0034 create</a
+            >
+            <a
+              class="btn btn-ghost"
               href="https://github.com/dwhforge/query/blob/main/docs/adr/0020-join-key-mapping.md"
               >ADR-0020 decision</a
+            >
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/dwhforge/query/blob/main/docs/adr/0024-keymap-composite.md"
+              >ADR-0024 composite</a
             >
             <a
               class="btn btn-ghost"
@@ -365,7 +416,8 @@
                   <h3>Build the graph</h3>
                   <p>
                     Join, append, filter, group, sort, calculated columns, and
-                    custom SQL—with Applied Steps you can revisit.
+                    custom SQL—with Applied Steps you can revisit. Create a KeyMap
+                    from two queries when aliases need a dictionary first.
                   </p>
                 </div>
               </li>
@@ -443,13 +495,19 @@
               The bundled Key mapping demo follows sales and spending across 15
               companies and 60 days—same businesses, different names. Use the
               full <a href="#mapping">mapping toolkit</a> end to end (seed
-              storage in the demo).
+              storage in the demo). For structure-at-scale, open
+              <strong>Help → Mapping labs</strong>.
             </p>
             <div class="cta-row" style="margin-top: 1.5rem">
               <a
                 class="btn btn-primary"
                 href="https://github.com/dwhforge/query/blob/main/docs/keymap-workflows.md"
                 >Mapping walkthrough</a
+              >
+              <a
+                class="btn btn-ghost"
+                href="https://github.com/dwhforge/query/blob/main/docs/mapping-quality-lab.md"
+                >Quality lab</a
               >
               <a class="btn btn-ghost" href="#mapping">Toolkit overview</a>
               <a class="btn btn-ghost" href="docs.html">All docs</a>
@@ -459,7 +517,8 @@
             <li>
               <strong style="color: var(--fg)">Open the problem.</strong> Help →
               Load demo → Key mapping; inspect <code>dirty_join</code> without a
-              map.
+              map. Or create a map from two local queries when you already know
+              the key columns.
             </li>
             <li>
               <strong style="color: var(--fg)">Diagnose in Join Lens.</strong>
@@ -469,9 +528,9 @@
             </li>
             <li>
               <strong style="color: var(--fg)">Edit the mapping.</strong> Fill
-              From→To (including non-lexical leftovers like tickers). Optional:
-              connect an LLM in Options for Suggest all… / chat on hard
-              aliases—then Accept into the map.
+              From→To (including non-lexical leftovers like tickers, or a
+              composite From). Optional: connect an LLM in Options for Suggest
+              all… / chat on hard aliases—then Accept into the map.
               <strong>Apply to left</strong> on sales and spend with one shared
               mapping.
             </li>

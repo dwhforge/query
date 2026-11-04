@@ -1,6 +1,6 @@
 use crate::connection::ConnectionDef;
 use crate::dialect::WarehouseDialect;
-use crate::emit::{emit_transform_step, emit_transform_step_ex, substitute_query_placeholders, EmitSchemaOpts};
+use crate::emit::{emit_transform_step_ex, substitute_query_placeholders, EmitSchemaOpts};
 use crate::graph::{cte_name, topo_queries_from};
 use crate::model::{KeyMapStorage, TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
@@ -81,7 +81,7 @@ impl<'a> GraphCompiler<'a> {
             return Err("Workspace is empty".into());
         }
 
-        let (km_rels, km_cols, km_ref_models) =
+        let (km_rels, km_cols, km_ref_models, km_range) =
             preview_key_map_opts(self.workspace, self.connections)?;
         let order = topo_queries_from(self.workspace, root_id)?;
         let mut last_cte: HashMap<String, String> = HashMap::new();
@@ -120,6 +120,7 @@ impl<'a> GraphCompiler<'a> {
                     &km_rels,
                     &km_cols,
                     &km_ref_models,
+                    &km_range,
                     prev_columns,
                 )?;
                 parts.push(format!("  {name} AS ({body})"));
@@ -177,6 +178,7 @@ fn preview_key_map_opts(
         HashMap<String, String>,
         HashMap<String, (Vec<String>, String)>,
         HashMap<String, String>,
+        HashMap<String, (String, String)>,
     ),
     String,
 > {
@@ -184,6 +186,7 @@ fn preview_key_map_opts(
     let mut relations = HashMap::new();
     let mut columns = HashMap::new();
     let mut ref_models = HashMap::new();
+    let mut ranges = HashMap::new();
     for km in &workspace.key_maps {
         let froms = km.from_columns_eff();
         let to = if km.to_column.trim().is_empty() {
@@ -192,6 +195,12 @@ fn preview_key_map_opts(
             km.to_column.clone()
         };
         columns.insert(km.id.clone(), (froms, to));
+        if km.is_range_scd() {
+            ranges.insert(
+                km.id.clone(),
+                (km.valid_from_col_eff(), km.valid_to_col_eff()),
+            );
+        }
         match &km.storage {
             KeyMapStorage::Source { source, table, .. } => {
                 if let Some(dsn) = dsns.get(&km.id) {
@@ -207,7 +216,7 @@ fn preview_key_map_opts(
             KeyMapStorage::Seed => {}
         }
     }
-    Ok((relations, columns, ref_models))
+    Ok((relations, columns, ref_models, ranges))
 }
 
 fn compile_step(
@@ -218,6 +227,7 @@ fn compile_step(
     key_map_relations: &HashMap<String, String>,
     key_map_columns: &HashMap<String, (Vec<String>, String)>,
     key_map_ref_models: &HashMap<String, String>,
+    key_map_range: &HashMap<String, (String, String)>,
     prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
     match step {
@@ -298,6 +308,7 @@ fn compile_step(
                 EmitSchemaOpts {
                     key_map_relations: Some(key_map_relations),
                     key_map_columns: Some(key_map_columns),
+                    key_map_range: Some(key_map_range),
                     prev_columns,
                     ..Default::default()
                 },
@@ -343,6 +354,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+                        as_of_column: None,
                         map_id: "map_ref".into(),
                         entries: km.entries.clone(),
                     },
@@ -390,6 +402,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+                        as_of_column: None,
                         map_id: "map_x".into(),
                         entries: vec![],
                     },

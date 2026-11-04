@@ -126,6 +126,7 @@ function resourceDirs() {
 function startHost() {
   return new Promise((resolve, reject) => {
     const bin = hostBinaryPath();
+    console.log(`[dwh] using host binary: ${bin}`);
     if (!fs.existsSync(bin)) {
       reject(
         new Error(
@@ -240,8 +241,17 @@ function onHostData(chunk) {
     const pending = id != null ? rpcPending.get(id) : null;
     if (pending) {
       rpcPending.delete(id);
-      if (parsed.ok) pending.resolve(parsed.result);
-      else pending.reject(new Error(parsed.error || "host error"));
+      // ADR-0029: never reject() through ipcMain.handle — Electron strips custom
+      // fields. Always resolve an envelope; renderer throws HostRpcError.
+      if (parsed.ok) {
+        pending.resolve({ ok: true, result: parsed.result });
+      } else {
+        pending.resolve({
+          ok: false,
+          message: parsed.error || "host error",
+          errorDetail: parsed.error_detail ?? null,
+        });
+      }
     }
   }
 }

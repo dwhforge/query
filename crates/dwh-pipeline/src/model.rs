@@ -2,6 +2,7 @@ use crate::connection::ConnectionDef;
 use crate::derive_ops::{DeriveMode, DeriveOp, SqlDialectTag};
 use crate::dialect::QueryExecution;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 fn default_pg_schema() -> String {
     "public".into()
@@ -275,10 +276,23 @@ pub enum TransformationStep {
         /// Where COALESCE(map.to, …) is written (default: first of columns).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_column: Option<String>,
+        /// Fact event-time column for range SCD maps ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_of_column: Option<String>,
         map_id: ObjectTarget,
         #[serde(default)]
         entries: Vec<KeyMapEntry>,
     },
+}
+
+/// Optional effectivity mode for a KeyMap ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyMapTimeMode {
+    #[default]
+    None,
+    /// Rows carry valid_from / valid_to; Apply uses half-open range predicate.
+    RangeScd,
 }
 
 /// One From→To alias row. Unique by trimmed From **tuple** within a [`KeyMapDef`].
@@ -372,6 +386,19 @@ fn default_to_col() -> String {
     "to".into()
 }
 
+/// User intent for how a KeyMap was authored from workspace queries
+/// ([ADR-0034](../../../docs/adr/0034-keymap-authoring-context.md)).
+/// Not ownership of a Join / MappingCheck — Apply consumers are computed separately.
+/// Wire type is generated to TypeScript via ts-rs (`KeyMapAuthoringContext.ts`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, TS)]
+pub struct KeyMapAuthoringContext {
+    pub source_query_id: String,
+    /// Ordered From columns on the source query (composite arity ≥ 1).
+    pub source_columns: Vec<String>,
+    pub target_query_id: String,
+    pub target_column: String,
+}
+
 /// Named join-key alias table (project resource).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct KeyMapDef {
@@ -393,9 +420,27 @@ pub struct KeyMapDef {
     /// Column on the map relation used as To (default `to`).
     #[serde(default = "default_to_col")]
     pub to_column: String,
-    /// Extra WH columns editable in the KeyMap UI (not From/To). Empty = from/to only.
+    /// Extra columns editable in the KeyMap UI (not From/To). Empty = from/to only.
+    /// Seed export includes these after `to` ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub editable_columns: Vec<String>,
+    /// Effectivity mode (default none = classic unique From).
+    #[serde(default, skip_serializing_if = "is_time_mode_none")]
+    pub time_mode: KeyMapTimeMode,
+    /// Map column for range start when `time_mode = range_scd` (default `valid_from`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from_column: Option<String>,
+    /// Map column for range end when `time_mode = range_scd` (default `valid_to`; NULL = open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_to_column: Option<String>,
+    /// Optional creation intent from query-based mapping wizard ([ADR-0034](../../../docs/adr/0034-keymap-authoring-context.md)).
+    /// Absent on legacy maps. No `format_version` bump (additive optional; old readers may drop on re-save).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_context: Option<KeyMapAuthoringContext>,
+}
+
+fn is_time_mode_none(m: &KeyMapTimeMode) -> bool {
+    matches!(m, KeyMapTimeMode::None)
 }
 
 impl KeyMapDef {
@@ -409,7 +454,53 @@ impl KeyMapDef {
             from_columns: vec![],
             to_column: default_to_col(),
             editable_columns: vec![],
+            time_mode: KeyMapTimeMode::None,
+            valid_from_column: None,
+            valid_to_column: None,
+            authoring_context: None,
         }
+    }
+
+    pub fn valid_from_col_eff(&self) -> String {
+        self.valid_from_column
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("valid_from")
+            .to_string()
+    }
+
+    pub fn valid_to_col_eff(&self) -> String {
+        self.valid_to_column
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("valid_to")
+            .to_string()
+    }
+
+    /// Seed / relation columns after From+To: range bounds (if any) then editable attrs.
+    pub fn stewardship_columns(&self) -> Vec<String> {
+        let mut cols = Vec::new();
+        if matches!(self.time_mode, KeyMapTimeMode::RangeScd) {
+            cols.push(self.valid_from_col_eff());
+            cols.push(self.valid_to_col_eff());
+        }
+        for c in &self.editable_columns {
+            let t = c.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if cols.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                continue;
+            }
+            cols.push(t.to_string());
+        }
+        cols
+    }
+
+    pub fn is_range_scd(&self) -> bool {
+        matches!(self.time_mode, KeyMapTimeMode::RangeScd)
     }
 
     /// Effective From column names on the map relation ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
@@ -452,10 +543,35 @@ impl KeyMapDef {
                 self.id
             ));
         }
+        {
+            let mut seen_names = std::collections::HashSet::new();
+            for c in &from_cols {
+                let key = c.to_ascii_lowercase();
+                if !seen_names.insert(key) {
+                    return Err(format!(
+                        "KeyMap '{}': duplicate From column name '{c}'",
+                        self.id
+                    ));
+                }
+            }
+            let to_key = self.to_column.to_ascii_lowercase();
+            if seen_names.contains(&to_key) {
+                return Err(format!(
+                    "KeyMap '{}': To column '{}' collides with a From column (seed CSV header must be unique)",
+                    self.id, self.to_column
+                ));
+            }
+        }
         let n = from_cols.len();
+        let range = self.is_range_scd();
+        let vf_col = self.valid_from_col_eff();
+        let vt_col = self.valid_to_col_eff();
         // External relations may have empty local entries (SoT is the table).
         if matches!(self.storage, KeyMapStorage::Seed) || !self.entries.is_empty() {
             let mut seen = std::collections::HashSet::new();
+            // from_key → list of (valid_from_epoch, valid_to_epoch_opt) for overlap checks
+            let mut ranges: std::collections::BTreeMap<Vec<String>, Vec<(i64, Option<i64>)>> =
+                std::collections::BTreeMap::new();
             for e in &self.entries {
                 let parts = e.from_parts_eff();
                 if parts.len() != n {
@@ -475,11 +591,72 @@ impl KeyMapDef {
                         self.id, key
                     ));
                 }
-                if !seen.insert(key.clone()) {
+                if range {
+                    let vf_raw = e
+                        .attrs
+                        .get(&vf_col)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "KeyMap '{}': range SCD requires {vf_col} for from {:?}",
+                                self.id, key
+                            )
+                        })?;
+                    let vf = parse_scd_bound(&vf_raw).map_err(|err| {
+                        format!(
+                            "KeyMap '{}': invalid {vf_col} '{vf_raw}' for from {:?}: {err}",
+                            self.id, key
+                        )
+                    })?;
+                    let vt_raw = e
+                        .attrs
+                        .get(&vt_col)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let vt = match &vt_raw {
+                        None => None,
+                        Some(end) => Some(parse_scd_bound(end).map_err(|err| {
+                            format!(
+                                "KeyMap '{}': invalid {vt_col} '{end}' for from {:?}: {err}",
+                                self.id, key
+                            )
+                        })?),
+                    };
+                    if let Some(end) = vt {
+                        if end <= vf {
+                            return Err(format!(
+                                "KeyMap '{}': {vt_col} must be > {vf_col} for from {:?} ({vf_raw} .. {})",
+                                self.id,
+                                key,
+                                vt_raw.as_deref().unwrap_or("")
+                            ));
+                        }
+                    }
+                    ranges.entry(key).or_default().push((vf, vt));
+                } else if !seen.insert(key.clone()) {
                     return Err(format!(
                         "KeyMap '{}': duplicate from tuple {:?}",
                         self.id, key
                     ));
+                }
+            }
+            if range {
+                for (key, mut ivals) in ranges {
+                    // ivals: (epoch_secs, Option<epoch_secs>)
+                    ivals.sort_by(|a, b| a.0.cmp(&b.0));
+                    for w in ivals.windows(2) {
+                        let (a_from, a_to) = &w[0];
+                        let (b_from, _) = &w[1];
+                        let a_end = a_to.unwrap_or(i64::MAX);
+                        // Half-open [from,to): overlap if a_from < b_end && b_from < a_end
+                        if *a_from < i64::MAX && *b_from < a_end {
+                            return Err(format!(
+                                "KeyMap '{}': overlapping ranges for from {:?} (epochs {a_from}..{a_end} vs {b_from}..)",
+                                self.id, key
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -489,6 +666,170 @@ impl KeyMapDef {
     pub fn is_seed_backed(&self) -> bool {
         matches!(self.storage, KeyMapStorage::Seed)
     }
+}
+
+/// Parse SCD bound as UTC epoch seconds.
+/// Formats: `YYYY-MM-DD` (midnight) or `YYYY-MM-DD[T ]HH:MM:SS[Z]`.
+/// v1 rejects fractional seconds and timezone offsets (must match TS `scdBound.ts`).
+/// Never panics on arbitrary input.
+pub fn parse_scd_bound(raw: &str) -> Result<i64, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("empty bound".into());
+    }
+    // Strict whole-string match — no early byte slicing.
+    let (date, time) = if let Some((d, t)) = s.split_once('T').or_else(|| s.split_once(' ')) {
+        (d, Some(t))
+    } else {
+        (s, None)
+    };
+    if !is_ymd(date) {
+        return Err("expected YYYY-MM-DD or YYYY-MM-DD[T ]HH:MM:SS[Z]".into());
+    }
+    let y: i32 = date[0..4].parse().map_err(|_| "invalid year".to_string())?;
+    let m: u32 = date[5..7].parse().map_err(|_| "invalid month".to_string())?;
+    let d: u32 = date[8..10].parse().map_err(|_| "invalid day".to_string())?;
+    if !valid_civil(y, m, d) {
+        return Err(format!("invalid calendar date {date}"));
+    }
+    let mut secs = civil_days_utc(y, m, d)? * 86_400;
+    if let Some(t) = time {
+        // No trim of the time part — must match TS exact regex (no space after T/ ).
+        let t = if let Some(stripped) = t.strip_suffix('Z') {
+            stripped
+        } else {
+            t
+        };
+        if t.contains('+') || t.contains('-') {
+            return Err("timezone offsets not supported (use UTC / Z)".into());
+        }
+        if t.contains('.') {
+            return Err("fractional seconds not supported in v1".into());
+        }
+        // Exact HH:MM:SS — reject garbage / short forms.
+        if t.len() != 8 || t.as_bytes().get(2) != Some(&b':') || t.as_bytes().get(5) != Some(&b':')
+        {
+            return Err("expected HH:MM:SS[Z]".into());
+        }
+        if !t.as_bytes().iter().enumerate().all(|(i, b)| {
+            if i == 2 || i == 5 {
+                *b == b':'
+            } else {
+                b.is_ascii_digit()
+            }
+        }) {
+            return Err("expected HH:MM:SS[Z]".into());
+        }
+        let hh: i64 = t[0..2].parse().map_err(|_| "invalid hour".to_string())?;
+        let mm: i64 = t[3..5].parse().map_err(|_| "invalid minute".to_string())?;
+        let ss: i64 = t[6..8].parse().map_err(|_| "invalid second".to_string())?;
+        // Align with TS: seconds 00–59 only (no leap-second 60).
+        if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=59).contains(&ss) {
+            return Err("time out of range".into());
+        }
+        secs += hh * 3600 + mm * 60 + ss;
+    }
+    Ok(secs)
+}
+
+fn is_ymd(date: &str) -> bool {
+    let b = date.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[5].is_ascii_digit()
+        && b[6].is_ascii_digit()
+        && b[8].is_ascii_digit()
+        && b[9].is_ascii_digit()
+}
+
+fn days_in_month(y: i32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn valid_civil(y: i32, m: u32, d: u32) -> bool {
+    (1..=12).contains(&m) && d >= 1 && d <= days_in_month(y, m)
+}
+
+#[cfg(test)]
+mod scd_bound_tests {
+    use super::parse_scd_bound;
+
+    #[test]
+    fn rejects_lexicographic_fruit() {
+        assert!(parse_scd_bound("apple").is_err());
+        assert!(parse_scd_bound("banana").is_err());
+    }
+
+    #[test]
+    fn date_order() {
+        let a = parse_scd_bound("2024-01-01").unwrap();
+        let b = parse_scd_bound("2024-06-01").unwrap();
+        assert!(a < b);
+    }
+
+    #[test]
+    fn rejects_invalid_calendar_and_garbage() {
+        assert!(parse_scd_bound("2026-02-31").is_err());
+        assert!(parse_scd_bound("2026-13-01").is_err());
+        assert!(parse_scd_bound("2026-11-03T25:00:00").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:00garbage").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:00+03:00").is_err());
+        assert!(parse_scd_bound("+").is_err());
+        assert!(parse_scd_bound("+03:00").is_err());
+        assert!(parse_scd_bound("abc+").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:00.100Z").is_err());
+        assert!(parse_scd_bound("2026-11-03T10:00:60").is_err());
+        assert!(parse_scd_bound("2026-11-03T 10:00:00").is_err());
+    }
+
+    #[test]
+    fn timestamp_keeps_time_of_day() {
+        let a = parse_scd_bound("2026-11-03T10:00:00").unwrap();
+        let b = parse_scd_bound("2026-11-03T11:00:00").unwrap();
+        assert_eq!(b - a, 3600);
+        let noonish = parse_scd_bound("2026-11-03T10:30:00").unwrap();
+        assert!(noonish > a && noonish < b);
+    }
+
+    #[test]
+    fn never_panics_on_fuzz_inputs() {
+        for s in ["", "+", "-", "T", " ", "🚀", "2026-02-31", "....", "10:00:00"] {
+            let _ = parse_scd_bound(s);
+        }
+    }
+}
+
+/// Days since Unix epoch (UTC), Howard Hinnant civil-from-days inverse.
+fn civil_days_utc(y: i32, m: u32, d: u32) -> Result<i64, String> {
+    let mut y = y;
+    let m = m as i32;
+    let d = d as i32;
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = (yoe * 365 + yoe / 4 - yoe / 100 + doy as u32) as i64;
+    Ok(era as i64 * 146_097 + doe - 719_468)
 }
 
 /// Deterministic normalize ops (near-miss Apply → NormalizeKey). Order = nest order.
@@ -644,5 +985,59 @@ impl Workspace {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod authoring_context_tests {
+    use super::{KeyMapAuthoringContext, KeyMapDef, KeyMapStorage};
+
+    #[test]
+    fn authoring_context_round_trips_on_keymap() {
+        let mut map = KeyMapDef::new("map_supplier", "Supplier→Catalog");
+        map.authoring_context = Some(KeyMapAuthoringContext {
+            source_query_id: "supplier_products".into(),
+            source_columns: vec!["supplier_id".into(), "product_code".into()],
+            target_query_id: "catalog_products".into(),
+            target_column: "product_id".into(),
+        });
+        let json = serde_json::to_string_pretty(&map).unwrap();
+        assert!(json.contains("authoring_context"));
+        assert!(json.contains("supplier_id"));
+        let back: KeyMapDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.authoring_context, map.authoring_context);
+        assert_eq!(back.storage, KeyMapStorage::Seed);
+    }
+
+    #[test]
+    fn legacy_keymap_without_authoring_context_deserializes() {
+        let legacy = r#"{
+            "id": "map_old",
+            "name": "old",
+            "entries": [{"from": "a", "to": "b"}],
+            "storage": {"kind": "seed"},
+            "from_column": "from",
+            "to_column": "to"
+        }"#;
+        let map: KeyMapDef = serde_json::from_str(legacy).unwrap();
+        assert!(map.authoring_context.is_none());
+        let out = serde_json::to_value(&map).unwrap();
+        assert!(out.get("authoring_context").is_none());
+    }
+
+    #[test]
+    fn validate_rejects_from_to_column_name_collision() {
+        let mut map = KeyMapDef::new("map_bad", "bad");
+        map.from_column = "to".into();
+        map.from_columns = vec!["to".into()];
+        map.to_column = "to".into();
+        let err = map.validate().unwrap_err();
+        assert!(err.contains("collides"), "{err}");
+
+        map.from_columns = vec!["sku".into(), "TO".into()];
+        map.from_column = "sku".into();
+        map.to_column = "to".into();
+        let err2 = map.validate().unwrap_err();
+        assert!(err2.contains("collides"), "{err2}");
     }
 }

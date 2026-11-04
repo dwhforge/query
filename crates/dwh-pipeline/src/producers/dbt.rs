@@ -5,7 +5,7 @@ use crate::dialect::{
     validate_engine_execution, workspace_needs_s3_landing, WarehouseDialect,
 };
     use crate::emit::{
-    emit_transform_step_ex, key_map_seed_csv_cols, key_map_seed_name,
+    emit_transform_step_ex, key_map_seed_name,
     substitute_query_placeholders, EmitSchemaOpts,
 };
 use crate::export_manifest::commit_export_plan;
@@ -101,6 +101,20 @@ fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, Strin
             km.to_column.clone()
         };
         out.insert(km.id.clone(), (froms, to));
+    }
+    out
+}
+
+/// map_id → (valid_from, valid_to) for range SCD Apply ([ADR-0028]).
+fn key_map_range(workspace: &Workspace) -> HashMap<String, (String, String)> {
+    let mut out = HashMap::new();
+    for km in &workspace.key_maps {
+        if km.is_range_scd() {
+            out.insert(
+                km.id.clone(),
+                (km.valid_from_col_eff(), km.valid_to_col_eff()),
+            );
+        }
     }
     out
 }
@@ -368,7 +382,7 @@ pub fn build_export_plan_routed(
         seeds_cfg.push_str(&format!("  {pipeline_name}:\n"));
         for map_id in key_maps.keys() {
             let seed = key_map_seed_name(map_id);
-            let (from_cols, to_col) = workspace
+            let (from_cols, to_col, extras) = workspace
                 .key_map(map_id)
                 .map(|m| {
                     let froms = m.from_columns_eff();
@@ -377,14 +391,32 @@ pub fn build_export_plan_routed(
                     } else {
                         m.to_column.clone()
                     };
-                    (froms, to)
+                    (froms, to, m.stewardship_columns())
                 })
-                .unwrap_or_else(|| (vec!["from".into()], "to".into()));
+                .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
             seeds_cfg.push_str(&format!("    {seed}:\n      +column_types:\n"));
             for fc in &from_cols {
                 seeds_cfg.push_str(&format!("        {fc}: varchar\n"));
             }
             seeds_cfg.push_str(&format!("        {to_col}: varchar\n"));
+            let temporal: std::collections::HashSet<String> = workspace
+                .key_map(map_id)
+                .filter(|m| m.is_range_scd())
+                .map(|m| {
+                    [m.valid_from_col_eff(), m.valid_to_col_eff()]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for ec in &extras {
+                // ADR-0028: SCD bounds are timestamps (date-only → midnight); not varchar.
+                let ty = if temporal.contains(ec) {
+                    "timestamp"
+                } else {
+                    "varchar"
+                };
+                seeds_cfg.push_str(&format!("        {ec}: {ty}\n"));
+            }
         }
     }
     let pg_schema_raw = postgres_schema.trim();
@@ -443,7 +475,7 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
 
     for (map_id, entries) in &key_maps {
         let seed = key_map_seed_name(map_id);
-        let (from_cols, to_col) = workspace
+        let (from_cols, to_col, extras) = workspace
             .key_map(map_id)
             .map(|m| {
                 let to = if m.to_column.trim().is_empty() {
@@ -451,12 +483,12 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
                 } else {
                     m.to_column.clone()
                 };
-                (m.from_columns_eff(), to)
+                (m.from_columns_eff(), to, m.stewardship_columns())
             })
-            .unwrap_or_else(|| (vec!["from".into()], "to".into()));
+            .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
         plan.insert(
             format!("seeds/{seed}.csv"),
-            key_map_seed_csv_cols(entries, &from_cols, &to_col),
+            crate::emit::key_map_seed_csv_full(entries, &from_cols, &to_col, &extras),
         );
     }
 
@@ -898,6 +930,7 @@ fn compile_query_as_dbt_model(
             other => {
                 let key_map_relations = key_map_relations(workspace);
                 let key_map_columns = key_map_columns(workspace);
+                let key_map_range = key_map_range(workspace);
                 let sql = emit_transform_step_ex(
                     other,
                     &prev,
@@ -909,6 +942,7 @@ fn compile_query_as_dbt_model(
                         query_columns: Some(&qcols),
                         key_map_relations: Some(&key_map_relations),
                         key_map_columns: Some(&key_map_columns),
+                        key_map_range: Some(&key_map_range),
                     },
                 )?;
                 // Physical left relation no longer matches CTE column set.
@@ -1439,6 +1473,7 @@ mod tests {
                         column: String::new(),
                         columns: vec!["ext_offer_id".into(), "day".into()],
                         output_column: Some("offer_sk".into()),
+                        as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },
@@ -1490,6 +1525,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+                        as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },
@@ -1572,6 +1608,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+                        as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
                     },

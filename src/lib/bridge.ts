@@ -12,6 +12,16 @@ import type {
   WarehouseDialect,
   Workspace,
 } from "../types/pipeline";
+import {
+  normalizeHostReject,
+  unpackInvokeReply,
+  type InvokeReply,
+} from "./hostRpc";
+import type { KeyMapWhArgs } from "../types/generated/KeyMapWhArgs";
+import type { LoadProjectArgs } from "../types/generated/LoadProjectArgs";
+import type { SaveProjectArgs } from "../types/generated/SaveProjectArgs";
+
+export type { InvokeReply };
 
 export type DbtTarget = "v1" | "v2";
 
@@ -44,9 +54,26 @@ function bridge() {
   return dwh;
 }
 
-/** IPC → dwh-host JSON-RPC. */
-function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return bridge().invoke<T>(cmd, args);
+/** IPC → dwh-host JSON-RPC (ADR-0029: structured HostError via ok:false envelope). */
+async function invoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  const e2e = String(import.meta.env.DWH_E2E ?? "") === "1";
+  let e2eBridge: typeof import("./e2eBridge") | null = null;
+  if (e2e) {
+    e2eBridge = await import("./e2eBridge");
+    await e2eBridge.e2eMaybeHoldDescribe(cmd);
+  }
+  try {
+    return await bridge()
+      .invoke<InvokeReply<T> | T>(cmd, args)
+      .then((reply) => unpackInvokeReply(reply));
+  } catch (e: unknown) {
+    throw normalizeHostReject(e);
+  } finally {
+    e2eBridge?.e2eNotifyDescribeSettled(cmd);
+  }
 }
 
 export function previewWorkspace(
@@ -224,8 +251,18 @@ export function joinPrepareProgress(): Promise<JoinPrepareProgress> {
 export function previewPreparedJoinSide(
   side: "left" | "right",
   limit = 50,
+  keyFilter?: {
+    keyColumns: string[];
+    /** Distinct join-key tuples (JSON-serializable cell values). */
+    keyTuples: unknown[][];
+  },
 ): Promise<PreviewResult> {
-  return invoke<PreviewResult>("preview_prepared_join_side", { side, limit });
+  return invoke<PreviewResult>("preview_prepared_join_side", {
+    side,
+    limit,
+    keyColumns: keyFilter?.keyColumns,
+    keyTuples: keyFilter?.keyTuples,
+  });
 }
 
 export type PreviewDbtModel = {
@@ -629,13 +666,8 @@ export function removeKeyMapFromExport(
   return invoke("remove_key_map_from_export", { exportPath, mapId });
 }
 
-export type KeyMapWriteResult = {
-  schema: string;
-  table: string;
-  rows_written: number;
-  created_table: boolean;
-  content_hash: string;
-};
+/** @deprecated Prefer generated KeyMapWriteResultDto — alias kept for call sites. */
+export type KeyMapWriteResult = import("../types/generated").KeyMapWriteResultDto;
 
 /** Warehouse snapshot at first local edit of a From key (ADR-0022 row-level concurrency). */
 export type KeyMapDirtyBaseline = {
@@ -680,10 +712,10 @@ export function writeKeyMap(
   expectedContentHash?: string | null,
   delta?: KeyMapDirtyDelta | null,
 ): Promise<KeyMapWriteResult> {
-  return invoke("write_key_map", {
+  const args = {
     keyMap,
     connectionString,
-    expectedContentHash: expectedContentHash ?? null,
+    expectedContentHash: expectedContentHash ?? undefined,
     delta: delta
       ? {
           upserts: delta.upserts,
@@ -691,8 +723,9 @@ export function writeKeyMap(
           deletedFromParts: delta.deletedFromParts ?? [],
           baselines: delta.baselines ?? [],
         }
-      : null,
-  });
+      : undefined,
+  } satisfies KeyMapWhArgs;
+  return invoke("write_key_map", args as Record<string, unknown>);
 }
 
 export function readKeyMap(
@@ -702,15 +735,22 @@ export function readKeyMap(
     limit?: number;
     offset?: number;
     fromPrefix?: string;
+    /**
+     * Exact From-tuple equality (Confirm baselines). Not a prefix page —
+     * absence in the result means the key is absent in WH for that batch.
+     */
+    fromExact?: string[][];
   },
 ): Promise<KeyMapReadResult> {
-  return invoke("read_key_map", {
+  const args = {
     keyMap,
     connectionString,
-    limit: opts?.limit ?? null,
-    offset: opts?.offset ?? null,
-    fromPrefix: opts?.fromPrefix ?? null,
-  });
+    limit: opts?.limit,
+    offset: opts?.offset,
+    fromPrefix: opts?.fromPrefix,
+    fromExact: opts?.fromExact,
+  } satisfies KeyMapWhArgs;
+  return invoke("read_key_map", args as Record<string, unknown>);
 }
 
 export interface ExportResult {
@@ -883,7 +923,8 @@ export function testPostgresConnection(
 }
 
 export function saveProject(path: string, project: Project): Promise<Project> {
-  return invoke<Project>("save_project", { path, project });
+  const args = { path, project } satisfies SaveProjectArgs;
+  return invoke<Project>("save_project", args as Record<string, unknown>);
 }
 
 export type ReferenceState =
@@ -996,10 +1037,11 @@ export function loadProject(
   path: string,
   opts?: { remember?: boolean },
 ): Promise<Project> {
-  return invoke<Project>("load_project", {
+  const args = {
     path,
     remember: opts?.remember ?? false,
-  });
+  } satisfies LoadProjectArgs;
+  return invoke<Project>("load_project", args as Record<string, unknown>);
 }
 
 export function getLastProjectPath(): Promise<string | null> {

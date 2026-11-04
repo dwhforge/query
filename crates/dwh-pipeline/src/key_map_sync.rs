@@ -1,8 +1,6 @@
 //! Seed ↔ KeyMap sync (ADR-0020): after first export, `seeds/map_*.csv` is SoT.
 
-use crate::emit::{
-    key_map_seed_csv_cols, key_map_seed_csv_named, key_map_seed_name, parse_key_map_seed_csv_cols,
-};
+use crate::emit::{key_map_seed_csv_named, key_map_seed_name};
 use crate::export_manifest::{hash_content, load_manifest, manifest_path, ExportManifest};
 use crate::model::{KeyMapDef, KeyMapEntry, TransformationStep, Workspace};
 use std::fs;
@@ -53,7 +51,7 @@ pub fn sync_key_maps_from_export(
             continue;
         }
         let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let (from_cols, to_col) = workspace
+        let (from_cols, to_col, extras) = workspace
             .key_maps
             .iter()
             .find(|m| key_map_seed_name(&m.id) == stem || m.id == stem)
@@ -63,10 +61,12 @@ pub fn sync_key_maps_from_export(
                 } else {
                     m.to_column.clone()
                 };
-                (m.from_columns_eff(), to)
+                (m.from_columns_eff(), to, m.stewardship_columns())
             })
-            .unwrap_or_else(|| (vec!["from".into()], "to".into()));
-        let entries = parse_key_map_seed_csv_cols(&body, &from_cols, &to_col)?;
+            .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
+        let entries = crate::emit::parse_key_map_seed_csv_full(
+            &body, &from_cols, &to_col, &extras,
+        )?;
         seed_files.push(format!("seeds/{stem}.csv"));
 
         let existing = workspace
@@ -137,7 +137,8 @@ pub fn push_key_map_to_export(
     } else {
         map.to_column.trim().to_string()
     };
-    let body = key_map_seed_csv_cols(&map.entries, &from_cols, &to_col);
+    let extras = map.stewardship_columns();
+    let body = crate::emit::key_map_seed_csv_full(&map.entries, &from_cols, &to_col, &extras);
     let path = export_root.join(&rel);
 
     let previous = if path.is_file() {
@@ -257,6 +258,7 @@ mod tests {
                     column: "channel".into(),
                     columns: vec![],
                     output_column: None,
+                    as_of_column: None,
                     map_id: "map_channel".into(),
                     entries: vec![KeyMapEntry {
                         from: "old".into(),

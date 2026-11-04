@@ -607,6 +607,7 @@ struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     fn load_root(&mut self) {
         let mut project = Project {
+            format_version: crate::project::PROJECT_FORMAT_VERSION,
             id: "root".into(),
             name: "root".into(),
             project_uid: self.input.project_uid.to_string(),
@@ -625,6 +626,8 @@ impl<'a> Resolver<'a> {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         };
         // Keep the caller's published list off the owner-facing fingerprint.
         let _ = &mut project;
@@ -1822,6 +1825,7 @@ mod tests {
 
     fn bare_project(name: &str, uid: &str) -> Project {
         Project {
+            format_version: crate::project::PROJECT_FORMAT_VERSION,
             id: format!("proj_{name}"),
             name: name.into(),
             project_uid: uid.into(),
@@ -1844,6 +1848,8 @@ mod tests {
             target_connection_id: None,
             last_dbt_export_path: None,
             canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
         }
     }
 
@@ -2702,6 +2708,7 @@ mod tests {
                     column: "sku".into(),
                     columns: vec![],
                     output_column: None,
+                    as_of_column: None,
                     map_id: "map_live".into(),
                     entries: vec![],
                 },
@@ -2721,6 +2728,7 @@ mod tests {
                     column: "sku".into(),
                     columns: vec![],
                     output_column: None,
+                    as_of_column: None,
                     map_id: ObjectTarget::external(&reference.id, ObjectKind::Mapping, "map_live"),
                     entries: vec![],
                 }],

@@ -31,10 +31,18 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/changes/query-based-mapping-create/` — ADR-0034 query-based KeyMap create (v0.3.1)
 - `openspec/changes/return-and-edit-foundation/` — ADR-0018 foundation
 - `openspec/changes/join-key-mapping/` — ADR-0020 KeyMap / near-miss
 - `openspec/changes/app-options-recent/` — ADR-0021 Options + Open Recent
-- `openspec/changes/keymap-live-bind/` — ADR-0022 Postgres KeyMap live bind
 - `openspec/specs/dbt-setup-onboarding/` — ADR-0023 first-run / Options dbt install (merged)
 - `openspec/specs/keymap-composite-*` — ADR-0024 composite From + multi-key Join Auto (merged)
 - `openspec/specs/project-references/` — ADR-0025 references between saved projects (merged)
+- `openspec/specs/mapping-quality-overview/` — ADR-0026 Help-lab overview (merged)
+- `openspec/specs/mapping-quality-checks/` — ADR-0027 MappingCheck / CheckRun closed loop (merged)
+- `openspec/specs/typed-wire-contract/` — ADR-0029 ts-rs / typed HostError (merged)
+- `openspec/specs/project-format-version/` — ADR-0030 project `format_version` (merged)
+- `openspec/specs/execution-lifecycle/` — ADR-0031 DuckDB ownership / cancel / stale replies (merged)
+- `openspec/specs/ui-host-decomposition/` — ADR-0032 checks / KeyMap / host commands (merged)
+- `openspec/specs/mapping-data-plane/` — ADR-0033 source maps without row bodies (merged)
+- `openspec/specs/keymap-stewardship-shapes/` — ADR-0028 attrs + optional range SCD (merged)

@@ -18,6 +18,8 @@ jobs:
           node-version: "20"
           cache: npm
       - run: npm ci
+      - name: Unit tests (hostRpc / KeyMap / mappingChecks)
+        run: npm run test:unit
       - run: npm run build
 
   rust:
@@ -32,6 +34,9 @@ jobs:
         run: |
           cargo test -p dwh-pipeline --lib
           cargo test -p dwh-engine --lib
+          cargo test -p dwh-host --lib
+      - name: Generated TS bindings freshness (ADR-0029)
+        run: bash scripts/check-generated-types.sh
       - name: Host build
         run: cargo build -p dwh-host --release
 

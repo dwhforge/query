@@ -20,12 +20,22 @@ openspec/
 
 Active changes:
 
+- [`changes/query-based-mapping-create/`](changes/query-based-mapping-create/) — query-based KeyMap create v0.3.1 ([ADR-0034](../docs/adr/0034-keymap-authoring-context.md))
+- ~~[`changes/typed-wire-contract/`](changes/typed-wire-contract/)~~ — **merged** → [`specs/typed-wire-contract/`](specs/typed-wire-contract/) ([ADR-0029](../docs/adr/0029-typed-wire-contract.md))
+- ~~[`changes/ui-host-decomposition/`](changes/ui-host-decomposition/)~~ — **merged** → [`specs/ui-host-decomposition/`](specs/ui-host-decomposition/) ([ADR-0032](../docs/adr/0032-ui-host-decomposition.md))
+- ~~[`changes/mapping-data-plane/`](changes/mapping-data-plane/)~~ — **merged** → [`specs/mapping-data-plane/`](specs/mapping-data-plane/) ([ADR-0033](../docs/adr/0033-mapping-data-plane.md))
+- ~~[`changes/project-format-version/`](changes/project-format-version/)~~ — **merged** → [`specs/project-format-version/`](specs/project-format-version/) ([ADR-0030](../docs/adr/0030-project-format-version.md))
+- ~~[`changes/execution-lifecycle/`](changes/execution-lifecycle/)~~ — **merged** → [`specs/execution-lifecycle/`](specs/execution-lifecycle/) ([ADR-0031](../docs/adr/0031-execution-lifecycle.md))
+- ~~[`changes/keymap-stewardship-shapes/`](changes/keymap-stewardship-shapes/)~~ — **merged** → [`specs/keymap-stewardship-shapes/`](specs/keymap-stewardship-shapes/) ([ADR-0028](../docs/adr/0028-keymap-stewardship-shapes.md))
 - [`changes/return-and-edit-foundation/`](changes/return-and-edit-foundation/) — seeds → safe re-export → e2e
 - [`changes/join-key-mapping/`](changes/join-key-mapping/) — KeyMap / NormalizeKey / near-miss ([ADR-0020](../docs/adr/0020-join-key-mapping.md))
 - [`changes/app-options-recent/`](changes/app-options-recent/) — Options + Open Recent ([ADR-0021](../docs/adr/0021-app-options-recent-projects.md))
+- ~~[`changes/mapping-quality-checks/`](changes/mapping-quality-checks/)~~ — **merged** → [`specs/mapping-quality-checks/`](specs/mapping-quality-checks/) ([ADR-0027](../docs/adr/0027-mapping-quality-checks.md))
 - ~~[`changes/project-references/`](changes/project-references/)~~ — **merged** → [`specs/project-references/`](specs/project-references/) ([ADR-0025](../docs/adr/0025-project-references.md))
 - ~~[`changes/keymap-live-bind/`](changes/keymap-live-bind/)~~ — **merged** → [`specs/keymap-live-bind/`](specs/keymap-live-bind/) ([ADR-0022](../docs/adr/0022-keymap-postgres-live-bind.md))
 - ~~[`changes/dbt-setup-onboarding/`](changes/dbt-setup-onboarding/)~~ — **merged** → [`specs/dbt-setup-onboarding/`](specs/dbt-setup-onboarding/) ([ADR-0023](../docs/adr/0023-dbt-setup-onboarding.md))
 - ~~[`changes/keymap-composite/`](changes/keymap-composite/)~~ — **merged** → [`specs/keymap-composite-*/`](specs/) ([ADR-0024](../docs/adr/0024-keymap-composite.md))
 
 Review order: proposal → specs → design → tasks. Implement only after that review (`openspec apply` / agent apply).
+
+- ~~[`changes/mapping-quality-overview/`](changes/mapping-quality-overview/)~~ — **prototype implemented**, contract merged → [`specs/mapping-quality-overview/`](specs/mapping-quality-overview/) ([ADR-0026](../docs/adr/0026-mapping-quality-overview.md))

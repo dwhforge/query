@@ -1,0 +1,13 @@
+{
+  "id": "proj_v0_legacy",
+  "name": "v0 legacy duckdb",
+  "connections": [],
+  "sources": [],
+  "workspace": {
+    "queries": [],
+    "focus_query_id": "",
+    "key_maps": []
+  },
+  "dbt_target": "v1",
+  "target_dialect": "duckdb"
+}

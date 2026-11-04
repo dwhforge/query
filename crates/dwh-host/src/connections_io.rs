@@ -1,5 +1,6 @@
 //! Global connections: `~/.dwhforge-query/connections.json` (shells) + secrets.json.
 
+use crate::atomic_fs::atomic_write;
 use crate::secrets_io::{dwh_home_dir, load_secrets_file, save_secrets_file};
 use dwh_pipeline::{
     connections_for_disk, merge_connection_list_secrets, migrate_legacy_project_secrets,
@@ -50,7 +51,10 @@ pub fn save_global_connections(connections: &[ConnectionDef]) -> Result<(), Stri
         connections: shells,
     };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    fs::write(connections_path()?, json).map_err(|e| e.to_string())?;
+    let outcome = atomic_write(&connections_path()?, json.as_bytes())?;
+    if let crate::atomic_fs::AtomicWriteOutcome::PostCommitDirSync { message } = outcome {
+        eprintln!("[dwh-host] connections post-commit: {message}");
+    }
 
     let mut store = load_secrets_file()?;
     if !store.projects.is_empty() {

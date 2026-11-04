@@ -106,6 +106,28 @@ function keyValuesFromRow(
   });
 }
 
+/** Distinct join-key tuples from center result (for keyed parent fetch). */
+function uniqueResultKeyTuples(
+  resultRows: unknown[][],
+  resultColumns: ColumnMetadata[],
+  resultKeyNames: string[],
+  max = 500,
+): unknown[][] {
+  if (resultKeyNames.length === 0 || resultRows.length === 0) return [];
+  const seen = new Set<string>();
+  const out: unknown[][] = [];
+  for (const row of resultRows) {
+    const tup = keyValuesFromRow(row, resultColumns, resultKeyNames);
+    if (tup.every((v) => v == null)) continue;
+    const stamp = JSON.stringify(tup);
+    if (seen.has(stamp)) continue;
+    seen.add(stamp);
+    out.push(tup);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function keysEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((v, i) => valuesEqual(v, b[i]));
@@ -361,6 +383,7 @@ function SidePanel({
               >
                 {displayCols.map(({ col: c, idx: ci }) => {
                   const isKey = keyFold.has(fold(c.name));
+                  const val = cellStr(row[ci]);
                   return (
                     <div
                       key={c.name}
@@ -375,8 +398,9 @@ function SidePanel({
                       </span>
                       <span
                         className={`min-w-0 truncate font-mono ${isKey ? "text-teal-50" : "text-slate-300"}`}
+                        title={val && val !== "∅" ? val : undefined}
                       >
-                        {cellStr(row[ci])}
+                        {val}
                       </span>
                     </div>
                   );
@@ -448,6 +472,16 @@ export type JoinLensProps = {
   joinDiagLoading?: boolean;
   /** Bump to force Probe mode (e.g. from Data-banner "Open in Probe"). */
   forceProbeNonce?: number;
+  /**
+   * Bump after opening a sample Join (e.g. mapping-quality Inspect) to start
+   * Load sides once preview is on screen — left TEMP for expensive inputs.
+   */
+  autoPrepareNonce?: number;
+  /**
+   * Pin This-row to a result column value (e.g. commercial_sku from overview
+   * samples). Join ON keys are the wrong focus after ApplyKeyMap.
+   */
+  focusResultHint?: { column: string; value: string } | null;
   /** Apply near-miss → insert NormalizeKey before Join. */
   onApplyNearMiss?: (hyp: NearMissHypothesis) => void;
   /**
@@ -486,6 +520,8 @@ function JoinLensImpl({
   joinDiag,
   joinDiagLoading = false,
   forceProbeNonce = 0,
+  autoPrepareNonce = 0,
+  focusResultHint = null,
   onApplyNearMiss,
   onMapKey,
   onPrepareBusy,
@@ -519,6 +555,8 @@ function JoinLensImpl({
    * samplesLoaded=true (auto Show rows never retries).
    */
   const samplesLoadGenRef = useRef(0);
+  /** Gen of the load currently in flight (0 = none). Used to free the auto-attempt gate on abort. */
+  const activeSamplesGenRef = useRef(0);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
   const [searchLeft, setSearchLeft] = useState("");
@@ -639,10 +677,12 @@ function JoinLensImpl({
         if (s.prepared) {
           setPrepareHint(formatJoinPrepareStatusHint(s));
           // One auto attempt per Join revision — do not retry on every status poll.
+          // samplesError means the attempt finished; wait for manual Retry.
           const id = joinParentsKey;
           if (
             !samplesLoaded &&
             !samplesLoading &&
+            !samplesError &&
             autoSamplesAttemptedRef.current !== id
           ) {
             autoSamplesAttemptedRef.current = id;
@@ -671,31 +711,65 @@ function JoinLensImpl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, hostQueryId, joinStepIndex, workspace, sources]);
 
+  const resultKeysFetchedRef = useRef("");
+  const resultKeysStamp = useMemo(() => {
+    const tuples = uniqueResultKeyTuples(rows, columns, leftOn);
+    return `${tuples.length}:${JSON.stringify(tuples)}`;
+  }, [rows, columns, leftOn]);
+
   useEffect(() => {
     autoDiagAttemptedRef.current = "";
     autoSamplesAttemptedRef.current = "";
+    resultKeysFetchedRef.current = "";
   }, [hostQueryId, joinStepIndex]);
 
-  // Small joins: auto-load This-row parent samples (same size heuristic as auto-diag).
+  // Re-fetch parents when the center result's join keys change (Inspect cohort,
+  // filter, etc.) — keyed L/R load, not a blind LIMIT 50 head.
+  useEffect(() => {
+    if (!enabled || sideMode !== "linked" || !prepared) return;
+    if (!hostQueryId || joinStepIndex < 1) return;
+    if (rows.length === 0) return;
+    if (resultKeysFetchedRef.current === resultKeysStamp) return;
+    resultKeysFetchedRef.current = resultKeysStamp;
+    void loadLinkedSamples({ forcePrepared: true, reason: "manual" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one fetch per key set
+  }, [
+    enabled,
+    sideMode,
+    prepared,
+    resultKeysStamp,
+    hostQueryId,
+    joinStepIndex,
+    rows.length,
+  ]);
+
+  // Small joins / prepared sides: auto-load This-row parent samples.
+  // Also recovers when an earlier attempt was aborted (gen bump) while the
+  // attempt gate stayed set — otherwise UI sits on “loading parents…” forever.
   useEffect(() => {
     if (!enabled || sideMode !== "linked") return;
     if (!hostQueryId || joinStepIndex < 1) return;
-    if (samplesLoaded || samplesLoading) return;
+    if (samplesLoaded || samplesLoading || samplesError) return;
+    const preparedReady = !!prepareStatus?.prepared;
+    const autoOk = shouldAutoLoadJoinParents(
+      workspace,
+      hostQueryId,
+      joinStepIndex,
+      prepareStatus,
+    );
+    if (!preparedReady && !autoOk) return;
     const id = joinParentsKey;
-    if (autoSamplesAttemptedRef.current === id) return;
-    if (
-      !shouldAutoLoadJoinParents(
-        workspace,
-        hostQueryId,
-        joinStepIndex,
-        prepareStatus,
-      )
-    ) {
-      return;
+    if (autoSamplesAttemptedRef.current === id) {
+      // Stale gate with nothing in flight: free and retry once.
+      if (activeSamplesGenRef.current === 0) {
+        autoSamplesAttemptedRef.current = "";
+      } else {
+        return;
+      }
     }
     autoSamplesAttemptedRef.current = id;
     void loadLinkedSamples({
-      forcePrepared: !!prepareStatus?.prepared,
+      forcePrepared: preparedReady,
       reason: "auto",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loadLinkedSamples closes over latest prepared/inputs
@@ -707,6 +781,7 @@ function JoinLensImpl({
     prepareStatus,
     samplesLoaded,
     samplesLoading,
+    samplesError,
   ]);
 
   function runPrepare(force = false) {
@@ -770,6 +845,37 @@ function JoinLensImpl({
       });
   }
 
+  // Mapping-quality Inspect (and similar): JoinLens mounts only after preview
+  // rows exist, so starting Load sides here does not race the first preview.
+  // Engine materializes expensive sides only (left for Derive/ApplyKeyMap; cheap
+  // CSV right stays live).
+  const autoPreparedForNonceRef = useRef(0);
+  useEffect(() => {
+    if (!enabled || !autoPrepareNonce) return;
+    if (autoPreparedForNonceRef.current === autoPrepareNonce) return;
+    if (!hostQueryId || joinStepIndex < 1) return;
+    autoPreparedForNonceRef.current = autoPrepareNonce;
+    runPrepare(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per nonce
+  }, [enabled, autoPrepareNonce, hostQueryId, joinStepIndex]);
+
+  // Overview samples are commercial_sku values; Join ON is canonical_key after map.
+  const focusHintAppliedRef = useRef("");
+  useEffect(() => {
+    if (!enabled || !focusResultHint || !rows.length || !columns.length) return;
+    const stamp = `${hostQueryId}|${focusResultHint.column}|${focusResultHint.value}|${rows.length}`;
+    if (focusHintAppliedRef.current === stamp) return;
+    const col = columns.findIndex(
+      (column) => column.name === focusResultHint.column,
+    );
+    if (col < 0) return;
+    const want = focusResultHint.value;
+    const idx = rows.findIndex((row) => String(row[col] ?? "") === want);
+    if (idx < 0) return;
+    focusHintAppliedRef.current = stamp;
+    setActiveIndex(idx);
+  }, [enabled, focusResultHint, rows, columns, hostQueryId]);
+
   function loadLinkedSamples(opts?: {
     forcePrepared?: boolean;
     /** auto = effect; prepare = after Prepare; manual = Show rows / Retry. */
@@ -787,6 +893,7 @@ function JoinLensImpl({
     }
     const usePrepared = opts?.forcePrepared || prepared;
     const gen = ++samplesLoadGenRef.current;
+    activeSamplesGenRef.current = gen;
     setSamplesError(null);
     setSamplesLoading(true);
     setLeftSideLoading(true);
@@ -800,10 +907,23 @@ function JoinLensImpl({
         let right: { columns: ColumnMetadata[]; rows: unknown[][] } | null =
           null;
         if (usePrepared) {
+          // Prefer parents for keys present in the center result. Blind LIMIT 50
+          // only covers early rows — Inspect cohorts (row 3+) looked empty.
+          // Values come from result left_on; column names are side-specific ON.
+          const keyTuples = uniqueResultKeyTuples(rows, columns, leftOn);
+          const limit = Math.max(50, keyTuples.length);
+          const leftFilter =
+            keyTuples.length > 0 && leftOn.length > 0
+              ? { keyColumns: leftOn, keyTuples }
+              : undefined;
+          const rightFilter =
+            keyTuples.length > 0 && rightOn.length > 0
+              ? { keyColumns: rightOn, keyTuples }
+              : undefined;
           // Fetch both before writing — never leave "right only" mid-flight.
-          left = await previewPreparedJoinSide("left", 50);
+          left = await previewPreparedJoinSide("left", limit, leftFilter);
           if (gen !== samplesLoadGenRef.current) return;
-          right = await previewPreparedJoinSide("right", 50);
+          right = await previewPreparedJoinSide("right", limit, rightFilter);
         } else if (leftInputWs && rightInputWs) {
           left = await previewWorkspace(
             leftInputWs,
@@ -841,7 +961,16 @@ function JoinLensImpl({
               : "Failed to load parent rows.";
         // Keep autoSamplesAttemptedRef — one auto try per Join revision.
       } finally {
-        if (gen !== samplesLoadGenRef.current) return;
+        if (gen !== samplesLoadGenRef.current) {
+          // Aborted (wipe/cancel/newer load). Free the auto-attempt gate only if
+          // we were still the active starter — otherwise a newer load owns it.
+          if (activeSamplesGenRef.current === gen) {
+            activeSamplesGenRef.current = 0;
+            autoSamplesAttemptedRef.current = "";
+          }
+          return;
+        }
+        activeSamplesGenRef.current = 0;
         setLeftSideLoading(false);
         setRightSideLoading(false);
         setSamplesLoading(false);
@@ -1446,11 +1575,13 @@ function JoinLensImpl({
     joinStepIndex,
     prepareStatus,
   );
-  const parentsPendingHint = prepared
-    ? "Prepared — loading parents…"
-    : autoLoadParents
-      ? "Loading parents…"
-      : "Large join — Show rows or Load sides for parents";
+  const parentsPendingHint = samplesLoading
+    ? "Loading parents…"
+    : prepared
+      ? "Prepared — click Show rows for parents"
+      : autoLoadParents
+        ? "Click Show rows for parents"
+        : "Large join — Show rows or Load sides for parents";
 
   const leftEmpty =
     sideMode === "linked"
@@ -2171,9 +2302,7 @@ function JoinLensImpl({
                   ? "Retry"
                   : samplesLoaded
                     ? "Reload rows"
-                    : autoLoadParents
-                      ? "Loading rows…"
-                      : "Show rows"}
+                    : "Show rows"}
             </button>
           )}
           {sideMode === "linked" && samplesError && !samplesLoading && (

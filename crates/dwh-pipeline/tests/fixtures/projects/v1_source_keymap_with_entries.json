@@ -1,0 +1,31 @@
+{
+  "format_version": 1,
+  "id": "proj_source_legacy_rows",
+  "name": "source keymap with legacy entries",
+  "connections": [],
+  "sources": [],
+  "workspace": {
+    "queries": [],
+    "focus_query_id": "",
+    "key_maps": [
+      {
+        "id": "map_wh",
+        "name": "WH aliases",
+        "from_column": "from",
+        "to_column": "to",
+        "entries": [
+          { "from": "legacy", "to": "should_clear" }
+        ],
+        "storage": {
+          "kind": "source",
+          "connection_id": "conn_pg",
+          "source": "public",
+          "table": "aliases"
+        }
+      }
+    ]
+  },
+  "dbt_target": "v1",
+  "execution_engine": "duckdb",
+  "destination": { "kind": "duckdb", "duckdb_path": "local.duckdb" }
+}

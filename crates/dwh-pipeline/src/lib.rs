@@ -9,6 +9,7 @@ pub mod export_manifest;
 pub mod export_tree;
 pub mod graph;
 pub mod key_map_sync;
+pub mod mapping_check;
 pub mod model;
 pub mod parquet_scan;
 pub mod postgres_attach;
@@ -42,9 +43,10 @@ pub use dialect::{
 };
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
-    key_map_seed_csv_cols, key_map_seed_csv_named, key_map_seed_name, normalize_column_expr,
-    normalize_key_column_expr, parse_key_map_seed_csv, parse_key_map_seed_csv_cols,
-    parse_key_map_seed_csv_mode, rename_select_list, resolve_source_column, select_list_aligned,
+    key_map_seed_csv_cols, key_map_seed_csv_full, key_map_seed_csv_named, key_map_seed_name,
+    normalize_column_expr, normalize_key_column_expr, parse_key_map_seed_csv,
+    parse_key_map_seed_csv_cols, parse_key_map_seed_csv_full, parse_key_map_seed_csv_mode,
+    rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
     validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,
 };
@@ -68,7 +70,9 @@ pub use export_manifest::{
 };
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{
-    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, NormalizeOp, ObjectKind,
+    apply_keymap_columns, JoinType, KeyMapAuthoringContext, KeyMapDef, KeyMapEntry, KeyMapStorage,
+    KeyMapTimeMode,
+    NormalizeOp, ObjectKind,
     ObjectTarget, QueryDef, TransformationStep, Workspace,
 };
 pub use project::{ConnectionBinding, ProjectReference};
@@ -84,8 +88,13 @@ pub use producers::{
     preview_dbt_model_sql_with_seeds_and_sources, DbtProducer, DbtTarget, OutputProducer,
     PreviewDbtModel,
 };
+pub use mapping_check::{
+    CheckAggregateCell, CheckComparability, CheckDeltaAttribution, CheckInputRevision, CheckRun,
+    MappingAllowDecision, MappingCheck, MappingCheckProjection,
+};
 pub use project::{
-    parquet_hive_partitioning, CanvasLayout, CanvasPosition, Project, SourceDef, SourceKind,
+    migrate_project_document, parquet_hive_partitioning, peek_format_version, CanvasLayout,
+    CanvasPosition, Project, SourceDef, SourceKind, PROJECT_FORMAT_VERSION,
 };
 pub use secrets::{
     connections_for_disk, extract_connection_secret, merge_connection_list_secrets,

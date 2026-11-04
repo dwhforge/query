@@ -113,6 +113,8 @@ export type TransformationStep =
         column?: string;
         columns?: string[];
         output_column?: string;
+        /** Fact event-time column when KeyMap is range SCD (ADR-0028). */
+        as_of_column?: string;
         map_id: ObjectTarget;
         entries?: KeyMapEntry[];
       };
@@ -197,7 +199,14 @@ export type KeyMapStorage =
       connection_id?: string;
     };
 
-/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024). */
+/** Effectivity mode ([ADR-0028](../../docs/adr/0028-keymap-stewardship-shapes.md)). */
+export type KeyMapTimeMode = "none" | "range_scd";
+
+/** Creation intent from query-based mapping wizard ([ADR-0034]) — generated from Rust. */
+import type { KeyMapAuthoringContext } from "./generated/KeyMapAuthoringContext";
+export type { KeyMapAuthoringContext };
+
+/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -208,8 +217,16 @@ export interface KeyMapDef {
   /** Composite From columns on the map relation; soft-migrate: omit → [from_column]. */
   from_columns?: string[];
   to_column?: string;
-  /** Extra WH columns editable in the UI (not From/To). */
+  /** Extra columns editable in the UI (not From/To); seed export includes them. */
   editable_columns?: string[];
+  /** Default `none` — classic unique From. */
+  time_mode?: KeyMapTimeMode;
+  /** Range start column when `time_mode = range_scd` (default valid_from). */
+  valid_from_column?: string;
+  /** Range end column when `time_mode = range_scd` (default valid_to; empty = open). */
+  valid_to_column?: string;
+  /** Optional query-based create intent; absent on legacy maps. */
+  authoring_context?: KeyMapAuthoringContext;
 }
 
 /** Preview engine for this Query node only (ADR-0014). */
@@ -300,7 +317,12 @@ export interface CanvasLayout {
  * IDE / dbt project container (ADR-0009 + ADR-0012).
  * Engine ≠ destination (four routes).
  */
+/** On-disk project document version (ADR-0030). Missing ⇒ 0 at load. */
+export const PROJECT_FORMAT_VERSION = 1 as const;
+
 export interface Project {
+  /** Document schema version (ADR-0030). */
+  format_version?: number;
   id: string;
   name: string;
   /** Immutable global identity (ADR-0025). Empty until first save. */
@@ -326,6 +348,10 @@ export interface Project {
   target_connection_id?: string;
   last_dbt_export_path?: string;
   canvas?: CanvasLayout;
+  /** Durable mapping quality checks (ADR-0027). */
+  mapping_checks?: import("./mappingCheck").MappingCheck[];
+  /** Immutable check execution results (ADR-0027). */
+  mapping_check_runs?: import("./mappingCheck").CheckRun[];
 }
 
 export interface PreviewResult {
@@ -410,6 +436,7 @@ export function emptyProject(
     "duckdb";
   const destKind = defaults?.default_destination_kind ?? engine;
   return {
+    format_version: PROJECT_FORMAT_VERSION,
     id: newProjectId(name),
     name,
     project_uid: crypto.randomUUID(),
@@ -432,6 +459,11 @@ export function emptyProject(
 
 /** Normalize legacy projects that only have `target_dialect`. */
 export function migrateProject(p: Project): Project {
+  if ((p.format_version ?? 0) > PROJECT_FORMAT_VERSION) {
+    throw new Error(
+      `Unsupported project format_version ${p.format_version} (app supports ≤ ${PROJECT_FORMAT_VERSION})`,
+    );
+  }
   const engine: ExecutionEngine =
     p.execution_engine ?? p.target_dialect ?? "duckdb";
   let destination = p.destination;
@@ -456,6 +488,7 @@ export function migrateProject(p: Project): Project {
   }
   return {
     ...p,
+    format_version: PROJECT_FORMAT_VERSION,
     project_uid: p.project_uid?.trim() ? p.project_uid : crypto.randomUUID(),
     references: p.references ?? [],
     connection_bindings: p.connection_bindings ?? [],

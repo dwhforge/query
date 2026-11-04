@@ -1,5 +1,6 @@
 //! Command dispatch — Electron IPC → JSON-RPC (camelCase args).
 
+use crate::commands;
 use crate::connections_io;
 use crate::dbt_setup;
 use crate::secrets_io;
@@ -16,14 +17,13 @@ use dwh_engine::{
     ensure_join_sides_materialized as run_ensure_join_sides,
     prepare_join_inputs_with_progress as run_prepare_join_inputs,
     preview_pipeline as run_preview_steps,
-    preview_prepared_join_side as run_preview_prepared_join_side,
-    preview_workspace as run_preview_workspace, read_key_map_paged as run_read_key_map_paged,
+    preview_prepared_join_side_filtered as run_preview_prepared_join_side_filtered,
+    preview_workspace as run_preview_workspace,
     set_extensions_dir, set_prepare_progress, test_postgres_connection as run_test_postgres_connection,
-    write_key_map_with_delta as run_write_key_map_with_delta, BlameUnmatchedKeyResult,
+    BlameUnmatchedKeyResult,
     DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyFuzzySuggest,
     JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, JoinPrepareProgress, JoinPrepareResult,
-    JoinPrepareStatus, KeyMapDirtyDelta, KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
-    PostgresColumn, PostgresObject, PreviewResult, QueryCancelHandle,
+    JoinPrepareStatus, PostgresColumn, PostgresObject, PreviewResult, QueryCancelHandle,
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
@@ -32,10 +32,11 @@ use dwh_pipeline::{
     reference_statuses, refresh_reference, relink_reference, resolve_dbt_bin, resolve_operation,
     remove_key_map_from_export, sync_key_maps_from_export, ConnectionBinding, ConnectionDef,
     CopiedObject, DbtProducer, DbtTarget, ExecutionEngine, ExportResult, KeyMapDef,
-    KeyMapSyncResult, LoweredOperation, ObjectKind, ObjectTarget, PreviewDbtModel, Project,
+    KeyMapSyncResult, LoweredOperation, ObjectKind, ObjectTarget, PreviewDbtModel,
     ProjectReference, QueryDef, ResolveInput, ResolveKind, SourceDef, TransformationStep,
     WarehouseDialect, Workspace,
 };
+use crate::error::{HostError, RpcError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -663,6 +664,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                         column: "company".into(),
                         columns: vec![],
                         output_column: None,
+                        as_of_column: None,
                         map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
                     },
@@ -691,6 +693,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                         column: "org_name".into(),
                         columns: vec![],
                         output_column: None,
+                        as_of_column: None,
                         map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
                     },
@@ -784,6 +787,10 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
 }
 
 fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
+    if name.trim().eq_ignore_ascii_case("mapping_quality") {
+        let cache = crate::secrets_io::dwh_home_dir()?.join("demos");
+        return crate::demo_mapping_quality::load(&cache);
+    }
     let fixtures = find_fixtures_dir()?;
     use crate::demo_keymap_labs as labs;
     match name.trim().to_ascii_lowercase().as_str() {
@@ -810,7 +817,7 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
              keymap_crosswalk | keymap_dual | keymap_codes | keymap_hop | \
              keymap_pg | keymap_pg_dual | keymap_pg_seed | keymap_ref | \
              keymap_mixed | keymap_parquet"
-        )),
+        ).into()),
     }
 }
 
@@ -908,24 +915,6 @@ struct PushKeyMapArgs {
 struct RemoveKeyMapSeedArgs {
     export_path: String,
     map_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct KeyMapWhArgs {
-    key_map: KeyMapDef,
-    connection_string: String,
-    /// Optimistic concurrency token from the prior read (checked under lock in TX).
-    expected_content_hash: Option<String>,
-    /// ADR-0022 dirty delta; when set, only these upserts/deletes are applied.
-    #[serde(default)]
-    delta: Option<KeyMapDirtyDelta>,
-    #[serde(default)]
-    limit: Option<u64>,
-    #[serde(default)]
-    offset: Option<u64>,
-    #[serde(default)]
-    from_prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1093,7 +1082,7 @@ fn parse_join_side(side: &str) -> Result<JoinKeySide, String> {
     match side.trim().to_ascii_lowercase().as_str() {
         "left" => Ok(JoinKeySide::Left),
         "right" => Ok(JoinKeySide::Right),
-        other => Err(format!("side must be 'left' or 'right' (got '{other}')")),
+        other => Err(format!("side must be 'left' or 'right' (got '{other}')").into()),
     }
 }
 
@@ -1197,13 +1186,6 @@ struct DescribeArgs {
     connection_string: String,
     schema: String,
     table_name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SaveProjectArgs {
-    path: String,
-    project: Project,
 }
 
 #[derive(Deserialize)]
@@ -1369,7 +1351,7 @@ fn fingerprint_json(parts: &[&Value]) -> u64 {
 struct HeavyJob {
     cmd: String,
     args: Value,
-    reply: SyncSender<Result<Value, String>>,
+    reply: SyncSender<Result<Value, RpcError>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1497,7 +1479,7 @@ impl HostState {
     /// Enqueue a heavy job.
     /// Preview/analysis: supersede only the same lane.
     /// Mutation: append FIFO (never replace).
-    pub fn enqueue_heavy(&self, cmd: &str, args: Value) -> Result<Value, String> {
+    pub fn enqueue_heavy(&self, cmd: &str, args: Value) -> Result<Value, RpcError> {
         // Fast path: preview cache hit without queue.
         if let Some(hit) = self.preview_cache_lookup(cmd, &args) {
             return Ok(hit);
@@ -1525,17 +1507,17 @@ impl HostState {
             reply: tx,
         };
         {
-            let mut slot = self.heavy_pending.lock().map_err(|e| e.to_string())?;
+            let mut slot = self.heavy_pending.lock().map_err(|e| RpcError::from(e.to_string()))?;
             match lane {
                 HeavyLane::Preview => {
                     if let Some(old) = slot.preview.take() {
-                        let _ = old.reply.send(Err("Preview superseded.".into()));
+                        let _ = old.reply.send(Err(HostError::cancelled("Preview superseded.").into()));
                     }
                     slot.preview = Some(job);
                 }
                 HeavyLane::Analysis => {
                     if let Some(old) = slot.analysis.take() {
-                        let _ = old.reply.send(Err("Preview superseded.".into()));
+                        let _ = old.reply.send(Err(HostError::cancelled("Preview superseded.").into()));
                     }
                     slot.analysis = Some(job);
                 }
@@ -1621,11 +1603,11 @@ impl HostState {
         }
     }
 
-    fn dispatch_heavy_job(&self, cmd: &str, args: Value) -> Result<Value, String> {
+    fn dispatch_heavy_job(&self, cmd: &str, args: Value) -> Result<Value, RpcError> {
         match cmd {
             "preview_pipeline" => {
                 let a: PreviewArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let steps = a.steps.ok_or("preview_pipeline: missing steps")?;
                 let conns = a.connections.unwrap_or_default();
                 let steps_v = serde_json::to_value(&steps).unwrap_or(Value::Null);
@@ -1640,9 +1622,9 @@ impl HostState {
                         return Ok(hit);
                     }
                 }
-                let db = self.db.lock().map_err(|e| e.to_string())?;
+                let db = self.db.lock().map_err(|e| RpcError::from(e.to_string()))?;
                 let out: PreviewResult = run_preview_steps(&db, &steps, &conns)?;
-                let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
+                let val = serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))?;
                 drop(db);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     cache.insert(key, val.clone());
@@ -1651,7 +1633,7 @@ impl HostState {
             }
             "preview_workspace" => {
                 let a: PreviewArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let ws = a.workspace.ok_or("preview_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
@@ -1683,9 +1665,9 @@ impl HostState {
                         return Ok(hit);
                     }
                 }
-                let db = self.db.lock().map_err(|e| e.to_string())?;
+                let db = self.db.lock().map_err(|e| RpcError::from(e.to_string()))?;
                 let out = run_preview_workspace(&db, &ws, &conns, &sources)?;
-                let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
+                let val = serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))?;
                 drop(db);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     cache.insert(key, val.clone());
@@ -1694,7 +1676,7 @@ impl HostState {
             }
             "describe_workspace" => {
                 let a: PreviewArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let ws = a.workspace.ok_or("describe_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
@@ -1726,9 +1708,9 @@ impl HostState {
                         return Ok(hit);
                     }
                 }
-                let db = self.db.lock().map_err(|e| e.to_string())?;
+                let db = self.db.lock().map_err(|e| RpcError::from(e.to_string()))?;
                 let out = run_describe_workspace(&db, &ws, &conns, &sources)?;
-                let val = serde_json::to_value(out).map_err(|e| e.to_string())?;
+                let val = serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))?;
                 drop(db);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     cache.insert(key, val.clone());
@@ -1739,7 +1721,7 @@ impl HostState {
         }
     }
 
-    pub fn dispatch(&self, cmd: &str, args: Value) -> Result<Value, String> {
+    pub fn dispatch(&self, cmd: &str, args: Value) -> Result<Value, RpcError> {
         if Self::is_heavy_rpc(cmd) {
             return self.enqueue_heavy(cmd, args);
         }
@@ -1751,13 +1733,13 @@ impl HostState {
                     .lock()
                     .map(|g| g.clone())
                     .unwrap_or_default();
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             // Must not *wait* on `db` — a blocked status poll stalls the accept
             // loop so Cancel never gets read. try_lock: if prepare holds db,
             // report "not ready" (UI already polls join_prepare_progress).
             "join_prepare_status" => {
-                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let sources = a.sources.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let (ws, sources) = match lower_focused(
@@ -1772,7 +1754,7 @@ impl HostState {
                     a.execution_engine,
                 ) {
                     Ok(v) => v,
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(RpcError::from(e)),
                 };
                 let out = match self.db.try_lock() {
                     Ok(db) => run_join_prepare_status(
@@ -1797,7 +1779,7 @@ impl HostState {
                         stale: false,
                     },
                 };
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "cancel_running_query" => {
                 self.interrupt_running_query();
@@ -1808,7 +1790,7 @@ impl HostState {
                 Ok(llm_public(&settings))
             }
             "set_llm_config" => {
-                let a: SetLlmArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: SetLlmArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let mut settings = settings_io::load_settings()?;
                 let base = a.base_url.trim().trim_end_matches('/').to_string();
                 if !(base.starts_with("https://") || base.starts_with("http://")) {
@@ -1828,7 +1810,7 @@ impl HostState {
                 Ok(llm_public(&settings))
             }
             "llm_chat" => {
-                let a: LlmChatArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: LlmChatArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let settings = settings_io::load_settings()?;
                 let content = crate::llm::complete_chat(&settings.llm, &a.messages)?;
                 Ok(serde_json::json!({ "content": content }))
@@ -1837,11 +1819,11 @@ impl HostState {
         }
     }
 
-    fn dispatch_locked(&self, cmd: &str, args: Value) -> Result<Value, String> {
-        let db = self.db.lock().map_err(|e| e.to_string())?;
+    fn dispatch_locked(&self, cmd: &str, args: Value) -> Result<Value, RpcError> {
+        let db = self.db.lock().map_err(|e| RpcError::from(e.to_string()))?;
         match cmd {
             "prepare_join_inputs" => {
-                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -1865,7 +1847,7 @@ impl HostState {
                     Some(&self.join_prep_progress),
                     a.force.unwrap_or(false),
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "clear_join_prepare" => {
                 run_clear_join_prepare(&db)?;
@@ -1878,13 +1860,30 @@ impl HostState {
                     side: String,
                     #[serde(default)]
                     limit: Option<u64>,
+                    /// Join-key column names on this side (left_on / right_on).
+                    #[serde(default)]
+                    key_columns: Option<Vec<String>>,
+                    /// Distinct key tuples from the center result (same arity as key_columns).
+                    #[serde(default)]
+                    key_tuples: Option<Vec<Vec<serde_json::Value>>>,
                 }
-                let a: PrepSideArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let out = run_preview_prepared_join_side(&db, &a.side, a.limit.unwrap_or(50))?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                let a: PrepSideArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                let cols = a.key_columns.unwrap_or_default();
+                let tuples = a.key_tuples.unwrap_or_default();
+                let limit = a
+                    .limit
+                    .unwrap_or_else(|| std::cmp::max(50u64, tuples.len() as u64));
+                let out = run_preview_prepared_join_side_filtered(
+                    &db,
+                    &a.side,
+                    limit,
+                    &cols,
+                    &tuples,
+                )?;
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "join_diagnostics" => {
-                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -1938,10 +1937,10 @@ impl HostState {
                         right_expensive: None,
                     },
                 );
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "explain_join_rows" => {
-                let a: ExplainArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: ExplainArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -1966,10 +1965,10 @@ impl HostState {
                     &keys,
                     a.preview_offsets.as_deref(),
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "explain_join_key" => {
-                let a: ExplainKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: ExplainKeyArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -1994,10 +1993,10 @@ impl HostState {
                     side,
                     &a.key_values,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "blame_unmatched_key" => {
-                let a: BlameKeyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: BlameKeyArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -2022,10 +2021,10 @@ impl HostState {
                     side,
                     &a.key_values,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "join_key_near_miss" => {
-                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -2047,10 +2046,10 @@ impl HostState {
                     &a.host_query_id,
                     a.join_step_index,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "join_key_fuzzy_suggest" => {
-                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -2075,18 +2074,18 @@ impl HostState {
                     a.composite_indices,
                     a.composite_fuzzy_slot,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "key_map_fuzzy_suggest" => {
-                let a: KeyMapFuzzyArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: KeyMapFuzzyArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = dwh_engine::key_map_fuzzy_suggest(
                     &db, &a.workspace, &a.connections, &a.left, &a.right, a.options,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "sync_key_maps_from_export" => {
                 let a: SyncKeyMapsArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let mut ws = a.workspace;
                 let result: KeyMapSyncResult =
                     sync_key_maps_from_export(&mut ws, Path::new(&a.export_path))?;
@@ -2094,46 +2093,34 @@ impl HostState {
                     workspace: ws,
                     result,
                 })
-                .map_err(|e| e.to_string())
+                .map_err(|e| RpcError::from(e.to_string()))
             }
             "push_key_map_to_export" => {
                 let a: PushKeyMapArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let rel = push_key_map_to_export(Path::new(&a.export_path), &a.key_map)?;
-                serde_json::to_value(serde_json::json!({ "path": rel })).map_err(|e| e.to_string())
+                serde_json::to_value(serde_json::json!({ "path": rel })).map_err(|e| RpcError::from(e.to_string()))
             }
             "remove_key_map_from_export" => {
                 let a: RemoveKeyMapSeedArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let removed =
                     remove_key_map_from_export(Path::new(&a.export_path), &a.map_id)?;
                 serde_json::to_value(serde_json::json!({ "path": removed }))
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| RpcError::from(e.to_string()))
             }
             "write_key_map" => {
-                let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let out: KeyMapWriteResult = run_write_key_map_with_delta(
-                    &db,
-                    &a.key_map,
-                    &a.connection_string,
-                    a.delta.as_ref(),
-                    a.expected_content_hash.as_deref(),
-                )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                let a: commands::keymap::KeyMapWhArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                commands::keymap::write_key_map(&db, a)
             }
             "read_key_map" => {
-                let a: KeyMapWhArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let q = KeyMapReadQuery {
-                    limit: a.limit,
-                    offset: a.offset,
-                    from_prefix: a.from_prefix,
-                };
-                let out: KeyMapReadResult =
-                    run_read_key_map_paged(&db, &a.key_map, &a.connection_string, &q)?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                let a: commands::keymap::KeyMapWhArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                commands::keymap::read_key_map(&db, a)
             }
             "preview_dbt_model" => {
-                let a: PreviewDbtArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: PreviewDbtArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
@@ -2160,10 +2147,10 @@ impl HostState {
                     &sources,
                     &prepared.sql_models,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "export_dbt" => {
-                let a: ExportArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: ExportArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let target = a.dbt_target.unwrap_or(DbtTarget::V1);
                 let dialect = a.target_dialect.unwrap_or_default();
                 let conns = a.connections.unwrap_or_default();
@@ -2289,10 +2276,10 @@ impl HostState {
                     result.dbt_parse_ok = outcome.ok;
                     result.dbt_parse_log = outcome.log;
                 }
-                serde_json::to_value(result).map_err(|e| e.to_string())
+                serde_json::to_value(result).map_err(|e| RpcError::from(e.to_string()))
             }
             "parse_export" => {
-                let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: PathArg = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let candidates = dbt_bin_candidates();
                 let bin = resolve_dbt_bin(&candidates);
                 let env = resolve_dbt_cli_env(&a);
@@ -2301,10 +2288,10 @@ impl HostState {
                     "ok": outcome.ok,
                     "log": outcome.log,
                 }))
-                .map_err(|e| e.to_string())
+                .map_err(|e| RpcError::from(e.to_string()))
             }
             "build_export" => {
-                let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: PathArg = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let candidates = dbt_bin_candidates();
                 let bin = resolve_dbt_bin(&candidates);
                 let env = resolve_dbt_cli_env(&a);
@@ -2313,67 +2300,67 @@ impl HostState {
                     "ok": outcome.ok,
                     "log": outcome.log,
                 }))
-                .map_err(|e| e.to_string())
+                .map_err(|e| RpcError::from(e.to_string()))
             }
             "list_export_tree" => {
-                let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: PathArg = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = walk_export_tree(&a.path)?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "list_postgres_objects" => {
-                let a: ConnStrArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: ConnStrArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out: Vec<PostgresObject> =
                     run_list_postgres_objects(&db, &a.connection_string)?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "describe_postgres_object" => {
-                let a: DescribeArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: DescribeArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out: Vec<PostgresColumn> = run_describe_postgres_object(
                     &db,
                     &a.connection_string,
                     &a.schema,
                     &a.table_name,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "test_postgres_connection" => {
-                let a: ConnStrArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: ConnStrArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 run_test_postgres_connection(&db, &a.connection_string)?;
                 Ok(Value::Null)
             }
             "reference_statuses" => {
                 drop(db);
                 let a: ReferenceStatusesArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = reference_statuses(Path::new(&a.project_file), &a.references);
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "make_project_reference" => {
                 drop(db);
                 let a: MakeReferenceArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = make_project_reference(
                     Path::new(&a.project_file),
                     Path::new(&a.owner_file),
                     &a.alias,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "relink_reference" => {
                 drop(db);
                 let a: RelinkReferenceArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = relink_reference(
                     Path::new(&a.project_file),
                     &a.reference,
                     Path::new(&a.owner_file),
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "refresh_reference" => {
                 drop(db);
                 let a: RefreshReferenceArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let available: Vec<String> = a.connections.iter().map(|c| c.id.clone()).collect();
                 let out = refresh_reference(
                     &ResolveInput {
@@ -2391,19 +2378,19 @@ impl HostState {
                     },
                     &a.reference_id,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "reference_consumers" => {
                 drop(db);
                 let a: ReferenceConsumersArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = reference_consumers(&a.workspace, &a.reference_id);
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "copy_referenced_object" => {
                 drop(db);
                 let a: CopyReferencedArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let available: Vec<String> = a.connections.iter().map(|c| c.id.clone()).collect();
                 let out: CopiedObject = copy_referenced_object(
                     Path::new(&a.project_file),
@@ -2419,25 +2406,28 @@ impl HostState {
                     &a.new_local_id,
                     &a.new_name,
                 )?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "save_project" => {
                 drop(db);
-                let a: SaveProjectArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let saved = secrets_io::save_project_with_secrets(&a.path, &a.project)?;
-                remember_project_path(&a.path)?;
-                serde_json::to_value(saved).map_err(|e| e.to_string())
+                let a: commands::project::SaveProjectArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                let path = a.path.clone();
+                let saved = commands::project::save_project(a)?;
+                remember_project_path(&path)?;
+                serde_json::to_value(saved).map_err(|e| RpcError::from(e.to_string()))
             }
             "load_project" => {
                 drop(db);
-                let a: PathArg = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let mut project = secrets_io::load_project_with_secrets(&a.path)?;
-                project.root_path = Some(a.path.clone());
+                let a: commands::project::LoadProjectArgs = serde_json::from_value(args)
+                    .map_err(|e| HostError::validation(format!("load_project args: {e}")))?;
+                let path = a.path.clone();
+                let (project, remember) = commands::project::load_project(a)?;
                 // Default false: reference catalogs / peeks must not steal the session path.
-                if a.remember.unwrap_or(false) {
-                    let _ = remember_project_path(&a.path);
+                if remember {
+                    let _ = remember_project_path(&path);
                 }
-                serde_json::to_value(project).map_err(|e| e.to_string())
+                serde_json::to_value(project).map_err(|e| e.to_string().into())
             }
             "get_last_project_path" => {
                 drop(db);
@@ -2445,25 +2435,25 @@ impl HostState {
                 if !file.is_file() {
                     return Ok(Value::Null);
                 }
-                let raw = fs::read_to_string(&file).map_err(|e| e.to_string())?;
+                let raw = fs::read_to_string(&file).map_err(|e| RpcError::from(e.to_string()))?;
                 let session: AppSession = serde_json::from_str(&raw).unwrap_or_default();
                 let path = session
                     .last_project_path
                     .filter(|p| PathBuf::from(p).is_file());
-                serde_json::to_value(path).map_err(|e| e.to_string())
+                serde_json::to_value(path).map_err(|e| RpcError::from(e.to_string()))
             }
             "get_app_settings" => {
                 drop(db);
                 let mut s = settings_io::load_settings()?;
                 // Panel-width saves round-trip this object. Never send the key out.
                 s.llm.api_key.clear();
-                serde_json::to_value(s).map_err(|e| e.to_string())
+                serde_json::to_value(s).map_err(|e| RpcError::from(e.to_string()))
             }
             "set_app_settings" => {
                 drop(db);
                 let settings_val = args.get("settings").cloned().unwrap_or(Value::Null);
                 let mut settings: AppSettings =
-                    serde_json::from_value(settings_val).map_err(|e| e.to_string())?;
+                    serde_json::from_value(settings_val).map_err(|e| RpcError::from(e.to_string()))?;
                 // Panel-width / Options / Recent saves must not clobber llm (base URL, model, key).
                 if let Ok(prev) = settings_io::load_settings() {
                     settings.llm = prev.llm;
@@ -2475,42 +2465,42 @@ impl HostState {
             "dbt_setup_status" => {
                 drop(db);
                 let status = dbt_setup::setup_status(&dbt_bin_candidates())?;
-                serde_json::to_value(status).map_err(|e| e.to_string())
+                serde_json::to_value(status).map_err(|e| RpcError::from(e.to_string()))
             }
             "dbt_install_script" => {
                 drop(db);
                 let script = dbt_setup::install_script()?;
-                serde_json::to_value(script).map_err(|e| e.to_string())
+                serde_json::to_value(script).map_err(|e| RpcError::from(e.to_string()))
             }
             "install_dbt_venv" => {
                 drop(db);
                 let result = dbt_setup::install_dbt_venv()?;
-                serde_json::to_value(result).map_err(|e| e.to_string())
+                serde_json::to_value(result).map_err(|e| RpcError::from(e.to_string()))
             }
             "get_global_connections" => {
                 drop(db);
                 let conns = connections_io::load_global_connections()?;
-                serde_json::to_value(conns).map_err(|e| e.to_string())
+                serde_json::to_value(conns).map_err(|e| RpcError::from(e.to_string()))
             }
             "set_global_connections" => {
                 drop(db);
                 let a: GlobalConnectionsArgs =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 connections_io::save_global_connections(&a.connections)?;
                 Ok(Value::Null)
             }
             "load_demo_workspace" => {
                 drop(db);
-                let a: DemoArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let a: DemoArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out = load_demo_workspace(&a.name)?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "load_sample_workspace" => {
                 drop(db);
                 let out = load_demo_workspace("sales")?;
-                serde_json::to_value(out).map_err(|e| e.to_string())
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
-            other => Err(format!("unknown command '{other}'")),
+            other => Err(format!("unknown command '{other}'").into()),
         }
     }
 }

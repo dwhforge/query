@@ -207,6 +207,32 @@ Raise {ENV_MEMORY} (e.g. 16GB), free disk under ~/.dwhforge-query/duckdb-tmp for
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Process env is global — serialize tests that set DWH_DUCKDB_*.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn format_round_gb() {
@@ -216,9 +242,9 @@ mod tests {
 
     #[test]
     fn env_memory_wins() {
-        std::env::set_var(ENV_MEMORY, "4GB");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _mem = EnvGuard::set(ENV_MEMORY, "4GB");
         assert_eq!(resolve_memory_limit(), "4GB");
-        std::env::remove_var(ENV_MEMORY);
     }
 
     #[test]
@@ -248,10 +274,11 @@ mod tests {
 
     #[test]
     fn apply_settings_roundtrip() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("dwh_duck_tmp_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var(ENV_TEMP, &dir);
-        std::env::set_var(ENV_MEMORY, "2GB");
+        let _temp = EnvGuard::set(ENV_TEMP, &dir);
+        let _mem = EnvGuard::set(ENV_MEMORY, "2GB");
         let conn = duckdb::Connection::open_in_memory().unwrap();
         let (mem, temp) = apply_resource_settings(&conn).unwrap();
         assert_eq!(mem, "2GB");
@@ -271,8 +298,6 @@ mod tests {
             got_temp.contains("dwh_duck_tmp"),
             "unexpected temp_directory={got_temp}"
         );
-        std::env::remove_var(ENV_TEMP);
-        std::env::remove_var(ENV_MEMORY);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -33,6 +33,7 @@ import {
   type MouseEvent,
 } from "react";
 import { formatJoinKeyLabel } from "../lib/joinKeys";
+import { isQualityInspectionQuery } from "../lib/mappingQuality";
 import type { ExternalBoundary } from "../lib/projectRefs";
 import {
   targetKey,
@@ -63,6 +64,8 @@ export type QueryNodeData = {
   expanded: boolean;
   isFocus: boolean;
   isActive: boolean;
+  /** Session-only Mapping quality Inspect sample — not saved with the project. */
+  isEphemeral?: boolean;
   /** Collapsed boundary for an external dependency (ADR-0025). */
   isExternal?: boolean;
   externalAlias?: string;
@@ -331,6 +334,7 @@ function buildGraph(
         expanded,
         isFocus: q.id === focusQueryId,
         isActive: q.id === activeQueryId,
+        isEphemeral: isQualityInspectionQuery(q.id),
       },
       // Do not drive RF `selected` from app state — it feedback-loops with
       // onSelectionChange and can blank the whole React tree.
@@ -515,10 +519,19 @@ const QueryNode = memo(function QueryNode({
   return (
     <div
       className={`min-w-[180px] max-w-[240px] rounded-xl border px-3 py-2.5 shadow-lg transition ${
-        data.isActive
-          ? "border-teal-400/70 bg-slate-900/95 shadow-[0_0_0_1px_rgba(45,212,191,0.35),0_12px_40px_rgba(0,0,0,0.45)]"
-          : "border-[var(--line)] bg-[var(--node)]"
+        data.isEphemeral
+          ? data.isActive
+            ? "border-dashed border-amber-400/80 bg-amber-950/40 shadow-[0_0_0_1px_rgba(251,191,36,0.35)]"
+            : "border-dashed border-amber-700/60 bg-amber-950/25"
+          : data.isActive
+            ? "border-teal-400/70 bg-slate-900/95 shadow-[0_0_0_1px_rgba(45,212,191,0.35),0_12px_40px_rgba(0,0,0,0.45)]"
+            : "border-[var(--line)] bg-[var(--node)]"
       }`}
+      title={
+        data.isEphemeral
+          ? "Ephemeral sample Inspect — session only, not saved with the project"
+          : undefined
+      }
     >
       <Handle
         type="target"
@@ -526,26 +539,37 @@ const QueryNode = memo(function QueryNode({
         className="!h-2.5 !w-2.5 !border-teal-800 !bg-teal-500"
       />
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-teal-400/90">
-          {data.sourceKind}
+        <span
+          className={`text-[10px] font-medium uppercase tracking-[0.14em] ${
+            data.isEphemeral ? "text-amber-300/90" : "text-teal-400/90"
+          }`}
+        >
+          {data.isEphemeral ? "ephemeral" : data.sourceKind}
         </span>
         <div className="flex items-center gap-1">
+          {data.isEphemeral && (
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] text-amber-200">
+              TEMP
+            </span>
+          )}
           {data.isFocus && (
             <span className="rounded bg-teal-500/15 px-1.5 py-0.5 text-[9px] text-teal-300">
               FOCUS
             </span>
           )}
-          <button
-            type="button"
-            title="Branch: new query = FromQuery / dbt ref(this)"
-            className="nodrag nopan rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-violet-300"
-            onClick={(e) => {
-              e.stopPropagation();
-              deriveQuery(id);
-            }}
-          >
-            ref↳
-          </button>
+          {!data.isEphemeral && (
+            <button
+              type="button"
+              title="Branch: new query = FromQuery / dbt ref(this)"
+              className="nodrag nopan rounded px-1 text-[10px] text-slate-500 hover:bg-slate-800 hover:text-violet-300"
+              onClick={(e) => {
+                e.stopPropagation();
+                deriveQuery(id);
+              }}
+            >
+              ref↳
+            </button>
+          )}
           <button
             type="button"
             title={data.expanded ? "Collapse steps" : "Expand steps"}
@@ -626,6 +650,29 @@ function GraphCanvasInner({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeInfo | null>(null);
+  // Canvas stays mounted under `hidden` while Mapping quality / KeyMap tabs are
+  // open — React Flow then measures 0×0 and paints Background/MiniMap as NaN.
+  const flowHostRef = useRef<HTMLDivElement>(null);
+  const [flowReady, setFlowReady] = useState(false);
+  useEffect(() => {
+    const el = flowHostRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const sync = () => {
+      const ready = el.clientWidth > 1 && el.clientHeight > 1;
+      setFlowReady((prev) => (prev === ready ? prev : ready));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!flowReady) return;
+    const id = window.requestAnimationFrame(() => {
+      fitView({ padding: 0.2 });
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [flowReady, fitView]);
 
   // Seed from persisted project positions once / when project changes.
   useEffect(() => {

@@ -195,11 +195,14 @@ function PreviewTableImpl({
       const value = row.original[index];
       const origin = columnOrigins?.[index];
       const on = origin === "key" || hi.has(foldKey(col.name));
+      const text =
+        value === null || value === undefined ? "∅" : String(value);
       return (
         <span
+          title={text === "∅" ? undefined : text}
           className={`block truncate ${originCellClass(origin ?? (on ? "key" : undefined))}`}
         >
-          {value === null || value === undefined ? "∅" : String(value)}
+          {text}
         </span>
       );
     },
@@ -236,7 +239,7 @@ function PreviewTableImpl({
   if (columns.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-slate-500">
-        Нет данных для превью
+        No preview data
       </div>
     );
   }

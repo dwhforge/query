@@ -35,3 +35,6 @@ target/
 *.sw?
 dist-portable/
 fixtures/examples/*
+playwright-report/
+test-results/
+e2e/electron/fixtures/mapping-create/_e2e_saved_*.dwhproj.json

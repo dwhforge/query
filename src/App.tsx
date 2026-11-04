@@ -122,6 +122,7 @@ import type {
 import {
   allowCheckDifference,
   appendMappingCheck,
+  applyConfirmRemapOntoProject,
   confirmContextStillValid,
   confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
   createMappingCheck,
@@ -130,6 +131,8 @@ import {
   recordCheckRun,
   resolveActiveMappingCheck,
   stageFrozenRemapChanges,
+  type ConfirmRemapApplyIntent,
+  type ConfirmRemapApplyResult,
 } from "./app/mappingChecks";
 import {
   applyKeyMapOntoProject,
@@ -288,12 +291,16 @@ type ProjectBag = {
   project: Project;
   /** Set by apply_keymap; cleared after UI handles close/error. */
   keyMapApplyResult: KeyMapApplyResult | null;
+  /** Set by confirm_remap; cleared after UI handles save/error. */
+  confirmRemapResult: ConfirmRemapApplyResult | null;
 };
 
 type ProjectBagAction =
   | { type: "set"; updater: (p: Project) => Project }
   | { type: "apply_keymap"; intent: KeyMapApplyIntent }
-  | { type: "clear_keymap_apply_result" };
+  | { type: "clear_keymap_apply_result" }
+  | { type: "confirm_remap"; intent: ConfirmRemapApplyIntent }
+  | { type: "clear_confirm_remap_result" };
 
 function projectBagReducer(
   state: ProjectBag,
@@ -307,10 +314,19 @@ function projectBagReducer(
         state.project,
         action.intent,
       );
-      return { project, keyMapApplyResult: result };
+      return { ...state, project, keyMapApplyResult: result };
     }
     case "clear_keymap_apply_result":
       return { ...state, keyMapApplyResult: null };
+    case "confirm_remap": {
+      const { project, result } = applyConfirmRemapOntoProject(
+        state.project,
+        action.intent,
+      );
+      return { ...state, project, confirmRemapResult: result };
+    }
+    case "clear_confirm_remap_result":
+      return { ...state, confirmRemapResult: null };
     default:
       return state;
   }
@@ -320,6 +336,7 @@ function App() {
   const [projectBag, dispatchProject] = useReducer(projectBagReducer, {
     project: emptyProject("Untitled"),
     keyMapApplyResult: null,
+    confirmRemapResult: null,
   });
   const project = projectBag.project;
   const setProject = useCallback((update: SetStateAction<Project>) => {
@@ -579,6 +596,8 @@ function App() {
   /** One Confirm at a time — no parallel WH reads / double publish. */
   const confirmRemapInFlightRef = useRef(false);
   const [confirmRemapBusy, setConfirmRemapBusy] = useState(false);
+  /** Matches reducer result.opId so effects ignore superseded confirms. */
+  const pendingConfirmOpIdRef = useRef<string | null>(null);
   /** Center workspace tab: canvas or open KeyMap id. */
   const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
   useEffect(() => {
@@ -1699,6 +1718,37 @@ function App() {
     closeKeyMapTab(result.mapId, result.workspace);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- closeKeyMapTab closes over latest tabs/project
   }, [projectBag.keyMapApplyResult]);
+
+  // After confirm_remap commits — tab/Save only when reducer reports applied.
+  useEffect(() => {
+    const result = projectBag.confirmRemapResult;
+    if (!result) return;
+    dispatchProject({ type: "clear_confirm_remap_result" });
+    if (pendingConfirmOpIdRef.current !== result.opId) {
+      return;
+    }
+    pendingConfirmOpIdRef.current = null;
+    confirmRemapInFlightRef.current = false;
+    setConfirmRemapBusy(false);
+    if (result.status === "stale") {
+      setError(result.reason);
+      return;
+    }
+    patchKeyMapTab(result.mapId, (s) => ({
+      ...s,
+      map: { ...result.nextMap, id: s.map.id },
+      dirtyDelta: result.dirtyDelta,
+      localDraft: true,
+    }));
+    setFrozenRemap(null);
+    setExportMsg(result.message);
+    setCenterTab(QUALITY_TAB);
+    lastCheckRunFingerprint.current = null;
+    void saveKeyMapToProject(result.nextMap, {
+      dirtyDelta: result.dirtyDelta,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- save/patch close over latest handlers
+  }, [projectBag.confirmRemapResult]);
 
   // Keep forms in sync when steps change; clamp selected step index.
   useEffect(() => {
@@ -3447,6 +3497,12 @@ function App() {
                 .filter(Boolean),
             ),
           ].map((from) => [from]);
+          if (fromExact.length === 0) {
+            setError(
+              "Confirm has no From keys to baseline — stage changes first.",
+            );
+            return;
+          }
           // Bounded exact equality IN — not prefix/ILIKE page + client filter.
           const page = await readKeyMap(mapAtStart, resolved.dsn, {
             fromExact,
@@ -3478,7 +3534,6 @@ function App() {
         setError(stale);
         return;
       }
-      // Same revision we started with — also caught by confirmContextStillValid.
       if (keyMapRevision(liveMap!) !== revisionAtStart) {
         setError(
           "KeyMap changed while reading baselines — refresh the remap preview.",
@@ -3502,44 +3557,30 @@ function App() {
         return;
       }
 
-      // Apply only if the functional updater still sees the same identity.
-      let applied = false;
-      setProject((p) => {
-        if (p.id !== projectIdAtStart) return p;
-        const m = (p.workspace.key_maps ?? []).find(
-          (x) => x.id === result.nextMap.id,
-        );
-        if (!m) return p;
-        if (keyMapBindingFingerprint(m) !== bindingAtStart) return p;
-        if (keyMapRevision(m) !== frozenAtStart.expected_map_revision) return p;
-        applied = true;
-        return upsertKeyMapIntoProject(p, result.nextMap);
-      });
-      if (!applied) {
-        setError(
-          "Project or KeyMap changed before Confirm could apply — refresh and retry.",
-        );
-        return;
-      }
-      patchKeyMapTab(result.nextMap.id, (s) => {
-        if (keyMapBindingFingerprint(s.map) !== bindingAtStart) return s;
-        return {
-          ...s,
-          map: { ...result.nextMap, id: s.map.id },
+      // Commit via reducer (like apply_keymap) — effects run only on applied.
+      const opId = `confirm_${Date.now().toString(36)}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      pendingConfirmOpIdRef.current = opId;
+      dispatchProject({
+        type: "confirm_remap",
+        intent: {
+          opId,
+          nextMap: result.nextMap,
           dirtyDelta: result.dirtyDelta,
-          localDraft: true,
-        };
+          message: result.message,
+          projectIdAtStart,
+          bindingAtStart,
+          expectedMapRevision: frozenAtStart.expected_map_revision,
+        },
       });
-      setFrozenRemap(null);
-      setExportMsg(result.message);
-      setCenterTab(QUALITY_TAB);
-      lastCheckRunFingerprint.current = null;
-      void saveKeyMapToProject(result.nextMap, {
-        dirtyDelta: result.dirtyDelta,
-      });
+      // Busy/in-flight cleared by confirmRemapResult effect (or finally if no dispatch).
+      return;
     } finally {
-      confirmRemapInFlightRef.current = false;
-      setConfirmRemapBusy(false);
+      if (pendingConfirmOpIdRef.current == null) {
+        confirmRemapInFlightRef.current = false;
+        setConfirmRemapBusy(false);
+      }
     }
   }
 

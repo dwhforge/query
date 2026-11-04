@@ -1,6 +1,7 @@
 export {
   allowCheckDifference,
   appendMappingCheck,
+  applyConfirmRemapOntoProject,
   confirmFrozenCheckRemap,
   createMappingCheck,
   confirmContextStillValid,
@@ -14,6 +15,8 @@ export {
   summarizeCellDeltas,
   unrelatedDraftBlocksConfirm,
   type AllowResult,
+  type ConfirmRemapApplyIntent,
+  type ConfirmRemapApplyResult,
   type ConfirmRemapResult,
   type InspectPayload,
   type InspectPlan,

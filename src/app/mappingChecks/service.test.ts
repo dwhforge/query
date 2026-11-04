@@ -1,5 +1,6 @@
 import {
   allowCheckDifference,
+  applyConfirmRemapOntoProject,
   confirmContextStillValid,
   confirmFrozenCheckRemap,
   createMappingCheck,
@@ -13,10 +14,7 @@ import {
   unrelatedDraftBlocksConfirm,
 } from "./service";
 import { keyMapRevision, labMappingCheck } from "../../lib/mappingCheck";
-import {
-  keyMapBindingFingerprint,
-  upsertKeyMapIntoProject,
-} from "../keyMap";
+import { keyMapBindingFingerprint } from "../keyMap";
 import type { Project, QueryDef } from "../../types/pipeline";
 
 function assert(cond: boolean, msg: string) {
@@ -285,19 +283,57 @@ assert(frozen.changes.length === 1 && frozen.changes[0].to === "NEW", "stage");
       "map updated",
     );
     assert(confirmed.dirtyDelta.upserts.length === 1, "dirty upserts");
-    const applied = upsertKeyMapIntoProject(project, confirmed.nextMap as never);
-    const apply = applied.workspace.queries[0]?.steps.find(
-      (s) => s.type === "ApplyKeyMap",
-    );
-    assert(apply?.type === "ApplyKeyMap", "apply step");
-    if (apply?.type === "ApplyKeyMap") {
-      assert(
-        (apply.payload.entries ?? []).some(
-          (e) => e.from === "x" && e.to === "NEW",
-        ),
-        "ApplyKeyMap snapshot synced on confirm path",
+    const fold = applyConfirmRemapOntoProject(project, {
+      opId: "op1",
+      nextMap: confirmed.nextMap as never,
+      dirtyDelta: confirmed.dirtyDelta,
+      message: confirmed.message,
+      projectIdAtStart: project.id,
+      bindingAtStart: keyMapBindingFingerprint(map as never),
+      expectedMapRevision: frozen.expected_map_revision,
+    });
+    assert(fold.result.status === "applied", "reducer apply ok");
+    if (fold.result.status === "applied") {
+      const apply = fold.project.workspace.queries[0]?.steps.find(
+        (s) => s.type === "ApplyKeyMap",
       );
+      assert(apply?.type === "ApplyKeyMap", "apply step");
+      if (apply?.type === "ApplyKeyMap") {
+        assert(
+          (apply.payload.entries ?? []).some(
+            (e) => e.from === "x" && e.to === "NEW",
+          ),
+          "ApplyKeyMap snapshot synced on confirm path",
+        );
+      }
     }
+    const staleProject = applyConfirmRemapOntoProject(project, {
+      opId: "op2",
+      nextMap: confirmed.nextMap as never,
+      dirtyDelta: confirmed.dirtyDelta,
+      message: confirmed.message,
+      projectIdAtStart: "other",
+      bindingAtStart: keyMapBindingFingerprint(map as never),
+      expectedMapRevision: frozen.expected_map_revision,
+    });
+    assert(
+      staleProject.result.status === "stale" &&
+        staleProject.project === project,
+      "stale project id leaves project untouched",
+    );
+    const staleRev = applyConfirmRemapOntoProject(project, {
+      opId: "op3",
+      nextMap: confirmed.nextMap as never,
+      dirtyDelta: confirmed.dirtyDelta,
+      message: confirmed.message,
+      projectIdAtStart: project.id,
+      bindingAtStart: keyMapBindingFingerprint(map as never),
+      expectedMapRevision: "map:outdated",
+    });
+    assert(
+      staleRev.result.status === "stale" && staleRev.project === project,
+      "stale revision leaves project untouched",
+    );
   }
 }
 

@@ -342,11 +342,8 @@ fn read_entries_on_conn(
         select_cols.push(format!("CAST({} AS VARCHAR)", quote_ident(c)));
     }
     let where_sql = read_where_sql(&q_froms, query)?;
-    let exact_lookup = query
-        .from_exact
-        .as_ref()
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
+    // Some(…) means exact mode (empty Some is rejected in read_where_sql).
+    let exact_lookup = query.from_exact.is_some();
 
     let mut total_count = None;
     if query.limit.is_some() || query.offset.is_some() || !where_sql.is_empty() {
@@ -407,6 +404,11 @@ fn read_entries_on_conn(
 }
 
 /// Build WHERE for KeyMap reads. Prefix = editor search (ILIKE); exact = equality IN.
+///
+/// `from_exact` semantics:
+/// - `None` — not an exact lookup (prefix / full page as usual)
+/// - `Some([])` — validation error (must not become unbounded read)
+/// - empty / blank parts — validation error (must not be silently dropped)
 pub(crate) fn read_where_sql(
     q_froms: &[String],
     query: &KeyMapReadQuery,
@@ -419,44 +421,43 @@ pub(crate) fn read_where_sql(
         .as_ref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
-    let exact = query
-        .from_exact
-        .as_ref()
-        .map(|keys| {
-            keys.iter()
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .map(|p| p.trim().to_string())
-                        .collect::<Vec<_>>()
-                })
-                .filter(|parts| parts.iter().any(|p| !p.is_empty()))
-                .collect::<Vec<_>>()
-        })
-        .filter(|keys| !keys.is_empty());
 
-    if prefix.is_some() && exact.is_some() {
-        return Err("read_key_map: from_prefix and from_exact are mutually exclusive".into());
-    }
-
-    if let Some(keys) = exact {
+    if let Some(raw_keys) = query.from_exact.as_ref() {
+        if prefix.is_some() {
+            return Err(
+                "read_key_map: from_prefix and from_exact are mutually exclusive".into(),
+            );
+        }
+        if raw_keys.is_empty() {
+            return Err(
+                "read_key_map: from_exact is empty — refusing unbounded read".into(),
+            );
+        }
         const MAX_EXACT: usize = 512;
-        if keys.len() > MAX_EXACT {
+        if raw_keys.len() > MAX_EXACT {
             return Err(format!(
                 "read_key_map: from_exact exceeds {MAX_EXACT} keys"
             ));
         }
         let arity = q_froms.len();
-        for parts in &keys {
+        let mut keys: Vec<Vec<String>> = Vec::with_capacity(raw_keys.len());
+        for parts in raw_keys {
+            if parts.is_empty() {
+                return Err("read_key_map: from_exact key has no parts".into());
+            }
             if parts.len() != arity {
                 return Err(format!(
                     "read_key_map: from_exact arity mismatch (expected {arity}, got {})",
                     parts.len()
                 ));
             }
-            if parts.iter().any(|p| p.is_empty()) {
-                return Err("read_key_map: from_exact parts must be non-empty".into());
+            let trimmed: Vec<String> = parts.iter().map(|p| p.trim().to_string()).collect();
+            if trimmed.iter().any(|p| p.is_empty()) {
+                return Err(
+                    "read_key_map: from_exact parts must be non-empty".into(),
+                );
             }
+            keys.push(trimmed);
         }
         if arity == 1 {
             let list: Vec<String> = keys
@@ -1153,6 +1154,33 @@ mod tests {
             sql.contains("('ERP', '100')"),
             "composite row IN: {sql}"
         );
+    }
+
+    #[test]
+    fn read_where_exact_empty_vec_refuses_unbounded() {
+        let q = KeyMapReadQuery {
+            from_exact: Some(vec![]),
+            ..Default::default()
+        };
+        let err = read_where_sql(&["\"from\"".into()], &q).unwrap_err();
+        assert!(
+            err.contains("empty") && err.contains("unbounded"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn read_where_exact_blank_parts_refuses() {
+        let q = KeyMapReadQuery {
+            from_exact: Some(vec![vec!["".into()]]),
+            ..Default::default()
+        };
+        assert!(read_where_sql(&["\"from\"".into()], &q).is_err());
+        let q2 = KeyMapReadQuery {
+            from_exact: Some(vec![vec!["ERP".into(), "  ".into()]]),
+            ..Default::default()
+        };
+        assert!(read_where_sql(&["\"sys\"".into(), "\"code\"".into()], &q2).is_err());
     }
 
     #[test]

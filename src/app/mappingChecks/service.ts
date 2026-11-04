@@ -33,6 +33,7 @@ import {
 import type { KeyMapDef, Project, QueryDef, Workspace } from "../../types/pipeline";
 import { targetKey } from "../../types/pipeline";
 import type { CheckRun } from "../../types/mappingCheck";
+import { keyMapBindingFingerprint, upsertKeyMapIntoProject } from "../keyMap";
 
 export function resolveActiveMappingCheck(
   checks: MappingCheck[] | undefined,
@@ -388,6 +389,95 @@ export type ConfirmRemapResult =
       message: string;
     }
   | { ok: false; error: string };
+
+/** Intent for projectBag `confirm_remap` — reducer returns applied/stale once. */
+export type ConfirmRemapApplyIntent = {
+  opId: string;
+  nextMap: KeyMapDef;
+  dirtyDelta: KeyMapDirtyDelta;
+  message: string;
+  projectIdAtStart: string;
+  bindingAtStart: string;
+  expectedMapRevision: string;
+};
+
+export type ConfirmRemapApplyResult =
+  | {
+      status: "applied";
+      opId: string;
+      mapId: string;
+      nextMap: KeyMapDef;
+      dirtyDelta: KeyMapDirtyDelta;
+      message: string;
+    }
+  | { status: "stale"; opId: string; reason: string };
+
+/**
+ * Pure: fold Confirm nextMap into project only when identity still matches.
+ * UI must react to `result`, not to a mutable flag outside the reducer.
+ */
+export function applyConfirmRemapOntoProject(
+  project: Project,
+  intent: ConfirmRemapApplyIntent,
+): { project: Project; result: ConfirmRemapApplyResult } {
+  if (project.id !== intent.projectIdAtStart) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        opId: intent.opId,
+        reason:
+          "Project changed before Confirm could apply — refresh and retry.",
+      },
+    };
+  }
+  const live = (project.workspace.key_maps ?? []).find(
+    (m) => m.id === intent.nextMap.id,
+  );
+  if (!live) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        opId: intent.opId,
+        reason: "KeyMap missing before Confirm could apply — refresh and retry.",
+      },
+    };
+  }
+  if (keyMapBindingFingerprint(live) !== intent.bindingAtStart) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        opId: intent.opId,
+        reason:
+          "KeyMap binding changed before Confirm could apply — refresh and retry.",
+      },
+    };
+  }
+  if (keyMapRevision(live) !== intent.expectedMapRevision) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        opId: intent.opId,
+        reason:
+          "KeyMap changed before Confirm could apply — refresh the remap preview.",
+      },
+    };
+  }
+  return {
+    project: upsertKeyMapIntoProject(project, intent.nextMap),
+    result: {
+      status: "applied",
+      opId: intent.opId,
+      mapId: intent.nextMap.id,
+      nextMap: intent.nextMap,
+      dirtyDelta: intent.dirtyDelta,
+      message: intent.message,
+    },
+  };
+}
 
 function entryFromKey(entry: KeyMapDef["entries"][number]): string {
   return (fromPartsEff(entry)[0] ?? entry.from).trim();

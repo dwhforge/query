@@ -1,4 +1,5 @@
 pub mod api;
+pub mod atomic_fs;
 pub mod commands;
 pub mod connections_io;
 pub mod dbt_setup;

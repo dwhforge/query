@@ -1,11 +1,12 @@
 # Stabilization report — ADR-0026–0033
 
-**Status:** in progress (scoped path: Phases 0–3; 4–6 gated follow-ups)  
+**Status:** scoped path complete (Phases 0–3); Phases 4–6 gated follow-ups  
 **Reviewed baseline SHA:** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
-**Tested SHA (Phase 0 start):** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
+**Tested SHA (start):** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
+**Tested SHA (this report tip):** see `git log -1` on branch after commits below  
 **Branch:** `feature/mapping_wow`  
 **Prepared:** 2026-11-04  
-**Scope agreement:** full unit inventory + KeyMap binding isolation + atomic persistence; Phases 4–6 deferred as gated follow-ups.
+**Scope agreement:** full unit inventory + KeyMap binding isolation + atomic persistence; Phases 4–6 deferred.
 
 ## Environment
 
@@ -17,45 +18,15 @@
 | rustc | 1.98.0 (stable-x86_64-unknown-linux-gnu) |
 | cargo | 1.98.0 |
 
-## Git reconcile
+## Commits (this pass)
 
-| Item | Value |
-|------|-------|
-| HEAD at start | `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6` |
-| vs reviewed SHA | identical |
-| Worktree at Phase 0 | clean |
-| Intervening commits | none |
+1. `55be262` — Stabilize test gates: full unit inventory, types freshness, engine env isolation  
+2. `148774b` — Isolate KeyMap tab state across warehouse binding changes  
+3. *(pending)* — Atomic project/secrets/connections writes + future-format refuse  
 
-## Test inventory (discovered)
+## Command matrix
 
-### TypeScript `*.test.ts` (11) — all in `test:unit` after Phase 1
-
-| File | Notes |
-|------|-------|
-| `src/lib/hostRpc.test.ts` | production `unpackInvokeReply` |
-| `src/lib/requestGen.test.ts` | |
-| `src/lib/mappingCheck.test.ts` | |
-| `src/app/keyMap/service.test.ts` | |
-| `src/app/mappingChecks/service.test.ts` | |
-| `src/lib/mappingQuality.test.ts` | was stale vs 24-key cap — fixed |
-| `src/lib/keyMapDirty.test.ts` | stub → points at edit store |
-| `src/lib/keyMapEditStore.test.ts` | |
-| `src/lib/keyMapFindApply.test.ts` | |
-| `src/lib/joinMapEffect.test.ts` | |
-| `src/lib/joinAutoDiag.test.ts` | |
-
-No `*.test.tsx` found. Electron IPC smoke: **release gate / not run** (no disposable harness in this pass).
-
-### Rust
-
-- Lib unit tests: `dwh-pipeline`, `dwh-engine`, `dwh-host`
-- Integration: `crates/dwh-host/tests/mapping_quality.rs` (not in default CI `--lib` gate)
-
-### CI trigger note
-
-`.github/workflows/ci.yml` runs on `pull_request` and pushes to `main`/`master` only. Feature-branch push alone does **not** run CI.
-
-## Command matrix (Phase 0 @ a62ff1f)
+### Phase 0 @ a62ff1f
 
 | Command | Result | Exit | Notes |
 |---------|--------|------|-------|
@@ -63,49 +34,53 @@ No `*.test.tsx` found. Electron IPC smoke: **release gate / not run** (no dispos
 | `npm run test:unit` | passed | 0 | then only 5 files |
 | `npm run build` | passed | 0 | |
 | `cargo test -p dwh-pipeline --lib` | passed | 0 | |
-| `cargo test -p dwh-engine --lib` | **failed** | 101 | `session_limits::apply_settings_roundtrip` env race |
+| `cargo test -p dwh-engine --lib` | **failed** | 101 | env race → fixed |
 | `cargo test -p dwh-host --lib` | passed | 0 | |
 | `npm run types:check` | passed | 0 | then git-diff only |
 | `cargo build -p dwh-host --release` | passed | 0 | |
 
-Logs: `docs/stabilization/logs/`.
-
-## Phase 1 evidence (post-fix)
+### After Phases 1–3 (focused re-runs)
 
 | Command | Result | Exit | Notes |
 |---------|--------|------|-------|
-| `npm run test:unit` | passed | 0 | **11/11** files; pinned esbuild binary |
-| `bash scripts/check-generated-types.sh` | passed | 0 | inventory + content vs clean temp export |
-| `cargo test -p dwh-engine --lib` | passed | 0 | after ENV_LOCK fix |
-| Electron IPC smoke | **not run** | — | documented release gate |
+| `npm run test:unit` | passed | 0 | **11/11** |
+| `npx tsc --noEmit` | passed | 0 | |
+| `bash scripts/check-generated-types.sh` | passed | 0 | |
+| `cargo test -p dwh-engine --lib` | passed | 0 | |
+| `cargo test -p dwh-host --lib atomic_fs::` | passed | 0 | |
+| `cargo test -p dwh-host --lib secrets_io::` | passed | 0 | |
+| Electron IPC smoke | **not run** | — | release gate |
+| Phase 4–6 suites | **not run** | — | deferred |
 
-## Resolved / open
+Logs: `docs/stabilization/logs/`.
 
-| Item | State |
-|------|-------|
-| Typed MappingCheck / bindings / DTO satisfies / IPC unpack | verified (unit) |
-| Strict format_version / source strip | verified prior; persistence atomicity Phase 3 |
-| Full TS unit inventory | **done** |
-| Strict generated-types freshness | **done** |
-| `dwh-engine` env-race flake | **fixed** |
-| KeyMap binding isolation / late-ack | **in progress** |
-| Atomic project write | open (Phase 3) |
-| Phases 4–6 | gated follow-ups |
+## Test inventory
 
-## Failures discovered
+All 11 `src/**/*.test.ts` discovered and executed by `npm run test:unit` (pinned esbuild binary; no `npx` download). No `*.test.tsx`. CI still triggers on PR / main|master only — feature-branch push alone is not evidence of CI.
 
-1. **`session_limits::apply_settings_roundtrip`** — parallel tests mutated process `DWH_DUCKDB_MEMORY`; resolved to auto RAM (`21852MB`) instead of `2GB`. Fix: `ENV_LOCK` + restore guards.
-2. **`mappingQuality.test.ts`** — fixture used 30 keys so `"a'b"` fell outside the 24-key inspect cap; assertion looked like a quote bug. Fix: separate quote vs cap assertions.
-3. **KeyMap rebind via editor `onChange`** — cleared only `map`, kept `contentHash`/`dirtyDelta`/`saveApi`; merge on binding change unioned previous relation rows before reset. Fix in Phase 2.
+## Failures discovered → fixes
 
-## Fixes applied
+| Failure | Fix |
+|---------|-----|
+| `session_limits::apply_settings_roundtrip` flake (`21852MB` vs `2GB`) | `ENV_LOCK` + restore guards |
+| `mappingQuality.test.ts` quote assert vs 24-key cap | split quote vs cap fixtures |
+| Unit runner omitted 6 files; used `npx esbuild` | discover-all + platform binary |
+| `types:check` missed untracked generated files | `check-generated-types.sh` inventory+content |
+| KeyMap rebind unioned old relation rows; late WH ack | `applyKeyMapTabMapChange`, fingerprint settle |
+| `fs::write` project/secrets/connections | `atomic_fs::atomic_write`; refuse future format |
 
-- Phase 0/1: report + logs; engine test isolation; discover-all unit runner (no npx esbuild); `check-generated-types.sh`; hostRpc nested-domain / snake_case / transport cases; mappingQuality fixture.
-- Phase 2 (in flight): `applyKeyMapTabMapChange`, rebind replaces rows (no union), refuse rebind while Save busy, late-ack binding fingerprint, deletedFroms/Parts not resurrected, editor storage disabled while saving.
+## Remaining limitations / debt
 
-## Remaining limitations
+- **Not ACID across files:** project publish + secrets/connections remain separate; crash between them can leave stale credentials while the project file stays parseable.
+- **Electron IPC smoke** not executed (documented release gate).
+- **Phases 4–6** (races, workflow/temporal/export e2e, perf baseline) not started.
+- Seed/ref drafts without a non-empty `dirtyDelta` are not protected across refresh.
+- Multi-process / network-FS rename behavior not claimed safe.
+- Host integration test `mapping_quality.rs` not in default `--lib` CI gate.
 
-- No Electron `ipcMain→preload→renderer` smoke executed this pass.
-- Seed/ref drafts without a non-empty `dirtyDelta` are not protected across refresh (editor normally emits delta via `toDelta`).
-- Multi-file project/connections/secrets crash consistency still not ACID (Phase 3 documents, does not claim).
-- Phases 4–6 not started under agreed scope cut.
+## Migration / rollback
+
+- No `format_version` bump.
+- Atomic write is transparent to file schema.
+- Future-format on-disk projects: save now **refuses** instead of stamping current version over them.
+- Upgrade `.bak`: first backup kept; retry does not overwrite existing `.bak`.

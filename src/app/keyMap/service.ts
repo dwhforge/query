@@ -226,6 +226,46 @@ function entrySnapshotsEqual(a: KeyMapEntry, b: KeyMapEntry): boolean {
   return true;
 }
 
+function isSeedOrRefStorage(map: KeyMapDef): boolean {
+  const kind = map.storage?.kind ?? "seed";
+  return kind === "seed" || kind === "ref";
+}
+
+/** Stable fingerprint of map rows — used to settle seed/ref Save without wiping newer edits. */
+export function keyMapEntriesFingerprint(map: KeyMapDef): string {
+  const meta: KeyMapIdentityMeta = {
+    time_mode: map.time_mode,
+    valid_from_column: map.valid_from_column,
+    valid_to_column: map.valid_to_column,
+  };
+  const rows = map.entries
+    .map((e) => {
+      const id = keyMapEntryIdentity(e, meta);
+      const attrs = e.attrs ?? {};
+      const attrKeys = Object.keys(attrs).sort();
+      const attrPart = attrKeys
+        .map((k) => `${k}=${(attrs[k] ?? "").trim()}`)
+        .join("&");
+      return `${id}\t${e.to.trim()}\t${attrPart}`;
+    })
+    .sort();
+  return rows.join("\n");
+}
+
+/**
+ * After seed/ref Save of revision R1 succeeds: clear draft only if the tab
+ * still holds R1. Edits made during the in-flight Save (R2) stay dirty.
+ */
+export function settleSeedDraftAfterSave(
+  session: KeyMapTabSession,
+  savedEntriesFingerprint: string,
+): KeyMapTabSession {
+  if (keyMapEntriesFingerprint(session.map) !== savedEntriesFingerprint) {
+    return session;
+  }
+  return { ...session, localDraft: false, dirtyDelta: null };
+}
+
 /**
  * Merge incoming map rows into an open tab.
  * Preserves editor lifecycle (contentHash / dirtyDelta / saveApi) on reopen;
@@ -285,6 +325,12 @@ export function mergeKeyMapTabSession(
     }
     const cur = byId.get(id);
     if (!cur) {
+      // Seed/ref local draft has no reliable add-vs-delete baseline when
+      // dirtyDelta is absent: do not union new incoming rows (would resurrect
+      // intentional deletes). Suggest-merge while draft must be a separate path.
+      if (protectLocalDrafts && isSeedOrRefStorage(prev.map)) {
+        continue;
+      }
       byId.set(id, e);
       continue;
     }

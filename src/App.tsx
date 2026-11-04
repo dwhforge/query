@@ -134,7 +134,9 @@ import {
   mergeFromValuesIntoMap,
   applyKeyMapTabMapChange,
   keyMapBindingFingerprint,
+  keyMapEntriesFingerprint,
   mergeKeyMapTabSession,
+  settleSeedDraftAfterSave,
   normalizeKeyMapForEditor,
   refSaveResult,
   resolveJoinStepFromCtx,
@@ -3091,22 +3093,20 @@ function App() {
     setSelectedKeyMapId(map.id);
     const kind = map.storage?.kind ?? "seed";
     if (kind === "seed") {
-      const clearSeedDraft = () =>
-        patchKeyMapTab(map.id, (s) => ({
-          ...s,
-          localDraft: false,
-          dirtyDelta: null,
-        }));
+      // Settle only if tab still holds the revision we published (R1).
+      const savedFp = keyMapEntriesFingerprint(map);
+      const settleSeed = () =>
+        patchKeyMapTab(map.id, (s) => settleSeedDraftAfterSave(s, savedFp));
       const exportPath = project.last_dbt_export_path;
       if (!exportPath) {
-        clearSeedDraft();
+        settleSeed();
         const result = seedSaveResult({ exportPath: null });
         setExportMsg(result.message);
         return result;
       }
       try {
         await pushKeyMapToExport(exportPath, map);
-        clearSeedDraft();
+        settleSeed();
         const result = seedSaveResult({ exportPath });
         setExportMsg(result.message);
         setError(null);
@@ -3234,11 +3234,8 @@ function App() {
         return result;
       }
     }
-    patchKeyMapTab(map.id, (s) => ({
-      ...s,
-      localDraft: false,
-      dirtyDelta: null,
-    }));
+    const savedFp = keyMapEntriesFingerprint(map);
+    patchKeyMapTab(map.id, (s) => settleSeedDraftAfterSave(s, savedFp));
     const result = refSaveResult();
     setExportMsg(result.message);
     return result;

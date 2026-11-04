@@ -2,12 +2,14 @@ import {
   applyKeyMapOntoProject,
   applyKeyMapTabMapChange,
   dirtyDeltaHasChanges,
+  keyMapEntriesFingerprint,
   mapForProjectAst,
   mergeFromValuesIntoMap,
   mergeKeyMapTabSession,
   normalizeKeyMapForEditor,
   resolveJoinStepFromCtx,
   seedSaveResult,
+  settleSeedDraftAfterSave,
   upsertKeyMapIntoProject,
 } from "./service";
 import type { KeyMapJoinCtx, KeyMapTabSession } from "./types";
@@ -424,6 +426,64 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
     entries: [{ from: "A", to: "2" }],
   } as never);
   assert(merged.map.entries[0]?.to === "2", "clean ref accepts refresh To");
+}
+
+{
+  // Local delete without dirtyDelta: refresh must not resurrect B.
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      storage: { kind: "seed" },
+      entries: [{ from: "A", to: "1" }],
+    },
+    localDraft: true,
+    dirtyDelta: null,
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    storage: { kind: "seed" },
+    entries: [
+      { from: "A", to: "1" },
+      { from: "B", to: "2" },
+    ],
+  } as never);
+  assert(
+    !merged.map.entries.some((e) => e.from === "B"),
+    "seed local delete not resurrected",
+  );
+  assert(merged.map.entries.length === 1, "only A remains");
+}
+
+{
+  // Save R1 while user edits to R2 — draft must stay dirty.
+  const r1 = {
+    id: "m",
+    name: "M",
+    storage: { kind: "seed" as const },
+    entries: [{ from: "A", to: "1" }],
+  };
+  const savedFp = keyMapEntriesFingerprint(r1 as never);
+  const duringSave: KeyMapTabSession = {
+    map: {
+      ...r1,
+      entries: [{ from: "A", to: "2" }],
+    },
+    localDraft: true,
+  };
+  const settled = settleSeedDraftAfterSave(duringSave, savedFp);
+  assert(settled.localDraft === true, "R2 stays dirty after R1 save");
+  assert(settled.map.entries[0]?.to === "2", "R2 entries kept");
+
+  const sameAsR1: KeyMapTabSession = {
+    map: r1 as never,
+    localDraft: true,
+    dirtyDelta: { upserts: [{ from: "A", to: "1" }], deletedFroms: [] },
+  };
+  const cleared = settleSeedDraftAfterSave(sameAsR1, savedFp);
+  assert(cleared.localDraft === false, "R1 save clears draft");
+  assert(cleared.dirtyDelta === null, "R1 save clears delta");
 }
 
 console.log("keyMap/service.test.ts: ok");

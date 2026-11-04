@@ -3,7 +3,7 @@
 **Status:** scoped path complete (Phases 0–3); Phases 4–6 gated follow-ups  
 **Reviewed baseline SHA:** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
 **Tested SHA (start):** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
-**Tested SHA (this report tip):** see `git log -1` on branch after commits below  
+**Tested functional tip:** `db975b2` (report commits may follow)  
 **Branch:** `feature/mapping_wow`  
 **Prepared:** 2026-11-04  
 **Scope agreement:** full unit inventory + KeyMap binding isolation + atomic persistence; Phases 4–6 deferred.
@@ -22,7 +22,7 @@
 
 1. `55be262` — Stabilize test gates: full unit inventory, types freshness, engine env isolation  
 2. `148774b` — Isolate KeyMap tab state across warehouse binding changes  
-3. *(pending)* — Atomic project/secrets/connections writes + future-format refuse  
+3. `db975b2` — Atomic project/secrets/connections writes + future-format refuse
 
 ## Command matrix
 

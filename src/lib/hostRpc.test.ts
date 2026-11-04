@@ -45,4 +45,41 @@ try {
 assert(threw instanceof HostRpcError, "err envelope → HostRpcError");
 assert(isHostCancelled(threw), "unpack preserves cancelled");
 
+// Nested domain {ok:false, log} inside an outer successful IPC envelope is a
+// domain result — unpack must return it, not throw as HostRpcError.
+const nestedDomain = unpackInvokeReply({
+  ok: true as const,
+  result: { ok: false as const, log: "dbt failed", code: 1 },
+});
+assert(nestedDomain.ok === false, "nested domain ok:false preserved");
+assert(nestedDomain.log === "dbt failed", "nested domain payload");
+
+assert(unpackInvokeReply(null) === null, "null passthrough");
+assert(unpackInvokeReply(42) === 42, "primitive passthrough");
+assert(unpackInvokeReply("x") === "x", "string passthrough");
+
+try {
+  unpackInvokeReply({
+    ok: false as const,
+    message: "socket closed",
+    error_detail: {
+      kind: "internal",
+      message: "socket closed",
+      correlation_id: "c1",
+    },
+  });
+  assert(false, "snake_case error_detail must throw");
+} catch (e) {
+  assert(e instanceof HostRpcError, "snake_case → HostRpcError");
+  assert(
+    (e as HostRpcError).errorDetail?.kind === "internal",
+    "snake_case detail kind",
+  );
+}
+
+const transport = normalizeHostReject(new Error("ECONNREFUSED"));
+assert(transport instanceof HostRpcError, "transport reject");
+assert(transport.errorDetail === null, "transport has no HostError");
+assert(!isHostCancelled(transport), "transport ≠ cancelled");
+
 console.log("hostRpc.test.ts: ok");

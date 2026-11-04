@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "host:build": "cargo build -p dwh-host --release",
     "types:generate": "bash scripts/export-ts-types.sh",
-    "types:check": "bash scripts/export-ts-types.sh && git diff --exit-code -- src/types/generated",
+    "types:check": "bash scripts/check-generated-types.sh",
     "test:unit": "node scripts/run-unit-tests.mjs",
     "electron:dev": "npm run host:build && node scripts/electron-dev.mjs",
     "electron:pack": "npm run host:build && npm run build && node scripts/pack-portable-electron.mjs",

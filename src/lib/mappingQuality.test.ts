@@ -102,10 +102,7 @@ const workspace: Workspace = {
   ],
 };
 const before = JSON.stringify(workspace);
-const sample = qualityInspectionQuery(workspace, [
-  "a'b",
-  ...Array.from({ length: 30 }, (_, i) => String(i)),
-]);
+const sample = qualityInspectionQuery(workspace, ["a'b", "z-key"]);
 assert(
   sample.steps[1]?.type === "Filter" &&
     sample.steps[1].payload.condition.includes("a''b"),
@@ -119,6 +116,15 @@ assert(
 assert(
   sample.steps[sample.steps.length - 1]?.type === "Join",
   "drill-down remains a real Join",
+);
+const capped = qualityInspectionQuery(
+  workspace,
+  Array.from({ length: 30 }, (_, i) => `k${String(i).padStart(2, "0")}`),
+);
+assert(
+  capped.steps[1]?.type === "Filter" &&
+    (capped.steps[1].payload.condition.match(/'/g)?.length ?? 0) === 48,
+  "sample inspect caps at 24 keys (24 quoted literals)",
 );
 assert(sample.id === QUALITY_INSPECTION, "stable ephemeral id");
 assert(

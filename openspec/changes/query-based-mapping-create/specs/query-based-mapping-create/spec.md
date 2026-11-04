@@ -23,6 +23,8 @@ The system SHALL allow an optional typed `authoring_context` on `KeyMapDef` (`so
 
 Query-based create SHALL build a pure review plan, re-validate freshness at commit, and fold map upsert + optional last-Fields patches in one project update. On stale or error, the project document SHALL be left unchanged. Create SHALL NOT Apply, Join, Check, Lens, export, or write the warehouse / disk.
 
+Schema evidence SHALL record **observed** describe output (not planned restores) and fingerprint the described query plus known upstream deps (FromQuery / Join / Append / SqlModel `{{query:id}}`). Commit SHALL refuse when those definitions drift. Before dispatch, the UI SHALL re-describe and compare digests; if schema cannot be re-confirmed, refuse while keeping the draft.
+
 #### Scenario: Happy path seed map
 - **GIVEN** two local workspace queries and valid key columns on output schemas
 - **WHEN** the user confirms a valid plan
@@ -34,6 +36,18 @@ Query-based create SHALL build a pure review plan, re-validate freshness at comm
 - **WHEN** commit runs
 - **THEN** the result is `stale`
 - **AND** the project reference is unchanged
+
+#### Scenario: Upstream def changed, selected steps unchanged
+- **GIVEN** source query `FromQuery(upstream)` + last Fields, with a restore planned from upstream columns
+- **AND** only `upstream` steps change after review
+- **WHEN** commit validates
+- **THEN** the result is `stale`
+
+#### Scenario: Observed vs planned schema
+- **GIVEN** restore columns missing from live output
+- **WHEN** the plan is built
+- **THEN** evidence `outputColumns` stay pre-patch
+- **AND** From/To are validated against planned output after patches
 
 ### Requirement: Last-Fields restore only
 

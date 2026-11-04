@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use dwh_pipeline::{CheckDeltaAttribution, CheckRun, MappingCheck};
+use dwh_pipeline::{
+    CheckDeltaAttribution, CheckRun, KeyMapAuthoringContext, MappingCheck,
+};
 use ts_rs::TS;
 
 fn main() {
@@ -15,6 +17,7 @@ fn main() {
     MappingCheck::export_all_to(&out).expect("export MappingCheck");
     CheckRun::export_all_to(&out).expect("export CheckRun");
     CheckDeltaAttribution::export_all_to(&out).expect("export CheckDeltaAttribution");
+    KeyMapAuthoringContext::export_all_to(&out).expect("export KeyMapAuthoringContext");
 
     // Index is finalized by export-ts-host after this bin runs.
     eprintln!("exported pipeline IR → {}", out.display());

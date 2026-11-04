@@ -31,6 +31,7 @@ export type { MappingCheck } from "./MappingCheck";
 export type { CheckInputRevision } from "./CheckInputRevision";
 export type { CheckAggregateCell } from "./CheckAggregateCell";
 export type { CheckRun } from "./CheckRun";
+export type { KeyMapAuthoringContext } from "./KeyMapAuthoringContext";
 export type { HostError } from "./HostError";
 export type { SaveProjectArgs } from "./SaveProjectArgs";
 export type { LoadProjectArgs } from "./LoadProjectArgs";

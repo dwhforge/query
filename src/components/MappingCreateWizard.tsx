@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { describeWorkspace, projectRefContext } from "../lib/bridge";
 import type { Project } from "../types/pipeline";
 import {
+  assertLiveSchemaMatchesPlan,
   buildMappingCreatePlan,
   excludedByLastFields,
   listLocalQueries,
   makeSchemaEvidence,
+  selectableOutputColumns,
+  workspaceQueryDefsFingerprint,
   type MappingCreateDraft,
   type MappingCreatePlan,
   type SchemaEvidence,
@@ -20,6 +23,26 @@ type Props = {
   onConfirm: (plan: MappingCreatePlan) => void;
 };
 
+function emptyDraft(locals: { id: string }[]): MappingCreateDraft {
+  return {
+    name: "",
+    sourceQueryId: locals[0]?.id ?? "",
+    sourceColumns: [],
+    targetQueryId: locals[1]?.id ?? locals[0]?.id ?? "",
+    targetColumn: "",
+    restoreColumnsByQuery: {},
+  };
+}
+
+function draftLooksFilled(d: MappingCreateDraft): boolean {
+  return Boolean(
+    d.name.trim() ||
+      d.sourceColumns.length ||
+      d.targetColumn.trim() ||
+      Object.values(d.restoreColumnsByQuery).some((c) => c?.length),
+  );
+}
+
 export function MappingCreateWizard({
   open,
   project,
@@ -30,54 +53,99 @@ export function MappingCreateWizard({
     () => listLocalQueries(project.workspace),
     [project.workspace],
   );
+  const wsFp = useMemo(
+    () => workspaceQueryDefsFingerprint(project.workspace),
+    [project.workspace],
+  );
+
   const [step, setStep] = useState<Step>("keys");
-  const [draft, setDraft] = useState<MappingCreateDraft>({
-    name: "",
-    sourceQueryId: locals[0]?.id ?? "",
-    sourceColumns: [],
-    targetQueryId: locals[1]?.id ?? locals[0]?.id ?? "",
-    targetColumn: "",
-    restoreColumnsByQuery: {},
-  });
+  const [draft, setDraft] = useState<MappingCreateDraft>(() =>
+    emptyDraft(locals),
+  );
   const [schemas, setSchemas] = useState<SchemaEvidence[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [plan, setPlan] = useState<MappingCreatePlan | null>(null);
 
+  /** Bumped to drop in-flight describe results. */
+  const describeGen = useRef(0);
+  const sessionWsFp = useRef<string | null>(null);
+  const wasOpen = useRef(false);
+
+  // New session only when the dialog opens (not on every workspace change).
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      describeGen.current += 1;
+      setStep("keys");
+      setError(null);
+      setNotice(null);
+      setPlan(null);
+      setSchemas([]);
+      setBusy(false);
+      setDraft(emptyDraft(listLocalQueries(project.workspace)));
+      sessionWsFp.current = workspaceQueryDefsFingerprint(project.workspace);
+    }
+    if (!open && wasOpen.current) {
+      describeGen.current += 1;
+      setBusy(false);
+    }
+    wasOpen.current = open;
+  }, [open, project.workspace]);
+
+  // Workspace defs changed while open: keep draft, invalidate evidence/plan.
   useEffect(() => {
     if (!open) return;
-    setStep("keys");
-    setError(null);
-    setPlan(null);
-    setDraft({
-      name: "",
-      sourceQueryId: locals[0]?.id ?? "",
-      sourceColumns: [],
-      targetQueryId: locals[1]?.id ?? locals[0]?.id ?? "",
-      targetColumn: "",
-      restoreColumnsByQuery: {},
-    });
+    if (sessionWsFp.current == null) {
+      sessionWsFp.current = wsFp;
+      return;
+    }
+    if (sessionWsFp.current === wsFp) return;
+    sessionWsFp.current = wsFp;
+    describeGen.current += 1;
     setSchemas([]);
-  }, [open, locals]);
+    setPlan(null);
+    setBusy(false);
+    setNotice(
+      "Workspace queries changed — draft kept; re-describe schemas before continuing.",
+    );
+    setError(null);
+    setStep("keys");
+  }, [open, wsFp]);
 
   if (!open) return null;
+
+  function invalidateDescribe() {
+    describeGen.current += 1;
+    setSchemas([]);
+    setPlan(null);
+  }
+
+  function requestClose() {
+    if (draftLooksFilled(draft)) {
+      const ok = window.confirm("Discard this mapping draft?");
+      if (!ok) return;
+    }
+    describeGen.current += 1;
+    setBusy(false);
+    onCancel();
+  }
 
   async function describePair(
     sourceId: string,
     targetId: string,
-  ): Promise<SchemaEvidence[]> {
+    gen: number,
+  ): Promise<SchemaEvidence[] | null> {
     const pref = projectRefContext(project);
     const ids = [...new Set([sourceId, targetId].filter(Boolean))];
     const out: SchemaEvidence[] = [];
     for (const id of ids) {
+      if (describeGen.current !== gen) return null;
       const q = project.workspace.queries.find((x) => x.id === id);
       if (!q) throw new Error(`Query “${id}” missing.`);
       const ws = {
         ...project.workspace,
         focus_query_id: id,
-        queries: project.workspace.queries.map((x) =>
-          x.id === id ? x : x,
-        ),
       };
       const full = await describeWorkspace(
         ws,
@@ -85,6 +153,7 @@ export function MappingCreateWizard({
         project.sources,
         pref,
       );
+      if (describeGen.current !== gen) return null;
       const outputColumns = full.columns.map((c) => c.name);
       let upstreamColumns: string[] | null = null;
       const last = q.steps[q.steps.length - 1];
@@ -106,30 +175,53 @@ export function MappingCreateWizard({
           project.sources,
           pref,
         );
+        if (describeGen.current !== gen) return null;
         upstreamColumns = up.columns.map((c) => c.name);
       }
       out.push(
-        makeSchemaEvidence({ queryId: id, outputColumns, upstreamColumns }),
+        makeSchemaEvidence({
+          workspace: project.workspace,
+          queryId: id,
+          outputColumns,
+          upstreamColumns,
+        }),
       );
     }
+    if (describeGen.current !== gen) return null;
     return out;
   }
 
   async function goFields() {
     setError(null);
+    setNotice(null);
+    if (!draft.name.trim()) {
+      setError("Name the mapping.");
+      return;
+    }
+    if (!draft.sourceQueryId || !draft.targetQueryId) {
+      setError("Pick source and target queries.");
+      return;
+    }
+    const gen = ++describeGen.current;
+    const sourceId = draft.sourceQueryId;
+    const targetId = draft.targetQueryId;
     setBusy(true);
     try {
-      if (!draft.name.trim()) throw new Error("Name the mapping.");
-      if (!draft.sourceQueryId || !draft.targetQueryId) {
-        throw new Error("Pick source and target queries.");
+      const ev = await describePair(sourceId, targetId, gen);
+      if (ev == null || describeGen.current !== gen) return;
+      if (
+        draft.sourceQueryId !== sourceId ||
+        draft.targetQueryId !== targetId
+      ) {
+        return;
       }
-      const ev = await describePair(draft.sourceQueryId, draft.targetQueryId);
       setSchemas(ev);
       setStep("fields");
     } catch (e) {
+      if (describeGen.current !== gen) return;
       setError(typeof e === "string" ? e : String(e));
     } finally {
-      setBusy(false);
+      if (describeGen.current === gen) setBusy(false);
     }
   }
 
@@ -139,21 +231,10 @@ export function MappingCreateWizard({
       setError("Pick source key(s) and target column.");
       return;
     }
-    // Keys restored via last-Fields are not yet on live output — treat planned
-    // output as current+restore for validation (patch still uses upstream).
-    const schemasForPlan = schemas.map((s) => {
-      const restore = draft.restoreColumnsByQuery[s.queryId] ?? [];
-      if (!restore.length) return s;
-      return makeSchemaEvidence({
-        queryId: s.queryId,
-        outputColumns: [...new Set([...s.outputColumns, ...restore])],
-        upstreamColumns: s.upstreamColumns,
-      });
-    });
     const built = buildMappingCreatePlan({
       project,
       draft,
-      schemas: schemasForPlan,
+      schemas,
     });
     if (!built.ok) {
       setError(built.error);
@@ -163,15 +244,69 @@ export function MappingCreateWizard({
     setStep("review");
   }
 
+  async function confirmCreate(current: MappingCreatePlan) {
+    setError(null);
+    setNotice(null);
+    const gen = ++describeGen.current;
+    const sourceId = current.authoringContext.source_query_id;
+    const targetId = current.authoringContext.target_query_id;
+    setBusy(true);
+    try {
+      const live = await describePair(sourceId, targetId, gen);
+      if (live == null || describeGen.current !== gen) return;
+      const match = assertLiveSchemaMatchesPlan(current, live);
+      if (!match.ok) {
+        setError(match.error);
+        setPlan(null);
+        setSchemas([]);
+        setStep("keys");
+        setNotice("Schema could not be re-confirmed — draft kept.");
+        return;
+      }
+      // Definitions must still match what the live describe just bound.
+      for (const ev of live) {
+        for (const [id, fp] of Object.entries(ev.basisQueryDefs)) {
+          if (current.expectedQueryDefs[id] !== fp) {
+            setError(
+              `Query definitions changed during schema check — refresh and confirm again.`,
+            );
+            setPlan(null);
+            setStep("keys");
+            return;
+          }
+        }
+      }
+      onConfirm(current);
+    } catch (e) {
+      if (describeGen.current !== gen) return;
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      if (describeGen.current === gen) setBusy(false);
+    }
+  }
+
   const sourceEv = schemas.find((s) => s.queryId === draft.sourceQueryId);
   const targetEv = schemas.find((s) => s.queryId === draft.targetQueryId);
   const sourceQ = project.workspace.queries.find(
     (q) => q.id === draft.sourceQueryId,
   );
+  const targetQ = project.workspace.queries.find(
+    (q) => q.id === draft.targetQueryId,
+  );
   const excludedSource =
     sourceQ && sourceEv?.upstreamColumns
       ? excludedByLastFields(sourceQ, sourceEv.upstreamColumns)
       : [];
+  const excludedTarget =
+    targetQ &&
+    targetEv?.upstreamColumns &&
+    draft.targetQueryId !== draft.sourceQueryId
+      ? excludedByLastFields(targetQ, targetEv.upstreamColumns)
+      : targetQ &&
+          targetEv?.upstreamColumns &&
+          draft.targetQueryId === draft.sourceQueryId
+        ? excludedSource
+        : [];
 
   function toggleRestore(queryId: string, col: string) {
     setDraft((d) => {
@@ -206,6 +341,41 @@ export function MappingCreateWizard({
     });
   }
 
+  function renderExcluded(
+    title: string,
+    queryId: string,
+    cols: string[],
+  ) {
+    if (!cols.length) return null;
+    return (
+      <div>
+        <p className="mb-1 text-[11px] uppercase text-slate-500">{title}</p>
+        <ul className="space-y-1">
+          {cols.map((c) => {
+            const on = (
+              draft.restoreColumnsByQuery[queryId] ?? []
+            ).some((x) => x.toLowerCase() === c.toLowerCase());
+            return (
+              <li
+                key={`${queryId}:${c}`}
+                className="flex items-center justify-between gap-2"
+              >
+                <span className="font-mono text-slate-300">{c}</span>
+                <button
+                  type="button"
+                  className="rounded border border-amber-800/60 px-2 py-0.5 text-[11px] text-amber-100 hover:bg-amber-950/40"
+                  onClick={() => toggleRestore(queryId, c)}
+                >
+                  {on ? "Remove" : "Include"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div
@@ -224,12 +394,17 @@ export function MappingCreateWizard({
           <button
             type="button"
             className="text-slate-500 hover:text-slate-300"
-            onClick={onCancel}
+            onClick={requestClose}
           >
             ✕
           </button>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-[13px] text-slate-300">
+          {notice && (
+            <p className="mb-3 rounded border border-amber-900/50 bg-amber-950/30 px-2 py-1.5 text-amber-100">
+              {notice}
+            </p>
+          )}
           {error && (
             <p className="mb-3 rounded border border-rose-900/50 bg-rose-950/40 px-2 py-1.5 text-rose-200">
               {error}
@@ -242,8 +417,9 @@ export function MappingCreateWizard({
                   Name
                 </span>
                 <input
-                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-100"
+                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-100 disabled:opacity-50"
                   value={draft.name}
+                  disabled={busy}
                   onChange={(e) =>
                     setDraft((d) => ({ ...d, name: e.target.value }))
                   }
@@ -255,16 +431,20 @@ export function MappingCreateWizard({
                   Source data
                 </span>
                 <select
-                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5"
+                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 disabled:opacity-50"
                   value={draft.sourceQueryId}
-                  onChange={(e) =>
+                  disabled={busy}
+                  onChange={(e) => {
+                    invalidateDescribe();
                     setDraft((d) => ({
                       ...d,
                       sourceQueryId: e.target.value,
                       sourceColumns: [],
                       restoreColumnsByQuery: {},
-                    }))
-                  }
+                      targetColumn:
+                        d.targetQueryId === e.target.value ? "" : d.targetColumn,
+                    }));
+                  }}
                 >
                   {locals.map((q) => (
                     <option key={q.id} value={q.id}>
@@ -282,15 +462,17 @@ export function MappingCreateWizard({
                   Target data
                 </span>
                 <select
-                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5"
+                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 disabled:opacity-50"
                   value={draft.targetQueryId}
-                  onChange={(e) =>
+                  disabled={busy}
+                  onChange={(e) => {
+                    invalidateDescribe();
                     setDraft((d) => ({
                       ...d,
                       targetQueryId: e.target.value,
                       targetColumn: "",
-                    }))
-                  }
+                    }));
+                  }}
                 >
                   {locals.map((q) => (
                     <option key={q.id} value={q.id}>
@@ -308,24 +490,16 @@ export function MappingCreateWizard({
                   Source key (order = From)
                 </p>
                 <div className="flex flex-wrap gap-1.5">
-                  {(sourceEv.upstreamColumns &&
-                  draft.restoreColumnsByQuery[draft.sourceQueryId]?.length
-                    ? [
-                        ...new Set([
-                          ...sourceEv.outputColumns,
-                          ...(draft.restoreColumnsByQuery[
-                            draft.sourceQueryId
-                          ] ?? []),
-                        ]),
-                      ]
-                    : sourceEv.outputColumns
+                  {selectableOutputColumns(
+                    sourceEv,
+                    draft.restoreColumnsByQuery[draft.sourceQueryId],
                   ).map((c) => {
                     const on = draft.sourceColumns.some(
                       (x) => x.toLowerCase() === c.toLowerCase(),
                     );
                     return (
                       <button
-                        key={c}
+                        key={`src:${c}`}
                         type="button"
                         onClick={() => toggleSourceCol(c)}
                         className={
@@ -345,9 +519,12 @@ export function MappingCreateWizard({
                   Target value
                 </p>
                 <div className="flex flex-wrap gap-1.5">
-                  {targetEv.outputColumns.map((c) => (
+                  {selectableOutputColumns(
+                    targetEv,
+                    draft.restoreColumnsByQuery[draft.targetQueryId],
+                  ).map((c) => (
                     <button
-                      key={c}
+                      key={`tgt:${c}`}
                       type="button"
                       onClick={() =>
                         setDraft((d) => ({ ...d, targetColumn: c }))
@@ -363,38 +540,19 @@ export function MappingCreateWizard({
                   ))}
                 </div>
               </div>
-              {excludedSource.length > 0 && (
-                <div>
-                  <p className="mb-1 text-[11px] uppercase text-slate-500">
-                    Excluded by last Fields
-                  </p>
-                  <ul className="space-y-1">
-                    {excludedSource.map((c) => {
-                      const on = (
-                        draft.restoreColumnsByQuery[draft.sourceQueryId] ??
-                        []
-                      ).some((x) => x.toLowerCase() === c.toLowerCase());
-                      return (
-                        <li
-                          key={c}
-                          className="flex items-center justify-between gap-2"
-                        >
-                          <span className="font-mono text-slate-300">{c}</span>
-                          <button
-                            type="button"
-                            className="rounded border border-amber-800/60 px-2 py-0.5 text-[11px] text-amber-100 hover:bg-amber-950/40"
-                            onClick={() =>
-                              toggleRestore(draft.sourceQueryId, c)
-                            }
-                          >
-                            {on ? "Remove" : "Include"}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
+              {renderExcluded(
+                draft.sourceQueryId === draft.targetQueryId
+                  ? "Excluded by last Fields"
+                  : "Source — excluded by last Fields",
+                draft.sourceQueryId,
+                excludedSource,
               )}
+              {draft.sourceQueryId !== draft.targetQueryId &&
+                renderExcluded(
+                  "Target — excluded by last Fields",
+                  draft.targetQueryId,
+                  excludedTarget,
+                )}
             </div>
           )}
           {step === "review" && plan && (
@@ -444,7 +602,8 @@ export function MappingCreateWizard({
           <button
             type="button"
             className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500"
-            onClick={onCancel}
+            onClick={requestClose}
+            disabled={busy}
           >
             Cancel
           </button>
@@ -463,13 +622,15 @@ export function MappingCreateWizard({
               <button
                 type="button"
                 className="rounded border border-slate-700 px-3 py-1.5 text-slate-300"
+                disabled={busy}
                 onClick={() => setStep("keys")}
               >
                 Back
               </button>
               <button
                 type="button"
-                className="rounded bg-teal-600 px-3 py-1.5 font-medium text-slate-950"
+                className="rounded bg-teal-600 px-3 py-1.5 font-medium text-slate-950 disabled:opacity-40"
+                disabled={busy}
                 onClick={goReview}
               >
                 Next
@@ -481,18 +642,22 @@ export function MappingCreateWizard({
               <button
                 type="button"
                 className="rounded border border-slate-700 px-3 py-1.5 text-slate-300"
+                disabled={busy}
                 onClick={() => setStep("fields")}
               >
                 Back
               </button>
               <button
                 type="button"
-                className="rounded bg-teal-600 px-3 py-1.5 font-medium text-slate-950"
-                onClick={() => onConfirm(plan)}
+                className="rounded bg-teal-600 px-3 py-1.5 font-medium text-slate-950 disabled:opacity-40"
+                disabled={busy}
+                onClick={() => void confirmCreate(plan)}
               >
-                {plan.patches.length
-                  ? "Update Fields and create map"
-                  : "Create and open"}
+                {busy
+                  ? "Confirming schema…"
+                  : plan.patches.length
+                    ? "Update Fields and create map"
+                    : "Create and open"}
               </button>
             </>
           )}

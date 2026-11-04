@@ -5,13 +5,13 @@
 import { emptyKeyMap } from "../../lib/keyMap";
 import { slugify, targetKey } from "../../types/pipeline";
 import type {
-  KeyMapAuthoringContext,
   KeyMapDef,
   Project,
   QueryDef,
   TransformationStep,
   Workspace,
 } from "../../types/pipeline";
+import type { KeyMapAuthoringContext } from "../../types/generated/KeyMapAuthoringContext";
 import { upsertKeyMapIntoProject } from "../keyMap";
 import type {
   LastFieldsRestoreProbe,
@@ -35,6 +35,66 @@ export function listLocalQueries(workspace: Workspace): QueryDef[] {
 
 export function isLocalQueryId(id: string): boolean {
   return Boolean(id.trim()) && !id.startsWith("xref:");
+}
+
+/**
+ * Direct upstream query ids via FromQuery / Join right / Append / SqlModel
+ * `{{query:id}}`. Supported dependency graph only — not a full lineage compiler.
+ */
+export function directUpstreamQueryIds(query: QueryDef): string[] {
+  const out: string[] = [];
+  for (const s of query.steps) {
+    if (s.type === "FromQuery") {
+      out.push(targetKey(s.payload.query_id));
+    } else if (s.type === "Join") {
+      out.push(targetKey(s.payload.right_query_id));
+    } else if (s.type === "Append") {
+      for (const t of s.payload.other_query_ids) out.push(targetKey(t));
+    } else if (s.type === "SqlModel") {
+      for (const m of s.payload.raw_sql.matchAll(SQL_QUERY_PLACEHOLDER)) {
+        if (m[1]) out.push(m[1]);
+      }
+    }
+  }
+  return [...new Set(out.filter(Boolean))];
+}
+
+/**
+ * Fingerprints for `rootQueryId` and its transitive known upstreams.
+ * Missing upstream ids → refuse (conservative outside supported graph).
+ */
+export function basisQueryFingerprints(
+  workspace: Workspace,
+  rootQueryId: string,
+): { ok: true; defs: Record<string, string> } | { ok: false; error: string } {
+  const byId = new Map(workspace.queries.map((q) => [q.id, q]));
+  if (!byId.has(rootQueryId)) {
+    return { ok: false, error: `Query “${rootQueryId}” is missing.` };
+  }
+  const defs: Record<string, string> = {};
+  const stack = [rootQueryId];
+  const seen = new Set<string>();
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const q = byId.get(id);
+    if (!q) {
+      return {
+        ok: false,
+        error: `Upstream query “${id}” is missing — cannot confirm schema basis.`,
+      };
+    }
+    if (String(id).startsWith("xref:")) {
+      return {
+        ok: false,
+        error: `External upstream “${id}” is outside the supported create graph.`,
+      };
+    }
+    defs[id] = fingerprintSteps(q.steps);
+    for (const up of directUpstreamQueryIds(q)) stack.push(up);
+  }
+  return { ok: true, defs };
 }
 
 /**
@@ -187,6 +247,26 @@ function uniqueOrdered(cols: string[]): string[] {
   return out;
 }
 
+/** Observed output ∪ planned restores — UI selection helper only. */
+export function selectableOutputColumns(
+  evidence: SchemaEvidence,
+  restoreColumns: string[] | undefined,
+): string[] {
+  return uniqueOrdered([
+    ...evidence.outputColumns,
+    ...(restoreColumns ?? []),
+  ]);
+}
+
+/** Planned output after applying a Fields patch for this query (if any). */
+export function plannedOutputColumns(
+  evidence: SchemaEvidence,
+  patches: QueryFieldsPatch[],
+): string[] {
+  const patch = patches.find((p) => p.queryId === evidence.queryId);
+  return patch ? [...patch.after] : [...evidence.outputColumns];
+}
+
 export function validateDraftSelection(args: {
   workspace: Workspace;
   draft: MappingCreateDraft;
@@ -229,7 +309,7 @@ export function validateDraftSelection(args: {
     ) {
       return {
         ok: false,
-        error: `Source column “${c}” is not in the current output schema.`,
+        error: `Source column “${c}” is not available after planned Fields changes.`,
       };
     }
   }
@@ -240,7 +320,7 @@ export function validateDraftSelection(args: {
   ) {
     return {
       ok: false,
-      error: `Target column “${toCol}” is not in the current output schema.`,
+      error: `Target column “${toCol}” is not available after planned Fields changes.`,
     };
   }
   return { ok: true };
@@ -256,14 +336,36 @@ function newMapId(name: string, existing: Set<string>): string {
   return `${base}_${Date.now().toString(36)}`;
 }
 
+function assertEvidenceBasisFresh(
+  workspace: Workspace,
+  evidence: SchemaEvidence,
+): { ok: true } | { ok: false; error: string } {
+  const live = basisQueryFingerprints(workspace, evidence.queryId);
+  if (!live.ok) return live;
+  const ids = new Set([
+    ...Object.keys(live.defs),
+    ...Object.keys(evidence.basisQueryDefs),
+  ]);
+  for (const id of ids) {
+    if (live.defs[id] !== evidence.basisQueryDefs[id]) {
+      const q = workspace.queries.find((x) => x.id === id);
+      return {
+        ok: false,
+        error: `Query “${q?.name ?? id}” (schema basis) changed since describe — refresh and confirm again.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 /**
- * Build a review plan from draft + schema evidence.
- * Does not mutate Project.
+ * Build a review plan from draft + **observed** schema evidence.
+ * Does not mutate Project. Computes patches, then validates From/To on planned output.
  */
 export function buildMappingCreatePlan(args: {
   project: Project;
   draft: MappingCreateDraft;
-  /** Output (+ optional upstream) schemas captured for review. */
+  /** Observed describe evidence (do not pre-merge restores into outputColumns). */
   schemas: SchemaEvidence[];
 }): { ok: true; plan: MappingCreatePlan } | { ok: false; error: string } {
   const { project, draft } = args;
@@ -274,13 +376,10 @@ export function buildMappingCreatePlan(args: {
   if (!srcEv || !tgtEv) {
     return { ok: false, error: "Schema evidence incomplete — re-describe queries." };
   }
-  const sel = validateDraftSelection({
-    workspace: project.workspace,
-    draft: { ...draft, sourceColumns: sourceCols, targetColumn: targetCol },
-    sourceOutputColumns: srcEv.outputColumns,
-    targetOutputColumns: tgtEv.outputColumns,
-  });
-  if (!sel.ok) return sel;
+  for (const ev of args.schemas) {
+    const basis = assertEvidenceBasisFresh(project.workspace, ev);
+    if (!basis.ok) return basis;
+  }
 
   const patches: QueryFieldsPatch[] = [];
   const patchByQuery = new Map<string, string[]>();
@@ -310,6 +409,16 @@ export function buildMappingCreatePlan(args: {
     patches.push(built.patch);
   }
 
+  const plannedSource = plannedOutputColumns(srcEv, patches);
+  const plannedTarget = plannedOutputColumns(tgtEv, patches);
+  const sel = validateDraftSelection({
+    workspace: project.workspace,
+    draft: { ...draft, sourceColumns: sourceCols, targetColumn: targetCol },
+    sourceOutputColumns: plannedSource,
+    targetOutputColumns: plannedTarget,
+  });
+  if (!sel.ok) return sel;
+
   const existingIds = new Set(
     (project.workspace.key_maps ?? []).map((m) => m.id),
   );
@@ -333,12 +442,14 @@ export function buildMappingCreatePlan(args: {
   };
 
   const expectedQueryDefs: Record<string, string> = {};
-  const touched = new Set<string>([
+  for (const ev of args.schemas) {
+    Object.assign(expectedQueryDefs, ev.basisQueryDefs);
+  }
+  for (const id of [
     draft.sourceQueryId,
     draft.targetQueryId,
     ...patches.map((p) => p.queryId),
-  ]);
-  for (const id of touched) {
+  ]) {
     const q = project.workspace.queries.find((x) => x.id === id);
     if (!q) return { ok: false, error: `Query “${id}” disappeared.` };
     expectedQueryDefs[id] = fingerprintSteps(q.steps);
@@ -402,6 +513,40 @@ function applyPatchToQuery(
 }
 
 /**
+ * Compare freshly described evidence digests to the plan (live schema gate).
+ * Does not mutate the plan. Call before dispatch after a new describe.
+ */
+export function assertLiveSchemaMatchesPlan(
+  plan: MappingCreatePlan,
+  live: SchemaEvidence[],
+): { ok: true } | { ok: false; error: string } {
+  for (const ev of plan.schemaEvidence) {
+    const cur = live.find((s) => s.queryId === ev.queryId);
+    if (!cur) {
+      return {
+        ok: false,
+        error: `Schema for “${ev.queryId}” could not be re-confirmed — describe again.`,
+      };
+    }
+    if (cur.digest !== ev.digest) {
+      return {
+        ok: false,
+        error: `Schema for “${ev.queryId}” changed since review — refresh and confirm again.`,
+      };
+    }
+    for (const [id, fp] of Object.entries(ev.basisQueryDefs)) {
+      if (cur.basisQueryDefs[id] !== fp) {
+        return {
+          ok: false,
+          error: `Schema basis for “${ev.queryId}” drifted during re-describe — refresh and confirm again.`,
+        };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/**
  * Freshness + identity checks against the live project (before fold).
  */
 export function validateMappingCreatePlan(
@@ -426,6 +571,10 @@ export function validateMappingCreatePlan(
       };
     }
   }
+  for (const ev of plan.schemaEvidence) {
+    const basis = assertEvidenceBasisFresh(project.workspace, ev);
+    if (!basis.ok) return basis;
+  }
   for (const patch of plan.patches) {
     const q = project.workspace.queries.find((x) => x.id === patch.queryId);
     const ev = plan.schemaEvidence.find((s) => s.queryId === patch.queryId);
@@ -448,30 +597,35 @@ export function validateMappingCreatePlan(
       };
     }
   }
+  const srcEv = plan.schemaEvidence.find(
+    (s) => s.queryId === plan.authoringContext.source_query_id,
+  );
+  const tgtEv = plan.schemaEvidence.find(
+    (s) => s.queryId === plan.authoringContext.target_query_id,
+  );
+  if (!srcEv || !tgtEv) {
+    return { ok: false, error: "Schema evidence incomplete on plan." };
+  }
+  const plannedSource = plannedOutputColumns(srcEv, plan.patches);
+  const plannedTarget = plannedOutputColumns(tgtEv, plan.patches);
   for (const col of plan.authoringContext.source_columns) {
-    const ev = plan.schemaEvidence.find(
-      (s) => s.queryId === plan.authoringContext.source_query_id,
-    );
-    if (
-      !ev?.outputColumns.some((c) => c.toLowerCase() === col.toLowerCase()) &&
-      !plan.patches.some(
-        (p) =>
-          p.queryId === plan.authoringContext.source_query_id &&
-          p.after.some((c) => c.toLowerCase() === col.toLowerCase()),
-      )
-    ) {
-      // After patches, output should include restored cols — check planned after.
-      const patched = plan.patches.find(
-        (p) => p.queryId === plan.authoringContext.source_query_id,
-      );
-      const cols = patched?.after ?? ev?.outputColumns ?? [];
-      if (!cols.some((c) => c.toLowerCase() === col.toLowerCase())) {
-        return {
-          ok: false,
-          error: `Source key “${col}” is not available after planned Fields changes.`,
-        };
-      }
+    if (!plannedSource.some((c) => c.toLowerCase() === col.toLowerCase())) {
+      return {
+        ok: false,
+        error: `Source key “${col}” is not available after planned Fields changes.`,
+      };
     }
+  }
+  if (
+    !plannedTarget.some(
+      (c) =>
+        c.toLowerCase() === plan.authoringContext.target_column.toLowerCase(),
+    )
+  ) {
+    return {
+      ok: false,
+      error: `Target column “${plan.authoringContext.target_column}” is not available after planned Fields changes.`,
+    };
   }
   return { ok: true };
 }
@@ -560,10 +714,15 @@ export function excludedByLastFields(
 }
 
 export function makeSchemaEvidence(args: {
+  workspace: Workspace;
   queryId: string;
   outputColumns: string[];
   upstreamColumns: string[] | null;
 }): SchemaEvidence {
+  const basis = basisQueryFingerprints(args.workspace, args.queryId);
+  if (!basis.ok) {
+    throw new Error(basis.error);
+  }
   return {
     queryId: args.queryId,
     outputColumns: args.outputColumns,
@@ -572,5 +731,15 @@ export function makeSchemaEvidence(args: {
       ...args.outputColumns,
       ...(args.upstreamColumns ?? []).map((c) => `up:${c}`),
     ]),
+    basisQueryDefs: basis.defs,
   };
+}
+
+/** Stable fingerprint of local query definitions (wizard workspace-drift detect). */
+export function workspaceQueryDefsFingerprint(workspace: Workspace): string {
+  return JSON.stringify(
+    [...workspace.queries]
+      .map((q) => [q.id, fingerprintSteps(q.steps)] as const)
+      .sort((a, b) => a[0].localeCompare(b[0])),
+  );
 }

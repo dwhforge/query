@@ -12,9 +12,18 @@
 - Thin wizard → existing KeyMap editor (no WH Save on create)
 - Explorer: **Create from data** (◇) next to blank **New mapping** (+)
 
+## Review hardening (same slice)
+
+- Schema evidence binds to query + known upstream fingerprints; commit refuses upstream drift
+- Evidence stays observed; builder computes planned output for From/To
+- Live re-describe + digest check before dispatch; describe generation guard in wizard
+- Symmetric target Fields restore; workspace change keeps draft and invalidates evidence
+- `KeyMapAuthoringContext` generated via ts-rs (`npm run types:generate`)
+
 ## Commands run
 
 ```bash
+npm run types:generate                   # KeyMapAuthoringContext.ts
 npx tsc --noEmit                         # exit 0
 npm run test:unit                        # 12 files ok (incl. mappingCreate)
 cargo test -p dwh-pipeline authoring_context  # 2 passed
@@ -26,6 +35,7 @@ cargo test -p dwh-pipeline authoring_context  # 2 passed
 - No post-commit undo
 - Seed storage only; create does not Apply / Join / Check / Lens / export / disk-save
 - Older app builds may drop `authoring_context` on re-save (accepted in ADR-0034)
+- Full React wizard→reducer→editor path not automated (service + guards covered in unit tests)
 
 ## OpenSpec
 

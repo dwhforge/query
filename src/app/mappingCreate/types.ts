@@ -1,10 +1,8 @@
 import type { KeyMapDirtyDelta } from "../../lib/bridge";
-import type {
-  KeyMapAuthoringContext,
-  KeyMapDef,
-  QueryDef,
-  TransformationStep,
-} from "../../types/pipeline";
+import type { KeyMapAuthoringContext } from "../../types/generated/KeyMapAuthoringContext";
+import type { KeyMapDef, QueryDef, TransformationStep } from "../../types/pipeline";
+
+export type { KeyMapAuthoringContext };
 
 /** Session-only wizard draft — never serialized into Project. */
 export type MappingCreateDraft = {
@@ -17,13 +15,19 @@ export type MappingCreateDraft = {
   restoreColumnsByQuery: Record<string, string[]>;
 };
 
+/**
+ * Observed schema from describe — never mutate with planned restores.
+ * `basisQueryDefs` fingerprints the described query and known upstream deps.
+ */
 export type SchemaEvidence = {
   queryId: string;
-  /** Live output columns at review (describe). */
+  /** Live output columns at describe time. */
   outputColumns: string[];
   /** Columns immediately before last SelectColumns when last step is Fields. */
   upstreamColumns: string[] | null;
   digest: string;
+  /** Query id → steps fingerprint for this evidence's dependency basis. */
+  basisQueryDefs: Record<string, string>;
 };
 
 export type QueryFieldsPatch = {
@@ -38,7 +42,10 @@ export type MappingCreatePlan = {
   projectId: string;
   map: KeyMapDef;
   authoringContext: KeyMapAuthoringContext;
-  /** Expected query step fingerprints at review time. */
+  /**
+   * Expected query step fingerprints at review (touched queries ∪ evidence basis).
+   * Checked again at commit.
+   */
   expectedQueryDefs: Record<string, string>;
   schemaEvidence: SchemaEvidence[];
   patches: QueryFieldsPatch[];

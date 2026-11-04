@@ -2,6 +2,7 @@ use crate::connection::ConnectionDef;
 use crate::derive_ops::{DeriveMode, DeriveOp, SqlDialectTag};
 use crate::dialect::QueryExecution;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 fn default_pg_schema() -> String {
     "public".into()
@@ -388,7 +389,8 @@ fn default_to_col() -> String {
 /// User intent for how a KeyMap was authored from workspace queries
 /// ([ADR-0034](../../../docs/adr/0034-keymap-authoring-context.md)).
 /// Not ownership of a Join / MappingCheck — Apply consumers are computed separately.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+/// Wire type is generated to TypeScript via ts-rs (`KeyMapAuthoringContext.ts`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, TS)]
 pub struct KeyMapAuthoringContext {
     pub source_query_id: String,
     /// Ordered From columns on the source query (composite arity ≥ 1).

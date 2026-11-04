@@ -202,14 +202,9 @@ export type KeyMapStorage =
 /** Effectivity mode ([ADR-0028](../../docs/adr/0028-keymap-stewardship-shapes.md)). */
 export type KeyMapTimeMode = "none" | "range_scd";
 
-/** Creation intent from query-based mapping wizard ([ADR-0034]). */
-export interface KeyMapAuthoringContext {
-  source_query_id: string;
-  /** Ordered From columns on the source query. */
-  source_columns: string[];
-  target_query_id: string;
-  target_column: string;
-}
+/** Creation intent from query-based mapping wizard ([ADR-0034]) — generated from Rust. */
+import type { KeyMapAuthoringContext } from "./generated/KeyMapAuthoringContext";
+export type { KeyMapAuthoringContext };
 
 /** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034). */
 export interface KeyMapDef {

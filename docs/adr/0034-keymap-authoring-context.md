@@ -19,7 +19,7 @@ Creating a KeyMap from two local workspace queries needs a durable, typed record
 
 ## Consequences
 
-- Rust remains SoT; TypeScript mirrors the shape for UI/plan helpers.
+- Rust remains SoT; `KeyMapAuthoringContext` is exported via ts-rs into `src/types/generated/` and re-exported from `pipeline.ts` (do not hand-copy the shape).
 - Wizard is session-only until commit; Cancel leaves Project unchanged.
 - Post-commit undo is out of scope for the first slice.
 

@@ -22,10 +22,16 @@ import {
   type MappingCheck,
 } from "../../lib/mappingCheck";
 import {
+  findApplyKeyMapIdForJoin,
+  fromPartsEff,
+} from "../../lib/keyMap";
+import type { KeyMapDirtyBaseline, KeyMapDirtyDelta } from "../../lib/bridge";
+import {
   QUALITY_SAMPLE_COLUMN,
   type QualityCell,
 } from "../../lib/mappingQuality";
 import type { KeyMapDef, Project, QueryDef, Workspace } from "../../types/pipeline";
+import { targetKey } from "../../types/pipeline";
 import type { CheckRun } from "../../types/mappingCheck";
 
 export function resolveActiveMappingCheck(
@@ -52,7 +58,12 @@ export type NewCheckResult =
   | { ok: true; check: MappingCheck; note: string }
   | { ok: false; error: string };
 
-/** Host queries whose Join path ApplyKeyMap-references `mapId`. */
+/**
+ * Candidate Join hosts where ApplyKeyMap for `mapId` remaps a column that is
+ * an input to that Join's left_on (same integrity as findApplyKeyMapIdForJoin).
+ * Not a full cross-query right-side resolver — creation flow must still pick
+ * explicitly among candidates.
+ */
 export function findJoinHostsForMap(
   queries: QueryDef[],
   mapId: string,
@@ -62,6 +73,11 @@ export function findJoinHostsForMap(
   leftOn: string[];
   rightOn: string[];
 }> {
+  const workspace: Workspace = {
+    queries,
+    focus_query_id: queries[0]?.id ?? "",
+    key_maps: [],
+  };
   const out: Array<{
     host: QueryDef;
     joinStepIndex: number;
@@ -72,24 +88,15 @@ export function findJoinHostsForMap(
     for (let i = 0; i < q.steps.length; i++) {
       const s = q.steps[i];
       if (s?.type !== "Join") continue;
-      const before = q.steps.slice(0, i);
-      const wired = before.some(
-        (st) =>
-          st.type === "ApplyKeyMap" &&
-          (typeof st.payload.map_id === "string"
-            ? st.payload.map_id
-            : String(st.payload.map_id)) === mapId,
-      );
-      // Also accept ApplyKeyMap after Join (right-side / post-join remap).
-      const after = q.steps.slice(i + 1);
-      const wiredAfter = after.some(
-        (st) =>
-          st.type === "ApplyKeyMap" &&
-          (typeof st.payload.map_id === "string"
-            ? st.payload.map_id
-            : String(st.payload.map_id)) === mapId,
-      );
-      if (!wired && !wiredAfter) continue;
+      const bound = findApplyKeyMapIdForJoin(workspace, {
+        hostQueryId: q.id,
+        joinStepIndex: i,
+        rightQueryId: targetKey(s.payload.right_query_id),
+        leftOn: s.payload.left_on,
+        rightOn: s.payload.right_on,
+        probeSide: "left",
+      });
+      if (bound !== mapId) continue;
       out.push({
         host: q,
         joinStepIndex: i,
@@ -177,6 +184,10 @@ export function recordCheckRun(args: {
   check: MappingCheck;
   cells: OverviewCell[];
   totalPositions: number;
+  cellsIncomplete?: boolean;
+  groupCount?: number;
+  coveredPositions?: number;
+  unmappedPositions?: number;
 }): RecordCheckRunResult {
   const { project, check, cells, totalPositions } = args;
   const map = (project.workspace.key_maps ?? []).find((m) => m.id === check.map_id);
@@ -193,12 +204,24 @@ export function recordCheckRun(args: {
       samples: c.samples,
     })),
     totalPositions,
+    cellsIncomplete: args.cellsIncomplete,
+    groupCount: args.groupCount,
+    coveredPositions: args.coveredPositions,
+    unmappedPositions: args.unmappedPositions,
   });
   const prev = (project.mapping_check_runs ?? [])
     .filter((r) => r.check_id === check.id)
     .at(-1);
   const attr = prev ? attributeDelta(prev, run) : null;
-  const cellNote = prev ? summarizeCellDeltas(prev.cells, run.cells) : null;
+  // Truncated top-N cells must not invent zero for groups that fell out of budget.
+  const cellNote =
+    prev && !prev.cells_incomplete && !run.cells_incomplete
+      ? summarizeCellDeltas(prev.cells, run.cells)
+      : null;
+  const truncNote =
+    run.cells_incomplete && run.group_count != null
+      ? ` · top ${run.cells.length}/${run.group_count} groups`
+      : "";
   const deltaNote = prev
     ? `${deltaLabel(attr!)}${
         run.comparability.kind === "limited"
@@ -206,8 +229,8 @@ export function recordCheckRun(args: {
           : ""
       } · positions ${prev.total_positions} → ${run.total_positions}${
         cellNote ? ` · ${cellNote}` : ""
-      }`
-    : `CheckRun recorded · ${run.total_positions.toLocaleString()} positions`;
+      }${truncNote}`
+    : `CheckRun recorded · ${run.total_positions.toLocaleString()} positions${truncNote}`;
 
   const mapping_checks =
     check.id === "check_lab_quality"
@@ -335,14 +358,106 @@ export type ConfirmRemapResult =
   | {
       ok: true;
       nextMap: KeyMapDef;
-      /** Upserts for source Save — seed/ref may ignore and still sync Apply snapshots. */
-      dirtyDelta: {
-        upserts: KeyMapDef["entries"];
-        deletedFroms: string[];
-      };
+      /** Full-row upserts (attrs preserved) + baselines for source Save. */
+      dirtyDelta: KeyMapDirtyDelta;
       message: string;
     }
   | { ok: false; error: string };
+
+function entryFromKey(entry: KeyMapDef["entries"][number]): string {
+  return (fromPartsEff(entry)[0] ?? entry.from).trim();
+}
+
+/** Dirty delta for Confirm: preserve attrs; freeze baselines for concurrency. */
+export function dirtyDeltaFromFrozenRemap(
+  map: KeyMapDef,
+  changes: FrozenRemapPreview["changes"],
+  nextMap: KeyMapDef,
+): KeyMapDirtyDelta {
+  const editable = map.editable_columns ?? [];
+  const prevByFrom = new Map(
+    map.entries.map((e) => [entryFromKey(e), e] as const),
+  );
+  const nextByFrom = new Map(
+    nextMap.entries.map((e) => [entryFromKey(e), e] as const),
+  );
+  const upserts: KeyMapDef["entries"] = [];
+  const baselines: KeyMapDirtyBaseline[] = [];
+  for (const c of changes) {
+    const from = c.from.trim();
+    const next = nextByFrom.get(from);
+    const prev = prevByFrom.get(from);
+    if (next) {
+      upserts.push({ ...next });
+    } else {
+      upserts.push({
+        from,
+        to: c.to,
+        attrs: prev?.attrs ? { ...prev.attrs } : {},
+      });
+    }
+    if (prev) {
+      const attrs: Record<string, string | null> = {};
+      for (const col of editable) {
+        attrs[col] = prev.attrs?.[col] ?? null;
+      }
+      for (const [k, v] of Object.entries(prev.attrs ?? {})) {
+        attrs[k] = v;
+      }
+      baselines.push({
+        fromParts: fromPartsEff(prev),
+        existed: true,
+        to: prev.to,
+        attrs,
+      });
+    } else {
+      baselines.push({
+        fromParts: [from],
+        existed: false,
+        to: "",
+        attrs: {},
+      });
+    }
+  }
+  return { upserts, deletedFroms: [], baselines };
+}
+
+/** Merge Confirm delta into an open editor delta without dropping unrelated drafts. */
+export function mergeRemapDirtyIntoTab(
+  existing: KeyMapDirtyDelta | null | undefined,
+  remap: KeyMapDirtyDelta,
+): KeyMapDirtyDelta {
+  if (!existing || !dirtyDeltaHasLocalChanges(existing)) {
+    return remap;
+  }
+  const remapFroms = new Set(
+    remap.upserts.map((u) => entryFromKey(u)),
+  );
+  const upserts = [
+    ...existing.upserts.filter((u) => !remapFroms.has(entryFromKey(u))),
+    ...remap.upserts,
+  ];
+  const baselines = [
+    ...(existing.baselines ?? []).filter(
+      (b) => !remapFroms.has((b.fromParts[0] ?? "").trim()),
+    ),
+    ...(remap.baselines ?? []),
+  ];
+  return {
+    upserts,
+    deletedFroms: existing.deletedFroms,
+    deletedFromParts: existing.deletedFromParts,
+    baselines,
+  };
+}
+
+function dirtyDeltaHasLocalChanges(delta: KeyMapDirtyDelta): boolean {
+  return (
+    delta.upserts.length > 0 ||
+    delta.deletedFroms.length > 0 ||
+    (delta.deletedFromParts?.length ?? 0) > 0
+  );
+}
 
 /**
  * Build the next map revision for Confirm.
@@ -367,13 +482,7 @@ export function confirmFrozenCheckRemap(args: {
       };
     }
     const nextMap = applyFrozenRemapToMap(map!, frozen, workspace, check);
-    const dirtyDelta = {
-      upserts: frozen.changes.map((c) => ({
-        from: c.from,
-        to: c.to,
-      })),
-      deletedFroms: [] as string[],
-    };
+    const dirtyDelta = dirtyDeltaFromFrozenRemap(map!, frozen.changes, nextMap);
     return {
       ok: true,
       nextMap,
@@ -385,7 +494,10 @@ export function confirmFrozenCheckRemap(args: {
   }
 }
 
-/** Compare aggregate cells by stable group id (row\\0column\\0signal). */
+/**
+ * Compare aggregate cells by stable group id (row\\0column\\0signal).
+ * Only call for complete (non-top-N) runs — missing keys are treated as real zeros.
+ */
 export function summarizeCellDeltas(
   prevCells: Array<{
     row: string;
@@ -408,12 +520,13 @@ export function summarizeCellDeltas(
   }) => `${c.row}\0${c.column}\0${c.signal}`;
   const prev = new Map(prevCells.map((c) => [keyOf(c), c.positions]));
   const next = new Map(nextCells.map((c) => [keyOf(c), c.positions]));
-  const keys = new Set([...prev.keys(), ...next.keys()]);
+  // Intersection-only: do not invent 0 for a group absent from one side.
+  const keys = [...prev.keys()].filter((k) => next.has(k));
   const changes: Array<{ key: string; from: number; to: number; d: number }> =
     [];
   for (const k of keys) {
-    const a = prev.get(k) ?? 0;
-    const b = next.get(k) ?? 0;
+    const a = prev.get(k)!;
+    const b = next.get(k)!;
     if (a === b) continue;
     changes.push({ key: k, from: a, to: b, d: b - a });
   }

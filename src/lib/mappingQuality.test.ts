@@ -2,6 +2,7 @@ import {
   QUALITY_INSPECTION,
   axes,
   parseQualitySummary,
+  parseQualitySummaryDetailed,
   qualityInspectionQuery,
   stripQualityInspectionQueries,
   upsertQualityInspection,
@@ -149,4 +150,70 @@ assert(
 );
 assert(stripped.focus_query_id === "quality_joined", "strip restores lab join focus");
 rejects(() => qualityInspectionQuery(workspace, []));
+
+// Budgeted attrs summary: group_count + unmapped_positions drive KPI, not top-N cells.
+{
+  const budgeted: PreviewResult = {
+    columns: [
+      "source_family",
+      "target_family",
+      "source_grade",
+      "target_grade",
+      "decision_method",
+      "signal",
+      "positions",
+      "total_positions",
+      "revenue",
+      "sample_keys",
+      "group_count",
+      "unmapped_positions",
+    ].map((name) => ({ name, type: "VARCHAR" })),
+    rows: [
+      [
+        "A",
+        "B",
+        "—",
+        "—",
+        "rule",
+        "attribute_difference",
+        40,
+        1000,
+        0,
+        '["k1"]',
+        80,
+        300,
+      ],
+      [
+        "C",
+        "Unmapped",
+        "—",
+        "—",
+        "rule",
+        "unmapped",
+        10,
+        1000,
+        0,
+        '["k2"]',
+        80,
+        300,
+      ],
+    ],
+    sql: "",
+  };
+  const detailed = parseQualitySummaryDetailed(budgeted);
+  assert(detailed.incomplete === true, "top-N incomplete");
+  assert(detailed.groupCount === 80, "full group_count");
+  assert(detailed.totalPositions === 1000, "full total");
+  assert(detailed.coveredPositions === 50, "top-N covered");
+  assert(
+    detailed.unmappedPositions === 300,
+    "unmapped from stats — not sum of top-N unmapped cells (10)",
+  );
+  // Coverage KPI must use full unmapped, not cell-inferred 10 → fake 99%.
+  const coverage =
+    (100 * (detailed.totalPositions - detailed.unmappedPositions)) /
+    detailed.totalPositions;
+  assert(Math.abs(coverage - 70) < 0.01, `coverage ${coverage}% uses full unmapped`);
+}
+
 console.log("mappingQuality.test.ts: ok");

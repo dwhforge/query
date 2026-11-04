@@ -370,8 +370,20 @@ export function buildCheckRun(args: {
   map: KeyMapDef | undefined;
   cells: CheckAggregateCell[];
   totalPositions: number;
+  cellsIncomplete?: boolean;
+  groupCount?: number;
+  coveredPositions?: number;
+  unmappedPositions?: number;
 }): CheckRun {
   const input_revisions = collectInputRevisions(args.workspace, args.check);
+  let comparability = runComparability(input_revisions);
+  const cellsIncomplete = Boolean(args.cellsIncomplete);
+  if (cellsIncomplete && comparability.kind === "full") {
+    comparability = {
+      kind: "limited",
+      reason: `overview cells are top-${args.cells.length} of ${args.groupCount ?? "?"} groups — not a full matrix`,
+    };
+  }
   return {
     id: newCheckRunId(),
     check_id: args.check.id,
@@ -381,7 +393,11 @@ export function buildCheckRun(args: {
     check_definition_revision: checkDefinitionRevision(args.check),
     total_positions: args.totalPositions,
     cells: args.cells,
-    comparability: runComparability(input_revisions),
+    comparability,
+    cells_incomplete: cellsIncomplete,
+    group_count: args.groupCount,
+    covered_positions: args.coveredPositions,
+    unmapped_positions: args.unmappedPositions,
   };
 }
 
@@ -653,7 +669,8 @@ agg AS (
 ),
 stats AS (
   SELECT COUNT(*)::BIGINT AS group_count,
-         COALESCE(SUM(positions), 0)::BIGINT AS total_positions
+         COALESCE(SUM(positions), 0)::BIGINT AS total_positions,
+         COALESCE(SUM(CASE WHEN signal = 'unmapped' THEN positions ELSE 0 END), 0)::BIGINT AS unmapped_positions
   FROM agg
 ),
 kept AS (
@@ -671,7 +688,8 @@ SELECT k.source_family,
        s.total_positions,
        k.revenue,
        k.sample_keys,
-       s.group_count
+       s.group_count,
+       s.unmapped_positions
 FROM kept k
 CROSS JOIN stats s
 ORDER BY k.positions DESC, k.source_family, k.target_family

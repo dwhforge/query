@@ -100,6 +100,22 @@ pub struct CheckRun {
     #[serde(default)]
     pub cells: Vec<CheckAggregateCell>,
     pub comparability: CheckComparability,
+    /// True when `cells` are a budgeted top-N, not the full aggregate matrix.
+    #[serde(default)]
+    pub cells_incomplete: bool,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub group_count: Option<i64>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub covered_positions: Option<i64>,
+    /// Full-aggregate unmapped positions (not inferred from a truncated cell list).
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub unmapped_positions: Option<i64>,
 }
 
 #[cfg(test)]

@@ -480,6 +480,94 @@ export function refSaveResult(): KeyMapSaveResult {
   };
 }
 
+/**
+ * Build JoinCtx + fill payload for Join Lens → KeyMap editor.
+ * Pure so left/right unmatched / pair / composite fills stay regression-tested.
+ *
+ * Contract:
+ * - left unmatched → From = left keys, To empty, probeSide left
+ * - right unmatched → From = right keys (Apply on right), To empty, probeSide right
+ * - pair (L+R) → From = left, To = right, probeSide left
+ * - composite fromParts keep Join ON index alignment (empty slots preserved upstream)
+ */
+export function planMapFillFromLens(args: {
+  probeSide: "left" | "right";
+  fromValues: string[];
+  lensLeftOn: string[];
+  lensRightOn: string[];
+  hostQueryId: string;
+  joinStepIndex: number;
+  rightQueryId: string;
+  joinType: import("../../types/pipeline").JoinType;
+  toValues?: string[];
+  fromParts?: string[][];
+  applyColumns?: string[];
+  outputColumn?: string;
+}): {
+  joinCtx: KeyMapJoinCtx;
+  fromValues: string[];
+  toValues?: string[];
+  fromParts?: string[][];
+  /** Primary Apply target implied by unmatched side. */
+  primaryApplySide: "left" | "right";
+} {
+  const {
+    probeSide,
+    fromValues,
+    lensLeftOn,
+    lensRightOn,
+    toValues,
+    fromParts,
+  } = args;
+  const tupleArity = fromParts?.find((p) => p.length)?.length ?? 0;
+  // Always left-oriented fact cols (Auto / Find Right pass leftOn names).
+  const applyCols = (
+    args.applyColumns?.filter((c) => c.trim()) ??
+    (tupleArity > 1 ? lensLeftOn.slice(0, tupleArity) : undefined)
+  )?.filter(Boolean);
+  const applyLeftOn = applyCols?.length
+    ? applyCols
+    : [lensLeftOn[0] ?? "key"];
+  const applyRightOn = applyLeftOn.map((lc) => {
+    const idx = lensLeftOn.findIndex(
+      (c) => c.toLowerCase() === lc.toLowerCase(),
+    );
+    return lensRightOn[idx >= 0 ? idx : 0] ?? lc;
+  });
+
+  const outputColumnLeft =
+    args.outputColumn?.trim() || applyLeftOn[0] || lensLeftOn[0] || "key";
+  const outLeftIdx = applyLeftOn.findIndex(
+    (c) => c.toLowerCase() === outputColumnLeft.toLowerCase(),
+  );
+  const outputColumnRight =
+    applyRightOn[outLeftIdx >= 0 ? outLeftIdx : 0] ??
+    applyRightOn[0] ??
+    lensRightOn[0] ??
+    "key";
+
+  const joinCtx: KeyMapJoinCtx = {
+    hostQueryId: args.hostQueryId,
+    joinStepIndex: args.joinStepIndex,
+    rightQueryId: args.rightQueryId,
+    leftOn: lensLeftOn,
+    rightOn: lensRightOn,
+    joinType: args.joinType,
+    probeSide,
+    applyLeftOn,
+    applyRightOn,
+    outputColumnLeft,
+    outputColumnRight,
+  };
+  return {
+    joinCtx,
+    fromValues,
+    toValues,
+    fromParts,
+    primaryApplySide: probeSide,
+  };
+}
+
 /** Merge From values (and optional To / parts) into a map for Join Lens → editor. */
 export function mergeFromValuesIntoMap(args: {
   map: KeyMapDef;
@@ -539,5 +627,42 @@ export function mergeFromValuesIntoMap(args: {
     from_columns,
     from_column: from_columns[0],
     entries,
+  };
+}
+
+/**
+ * Editor open payload after Lens fill — what KeyMapEditor must show.
+ * Keeps suggestedFrom / entries / probeSide coherent for UI assertions.
+ */
+export function mapEditorFillSnapshot(args: {
+  map: KeyMapDef;
+  joinCtx: KeyMapJoinCtx;
+  fromValues: string[];
+  toValues?: string[];
+  fromParts?: string[][];
+}): {
+  entries: KeyMapEntry[];
+  suggestedFrom: string[];
+  suggestedFromParts: string[][];
+  probeSide: "left" | "right" | undefined;
+  fromColumns: string[];
+  emptyToCount: number;
+  filledToCount: number;
+} {
+  const merged = mergeFromValuesIntoMap(args);
+  const suggestedFromParts =
+    args.fromParts && args.fromParts.length > 0
+      ? args.fromParts.map((p) => p.map((x) => x.trim()))
+      : args.fromValues.map((s) => [s.trim()]);
+  const emptyToCount = merged.entries.filter((e) => !e.to.trim()).length;
+  const filledToCount = merged.entries.filter((e) => e.to.trim()).length;
+  return {
+    entries: merged.entries,
+    suggestedFrom: args.fromValues,
+    suggestedFromParts,
+    probeSide: args.joinCtx.probeSide,
+    fromColumns: merged.from_columns ?? [merged.from_column ?? "from"],
+    emptyToCount,
+    filledToCount,
   };
 }

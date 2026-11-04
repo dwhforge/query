@@ -523,6 +523,10 @@ mod tests {
                 total_positions: 1,
                 cells: vec![],
                 comparability: CheckComparability::Full,
+                cells_incomplete: false,
+                group_count: None,
+                covered_positions: None,
+                unmapped_positions: None,
             }],
         };
         let json = p.to_json_pretty().unwrap();

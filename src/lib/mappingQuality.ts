@@ -263,6 +263,8 @@ export type QualitySummaryParse = {
   /** True when returned groups are a budgeted subset of the full aggregate. */
   incomplete: boolean;
   coveredPositions: number;
+  /** Full-aggregate unmapped positions (from stats CTE); not inferred from top-N cells. */
+  unmappedPositions: number;
 };
 
 /**
@@ -315,12 +317,20 @@ export function parseQualitySummaryDetailed(
         `Coarsen group attributes or re-run with a budgeted attrs summary.`,
     );
   }
+  const unmappedRaw = rows[0]!.unmapped_positions;
+  const unmappedPositions =
+    unmappedRaw == null || unmappedRaw === ""
+      ? cells
+          .filter((c) => c.signal === "unmapped")
+          .reduce((s, c) => s + c.positions, 0)
+      : number(unmappedRaw);
   return {
     cells,
     totalPositions: reportedTotal,
     groupCount,
     incomplete,
     coveredPositions,
+    unmappedPositions,
   };
 }
 export function parseQualityTargets(result: PreviewResult): QualityTarget[] {

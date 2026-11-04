@@ -3,10 +3,12 @@ import {
   applyKeyMapTabMapChange,
   dirtyDeltaHasChanges,
   keyMapEntriesFingerprint,
+  mapEditorFillSnapshot,
   mapForProjectAst,
   mergeFromValuesIntoMap,
   mergeKeyMapTabSession,
   normalizeKeyMapForEditor,
+  planMapFillFromLens,
   resolveJoinStepFromCtx,
   seedSaveResult,
   settleSeedDraftAfterSave,
@@ -14,6 +16,7 @@ import {
 } from "./service";
 import type { KeyMapJoinCtx, KeyMapTabSession } from "./types";
 import type { Project } from "../../types/pipeline";
+import { findApplyKeyMapIdForJoin } from "../../lib/keyMap";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -484,6 +487,253 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
   const cleared = settleSeedDraftAfterSave(sameAsR1, savedFp);
   assert(cleared.localDraft === false, "R1 save clears draft");
   assert(cleared.dirtyDelta === null, "R1 save clears delta");
+}
+
+// --- Join Lens → KeyMap UI fill (left/right unmatched, pair, composite) ---
+{
+  const lensBase = {
+    lensLeftOn: ["sku"],
+    lensRightOn: ["id"],
+    hostQueryId: "q_host",
+    joinStepIndex: 0,
+    rightQueryId: "q_right",
+    joinType: "left" as const,
+  };
+
+  // Left unmatched only: From filled, To empty, Apply prefers left.
+  {
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      probeSide: "left",
+      fromValues: ["DIRTY_A", "DIRTY_B"],
+    });
+    assert(planned.primaryApplySide === "left", "left unmatched → Apply left");
+    assert(planned.joinCtx.probeSide === "left", "probe left");
+    assert(
+      planned.joinCtx.applyLeftOn?.[0] === "sku" &&
+        planned.joinCtx.applyRightOn?.[0] === "id",
+      "left unmatched maps ON cols",
+    );
+    const snap = mapEditorFillSnapshot({
+      map: { ...map, entries: [] } as never,
+      joinCtx: planned.joinCtx,
+      fromValues: planned.fromValues,
+    });
+    assert(snap.entries.length === 2, "left unmatched adds From rows");
+    assert(
+      snap.entries.every((e) => e.to === "") && snap.emptyToCount === 2,
+      "left unmatched leaves To empty",
+    );
+    assert(
+      snap.suggestedFrom.join(",") === "DIRTY_A,DIRTY_B",
+      "left unmatched suggestedFrom",
+    );
+  }
+
+  // Right unmatched only: From = right keys, probe/Apply right (not To column).
+  {
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      probeSide: "right",
+      fromValues: ["CANON_X"],
+    });
+    assert(planned.primaryApplySide === "right", "right unmatched → Apply right");
+    assert(planned.joinCtx.probeSide === "right", "probe right");
+    const snap = mapEditorFillSnapshot({
+      map: { ...map, entries: [] } as never,
+      joinCtx: planned.joinCtx,
+      fromValues: planned.fromValues,
+    });
+    assert(
+      snap.entries.length === 1 &&
+        snap.entries[0]!.from === "CANON_X" &&
+        snap.entries[0]!.to === "",
+      "right unmatched fills From (Apply on right), not To",
+    );
+    assert(snap.probeSide === "right", "editor sees right probe");
+  }
+
+  // Pair L+R: From=left, To=right, probe left (dirty → canon).
+  {
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      probeSide: "left",
+      fromValues: ["DIRTY_A"],
+      toValues: ["CANON_1"],
+    });
+    assert(planned.primaryApplySide === "left", "pair Apply left");
+    const snap = mapEditorFillSnapshot({
+      map: { ...map, entries: [] } as never,
+      joinCtx: planned.joinCtx,
+      fromValues: planned.fromValues,
+      toValues: planned.toValues,
+    });
+    assert(
+      snap.entries.some((e) => e.from === "DIRTY_A" && e.to === "CANON_1"),
+      "pair fills From→To",
+    );
+    assert(snap.filledToCount === 1 && snap.emptyToCount === 0, "pair To filled");
+  }
+
+  // Composite From parts: arity + from_columns from leftOn; empty slot rejected.
+  {
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      lensLeftOn: ["sys", "code"],
+      lensRightOn: ["src", "sku"],
+      probeSide: "left",
+      fromValues: ["ERP|100"],
+      toValues: ["A"],
+      fromParts: [["ERP", "100"]],
+    });
+    assert(
+      planned.joinCtx.applyLeftOn?.join(",") === "sys,code",
+      "composite applyLeftOn",
+    );
+    assert(
+      planned.joinCtx.applyRightOn?.join(",") === "src,sku",
+      "composite applyRightOn aligned",
+    );
+    const snap = mapEditorFillSnapshot({
+      map: { id: "m", name: "M", entries: [] } as never,
+      joinCtx: planned.joinCtx,
+      fromValues: planned.fromValues,
+      toValues: planned.toValues,
+      fromParts: planned.fromParts,
+    });
+    assert(
+      snap.fromColumns.join(",") === "sys,code",
+      "composite editor from_columns",
+    );
+    assert(
+      snap.entries[0]?.from_parts?.join("|") === "ERP|100" &&
+        snap.entries[0]?.to === "A",
+      "composite entry parts + To",
+    );
+    // Incomplete composite (empty part) must not create a row.
+    const incomplete = mergeFromValuesIntoMap({
+      map: { id: "m", name: "M", entries: [] } as never,
+      joinCtx: planned.joinCtx,
+      fromValues: ["ERP|"],
+      fromParts: [["ERP", ""]],
+    });
+    assert(incomplete.entries.length === 0, "reject incomplete composite From");
+  }
+
+  // Existing empty-To row gets To filled; attrs/from preserved on duplicate From.
+  {
+    const withAttrs = {
+      ...map,
+      entries: [
+        {
+          from: "DIRTY_A",
+          to: "",
+          attrs: { note: "keep-me" },
+        },
+      ],
+    };
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      probeSide: "left",
+      fromValues: ["DIRTY_A"],
+      toValues: ["CANON_1"],
+    });
+    const merged = mergeFromValuesIntoMap({
+      map: withAttrs as never,
+      joinCtx: planned.joinCtx,
+      fromValues: planned.fromValues,
+      toValues: planned.toValues,
+    });
+    assert(merged.entries.length === 1, "no duplicate From");
+    assert(
+      merged.entries[0]!.to === "CANON_1" &&
+        merged.entries[0]!.attrs?.note === "keep-me",
+      "fill To preserves attrs",
+    );
+  }
+
+  // Preferred ApplyKeyMap for left unmatched (not an unrelated map).
+  {
+    const ws = {
+      queries: [
+        {
+          id: "q_host",
+          name: "host",
+          steps: [
+            {
+              type: "ApplyKeyMap" as const,
+              payload: {
+                map_id: "map_sku",
+                column: "sku",
+                entries: [],
+              },
+            },
+            {
+              type: "ApplyKeyMap" as const,
+              payload: {
+                map_id: "map_channel",
+                column: "channel",
+                entries: [],
+              },
+            },
+            {
+              type: "Join" as const,
+              payload: {
+                right_query_id: "q_right",
+                join_type: "left" as const,
+                left_on: ["sku"],
+                right_on: ["id"],
+              },
+            },
+          ],
+        },
+        { id: "q_right", name: "right", steps: [] },
+      ],
+      focus_query_id: "q_host",
+      key_maps: [],
+    };
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      joinStepIndex: 2,
+      probeSide: "left",
+      fromValues: ["x"],
+    });
+    const preferred = findApplyKeyMapIdForJoin(ws as never, planned.joinCtx);
+    assert(preferred === "map_sku", "left unmatched prefers key-linked Apply");
+    const rightPlanned = planMapFillFromLens({
+      ...lensBase,
+      joinStepIndex: 2,
+      probeSide: "right",
+      fromValues: ["y"],
+    });
+    // No Apply on right query → may fall back to host left Apply.
+    const rightPref = findApplyKeyMapIdForJoin(
+      ws as never,
+      rightPlanned.joinCtx,
+    );
+    assert(
+      rightPref === "map_sku",
+      "right probe falls back to host left Apply when right has none",
+    );
+  }
+
+  // outputColumn override keeps left/right output alignment.
+  {
+    const planned = planMapFillFromLens({
+      ...lensBase,
+      lensLeftOn: ["sku", "plant"],
+      lensRightOn: ["item", "site"],
+      probeSide: "left",
+      fromValues: ["a"],
+      applyColumns: ["sku", "plant"],
+      outputColumn: "plant",
+    });
+    assert(
+      planned.joinCtx.outputColumnLeft === "plant" &&
+        planned.joinCtx.outputColumnRight === "site",
+      "outputColumn aligns right partner",
+    );
+  }
 }
 
 console.log("keyMap/service.test.ts: ok");

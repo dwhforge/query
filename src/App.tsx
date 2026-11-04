@@ -124,6 +124,7 @@ import {
   confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
   createMappingCheck,
   findJoinHostsForMap,
+  mergeRemapDirtyIntoTab,
   planCheckInspect,
   recordCheckRun,
   resolveActiveMappingCheck,
@@ -133,6 +134,7 @@ import {
   applyKeyMapOntoProject,
   dirtyDeltaHasChanges,
   mergeFromValuesIntoMap,
+  planMapFillFromLens,
   applyKeyMapTabMapChange,
   keyMapBindingFingerprint,
   keyMapEntriesFingerprint,
@@ -3381,10 +3383,15 @@ function App() {
     }
     // Single KeyMap mutation path: project AST + Apply snapshots (not key_maps alone).
     setProject((p) => upsertKeyMapIntoProject(p, result.nextMap));
+    const openTab = keyMapTabs.find((t) => t.map.id === result.nextMap.id);
+    const mergedDirty = mergeRemapDirtyIntoTab(
+      openTab?.dirtyDelta,
+      result.dirtyDelta,
+    );
     patchKeyMapTab(result.nextMap.id, (s) => ({
       ...s,
       map: { ...result.nextMap, id: s.map.id },
-      dirtyDelta: result.dirtyDelta,
+      dirtyDelta: mergeRemapDirtyIntoTab(s.dirtyDelta, result.dirtyDelta),
       localDraft: true,
     }));
     setFrozenRemap(null);
@@ -3393,7 +3400,7 @@ function App() {
     lastCheckRunFingerprint.current = null;
     // Seed export / source WH write-back through the normal Save path.
     void saveKeyMapToProject(result.nextMap, {
-      dirtyDelta: result.dirtyDelta,
+      dirtyDelta: mergedDirty,
     });
   }
 
@@ -3428,47 +3435,21 @@ function App() {
       joinType,
     } = joinLensTarget;
     const maps = project.workspace.key_maps ?? [];
-    const toValues = opts?.toValues;
-    const fromParts = opts?.fromParts;
-    const tupleArity = fromParts?.find((p) => p.length)?.length ?? 0;
-    // Always left-oriented fact cols (Auto / Find Right pass leftOn names).
-    const applyCols = (
-      opts?.applyColumns?.filter((c) => c.trim()) ??
-      (tupleArity > 1 ? lensLeftOn.slice(0, tupleArity) : undefined)
-    )?.filter(Boolean);
-    const applyLeftOn =
-      applyCols?.length ? applyCols : [lensLeftOn[0] ?? "key"];
-    const applyRightOn = applyLeftOn.map((lc) => {
-      const idx = lensLeftOn.findIndex(
-        (c) => c.toLowerCase() === lc.toLowerCase(),
-      );
-      return lensRightOn[idx >= 0 ? idx : 0] ?? lc;
-    });
-
-    const outputColumnLeft =
-      opts?.outputColumn?.trim() || applyLeftOn[0] || lensLeftOn[0] || "key";
-    const outLeftIdx = applyLeftOn.findIndex(
-      (c) => c.toLowerCase() === outputColumnLeft.toLowerCase(),
-    );
-    const outputColumnRight =
-      applyRightOn[outLeftIdx >= 0 ? outLeftIdx : 0] ??
-      applyRightOn[0] ??
-      lensRightOn[0] ??
-      "key";
-
-    const joinCtx: KeyMapJoinCtx = {
+    const planned = planMapFillFromLens({
+      probeSide: side,
+      fromValues,
+      lensLeftOn,
+      lensRightOn,
       hostQueryId,
       joinStepIndex,
       rightQueryId,
-      leftOn: lensLeftOn,
-      rightOn: lensRightOn,
       joinType,
-      probeSide: side,
-      applyLeftOn,
-      applyRightOn,
-      outputColumnLeft,
-      outputColumnRight,
-    };
+      toValues: opts?.toValues,
+      fromParts: opts?.fromParts,
+      applyColumns: opts?.applyColumns,
+      outputColumn: opts?.outputColumn,
+    });
+    const { joinCtx, toValues, fromParts } = planned;
     if (maps.length === 0) {
       const arity = applyLeftOn.length;
       const from_columns =
@@ -4903,13 +4884,24 @@ function App() {
                   onCanvas={() => openMappingQualityCanvas()}
                   deltaNote={checkDeltaNote}
                   allowNote={checkAllowNote}
-                  onCheckRun={({ cells, totalPositions }) => {
+                  onCheckRun={({
+                    cells,
+                    totalPositions,
+                    cellsIncomplete,
+                    groupCount,
+                    coveredPositions,
+                    unmappedPositions,
+                  }) => {
                     const check = activeMappingCheck ?? labMappingCheck();
                     const recorded = recordCheckRun({
                       project,
                       check,
                       cells,
                       totalPositions,
+                      cellsIncomplete,
+                      groupCount,
+                      coveredPositions,
+                      unmappedPositions,
                     });
                     setCheckDeltaNote(recorded.deltaNote);
                     lastCheckRunFingerprint.current = recorded.run.id;

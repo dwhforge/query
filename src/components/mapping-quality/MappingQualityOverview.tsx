@@ -44,6 +44,10 @@ type Props = {
   onCheckRun?: (payload: {
     cells: QualityCell[];
     totalPositions: number;
+    cellsIncomplete?: boolean;
+    groupCount?: number;
+    coveredPositions?: number;
+    unmappedPositions?: number;
   }) => void;
   /** ADR-0027: mark observed difference as allowed (does not change KeyMap). */
   onAllowDifference?: (groupKey: string, explanation: string) => void;
@@ -99,6 +103,10 @@ export function MappingQualityOverview({
   const [cells, setCells] = useState<QualityCell[]>([]);
   const [aggregateNote, setAggregateNote] = useState<string | null>(null);
   const [reportedTotalPositions, setReportedTotalPositions] = useState<
+    number | null
+  >(null);
+  /** Full-aggregate unmapped (stats CTE) — do not infer from top-N cells. */
+  const [reportedUnmappedPositions, setReportedUnmappedPositions] = useState<
     number | null
   >(null);
   const [targets, setTargets] = useState<QualityTarget[]>([]);
@@ -244,6 +252,7 @@ export function MappingQualityOverview({
           incomplete: detailed.incomplete,
           groupCount: detailed.groupCount,
           coveredPositions: detailed.coveredPositions,
+          unmappedPositions: detailed.unmappedPositions,
         };
       };
       let lastError: unknown = null;
@@ -263,6 +272,7 @@ export function MappingQualityOverview({
           setCells(parsed.cells);
           setTargets(parsed.targets);
           setReportedTotalPositions(parsed.totalPositions);
+          setReportedUnmappedPositions(parsed.unmappedPositions);
           setAggregateNote(
             parsed.incomplete
               ? `Showing top ${parsed.cells.length} of ${parsed.groupCount} groups ` +
@@ -277,6 +287,10 @@ export function MappingQualityOverview({
           onCheckRunRef.current?.({
             cells: parsed.cells,
             totalPositions: parsed.totalPositions,
+            cellsIncomplete: parsed.incomplete,
+            groupCount: parsed.groupCount,
+            coveredPositions: parsed.coveredPositions,
+            unmappedPositions: parsed.unmappedPositions,
           });
           return;
         } catch (reason) {
@@ -289,6 +303,7 @@ export function MappingQualityOverview({
       setTargets([]);
       setAggregateNote(null);
       setReportedTotalPositions(null);
+      setReportedUnmappedPositions(null);
       setCacheStamp(null);
       setError(String(lastError ?? "Analysis is unavailable"));
       setBusy(false);
@@ -445,7 +460,13 @@ export function MappingQualityOverview({
             <div>
               <small>Catalog coverage</small>
               <strong className="quality-mint">
-                {percent(total - (signalCounts.get("unmapped") ?? 0), total)}
+                {percent(
+                  total -
+                    (reportedUnmappedPositions ??
+                      signalCounts.get("unmapped") ??
+                      0),
+                  total,
+                )}
               </strong>
               <span>Having a partner is not proof of quality</span>
             </div>

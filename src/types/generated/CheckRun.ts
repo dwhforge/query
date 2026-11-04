@@ -6,4 +6,12 @@ import type { CheckInputRevision } from "./CheckInputRevision";
 /**
  * Result of one execution of a MappingCheck (ADR-0027).
  */
-export type CheckRun = { id: string, check_id: string, ran_at: string, map_revision: string, input_revisions: Array<CheckInputRevision>, check_definition_revision: string, total_positions: number, cells: Array<CheckAggregateCell>, comparability: CheckComparability, };
+export type CheckRun = { id: string, check_id: string, ran_at: string, map_revision: string, input_revisions: Array<CheckInputRevision>, check_definition_revision: string, total_positions: number, cells: Array<CheckAggregateCell>, comparability: CheckComparability, 
+/**
+ * True when `cells` are a budgeted top-N, not the full aggregate matrix.
+ */
+cells_incomplete: boolean, group_count?: number, covered_positions?: number, 
+/**
+ * Full-aggregate unmapped positions (not inferred from a truncated cell list).
+ */
+unmapped_positions?: number, };

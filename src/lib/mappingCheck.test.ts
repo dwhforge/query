@@ -428,6 +428,22 @@ assert(
   assert(lens?.hostQueryId === QUALITY_JOIN, "lab lens → QUALITY_JOIN");
   assert(lens?.joinStepIndex === 1, "lab join step index");
   assert(lens?.leftOn[0] === "sku", "lab left_on");
+  assert(lens?.rightOn[0] === "id", "lab right_on");
+  assert(lens?.rightQueryId === "dim", "lab right query");
+  assert(lens?.joinType === "left", "lab join type");
+  // Cohort lives in SqlModel WHERE; Lens ON keys come from QUALITY_JOIN.
+  const sql = labInspect.steps[0];
+  assert(sql?.type === "SqlModel", "lab inspect SqlModel");
+  if (sql?.type === "SqlModel") {
+    assert(
+      /aligned_attributes/.test(sql.payload.raw_sql),
+      "inspect embeds cohort predicate",
+    );
+    assert(
+      sql.payload.raw_sql.includes(`{{query:${QUALITY_JOIN}}}`),
+      "inspect reads QUALITY_JOIN",
+    );
+  }
 }
 
 console.log("mappingCheck.test.ts: ok");

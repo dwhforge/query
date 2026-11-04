@@ -12,21 +12,16 @@ import type {
   WarehouseDialect,
   Workspace,
 } from "../types/pipeline";
-import { normalizeHostReject } from "./hostRpc";
-import type { HostError } from "../types/hostError";
+import {
+  normalizeHostReject,
+  unpackInvokeReply,
+  type InvokeReply,
+} from "./hostRpc";
 import type { KeyMapWhArgs } from "../types/generated/KeyMapWhArgs";
 import type { LoadProjectArgs } from "../types/generated/LoadProjectArgs";
 import type { SaveProjectArgs } from "../types/generated/SaveProjectArgs";
 
-/** Successful IPC result vs structured host failure (survives Electron handle). */
-export type InvokeReply<T> =
-  | { ok: true; result: T }
-  | {
-      ok: false;
-      message: string;
-      errorDetail?: HostError | null;
-      error_detail?: HostError | null;
-    };
+export type { InvokeReply };
 
 export type DbtTarget = "v1" | "v2";
 
@@ -63,18 +58,7 @@ function bridge() {
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return bridge()
     .invoke<InvokeReply<T> | T>(cmd, args)
-    .then((reply) => {
-      if (reply && typeof reply === "object" && "ok" in (reply as object)) {
-        const env = reply as InvokeReply<T>;
-        if (env.ok) return env.result;
-        throw normalizeHostReject({
-          message: env.message,
-          errorDetail: env.errorDetail ?? env.error_detail ?? null,
-        });
-      }
-      // Legacy / non-envelope (tests, direct mocks).
-      return reply as T;
-    })
+    .then((reply) => unpackInvokeReply(reply))
     .catch((e: unknown) => {
       throw normalizeHostReject(e);
     });

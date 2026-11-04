@@ -4,6 +4,8 @@ export {
   isSyncConflictMessage,
   mapForProjectAst,
   mergeFromValuesIntoMap,
+  isKeyMapBindingChanged,
+  keyMapEntryIdentity,
   mergeKeyMapTabSession,
   normalizeKeyMapForEditor,
   refSaveResult,

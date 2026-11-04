@@ -12,33 +12,80 @@ import {
 import type {
   KeyMapDef,
   KeyMapEntry,
+  KeyMapStorage,
   Project,
   TransformationStep,
   Workspace,
 } from "../../types/pipeline";
 import { targetKey } from "../../types/pipeline";
-
-/** Row identity for tab merge — full From tuple; range SCD includes bounds. */
-export function keyMapEntryIdentity(
-  entry: KeyMapEntry,
-  map: Pick<KeyMapDef, "time_mode" | "valid_from_column" | "valid_to_column">,
-): string {
-  const parts = tupleKey(fromPartsEff(entry));
-  if (map.time_mode === "range_scd") {
-    const vf = map.valid_from_column?.trim() || "valid_from";
-    const vt = map.valid_to_column?.trim() || "valid_to";
-    const from = (entry.attrs?.[vf] ?? "").trim();
-    const to = (entry.attrs?.[vt] ?? "").trim();
-    return `${parts}\0${from}\0${to}`;
-  }
-  return parts;
-}
 import type {
   KeyMapApplyIntent,
   KeyMapApplyResult,
   KeyMapJoinCtx,
   KeyMapTabSession,
 } from "./types";
+
+type KeyMapIdentityMeta = Pick<
+  KeyMapDef,
+  "time_mode" | "valid_from_column" | "valid_to_column"
+>;
+
+/**
+ * Stable edit identity for merge.
+ * - Static / composite: full From tuple.
+ * - Range SCD: From tuple + valid_from only (closing an open interval updates
+ *   the same row instead of adding an overlapping sibling).
+ */
+export function keyMapEntryIdentity(
+  entry: KeyMapEntry,
+  map: KeyMapIdentityMeta,
+): string {
+  const parts = tupleKey(fromPartsEff(entry));
+  if (map.time_mode === "range_scd") {
+    const vf = map.valid_from_column?.trim() || "valid_from";
+    const from = (entry.attrs?.[vf] ?? "").trim();
+    return `${parts}\0${from}`;
+  }
+  return parts;
+}
+
+function storageBindingKey(storage: KeyMapStorage | undefined): string {
+  if (!storage || storage.kind === "seed") return "seed";
+  if (storage.kind === "ref") return `ref:${storage.model}`;
+  return `source:${storage.connection_id ?? ""}:${storage.source}:${storage.table}`;
+}
+
+/** True when warehouse / seed binding changed — drop concurrency tokens. */
+export function isKeyMapBindingChanged(
+  prev: KeyMapDef,
+  incoming: KeyMapDef,
+): boolean {
+  return (
+    storageBindingKey(prev.storage) !== storageBindingKey(incoming.storage)
+  );
+}
+
+function dirtyTouchesEntry(
+  delta: KeyMapDirtyDelta | null | undefined,
+  entry: KeyMapEntry,
+  meta: KeyMapIdentityMeta,
+): boolean {
+  if (!delta) return false;
+  const id = keyMapEntryIdentity(entry, meta);
+  if (
+    delta.upserts.some((u) => keyMapEntryIdentity(u, meta) === id)
+  ) {
+    return true;
+  }
+  const parts = fromPartsEff(entry).map((p) => p.trim());
+  if (parts.length <= 1) {
+    const from = parts[0] ?? entry.from.trim();
+    return delta.deletedFroms.some((d) => d.trim() === from);
+  }
+  return (delta.deletedFromParts ?? []).some(
+    (d) => tupleKey(d) === tupleKey(parts),
+  );
+}
 
 /** After ApplyKeyMap insert, Join may shift; find the same Join by right + ON + type. */
 export function resolveJoinStepFromCtx(
@@ -112,7 +159,11 @@ export function normalizeKeyMapForEditor(map: KeyMapDef): KeyMapDef {
   };
 }
 
-/** Merge incoming entries into an open tab without dropping dirty Suggest rows. */
+/**
+ * Merge incoming map rows into an open tab.
+ * Preserves editor lifecycle (contentHash / dirtyDelta / saveApi) on reopen;
+ * clears concurrency state only when warehouse binding changes.
+ */
 export function mergeKeyMapTabSession(
   prev: KeyMapTabSession,
   incoming: KeyMapDef,
@@ -124,18 +175,14 @@ export function mergeKeyMapTabSession(
   },
 ): KeyMapTabSession {
   const normalized = normalizeKeyMapForEditor(incoming);
-  const meta = {
+  const meta: KeyMapIdentityMeta = {
     time_mode: normalized.time_mode ?? prev.map.time_mode,
     valid_from_column:
       normalized.valid_from_column ?? prev.map.valid_from_column,
     valid_to_column: normalized.valid_to_column ?? prev.map.valid_to_column,
   };
-  // Identity = full From tuple (ADR-0024); range SCD also keys on bounds (ADR-0028).
-  // Never collapse composite rows that share only the first From part.
   const byId = new Map(
-    prev.map.entries.map(
-      (e) => [keyMapEntryIdentity(e, meta), e] as const,
-    ),
+    prev.map.entries.map((e) => [keyMapEntryIdentity(e, meta), e] as const),
   );
   for (const e of normalized.entries) {
     const id = keyMapEntryIdentity(e, meta);
@@ -143,28 +190,55 @@ export function mergeKeyMapTabSession(
     const cur = byId.get(id);
     if (!cur) {
       byId.set(id, e);
-    } else if (e.to.trim() && e.to.trim() !== cur.to.trim()) {
-      // Replace whole row — keep incoming attrs (avoid stale SCD bounds).
-      byId.set(id, { ...e });
-    } else if (e.to.trim() && !cur.to.trim()) {
+      continue;
+    }
+    // Local dirty draft wins over SoT/suggest refresh for this identity.
+    if (dirtyTouchesEntry(prev.dirtyDelta, cur, meta)) {
+      continue;
+    }
+    const toIn = e.to.trim();
+    const toCur = cur.to.trim();
+    if (toIn && toIn !== toCur) {
+      // Fresh To from SoT/suggest; keep local attrs only if incoming omitted them.
+      byId.set(id, {
+        ...e,
+        attrs: { ...(cur.attrs ?? {}), ...(e.attrs ?? {}) },
+      });
+    } else if (e.attrs && Object.keys(e.attrs).length > 0) {
+      // Same To (or both empty): attrs / SCD bound updates.
       byId.set(id, {
         ...cur,
-        to: e.to,
-        ...(e.attrs ? { attrs: { ...cur.attrs, ...e.attrs } } : {}),
+        to: toIn || cur.to,
+        attrs: { ...(cur.attrs ?? {}), ...e.attrs },
       });
+    } else if (toIn && !toCur) {
+      byId.set(id, { ...cur, to: e.to });
     }
   }
-  return {
+
+  const rebound = isKeyMapBindingChanged(prev.map, normalized);
+  const next: KeyMapTabSession = {
+    ...prev,
     map: {
       ...normalized,
       entries: [...byId.values()],
       storage: normalized.storage ?? prev.map.storage,
     },
-    pickTo: opts?.pickTo,
-    suggestedFrom: opts?.suggestedFrom,
-    suggestedFromParts: opts?.suggestedFromParts,
-    joinCtx: opts?.joinCtx,
   };
+  if (opts && "pickTo" in opts) next.pickTo = opts.pickTo;
+  if (opts && "suggestedFrom" in opts) next.suggestedFrom = opts.suggestedFrom;
+  if (opts && "suggestedFromParts" in opts) {
+    next.suggestedFromParts = opts.suggestedFromParts;
+  }
+  if (opts && "joinCtx" in opts) next.joinCtx = opts.joinCtx;
+  if (rebound) {
+    next.contentHash = undefined;
+    next.dirtyDelta = null;
+    next.saveInFlight = false;
+    next.dirtyResetSeq = undefined;
+    next.totalCount = undefined;
+  }
+  return next;
 }
 
 /**

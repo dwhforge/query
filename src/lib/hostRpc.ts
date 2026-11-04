@@ -1,6 +1,6 @@
 /**
  * Structured host IPC errors (ADR-0029).
- * Electron rejects with a plain object so `errorDetail` survives the bridge.
+ * Main resolves an ok/false envelope so `errorDetail` survives Electron handle.
  */
 import type { HostError } from "../types/hostError";
 
@@ -17,6 +17,16 @@ export class HostRpcError extends Error {
     return this.errorDetail?.kind ?? null;
   }
 }
+
+/** IPC reply envelope (must be `resolve`, never `reject`, from Electron main). */
+export type InvokeReply<T> =
+  | { ok: true; result: T }
+  | {
+      ok: false;
+      message: string;
+      errorDetail?: HostError | null;
+      error_detail?: HostError | null;
+    };
 
 export function isHostRpcError(e: unknown): e is HostRpcError {
   return e instanceof HostRpcError;
@@ -50,4 +60,20 @@ export function normalizeHostReject(e: unknown): HostRpcError {
   }
   if (e instanceof Error) return new HostRpcError(e.message, null);
   return new HostRpcError(String(e), null);
+}
+
+/**
+ * Unpack the envelope Electron main resolves for `dwh:invoke`.
+ * Shared by bridge + unit tests (ADR-0029).
+ */
+export function unpackInvokeReply<T>(reply: InvokeReply<T> | T): T {
+  if (reply && typeof reply === "object" && "ok" in (reply as object)) {
+    const env = reply as InvokeReply<T>;
+    if (env.ok) return env.result;
+    throw normalizeHostReject({
+      message: env.message,
+      errorDetail: env.errorDetail ?? env.error_detail ?? null,
+    });
+  }
+  return reply as T;
 }

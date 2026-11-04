@@ -124,6 +124,17 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
         { from: "ERP", from_parts: ["ERP", "200"], to: "B" },
       ],
     },
+    contentHash: "hash-1",
+    dirtyDelta: { upserts: [], deletedFroms: [] },
+    saveInFlight: true,
+    dirtyResetSeq: 3,
+    totalCount: 9,
+    saveApi: {
+      captureSave: () => null,
+      confirmSave: () => {},
+      abortSave: () => {},
+      isSaving: () => false,
+    },
   };
   const incoming = {
     id: "m",
@@ -143,6 +154,113 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
     merged.map.entries.some((e) => e.from_parts?.[1] === "200" && e.to === "B"),
     "sibling tuple kept",
   );
+  assert(merged.contentHash === "hash-1", "lifecycle contentHash");
+  assert(merged.saveInFlight === true, "lifecycle saveInFlight");
+  assert(merged.dirtyResetSeq === 3, "lifecycle dirtyResetSeq");
+  assert(merged.totalCount === 9, "lifecycle totalCount");
+  assert(merged.saveApi != null, "lifecycle saveApi");
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      entries: [{ from: "A", to: "1", attrs: { reason: "old" } }],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    entries: [{ from: "A", to: "1", attrs: { reason: "new" } }],
+  } as never);
+  assert(
+    merged.map.entries[0]?.attrs?.reason === "new",
+    "attrs-only update when not dirty",
+  );
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      entries: [{ from: "A", to: "1", attrs: { reason: "local" } }],
+    },
+    dirtyDelta: {
+      upserts: [{ from: "A", to: "1", attrs: { reason: "local" } }],
+      deletedFroms: [],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    entries: [{ from: "A", to: "1", attrs: { reason: "remote" } }],
+  } as never);
+  assert(
+    merged.map.entries[0]?.attrs?.reason === "local",
+    "dirty draft attrs win",
+  );
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      time_mode: "range_scd",
+      entries: [
+        {
+          from: "A",
+          to: "1",
+          attrs: { valid_from: "2026-01-01", valid_to: "" },
+        },
+      ],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    time_mode: "range_scd",
+    entries: [
+      {
+        from: "A",
+        to: "1",
+        attrs: { valid_from: "2026-01-01", valid_to: "2026-06-01" },
+      },
+    ],
+  } as never);
+  assert(merged.map.entries.length === 1, "SCD bound update is one row");
+  assert(
+    merged.map.entries[0]?.attrs?.valid_to === "2026-06-01",
+    "SCD valid_to updated",
+  );
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      storage: { kind: "seed" },
+      entries: [{ from: "A", to: "1" }],
+    },
+    contentHash: "keep-me",
+    dirtyDelta: { upserts: [{ from: "A", to: "1" }], deletedFroms: [] },
+  };
+  const rebound = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    storage: {
+      kind: "source",
+      source: "public",
+      table: "t",
+      connection_id: "c1",
+    },
+    entries: [{ from: "A", to: "1" }],
+  } as never);
+  assert(rebound.contentHash === undefined, "rebind clears hash");
+  assert(rebound.dirtyDelta === null, "rebind clears dirty");
 }
 
 console.log("keyMap/service.test.ts: ok");

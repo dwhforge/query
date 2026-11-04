@@ -699,21 +699,24 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
       fromValues: ["x"],
     });
     const preferred = findApplyKeyMapIdForJoin(ws as never, planned.joinCtx);
-    assert(preferred === "map_sku", "left unmatched prefers key-linked Apply");
+    assert(
+      preferred === "map_sku",
+      `left unmatched prefers key-linked Apply, got ${preferred}`,
+    );
     const rightPlanned = planMapFillFromLens({
       ...lensBase,
       joinStepIndex: 2,
       probeSide: "right",
       fromValues: ["y"],
     });
-    // No Apply on right query → may fall back to host left Apply.
+    // No Apply on right query → fall back to host left Apply.
     const rightPref = findApplyKeyMapIdForJoin(
       ws as never,
       rightPlanned.joinCtx,
     );
     assert(
       rightPref === "map_sku",
-      "right probe falls back to host left Apply when right has none",
+      `right probe falls back to host left Apply when right has none, got ${rightPref}`,
     );
   }
 

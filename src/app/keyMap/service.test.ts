@@ -387,4 +387,43 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
   );
 }
 
+{
+  // Seed/ref may have no warehouse dirtyDelta — localDraft still protects.
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      storage: { kind: "seed" },
+      entries: [{ from: "A", to: "local" }],
+    },
+    localDraft: true,
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    storage: { kind: "seed" },
+    entries: [{ from: "A", to: "from-file" }],
+  } as never);
+  assert(merged.map.entries[0]?.to === "local", "seed localDraft without delta");
+}
+
+{
+  // Clean seed tab (no localDraft): SoT/suggest refresh may update To.
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      storage: { kind: "ref", model: "map_x" },
+      entries: [{ from: "A", to: "1" }],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    storage: { kind: "ref", model: "map_x" },
+    entries: [{ from: "A", to: "2" }],
+  } as never);
+  assert(merged.map.entries[0]?.to === "2", "clean ref accepts refresh To");
+}
+
 console.log("keyMap/service.test.ts: ok");

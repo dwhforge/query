@@ -51,7 +51,10 @@ pub fn save_global_connections(connections: &[ConnectionDef]) -> Result<(), Stri
         connections: shells,
     };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    atomic_write(&connections_path()?, json.as_bytes())?;
+    let outcome = atomic_write(&connections_path()?, json.as_bytes())?;
+    if let crate::atomic_fs::AtomicWriteOutcome::PostCommitDirSync { message } = outcome {
+        eprintln!("[dwh-host] connections post-commit: {message}");
+    }
 
     let mut store = load_secrets_file()?;
     if !store.projects.is_empty() {

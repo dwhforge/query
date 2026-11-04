@@ -1,28 +1,85 @@
 //! Smallest atomic file replace helper for project / secrets / connections.
 //!
-//! Write complete bytes to a unique temp file in the destination directory,
-//! sync, then rename over the target. Never deletes the destination first.
+//! ## Guarantees
+//! - **Atomic replacement:** the destination is never partially overwritten. A
+//!   failure before `rename` leaves previous bytes intact; a successful
+//!   [`AtomicWriteOutcome`] means the published path holds the new contents.
+//! - **Confidentiality (Unix):** when `unix_mode` is set (secrets: `0o600`), the
+//!   temp file is created with that mode **before** any bytes are written.
+//! - **Mode preservation:** replacing an existing file keeps its prior Unix
+//!   mode bits when `unix_mode` is `None` (project / connections).
 //!
-//! Limitations (documented, not claimed safe): multi-process writers, network
-//! filesystems with non-atomic rename, and crashes between multi-file saves
-//! (project vs secrets vs connections) are not a distributed transaction.
+//! ## Not guaranteed
+//! - Directory-entry durability after power loss: parent `sync_all` is
+//!   **best-effort**. Failure is returned as
+//!   [`AtomicWriteOutcome::PostCommitDirSync`] — **not** “old file kept”
+//!   (rename already succeeded).
+//! - Multi-process writers, network filesystems with non-atomic rename, and
+//!   crashes between multi-file saves (project vs secrets vs connections) are
+//!   not a distributed transaction.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Result after content has been published (or an error before publish).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicWriteOutcome {
+    /// Destination published; directory sync skipped or succeeded.
+    Committed,
+    /// Destination published, but parent directory sync failed (durability gap).
+    PostCommitDirSync { message: String },
+}
+
+/// Test-only fault injection points on the production write path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicWriteFault {
+    /// Fail after temp create, before any payload bytes.
+    AfterCreate,
+    /// Fail after a partial payload write (first byte only), before sync/rename.
+    AfterPartialWrite,
+    /// Fail after full write+sync, before rename.
+    BeforeRename,
+    /// Fail instead of rename (temp cleaned up; destination untouched).
+    Rename,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FAULT: std::cell::Cell<Option<AtomicWriteFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub fn set_test_fault(fault: Option<AtomicWriteFault>) {
+    TEST_FAULT.with(|c| c.set(fault));
+}
+
+#[cfg(test)]
+fn take_test_fault() -> Option<AtomicWriteFault> {
+    TEST_FAULT.with(|c| c.take())
+}
+
+#[cfg(not(test))]
+fn take_test_fault() -> Option<AtomicWriteFault> {
+    None
+}
+
 /// Atomically replace `path` with `bytes` (same-directory temp + rename).
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<AtomicWriteOutcome, String> {
     atomic_write_with_mode(path, bytes, None)
 }
 
-/// Like [`atomic_write`], optionally setting Unix mode on the temp file before rename.
+/// Like [`atomic_write`], with an explicit Unix create mode for the temp file.
+///
+/// - `Some(0o600)` — secrets: closed from the first byte.
+/// - `None` — when replacing, copy the existing file's mode; new files use the
+///   platform/umask default.
 pub fn atomic_write_with_mode(
     path: &Path,
     bytes: &[u8],
     unix_mode: Option<u32>,
-) -> Result<(), String> {
+) -> Result<AtomicWriteOutcome, String> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -43,21 +100,72 @@ pub fn atomic_write_with_mode(
         nanos
     ));
 
+    #[cfg(unix)]
+    let create_mode: Option<u32> = {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(m) = unix_mode {
+            Some(m & 0o7777)
+        } else if path.is_file() {
+            fs::metadata(path)
+                .ok()
+                .map(|md| md.permissions().mode() & 0o7777)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(unix))]
+    let create_mode: Option<u32> = unix_mode;
+
+    let fault = take_test_fault();
+
     let write_tmp = || -> Result<(), String> {
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Some(mode) = create_mode {
+                opts.mode(mode);
+            }
+        }
         let mut f = opts
             .open(&tmp)
             .map_err(|e| format!("temp create {}: {e}", tmp.display()))?;
+
+        if fault == Some(AtomicWriteFault::AfterCreate) {
+            #[cfg(all(test, unix))]
+            if let Some(expected) = create_mode {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&tmp)
+                    .map_err(|e| format!("stat temp: {e}"))?
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                let exp = expected & 0o777;
+                if mode != exp {
+                    return Err(format!(
+                        "temp mode at create {mode:o} != expected {exp:o}"
+                    ));
+                }
+            }
+            return Err("injected: after create".into());
+        }
+
+        if fault == Some(AtomicWriteFault::AfterPartialWrite) {
+            if !bytes.is_empty() {
+                f.write_all(&bytes[..1])
+                    .map_err(|e| format!("temp partial write {}: {e}", tmp.display()))?;
+            }
+            return Err("injected: after partial write".into());
+        }
+
         f.write_all(bytes)
             .map_err(|e| format!("temp write {}: {e}", tmp.display()))?;
         f.sync_all()
             .map_err(|e| format!("temp sync {}: {e}", tmp.display()))?;
-        #[cfg(unix)]
-        if let Some(mode) = unix_mode {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))
-                .map_err(|e| format!("temp chmod {}: {e}", tmp.display()))?;
+
+        if fault == Some(AtomicWriteFault::BeforeRename) {
+            return Err("injected: before rename".into());
         }
         Ok(())
     };
@@ -65,6 +173,11 @@ pub fn atomic_write_with_mode(
     if let Err(e) = write_tmp() {
         let _ = fs::remove_file(&tmp);
         return Err(e);
+    }
+
+    if fault == Some(AtomicWriteFault::Rename) {
+        let _ = fs::remove_file(&tmp);
+        return Err("injected: rename".into());
     }
 
     // rename replaces destination on Unix and Windows when same volume.
@@ -77,15 +190,20 @@ pub fn atomic_write_with_mode(
         ));
     }
 
-    // Best-effort directory sync so the directory entry is durable.
+    // Best-effort directory sync — rename already committed the new bytes.
     #[cfg(unix)]
     {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
+        match File::open(parent).and_then(|dir| dir.sync_all()) {
+            Ok(()) => Ok(AtomicWriteOutcome::Committed),
+            Err(e) => Ok(AtomicWriteOutcome::PostCommitDirSync {
+                message: format!("dir sync {}: {e}", parent.display()),
+            }),
         }
     }
-
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        Ok(AtomicWriteOutcome::Committed)
+    }
 }
 
 #[cfg(test)]
@@ -107,26 +225,79 @@ mod tests {
         dir
     }
 
+    fn leftover_temps(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".tmp"))
+            })
+            .collect()
+    }
+
     #[test]
     fn successful_replacement_is_readable() {
         let dir = tmp_dir("ok");
         let path = dir.join("proj.json");
         fs::write(&path, b"old").unwrap();
-        atomic_write(&path, b"{\"ok\":true}").unwrap();
+        let out = atomic_write(&path, b"{\"ok\":true}").unwrap();
+        assert_eq!(out, AtomicWriteOutcome::Committed);
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"ok\":true}");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn failed_temp_write_leaves_previous_bytes() {
-        let dir = tmp_dir("keep");
+    fn injected_after_create_leaves_previous_bytes() {
+        let dir = tmp_dir("inj_create");
         let path = dir.join("proj.json");
         fs::write(&path, b"keep-me").unwrap();
-        // Simulate pre-commit failure: write temp then remove it without rename.
-        let tmp = dir.join(format!(".proj.json.{}-sim.tmp", std::process::id()));
-        fs::write(&tmp, b"partial").unwrap();
-        fs::remove_file(&tmp).unwrap();
+        set_test_fault(Some(AtomicWriteFault::AfterCreate));
+        let err = atomic_write(&path, b"new").unwrap_err();
+        assert!(err.contains("injected"), "{err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "keep-me");
+        assert!(leftover_temps(&dir).is_empty(), "temp cleaned");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn injected_partial_write_leaves_previous_bytes() {
+        let dir = tmp_dir("inj_partial");
+        let path = dir.join("proj.json");
+        fs::write(&path, b"keep-me").unwrap();
+        set_test_fault(Some(AtomicWriteFault::AfterPartialWrite));
+        let err = atomic_write(&path, b"ABCDEF").unwrap_err();
+        assert!(err.contains("injected"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep-me");
+        assert!(leftover_temps(&dir).is_empty(), "temp cleaned");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn injected_before_rename_leaves_previous_bytes() {
+        let dir = tmp_dir("inj_before");
+        let path = dir.join("proj.json");
+        fs::write(&path, b"keep-me").unwrap();
+        set_test_fault(Some(AtomicWriteFault::BeforeRename));
+        let err = atomic_write(&path, b"new-full").unwrap_err();
+        assert!(err.contains("injected"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep-me");
+        assert!(leftover_temps(&dir).is_empty(), "temp cleaned");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn injected_rename_leaves_previous_bytes() {
+        let dir = tmp_dir("inj_rename");
+        let path = dir.join("proj.json");
+        fs::write(&path, b"keep-me").unwrap();
+        set_test_fault(Some(AtomicWriteFault::Rename));
+        let err = atomic_write(&path, b"new-full").unwrap_err();
+        assert!(err.contains("injected"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep-me");
+        assert!(leftover_temps(&dir).is_empty(), "temp cleaned");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -140,7 +311,6 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
             let err = atomic_write(&path, b"new");
-            // restore writable for cleanup
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
             assert!(err.is_err(), "expected error on read-only dir");
             assert_eq!(fs::read_to_string(&path).unwrap(), "safe");
@@ -163,6 +333,43 @@ mod tests {
             .read_to_string(&mut buf)
             .unwrap();
         assert_eq!(buf, "hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_mode_at_create_before_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir("sec_create");
+        let path = dir.join("secrets.json");
+        fs::write(&path, b"old").unwrap();
+        set_test_fault(Some(AtomicWriteFault::AfterCreate));
+        // Production path checks temp mode == 0600 before returning injected err.
+        let err = atomic_write_with_mode(&path, b"SECRET", Some(0o600)).unwrap_err();
+        assert!(
+            err.contains("injected: after create"),
+            "mode check must pass before inject: {err}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert!(leftover_temps(&dir).is_empty());
+
+        atomic_write_with_mode(&path, b"{\"k\":1}", Some(0o600)).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_preserves_existing_project_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir("mode");
+        let path = dir.join("proj.json");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        atomic_write(&path, b"new").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "replace must keep prior 0600");
         let _ = fs::remove_dir_all(&dir);
     }
 }

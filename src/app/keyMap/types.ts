@@ -27,6 +27,13 @@ export type KeyMapTabSession = {
   contentHash?: string;
   /** ADR-0022 dirty delta for source Save. */
   dirtyDelta?: KeyMapDirtyDelta | null;
+  /**
+   * Unsaved editor edits (seed/ref included). Set when the editor changes rows
+   * or reports a non-empty dirtyDelta; cleared on rebind / successful settle.
+   * Merge must not overwrite divergent rows while this is true — even if
+   * `dirtyDelta` is null (seed/ref have no warehouse dirty wire).
+   */
+  localDraft?: boolean;
   /** Editor store Save API — one in-flight capture; confirm/abort take its token. */
   saveApi?: {
     captureSave: () => {

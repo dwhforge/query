@@ -1,9 +1,9 @@
 # Stabilization report — ADR-0026–0033
 
-**Status:** scoped path complete (Phases 0–3); Phases 4–6 gated follow-ups  
+**Status:** Phases 0–3 acceptance closed after persistence/review fixes; Phases 4–6 gated follow-ups  
 **Reviewed baseline SHA:** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
 **Tested SHA (start):** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
-**Tested functional tip:** `db975b2` (report commits may follow)  
+**Tested functional tip:** post-review commit on `feature/mapping_wow` (see git log)  
 **Branch:** `feature/mapping_wow`  
 **Prepared:** 2026-11-04  
 **Scope agreement:** full unit inventory + KeyMap binding isolation + atomic persistence; Phases 4–6 deferred.
@@ -22,7 +22,19 @@
 
 1. `55be262` — Stabilize test gates: full unit inventory, types freshness, engine env isolation  
 2. `148774b` — Isolate KeyMap tab state across warehouse binding changes  
-3. `db975b2` — Atomic project/secrets/connections writes + future-format refuse
+3. `db975b2` — Atomic project/secrets/connections writes + future-format refuse  
+4. *(review)* — Temp mode at create, real fault-injection tests, durability wording, seed/ref `localDraft`
+
+## Durability guarantee (explicit)
+
+| Claim | Status |
+|-------|--------|
+| No partially overwritten destination JSON | **yes** — temp + rename |
+| Pre-rename failure leaves previous bytes | **yes** — verified via injected faults on production path |
+| Secrets temp confidential from first byte (Unix `0o600` at `open`) | **yes** |
+| Replace preserves prior project mode when mode not overridden | **yes** |
+| Directory-entry durable after power loss | **no** — parent `sync_all` is best-effort; failure → `PostCommitDirSync` (content already published) |
+| Multi-file project+secrets+connections ACID | **no** |
 
 ## Command matrix
 
@@ -39,48 +51,44 @@
 | `npm run types:check` | passed | 0 | then git-diff only |
 | `cargo build -p dwh-host --release` | passed | 0 | |
 
-### After Phases 1–3 (focused re-runs)
+### Full gate after review fixes
 
 | Command | Result | Exit | Notes |
 |---------|--------|------|-------|
 | `npm run test:unit` | passed | 0 | **11/11** |
 | `npx tsc --noEmit` | passed | 0 | |
 | `bash scripts/check-generated-types.sh` | passed | 0 | |
+| `npm run build` | passed | 0 | |
+| `cargo test -p dwh-pipeline --lib` | passed | 0 | |
 | `cargo test -p dwh-engine --lib` | passed | 0 | |
-| `cargo test -p dwh-host --lib atomic_fs::` | passed | 0 | |
-| `cargo test -p dwh-host --lib secrets_io::` | passed | 0 | |
+| `cargo test -p dwh-host --lib` | passed | 0 | incl. atomic fault + mode tests |
 | Electron IPC smoke | **not run** | — | release gate |
 | Phase 4–6 suites | **not run** | — | deferred |
 
-Logs: `docs/stabilization/logs/`.
-
-## Test inventory
-
-All 11 `src/**/*.test.ts` discovered and executed by `npm run test:unit` (pinned esbuild binary; no `npx` download). No `*.test.tsx`. CI still triggers on PR / main|master only — feature-branch push alone is not evidence of CI.
+Logs: `docs/stabilization/logs/` (gitignored).
 
 ## Failures discovered → fixes
 
 | Failure | Fix |
 |---------|-----|
-| `session_limits::apply_settings_roundtrip` flake (`21852MB` vs `2GB`) | `ENV_LOCK` + restore guards |
-| `mappingQuality.test.ts` quote assert vs 24-key cap | split quote vs cap fixtures |
-| Unit runner omitted 6 files; used `npx esbuild` | discover-all + platform binary |
-| `types:check` missed untracked generated files | `check-generated-types.sh` inventory+content |
-| KeyMap rebind unioned old relation rows; late WH ack | `applyKeyMapTabMapChange`, fingerprint settle |
-| `fs::write` project/secrets/connections | `atomic_fs::atomic_write`; refuse future format |
+| Engine env race | `ENV_LOCK` |
+| Unit inventory / esbuild / types freshness | discover-all runner + `check-generated-types.sh` |
+| KeyMap rebind / late ack | binding fingerprint + refuse busy rebind |
+| Secrets temp chmod-after-write | `OpenOptionsExt::mode` at create |
+| Fake pre-commit test | `AtomicWriteFault` injection on production path |
+| Seed/ref drafts without `dirtyDelta` | session `localDraft` + merge protect |
 
 ## Remaining limitations / debt
 
-- **Not ACID across files:** project publish + secrets/connections remain separate; crash between them can leave stale credentials while the project file stays parseable.
-- **Electron IPC smoke** not executed (documented release gate).
-- **Phases 4–6** (races, workflow/temporal/export e2e, perf baseline) not started.
-- Seed/ref drafts without a non-empty `dirtyDelta` are not protected across refresh.
-- Multi-process / network-FS rename behavior not claimed safe.
-- Host integration test `mapping_quality.rs` not in default `--lib` CI gate.
+- Multi-file crash consistency still not ACID (documented).
+- Dir sync best-effort / `PostCommitDirSync` (logged; not rolled back).
+- Electron IPC smoke not executed.
+- Phases 4–6 not started.
+- Multi-process / network-FS rename not claimed safe.
 
 ## Migration / rollback
 
 - No `format_version` bump.
-- Atomic write is transparent to file schema.
-- Future-format on-disk projects: save now **refuses** instead of stamping current version over them.
-- Upgrade `.bak`: first backup kept; retry does not overwrite existing `.bak`.
+- Atomic write transparent to schema.
+- Future on-disk format: save refuses overwrite.
+- First upgrade `.bak` retained on retry.

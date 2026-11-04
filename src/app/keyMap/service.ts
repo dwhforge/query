@@ -128,6 +128,7 @@ export function applyKeyMapTabMapChange(
       map: normalized,
       contentHash: undefined,
       dirtyDelta: null,
+      localDraft: false,
       saveInFlight: false,
       dirtyResetSeq: undefined,
       totalCount: undefined,
@@ -269,10 +270,10 @@ export function mergeKeyMapTabSession(
   const byId = new Map(
     prev.map.entries.map((e) => [keyMapEntryIdentity(e, meta), e] as const),
   );
-  // Seed/ref drafts normally flow through dirtyDelta (editor toDelta). When the
-  // delta reports changes, treat divergent prev rows as protected even if the
-  // upsert list omitted an identity (e.g. attr-only local edit race).
-  const protectLocalDrafts = dirtyDeltaHasChanges(prev.dirtyDelta);
+  // Protect divergent rows when the tab has unsaved edits. Source maps usually
+  // have dirtyDelta; seed/ref may only flip localDraft (no warehouse wire).
+  const protectLocalDrafts =
+    dirtyDeltaHasChanges(prev.dirtyDelta) || Boolean(prev.localDraft);
 
   for (const e of normalized.entries) {
     const id = keyMapEntryIdentity(e, meta);

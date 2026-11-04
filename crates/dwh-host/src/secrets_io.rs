@@ -38,8 +38,12 @@ pub fn save_secrets_file(file: &SecretsFile) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("secrets.json");
     let json = serde_json::to_string_pretty(file).map_err(|e| e.to_string())?;
-    // Serialize/validate JSON before touching the destination; mode 0600 on publish.
-    atomic_write_with_mode(&path, json.as_bytes(), Some(0o600))?;
+    // Serialize/validate JSON before touching the destination; mode 0600 from create.
+    let outcome = atomic_write_with_mode(&path, json.as_bytes(), Some(0o600))?;
+    if let crate::atomic_fs::AtomicWriteOutcome::PostCommitDirSync { message } = outcome {
+        // Content is published; durability of the dir entry is best-effort.
+        eprintln!("[dwh-host] secrets post-commit: {message}");
+    }
     Ok(())
 }
 
@@ -78,7 +82,10 @@ pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<Projec
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     backup_if_format_upgrade(path)?;
-    atomic_write(Path::new(path), json.as_bytes())?;
+    let outcome = atomic_write(Path::new(path), json.as_bytes())?;
+    if let crate::atomic_fs::AtomicWriteOutcome::PostCommitDirSync { message } = outcome {
+        eprintln!("[dwh-host] project post-commit: {message}");
+    }
 
     // Secrets/connections are separate files — not one ACID transaction with the
     // project. A crash after project publish but before secrets update can leave

@@ -3091,14 +3091,22 @@ function App() {
     setSelectedKeyMapId(map.id);
     const kind = map.storage?.kind ?? "seed";
     if (kind === "seed") {
+      const clearSeedDraft = () =>
+        patchKeyMapTab(map.id, (s) => ({
+          ...s,
+          localDraft: false,
+          dirtyDelta: null,
+        }));
       const exportPath = project.last_dbt_export_path;
       if (!exportPath) {
+        clearSeedDraft();
         const result = seedSaveResult({ exportPath: null });
         setExportMsg(result.message);
         return result;
       }
       try {
         await pushKeyMapToExport(exportPath, map);
+        clearSeedDraft();
         const result = seedSaveResult({ exportPath });
         setExportMsg(result.message);
         setError(null);
@@ -3181,6 +3189,7 @@ function App() {
             return {
               ...s,
               contentHash: r.content_hash,
+              localDraft: false,
               saveInFlight: false,
             };
           }
@@ -3188,6 +3197,7 @@ function App() {
             ...s,
             contentHash: r.content_hash,
             dirtyDelta: null,
+            localDraft: false,
             dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
             saveInFlight: false,
           };
@@ -3224,6 +3234,11 @@ function App() {
         return result;
       }
     }
+    patchKeyMapTab(map.id, (s) => ({
+      ...s,
+      localDraft: false,
+      dirtyDelta: null,
+    }));
     const result = refSaveResult();
     setExportMsg(result.message);
     return result;
@@ -5023,7 +5038,16 @@ function App() {
                         setExportMsg(transition.reason);
                         return s;
                       }
-                      return transition.session;
+                      const next = transition.session;
+                      const entriesChanged =
+                        JSON.stringify(next.map.entries) !==
+                        JSON.stringify(s.map.entries);
+                      // Seed/ref have no WH dirtyDelta requirement — mark draft
+                      // whenever the editor publishes a different entry set.
+                      if (entriesChanged) {
+                        return { ...next, localDraft: true };
+                      }
+                      return next;
                     })
                   }
                   onWarehouseRead={(contentHash, totalCount) =>
@@ -5038,7 +5062,8 @@ function App() {
                           (dirty.deletedFromParts?.length ?? 0) > 0);
                       return {
                         ...s,
-                        contentHash: hasDirty ? s.contentHash : contentHash,
+                        contentHash:
+                          hasDirty || s.localDraft ? s.contentHash : contentHash,
                         totalCount,
                       };
                     })
@@ -5047,6 +5072,8 @@ function App() {
                     patchKeyMapTab(keyMapEditor.map.id, (s) => ({
                       ...s,
                       dirtyDelta,
+                      localDraft:
+                        dirtyDeltaHasChanges(dirtyDelta) || Boolean(s.localDraft),
                     }))
                   }
                   saveInFlight={keyMapEditor.saveInFlight}

@@ -35,6 +35,10 @@ pub struct KeyMapWhArgs {
     #[serde(default)]
     #[ts(optional)]
     pub from_prefix: Option<String>,
+    /// Exact From-tuple equality lookup (Confirm baselines). Not a prefix page.
+    #[serde(default)]
+    #[ts(optional)]
+    pub from_exact: Option<Vec<Vec<String>>>,
 }
 
 /// Wire response for `write_key_map` (ADR-0029).
@@ -109,6 +113,7 @@ pub fn read_key_map(db: &DbSession, args: KeyMapWhArgs) -> Result<Value, RpcErro
         limit: args.limit,
         offset: args.offset,
         from_prefix: args.from_prefix,
+        from_exact: args.from_exact,
     };
     let out: KeyMapReadResult =
         run_read_key_map_paged(db, &args.key_map, &args.connection_string, &q)

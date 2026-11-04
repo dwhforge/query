@@ -1,9 +1,11 @@
 import {
   allowCheckDifference,
+  confirmContextStillValid,
   confirmFrozenCheckRemap,
   createMappingCheck,
   dirtyDeltaFromFrozenRemap,
   findJoinHostsForMap,
+  frozenRemapFingerprint,
   recordCheckRun,
   resolveActiveMappingCheck,
   stageFrozenRemapChanges,
@@ -11,7 +13,10 @@ import {
   unrelatedDraftBlocksConfirm,
 } from "./service";
 import { keyMapRevision, labMappingCheck } from "../../lib/mappingCheck";
-import { upsertKeyMapIntoProject } from "../keyMap";
+import {
+  keyMapBindingFingerprint,
+  upsertKeyMapIntoProject,
+} from "../keyMap";
 import type { Project, QueryDef } from "../../types/pipeline";
 
 function assert(cond: boolean, msg: string) {
@@ -456,6 +461,93 @@ assert(frozen.changes.length === 1 && frozen.changes[0].to === "NEW", "stage");
     },
   });
   assert(refuseConfirm.ok === false, "Confirm refuses unrelated dirty");
+}
+
+// Post-await Confirm context: project / freeze / binding / revision must still match.
+{
+  const fp = frozenRemapFingerprint(frozen);
+  assert(
+    frozenRemapFingerprint({ ...frozen, changes: [...frozen.changes] }) === fp,
+    "fingerprint stable on clone",
+  );
+  assert(
+    frozenRemapFingerprint({
+      ...frozen,
+      changes: [{ from: "x", to: "OTHER" }],
+    }) !== fp,
+    "fingerprint moves when changes move",
+  );
+
+  const binding = keyMapBindingFingerprint(map as never);
+  assert(
+    confirmContextStillValid({
+      frozenAtStart: frozen,
+      liveFrozen: frozen,
+      projectIdAtStart: project.id,
+      liveProjectId: project.id,
+      bindingAtStart: binding,
+      liveMap: map as never,
+      bindingOf: keyMapBindingFingerprint,
+    }) == null,
+    "same context ok",
+  );
+  assert(
+    confirmContextStillValid({
+      frozenAtStart: frozen,
+      liveFrozen: frozen,
+      projectIdAtStart: project.id,
+      liveProjectId: "other-project",
+      bindingAtStart: binding,
+      liveMap: map as never,
+      bindingOf: keyMapBindingFingerprint,
+    }) != null,
+    "project switch refused",
+  );
+  assert(
+    confirmContextStillValid({
+      frozenAtStart: frozen,
+      liveFrozen: null,
+      projectIdAtStart: project.id,
+      liveProjectId: project.id,
+      bindingAtStart: binding,
+      liveMap: map as never,
+      bindingOf: keyMapBindingFingerprint,
+    }) != null,
+    "cleared freeze refused",
+  );
+  assert(
+    confirmContextStillValid({
+      frozenAtStart: frozen,
+      liveFrozen: { ...frozen, changes: [{ from: "x", to: "Z" }] },
+      projectIdAtStart: project.id,
+      liveProjectId: project.id,
+      bindingAtStart: binding,
+      liveMap: map as never,
+      bindingOf: keyMapBindingFingerprint,
+    }) != null,
+    "mutated freeze refused",
+  );
+  const rebound = {
+    ...map,
+    storage: {
+      kind: "source" as const,
+      connection_id: "c2",
+      schema: "s",
+      table: "t2",
+    },
+  };
+  assert(
+    confirmContextStillValid({
+      frozenAtStart: frozen,
+      liveFrozen: frozen,
+      projectIdAtStart: project.id,
+      liveProjectId: project.id,
+      bindingAtStart: binding,
+      liveMap: rebound as never,
+      bindingOf: keyMapBindingFingerprint,
+    }) != null,
+    "binding change refused",
+  );
 }
 
 // Incomplete top-N CheckRun: store flags; do not invent cell Δ zeros.

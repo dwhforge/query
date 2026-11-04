@@ -723,6 +723,11 @@ export function readKeyMap(
     limit?: number;
     offset?: number;
     fromPrefix?: string;
+    /**
+     * Exact From-tuple equality (Confirm baselines). Not a prefix page —
+     * absence in the result means the key is absent in WH for that batch.
+     */
+    fromExact?: string[][];
   },
 ): Promise<KeyMapReadResult> {
   const args = {
@@ -731,6 +736,7 @@ export function readKeyMap(
     limit: opts?.limit,
     offset: opts?.offset,
     fromPrefix: opts?.fromPrefix,
+    fromExact: opts?.fromExact,
   } satisfies KeyMapWhArgs;
   return invoke("read_key_map", args as Record<string, unknown>);
 }

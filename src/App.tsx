@@ -110,6 +110,7 @@ import {
 } from "./lib/mappingQuality";
 import {
   ensureLabCheck,
+  keyMapRevision,
   labMappingCheck,
   resolveInspectJoinLensTarget,
   type FrozenRemapPreview,
@@ -121,6 +122,7 @@ import type {
 import {
   allowCheckDifference,
   appendMappingCheck,
+  confirmContextStillValid,
   confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
   createMappingCheck,
   findJoinHostsForMap,
@@ -567,6 +569,16 @@ function App() {
   const lastCheckRunFingerprint = useRef<string | null>(null);
   /** Open KeyMap editor tabs (VS Code–style, beside Pipeline canvas). */
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
+  /** Live snapshots for post-await Confirm revalidation. */
+  const projectLiveRef = useRef(project);
+  projectLiveRef.current = project;
+  const frozenRemapLiveRef = useRef(frozenRemap);
+  frozenRemapLiveRef.current = frozenRemap;
+  const keyMapTabsLiveRef = useRef(keyMapTabs);
+  keyMapTabsLiveRef.current = keyMapTabs;
+  /** One Confirm at a time — no parallel WH reads / double publish. */
+  const confirmRemapInFlightRef = useRef(false);
+  const [confirmRemapBusy, setConfirmRemapBusy] = useState(false);
   /** Center workspace tab: canvas or open KeyMap id. */
   const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
   useEffect(() => {
@@ -3377,93 +3389,158 @@ function App() {
   }
 
   async function confirmFrozenCheckRemap() {
-    if (!frozenRemap) return;
-    const frozen = frozenRemap;
-    const map = (project.workspace.key_maps ?? []).find(
-      (m) => m.id === frozen.map_id,
+    if (confirmRemapInFlightRef.current) return;
+    const frozenAtStart = frozenRemapLiveRef.current;
+    if (!frozenAtStart) return;
+    const projectAtStart = projectLiveRef.current;
+    const mapAtStart = (projectAtStart.workspace.key_maps ?? []).find(
+      (m) => m.id === frozenAtStart.map_id,
     );
-    if (!map) {
+    if (!mapAtStart) {
       setError("KeyMap missing — refresh the remap preview.");
       return;
     }
-    const openTab = keyMapTabs.find((t) => t.map.id === map.id);
+    const projectIdAtStart = projectAtStart.id;
+    const bindingAtStart = keyMapBindingFingerprint(mapAtStart);
+    const revisionAtStart = keyMapRevision(mapAtStart);
 
-    let priorEntries = map.entries;
-    if (map.storage?.kind === "source") {
-      let conns = project.connections;
-      let resolved = resolveKeyMapConnection(project, map, conns, true);
-      if (!resolved.ok) {
-        try {
-          conns = await getGlobalConnections();
-          if (conns.length) {
-            setProject((p) => ({ ...p, connections: conns }));
-          }
-          resolved = resolveKeyMapConnection(project, map, conns, true);
-        } catch {
-          /* ignore */
-        }
-      }
-      if (!resolved.ok) {
-        setError(
-          `Cannot read warehouse baselines for Confirm: ${resolved.error}`,
+    confirmRemapInFlightRef.current = true;
+    setConfirmRemapBusy(true);
+    try {
+      let priorEntries = mapAtStart.entries;
+      if (mapAtStart.storage?.kind === "source") {
+        let conns = projectAtStart.connections;
+        let resolved = resolveKeyMapConnection(
+          projectAtStart,
+          mapAtStart,
+          conns,
+          true,
         );
-        return;
-      }
-      try {
-        // Exact From lookups — absence in WH is the only valid existed:false.
-        const found: typeof map.entries = [];
-        const seen = new Set<string>();
-        for (const change of frozen.changes) {
-          const from = change.from.trim();
-          if (!from || seen.has(from)) continue;
-          seen.add(from);
-          const page = await readKeyMap(map, resolved.dsn, {
-            fromPrefix: from,
-            limit: 32,
-          });
-          for (const e of page.entries) {
-            const key = (e.from_parts?.[0] ?? e.from).trim();
-            if (key === from && !found.some((x) => (x.from_parts?.[0] ?? x.from).trim() === key)) {
-              found.push(e);
+        if (!resolved.ok) {
+          try {
+            conns = await getGlobalConnections();
+            if (conns.length) {
+              setProject((p) => ({ ...p, connections: conns }));
             }
+            // Re-resolve against live project after await.
+            resolved = resolveKeyMapConnection(
+              projectLiveRef.current,
+              mapAtStart,
+              conns.length ? conns : projectLiveRef.current.connections,
+              true,
+            );
+          } catch {
+            /* ignore */
           }
         }
-        priorEntries = found;
-      } catch (e) {
+        if (!resolved.ok) {
+          setError(
+            `Cannot read warehouse baselines for Confirm: ${resolved.error}`,
+          );
+          return;
+        }
+        try {
+          const fromExact = [
+            ...new Set(
+              frozenAtStart.changes
+                .map((c) => c.from.trim())
+                .filter(Boolean),
+            ),
+          ].map((from) => [from]);
+          // Bounded exact equality IN — not prefix/ILIKE page + client filter.
+          const page = await readKeyMap(mapAtStart, resolved.dsn, {
+            fromExact,
+          });
+          priorEntries = page.entries;
+        } catch (e) {
+          setError(
+            `Cannot read warehouse baselines for Confirm: ${typeof e === "string" ? e : String(e)}`,
+          );
+          return;
+        }
+      }
+
+      const liveProject = projectLiveRef.current;
+      const liveFrozen = frozenRemapLiveRef.current;
+      const liveMap = (liveProject.workspace.key_maps ?? []).find(
+        (m) => m.id === frozenAtStart.map_id,
+      );
+      const stale = confirmContextStillValid({
+        frozenAtStart,
+        liveFrozen,
+        projectIdAtStart,
+        liveProjectId: liveProject.id,
+        bindingAtStart,
+        liveMap,
+        bindingOf: keyMapBindingFingerprint,
+      });
+      if (stale) {
+        setError(stale);
+        return;
+      }
+      // Same revision we started with — also caught by confirmContextStillValid.
+      if (keyMapRevision(liveMap!) !== revisionAtStart) {
         setError(
-          `Cannot read warehouse baselines for Confirm: ${typeof e === "string" ? e : String(e)}`,
+          "KeyMap changed while reading baselines — refresh the remap preview.",
         );
         return;
       }
-    }
 
-    const result = confirmFrozenCheckRemapSvc({
-      frozen,
-      workspace: project.workspace,
-      checks: project.mapping_checks ?? [],
-      priorEntries,
-      openTabDirty: openTab?.dirtyDelta,
-      openTabLocalDraft: openTab?.localDraft,
-    });
-    if (!result.ok) {
-      setError(result.error);
-      return;
+      const openTab = keyMapTabsLiveRef.current.find(
+        (t) => t.map.id === frozenAtStart.map_id,
+      );
+      const result = confirmFrozenCheckRemapSvc({
+        frozen: liveFrozen!,
+        workspace: liveProject.workspace,
+        checks: liveProject.mapping_checks ?? [],
+        priorEntries,
+        openTabDirty: openTab?.dirtyDelta,
+        openTabLocalDraft: openTab?.localDraft,
+      });
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+
+      // Apply only if the functional updater still sees the same identity.
+      let applied = false;
+      setProject((p) => {
+        if (p.id !== projectIdAtStart) return p;
+        const m = (p.workspace.key_maps ?? []).find(
+          (x) => x.id === result.nextMap.id,
+        );
+        if (!m) return p;
+        if (keyMapBindingFingerprint(m) !== bindingAtStart) return p;
+        if (keyMapRevision(m) !== frozenAtStart.expected_map_revision) return p;
+        applied = true;
+        return upsertKeyMapIntoProject(p, result.nextMap);
+      });
+      if (!applied) {
+        setError(
+          "Project or KeyMap changed before Confirm could apply — refresh and retry.",
+        );
+        return;
+      }
+      patchKeyMapTab(result.nextMap.id, (s) => {
+        if (keyMapBindingFingerprint(s.map) !== bindingAtStart) return s;
+        return {
+          ...s,
+          map: { ...result.nextMap, id: s.map.id },
+          dirtyDelta: result.dirtyDelta,
+          localDraft: true,
+        };
+      });
+      setFrozenRemap(null);
+      setExportMsg(result.message);
+      setCenterTab(QUALITY_TAB);
+      lastCheckRunFingerprint.current = null;
+      void saveKeyMapToProject(result.nextMap, {
+        dirtyDelta: result.dirtyDelta,
+      });
+    } finally {
+      confirmRemapInFlightRef.current = false;
+      setConfirmRemapBusy(false);
     }
-    // Literal Confirm: only frozen dirtyDelta — never merge unrelated editor drafts.
-    setProject((p) => upsertKeyMapIntoProject(p, result.nextMap));
-    patchKeyMapTab(result.nextMap.id, (s) => ({
-      ...s,
-      map: { ...result.nextMap, id: s.map.id },
-      dirtyDelta: result.dirtyDelta,
-      localDraft: true,
-    }));
-    setFrozenRemap(null);
-    setExportMsg(result.message);
-    setCenterTab(QUALITY_TAB);
-    lastCheckRunFingerprint.current = null;
-    void saveKeyMapToProject(result.nextMap, {
-      dirtyDelta: result.dirtyDelta,
-    });
   }
 
   function handleMapKeyFromLens(
@@ -4441,7 +4518,9 @@ function App() {
               <button
                 type="button"
                 className="rounded border border-amber-400/50 bg-amber-500/15 px-2.5 py-1 font-medium text-amber-50 hover:bg-amber-500/25 disabled:opacity-40"
-                disabled={!frozenRemap.changes.length}
+                disabled={
+                  !frozenRemap.changes.length || confirmRemapBusy
+                }
                 onClick={() => confirmFrozenCheckRemap()}
               >
                 Confirm into KeyMap

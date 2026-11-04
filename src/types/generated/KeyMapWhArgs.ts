@@ -11,4 +11,8 @@ expectedContentHash?: string,
 /**
  * ADR-0022 dirty delta; when set, only these upserts/deletes are applied.
  */
-delta?: import("../../lib/bridge").KeyMapDirtyDelta, limit?: number, offset?: number, fromPrefix?: string, };
+delta?: import("../../lib/bridge").KeyMapDirtyDelta, limit?: number, offset?: number, fromPrefix?: string, 
+/**
+ * Exact From-tuple equality lookup (Confirm baselines). Not a prefix page.
+ */
+fromExact?: Array<Array<string>>, };

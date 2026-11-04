@@ -476,6 +476,56 @@ function dirtyDeltaHasLocalChanges(delta: KeyMapDirtyDelta): boolean {
   );
 }
 
+/** Stable identity of a frozen remap preview (for post-await stale checks). */
+export function frozenRemapFingerprint(frozen: FrozenRemapPreview): string {
+  return JSON.stringify({
+    check_id: frozen.check_id,
+    map_id: frozen.map_id,
+    expected_map_revision: frozen.expected_map_revision,
+    expected_input_revisions: frozen.expected_input_revisions,
+    changes: frozen.changes,
+  });
+}
+
+/**
+ * After async warehouse reads, refuse Confirm if the live UI context moved.
+ * Returns an error message, or null when still valid.
+ */
+export function confirmContextStillValid(args: {
+  frozenAtStart: FrozenRemapPreview;
+  liveFrozen: FrozenRemapPreview | null;
+  projectIdAtStart: string;
+  liveProjectId: string;
+  bindingAtStart: string;
+  liveMap: KeyMapDef | undefined;
+  bindingOf: (map: KeyMapDef) => string;
+}): string | null {
+  if (args.liveProjectId !== args.projectIdAtStart) {
+    return "Project changed while reading baselines — Confirm cancelled.";
+  }
+  if (!args.liveFrozen) {
+    return "Remap preview was cleared — Confirm cancelled.";
+  }
+  if (
+    frozenRemapFingerprint(args.liveFrozen) !==
+    frozenRemapFingerprint(args.frozenAtStart)
+  ) {
+    return "Remap preview changed while reading baselines — Confirm cancelled.";
+  }
+  if (!args.liveMap) {
+    return "KeyMap missing after baseline read — Confirm cancelled.";
+  }
+  if (args.bindingOf(args.liveMap) !== args.bindingAtStart) {
+    return "KeyMap binding changed while reading baselines — Confirm cancelled.";
+  }
+  if (
+    keyMapRevision(args.liveMap) !== args.frozenAtStart.expected_map_revision
+  ) {
+    return "KeyMap changed while reading baselines — refresh the remap preview.";
+  }
+  return null;
+}
+
 /**
  * Confirm applies only frozen changes — refuse when the open editor has
  * unrelated unsaved drafts (do not silently merge / publish them).

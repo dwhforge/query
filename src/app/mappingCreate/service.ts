@@ -37,9 +37,18 @@ export function isLocalQueryId(id: string): boolean {
   return Boolean(id.trim()) && !id.startsWith("xref:");
 }
 
+/** Align with Rust `graph::direct_deps` — SqlModel and CustomSql both use `{{query:id}}`. */
+function sqlPlaceholderQueryIds(rawSql: string): string[] {
+  const out: string[] = [];
+  for (const m of rawSql.matchAll(SQL_QUERY_PLACEHOLDER)) {
+    if (m[1]) out.push(m[1]);
+  }
+  return out;
+}
+
 /**
- * Direct upstream query ids via FromQuery / Join right / Append / SqlModel
- * `{{query:id}}`. Supported dependency graph only — not a full lineage compiler.
+ * Direct upstream query ids via FromQuery / Join right / Append / SqlModel /
+ * CustomSql `{{query:id}}`. Mirrors supported edges in `graph::direct_deps`.
  */
 export function directUpstreamQueryIds(query: QueryDef): string[] {
   const out: string[] = [];
@@ -50,10 +59,8 @@ export function directUpstreamQueryIds(query: QueryDef): string[] {
       out.push(targetKey(s.payload.right_query_id));
     } else if (s.type === "Append") {
       for (const t of s.payload.other_query_ids) out.push(targetKey(t));
-    } else if (s.type === "SqlModel") {
-      for (const m of s.payload.raw_sql.matchAll(SQL_QUERY_PLACEHOLDER)) {
-        if (m[1]) out.push(m[1]);
-      }
+    } else if (s.type === "SqlModel" || s.type === "CustomSql") {
+      out.push(...sqlPlaceholderQueryIds(s.payload.raw_sql));
     }
   }
   return [...new Set(out.filter(Boolean))];
@@ -98,8 +105,9 @@ export function basisQueryFingerprints(
 }
 
 /**
- * Direct dependents of `queryId` via FromQuery / Join right / Append / SqlModel
- * `{{query:id}}` placeholders. Not map_id consumers.
+ * Direct dependents of `queryId` via FromQuery / Join right / Append / SqlModel /
+ * CustomSql `{{query:id}}`. Not map_id consumers. Same step set as
+ * `directUpstreamQueryIds` / Rust `graph::direct_deps`.
  */
 export function directQueryConsumers(
   workspace: Workspace,
@@ -125,9 +133,9 @@ export function directQueryConsumers(
         ) {
           vias.push("Append");
         }
-      } else if (s.type === "SqlModel") {
-        for (const m of s.payload.raw_sql.matchAll(SQL_QUERY_PLACEHOLDER)) {
-          if (m[1] === want) vias.push("SqlModel");
+      } else if (s.type === "SqlModel" || s.type === "CustomSql") {
+        if (sqlPlaceholderQueryIds(s.payload.raw_sql).includes(want)) {
+          vias.push(s.type);
         }
       }
     }
@@ -245,6 +253,57 @@ function uniqueOrdered(cols: string[]): string[] {
     out.push(t);
   }
   return out;
+}
+
+/**
+ * Keep restores only for queries still in the source/target pair.
+ * Pure helper for wizard pair changes and plan build.
+ */
+export function restoresForPair(
+  restores: Record<string, string[]>,
+  sourceQueryId: string,
+  targetQueryId: string,
+): Record<string, string[]> {
+  const keep = new Set([sourceQueryId, targetQueryId].filter(Boolean));
+  const out: Record<string, string[]> = {};
+  for (const [id, cols] of Object.entries(restores)) {
+    if (!keep.has(id) || !cols?.length) continue;
+    out[id] = [...cols];
+  }
+  return out;
+}
+
+/**
+ * Physical KeyMap relation column names — must be unique within the seed CSV
+ * header (From… + To). Authoring context keeps the original query column names.
+ */
+export function allocateMapRelationColumns(args: {
+  /** Preferred From names (usually authoring source columns). */
+  sourceColumns: string[];
+  /** Preferred To name (default `to`). */
+  preferredTo?: string;
+}): {
+  from_columns: string[];
+  from_column: string;
+  to_column: string;
+} {
+  const from_columns = uniqueOrdered(args.sourceColumns);
+  if (!from_columns.length) {
+    throw new Error("allocateMapRelationColumns: empty From columns");
+  }
+  const used = new Set(from_columns.map((c) => c.toLowerCase()));
+  const preferred = (args.preferredTo ?? "to").trim() || "to";
+  let to_column = preferred;
+  if (used.has(to_column.toLowerCase())) {
+    let i = 2;
+    while (used.has(`${preferred}_${i}`.toLowerCase())) i += 1;
+    to_column = `${preferred}_${i}`;
+  }
+  return {
+    from_columns,
+    from_column: from_columns[0]!,
+    to_column,
+  };
 }
 
 /** Observed output ∪ planned restores — UI selection helper only. */
@@ -381,9 +440,14 @@ export function buildMappingCreatePlan(args: {
     if (!basis.ok) return basis;
   }
 
+  const restores = restoresForPair(
+    draft.restoreColumnsByQuery,
+    draft.sourceQueryId,
+    draft.targetQueryId,
+  );
   const patches: QueryFieldsPatch[] = [];
   const patchByQuery = new Map<string, string[]>();
-  for (const [qid, cols] of Object.entries(draft.restoreColumnsByQuery)) {
+  for (const [qid, cols] of Object.entries(restores)) {
     if (!cols?.length) continue;
     const merged = patchByQuery.get(qid) ?? [];
     patchByQuery.set(qid, uniqueOrdered([...merged, ...cols]));
@@ -429,15 +493,16 @@ export function buildMappingCreatePlan(args: {
     target_query_id: draft.targetQueryId,
     target_column: targetCol,
   };
+  const relation = allocateMapRelationColumns({ sourceColumns: sourceCols });
   const map: KeyMapDef = {
     ...emptyKeyMap(draft.name.trim()),
     id: mapId,
     name: draft.name.trim(),
     entries: [],
     storage: { kind: "seed" },
-    from_column: sourceCols[0],
-    from_columns: sourceCols,
-    to_column: "to",
+    from_column: relation.from_column,
+    from_columns: relation.from_columns,
+    to_column: relation.to_column,
     authoring_context: authoringContext,
   };
 

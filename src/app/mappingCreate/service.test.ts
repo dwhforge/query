@@ -1,13 +1,16 @@
 import {
+  allocateMapRelationColumns,
   applyMappingCreateOntoProject,
   assertLiveSchemaMatchesPlan,
   basisQueryFingerprints,
   buildMappingCreatePlan,
   directQueryConsumers,
+  directUpstreamQueryIds,
   excludedByLastFields,
   makeSchemaEvidence,
   plannedOutputColumns,
   probeLastFieldsRestore,
+  restoresForPair,
   validateMappingCreatePlan,
 } from "./service";
 import type { Project, QueryDef, Workspace } from "../../types/pipeline";
@@ -458,6 +461,202 @@ function ev(
     storage: { kind: "seed" },
   };
   assert(legacy.authoring_context === undefined, "legacy absence");
+}
+
+{
+  // Physical To must not collide with From (incl. case).
+  const single = allocateMapRelationColumns({ sourceColumns: ["to"] });
+  assert(single.from_columns.join(",") === "to", "keep From name to");
+  assert(single.to_column === "to_2", "To becomes to_2");
+  const composite = allocateMapRelationColumns({
+    sourceColumns: ["sku", "to"],
+  });
+  assert(composite.to_column === "to_2", "composite with to");
+  const upper = allocateMapRelationColumns({ sourceColumns: ["TO"] });
+  assert(upper.from_columns[0] === "TO", "keep TO");
+  assert(upper.to_column.toLowerCase() !== "to", "case-insensitive collision");
+
+  const toColProject = {
+    ...project,
+    workspace: {
+      queries: [
+        {
+          id: "q_to",
+          name: "q_to",
+          steps: [{ type: "LoadCsv", payload: { path: "t.csv" } }],
+        } as QueryDef,
+      ],
+      focus_query_id: "q_to",
+      key_maps: [],
+    },
+  } as Project;
+  const toPlan = buildMappingCreatePlan({
+    project: toColProject,
+    draft: {
+      name: "To key",
+      sourceQueryId: "q_to",
+      sourceColumns: ["to"],
+      targetQueryId: "q_to",
+      targetColumn: "to",
+      restoreColumnsByQuery: {},
+    },
+    schemas: [
+      makeSchemaEvidence({
+        workspace: toColProject.workspace,
+        queryId: "q_to",
+        outputColumns: ["to"],
+        upstreamColumns: null,
+      }),
+    ],
+  });
+  assert(toPlan.ok === true, "plan with source col to");
+  if (toPlan.ok) {
+    assert(
+      toPlan.plan.authoringContext.source_columns[0] === "to",
+      "authoring keeps query col",
+    );
+    assert(toPlan.plan.map.from_columns?.[0] === "to", "map From is to");
+    assert(toPlan.plan.map.to_column === "to_2", "map To disambiguated");
+  }
+}
+
+{
+  // CustomSql placeholders in basis + consumers + stale fold.
+  const lookup: QueryDef = {
+    id: "lookup",
+    name: "lookup",
+    steps: [{ type: "LoadCsv", payload: { path: "lookup.csv" } }],
+  };
+  const withCustom: QueryDef = {
+    id: "enriched",
+    name: "enriched",
+    steps: [
+      { type: "LoadCsv", payload: { path: "e.csv" } },
+      {
+        type: "CustomSql",
+        payload: {
+          raw_sql: "select * from {{prev_step}} join {{query:lookup}} using (id)",
+        },
+      },
+      { type: "SelectColumns", payload: { columns: ["id"] } },
+    ],
+  };
+  const customWs: Workspace = {
+    queries: [lookup, withCustom],
+    focus_query_id: "enriched",
+    key_maps: [],
+  };
+  const customProject = {
+    ...project,
+    workspace: customWs,
+  } as Project;
+  assert(
+    directUpstreamQueryIds(withCustom).includes("lookup"),
+    "CustomSql upstream",
+  );
+  assert(
+    directQueryConsumers(customWs, "lookup").some(
+      (c) => c.queryId === "enriched" && c.via.includes("CustomSql"),
+    ),
+    "CustomSql consumer",
+  );
+  const basis = basisQueryFingerprints(customWs, "enriched");
+  assert(basis.ok === true && basis.ok && basis.defs.lookup != null, "basis has lookup");
+  const up = ["id", "code"];
+  const draft = {
+    name: "CustomSql map",
+    sourceQueryId: "enriched",
+    sourceColumns: ["code"],
+    targetQueryId: "enriched",
+    targetColumn: "id",
+    restoreColumnsByQuery: { enriched: ["code"] },
+  };
+  const plan = buildMappingCreatePlan({
+    project: customProject,
+    draft,
+    schemas: [
+      makeSchemaEvidence({
+        workspace: customWs,
+        queryId: "enriched",
+        outputColumns: ["id"],
+        upstreamColumns: up,
+      }),
+    ],
+  });
+  assert(plan.ok === true, "customsql plan");
+  if (plan.ok) {
+    assert(plan.plan.expectedQueryDefs.lookup != null, "expected includes lookup");
+    const moved: Project = {
+      ...customProject,
+      workspace: {
+        ...customWs,
+        queries: customWs.queries.map((q) =>
+          q.id === "lookup"
+            ? {
+                ...q,
+                steps: [...q.steps, { type: "Limit", payload: { n: 1 } }],
+              }
+            : q,
+        ),
+      },
+    };
+    assert(
+      JSON.stringify(
+        moved.workspace.queries.find((q) => q.id === "enriched")!.steps,
+      ) === JSON.stringify(withCustom.steps),
+      "enriched steps unchanged",
+    );
+    const fold = applyMappingCreateOntoProject(moved, {
+      opId: "custom-stale",
+      plan: plan.plan,
+    });
+    assert(
+      fold.result.status === "stale" && fold.project === moved,
+      "CustomSql upstream stale",
+    );
+  }
+}
+
+{
+  // Pair change: orphan target restores pruned (wizard helper + builder).
+  const pruned = restoresForPair(
+    {
+      supplier_products: ["supplier_id"],
+      catalog_products: ["product_id"],
+      gone_target: ["x"],
+    },
+    "supplier_products",
+    "catalog_products",
+  );
+  assert(pruned.gone_target === undefined, "orphan restore dropped");
+  assert(pruned.catalog_products?.[0] === "product_id", "active target kept");
+
+  const draft = {
+    name: "Orphan restore",
+    sourceQueryId: "supplier_products",
+    sourceColumns: ["product_name"],
+    targetQueryId: "catalog_products",
+    targetColumn: "name",
+    restoreColumnsByQuery: {
+      catalog_products: [] as string[],
+      obsolete_b: ["product_id"],
+    },
+  };
+  const plan = buildMappingCreatePlan({
+    project,
+    draft,
+    schemas: [
+      ev("supplier_products", ["product_name", "category"], upstream),
+      ev("catalog_products", catalogOut, catalogUpstream),
+    ],
+  });
+  assert(
+    plan.ok === true,
+    `orphan restore ignored: ${plan.ok === false ? plan.error : "ok"}`,
+  );
+  if (plan.ok) {
+    assert(plan.plan.patches.length === 0, "no patch for obsolete query");
+  }
 }
 
 console.log("mappingCreate/service.test.ts: ok");

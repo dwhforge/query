@@ -543,6 +543,25 @@ impl KeyMapDef {
                 self.id
             ));
         }
+        {
+            let mut seen_names = std::collections::HashSet::new();
+            for c in &from_cols {
+                let key = c.to_ascii_lowercase();
+                if !seen_names.insert(key) {
+                    return Err(format!(
+                        "KeyMap '{}': duplicate From column name '{c}'",
+                        self.id
+                    ));
+                }
+            }
+            let to_key = self.to_column.to_ascii_lowercase();
+            if seen_names.contains(&to_key) {
+                return Err(format!(
+                    "KeyMap '{}': To column '{}' collides with a From column (seed CSV header must be unique)",
+                    self.id, self.to_column
+                ));
+            }
+        }
         let n = from_cols.len();
         let range = self.is_range_scd();
         let vf_col = self.valid_from_col_eff();
@@ -1004,5 +1023,21 @@ mod authoring_context_tests {
         assert!(map.authoring_context.is_none());
         let out = serde_json::to_value(&map).unwrap();
         assert!(out.get("authoring_context").is_none());
+    }
+
+    #[test]
+    fn validate_rejects_from_to_column_name_collision() {
+        let mut map = KeyMapDef::new("map_bad", "bad");
+        map.from_column = "to".into();
+        map.from_columns = vec!["to".into()];
+        map.to_column = "to".into();
+        let err = map.validate().unwrap_err();
+        assert!(err.contains("collides"), "{err}");
+
+        map.from_columns = vec!["sku".into(), "TO".into()];
+        map.from_column = "sku".into();
+        map.to_column = "to".into();
+        let err2 = map.validate().unwrap_err();
+        assert!(err2.contains("collides"), "{err2}");
     }
 }

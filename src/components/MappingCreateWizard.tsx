@@ -7,6 +7,7 @@ import {
   excludedByLastFields,
   listLocalQueries,
   makeSchemaEvidence,
+  restoresForPair,
   selectableOutputColumns,
   workspaceQueryDefsFingerprint,
   type MappingCreateDraft,
@@ -436,13 +437,18 @@ export function MappingCreateWizard({
                   disabled={busy}
                   onChange={(e) => {
                     invalidateDescribe();
+                    const nextSource = e.target.value;
                     setDraft((d) => ({
                       ...d,
-                      sourceQueryId: e.target.value,
+                      sourceQueryId: nextSource,
                       sourceColumns: [],
-                      restoreColumnsByQuery: {},
+                      restoreColumnsByQuery: restoresForPair(
+                        d.restoreColumnsByQuery,
+                        nextSource,
+                        d.targetQueryId,
+                      ),
                       targetColumn:
-                        d.targetQueryId === e.target.value ? "" : d.targetColumn,
+                        d.targetQueryId === nextSource ? "" : d.targetColumn,
                     }));
                   }}
                 >
@@ -467,10 +473,16 @@ export function MappingCreateWizard({
                   disabled={busy}
                   onChange={(e) => {
                     invalidateDescribe();
+                    const nextTarget = e.target.value;
                     setDraft((d) => ({
                       ...d,
-                      targetQueryId: e.target.value,
+                      targetQueryId: nextTarget,
                       targetColumn: "",
+                      restoreColumnsByQuery: restoresForPair(
+                        d.restoreColumnsByQuery,
+                        d.sourceQueryId,
+                        nextTarget,
+                      ),
                     }));
                   }}
                 >
@@ -562,13 +574,26 @@ export function MappingCreateWizard({
                 <span className="font-medium text-slate-100">
                   {plan.map.name}
                 </span>{" "}
-                · seed · From{" "}
+                · seed · relation From{" "}
                 <span className="font-mono text-teal-200/90">
+                  {(plan.map.from_columns ?? [plan.map.from_column ?? "from"]).join(
+                    " · ",
+                  )}
+                </span>{" "}
+                → To{" "}
+                <span className="font-mono text-teal-200/90">
+                  {plan.map.to_column ?? "to"}
+                </span>
+              </p>
+              <p className="text-[12px] text-slate-500">
+                Authoring: source{" "}
+                <span className="font-mono">
                   {plan.authoringContext.source_columns.join(" · ")}
                 </span>{" "}
-                → To column{" "}
-                <span className="font-mono text-teal-200/90">to</span> (from{" "}
-                {plan.authoringContext.target_column})
+                → target{" "}
+                <span className="font-mono">
+                  {plan.authoringContext.target_column}
+                </span>
               </p>
               {plan.patches.length === 0 ? (
                 <p className="text-slate-500">Queries will not change.</p>

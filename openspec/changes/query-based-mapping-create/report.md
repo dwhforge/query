@@ -19,6 +19,9 @@
 - Live re-describe + digest check before dispatch; describe generation guard in wizard
 - Symmetric target Fields restore; workspace change keeps draft and invalidates evidence
 - `KeyMapAuthoringContext` generated via ts-rs (`npm run types:generate`)
+- Map relation From/To names allocated uniquely (`to`/`TO` source key → physical `to_2`); Rust `KeyMapDef::validate` rejects collisions
+- CustomSql `{{query:id}}` in basis + consumers (aligned with `graph::direct_deps`)
+- Pair change prunes restores via `restoresForPair` (wizard + builder)
 
 ## Commands run
 

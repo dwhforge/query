@@ -1,4 +1,5 @@
 export {
+  allocateMapRelationColumns,
   applyMappingCreateOntoProject,
   assertLiveSchemaMatchesPlan,
   basisQueryFingerprints,
@@ -12,6 +13,7 @@ export {
   makeSchemaEvidence,
   plannedOutputColumns,
   probeLastFieldsRestore,
+  restoresForPair,
   selectableOutputColumns,
   validateDraftSelection,
   validateMappingCreatePlan,

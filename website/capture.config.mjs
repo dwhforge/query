@@ -41,11 +41,9 @@ export default {
     },
     {
       id: "mapping-quality",
-      enabled: false,
+      enabled: true,
       dataShot: "mapping-quality",
       ready: ".quality-loading gone AND Catalog coverage > 0%",
-      note:
-        "Disabled until Electron lab path shows non-zero coverage after load (was stuck at 0.0%).",
     },
   ],
 };

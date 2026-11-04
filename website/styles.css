@@ -406,17 +406,41 @@ a:hover {
   overflow: visible;
 }
 
+.hero-top {
+  display: grid;
+  gap: 1.75rem 2.5rem;
+  margin-bottom: 2.25rem;
+  align-items: start;
+}
+
+@media (min-width: 840px) {
+  .hero-top {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  }
+}
+
 .hero-copy {
   max-width: 36rem;
-  margin-bottom: 2.25rem;
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.65rem;
   animation: rise 0.9s ease both;
+}
+
+.hero-aside {
+  max-width: 32rem;
+  display: grid;
+  gap: 0.85rem;
+  animation: rise 0.9s 0.12s ease both;
 }
 
 .hero-chip {
   display: inline-flex;
   align-items: center;
   gap: 0.55rem;
-  margin: 0 0 1rem;
+  margin: 0;
+  align-self: flex-start;
   padding: 0.35rem 0.75rem 0.35rem 0.55rem;
   border: 1px solid rgba(45, 212, 191, 0.28);
   border-radius: 999px;
@@ -448,7 +472,7 @@ a:hover {
   font-size: clamp(2.75rem, 7.2vw, 4.6rem);
   letter-spacing: 0.01em;
   line-height: 0.88;
-  margin: 0 0 1.25rem;
+  margin: 0;
   text-transform: none;
 }
 
@@ -501,31 +525,67 @@ a:hover {
   font-size: clamp(1.25rem, 2.4vw, 1.65rem);
   letter-spacing: -0.02em;
   line-height: 1.25;
-  margin: 0 0 0.75rem;
+  margin: 0;
   color: var(--fg);
   animation: rise 0.85s 0.35s ease both;
 }
 
 .hero-lede {
-  margin: 0 0 0.85rem;
-  color: var(--muted);
-  font-size: 1.05rem;
-  max-width: 32rem;
+  margin: 0;
+  color: var(--fg);
+  font-size: 1.08rem;
+  line-height: 1.45;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  max-width: none;
   animation: rise 0.85s 0.45s ease both;
 }
 
-.hero-craft {
-  margin: 0 0 1.5rem;
-  max-width: 28rem;
-  font-size: 0.92rem;
-  line-height: 1.45;
-  color: var(--faint);
-  letter-spacing: 0.01em;
-  animation: rise 0.85s 0.5s ease both;
+.hero-theses {
+  list-style: none;
+  margin: 0.15rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.65rem;
+  counter-reset: hero-step;
+  animation: rise 0.85s 0.55s ease both;
 }
 
-.hero-copy .cta-row {
-  animation: rise 0.85s 0.55s ease both;
+.hero-theses li {
+  position: relative;
+  padding-left: 1.65rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  counter-increment: hero-step;
+}
+
+.hero-theses li::before {
+  content: counter(hero-step);
+  position: absolute;
+  left: 0;
+  top: 0.1em;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 50%;
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  color: var(--teal);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.15rem;
+  text-align: center;
+  background: rgba(11, 18, 25, 0.65);
+}
+
+.hero-theses strong {
+  color: var(--fg);
+  font-weight: 650;
+}
+
+.hero-theses em {
+  font-style: normal;
+  color: var(--teal);
+  font-weight: 560;
 }
 
 .hero-stage {
@@ -1470,12 +1530,12 @@ section {
   }
 
   .hero-copy,
+  .hero-aside,
   .hero-stage,
   .hero-headline,
   .hero-lede,
-  .hero-craft,
+  .hero-theses,
   .hero-chip,
-  .hero-copy .cta-row,
   .hero-glow,
   .hero-brand .char,
   .float-tag,

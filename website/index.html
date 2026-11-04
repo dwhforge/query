@@ -64,31 +64,48 @@
 
     <main>
       <section class="hero wrap">
-        <div class="hero-copy">
-          <p class="hero-chip">
-            <span class="chip-dot"></span> Create maps from queries · Join Lens ·
-            dbt you keep
-          </p>
-          <h1 class="hero-brand" aria-label="DWHForge Query">
-            <span class="brand-stem">DWHForge</span>
-            <span class="query">Query</span>
-          </h1>
-          <p class="hero-headline">
-            Build visually. Verify on real data. Ship dbt.
-          </p>
-          <p class="hero-lede">
-            A local desktop workbench for turning PostgreSQL and files into
-            inspectable transforms and a runnable dbt project. Preview and
-            transforms run on your machine; an optional LLM assist may send a
-            limited key context to the endpoint you configure.
-          </p>
-          <p class="hero-craft">
-            For the hour you spend on unmatched keys before the model leaves the
-            laptop.
-          </p>
-          <div class="cta-row">
-            <a class="btn btn-primary btn-glow" href="download.html">Download</a>
-            <a class="btn btn-ghost" href="docs.html">Documentation</a>
+        <div class="hero-top">
+          <div class="hero-copy">
+            <p class="hero-chip">
+              <span class="chip-dot"></span> Local desktop workbench for warehouse
+              transforms
+            </p>
+            <h1 class="hero-brand" aria-label="DWHForge Query">
+              <span class="brand-stem">DWHForge</span>
+              <span class="query">Query</span>
+            </h1>
+            <p class="hero-headline">
+              Your data → map → analyze → dbt
+            </p>
+          </div>
+          <div class="hero-aside">
+            <p class="hero-lede">
+              One loop on your machine: sources in, inspectable pipeline out,
+              export your repo can run.
+            </p>
+            <ol class="hero-theses">
+              <li>
+                <strong>Connect</strong> — Postgres, CSV, Parquet, S3; secrets
+                stay local.
+              </li>
+              <li>
+                <strong>Build &amp; preview</strong> — canvas steps with live
+                intermediate results, not a blind compile.
+              </li>
+              <li>
+                <strong>Map dirty keys</strong> — Join Lens shows
+                <em>why</em> a row missed; the mapping <em>you</em> accept
+                (manual, fuzzy, or LLM suggest)—never automatic ON.
+              </li>
+              <li>
+                <strong>Analyze mappings</strong> — family/grade coverage,
+                concentration, and CheckRuns—not a fake global quality score.
+              </li>
+              <li>
+                <strong>Build / deploy</strong> — export real dbt, parse, and
+                build to DuckDB or PostgreSQL.
+              </li>
+            </ol>
           </div>
         </div>
         <div class="hero-stage">
@@ -250,7 +267,6 @@
                   rename ideas—not a third investigate mode.
                 </p>
               </div>
-              <!-- TODO: reshoot assets/features/join-lens.png — UI now uses This row / No match + Suggest all… action, not a third tab. -->
               <button type="button" class="feature-shot" data-shot="join-lens" hidden></button>
             </li>
             <li>
@@ -395,7 +411,7 @@
           <div>
             <div class="section-head">
               <p class="section-kicker">Core loop</p>
-              <h2 class="section-title">Connect → transform → publish → build</h2>
+              <h2 class="section-title">Your data → map → analyze → dbt</h2>
               <p class="section-lede">
                 Built for data engineers, DBAs, and consultants who already live
                 in Postgres, files, and dbt—not another analyst black box.
@@ -404,38 +420,51 @@
             <ol class="steps">
               <li>
                 <div>
-                  <h3>Connect sources</h3>
+                  <h3>Connect</h3>
                   <p>
-                    PostgreSQL tables, CSV, Parquet, S3-compatible storage, and
-                    DuckDB files in one project explorer.
+                    PostgreSQL, CSV, Parquet, S3-compatible storage, and DuckDB
+                    files in one project explorer. Secrets stay on your machine.
                   </p>
                 </div>
               </li>
               <li>
                 <div>
-                  <h3>Build the graph</h3>
+                  <h3>Build &amp; preview</h3>
                   <p>
                     Join, append, filter, group, sort, calculated columns, and
-                    custom SQL—with Applied Steps you can revisit. Create a KeyMap
-                    from two queries when aliases need a dictionary first.
+                    custom SQL—with Applied Steps and live intermediate results,
+                    not a blind compile.
                   </p>
                 </div>
               </li>
               <li>
                 <div>
-                  <h3>Mark what to publish</h3>
+                  <h3>Map dirty keys</h3>
                   <p>
-                    Choose the execution engine and destination, then enable
-                    Publish to destination on the queries that become marts.
+                    Join Lens shows why a row missed; accept the mapping yourself
+                    (manual, fuzzy, or LLM suggest)—never automatic join ON.
+                    Create a KeyMap from two queries when aliases need a
+                    dictionary first.
                   </p>
                 </div>
               </li>
               <li>
                 <div>
-                  <h3>Export → Parse → Build</h3>
+                  <h3>Analyze mappings</h3>
                   <p>
-                    Write a real dbt project, gate on offline parse, then build
-                    with progress and logs—inside the app or from the CLI.
+                    Family/grade coverage, concentration, and CheckRuns over the
+                    Help lab—observations to inspect, not a fake global quality
+                    score.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <div>
+                  <h3>Build / deploy</h3>
+                  <p>
+                    Mark queries to publish, export a real dbt project, gate on
+                    offline parse, then build to DuckDB or PostgreSQL—inside the
+                    app or from the CLI.
                   </p>
                 </div>
               </li>

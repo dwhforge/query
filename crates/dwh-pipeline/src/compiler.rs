@@ -1,14 +1,17 @@
 use crate::connection::ConnectionDef;
 use crate::dialect::WarehouseDialect;
-use crate::emit::{emit_transform_step_ex, substitute_query_placeholders, EmitSchemaOpts};
+use crate::emit::{
+    emit_transform_step_ex, key_map_seed_csv_cols, substitute_query_placeholders, EmitSchemaOpts,
+};
 use crate::graph::{cte_name, topo_queries_from};
-use crate::model::{KeyMapStorage, TransformationStep, Workspace};
+use crate::model::{KeyMapDef, KeyMapStorage, TransformationStep, Workspace};
 use crate::postgres_attach::duckdb_postgres_relation;
 use crate::parquet_scan::read_parquet_call_opts;
 use crate::project::{parquet_hive_partitioning, SourceDef};
 use crate::schema::WorkspaceSchemas;
 use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::HashMap;
+use std::io::Write;
 
 pub struct GraphCompiler<'a> {
     workspace: &'a Workspace,
@@ -167,7 +170,8 @@ impl<'a> PipelineCompiler<'a> {
     }
 }
 
-/// Preview ApplyKeyMap: source → ATTACH; seed → VALUES from entries; ref → blocked (see below).
+/// Preview ApplyKeyMap: source → ATTACH; seed → CSV relation (or VALUES on the step);
+/// ref → blocked (see below).
 /// Returns `(relations, columns, ref_models)` where `ref_models` is map_id → dbt model name
 /// for `storage=ref` (DuckDB cannot resolve `{{ ref }}`).
 fn preview_key_map_opts(
@@ -194,7 +198,7 @@ fn preview_key_map_opts(
         } else {
             km.to_column.clone()
         };
-        columns.insert(km.id.clone(), (froms, to));
+        columns.insert(km.id.clone(), (froms.clone(), to.clone()));
         if km.is_range_scd() {
             ranges.insert(
                 km.id.clone(),
@@ -213,10 +217,43 @@ fn preview_key_map_opts(
             KeyMapStorage::Ref { model } => {
                 ref_models.insert(km.id.clone(), model.clone());
             }
-            KeyMapStorage::Seed => {}
+            KeyMapStorage::Seed => {
+                // Step snapshots may be empty (large labs / IPC). Prefer workspace
+                // KeyMapDef.entries via a temp CSV join — avoids VALUES bloat and the
+                // empty-entries no-op that left quality lab at 0% coverage.
+                if !km.entries.is_empty() {
+                    let path = materialize_seed_preview_csv(km, &froms, &to)?;
+                    relations.insert(
+                        km.id.clone(),
+                        format!("read_csv_auto('{}', header=true)", escape_sql_string(&path)),
+                    );
+                }
+            }
         }
     }
     Ok((relations, columns, ref_models, ranges))
+}
+
+/// Spill seed KeyMap rows for DuckDB preview join (ApplyKeyMap with empty step entries).
+fn materialize_seed_preview_csv(
+    km: &KeyMapDef,
+    from_cols: &[String],
+    to_col: &str,
+) -> Result<String, String> {
+    let dir = std::env::temp_dir().join("dwhforge-keymap-preview");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("keymap preview dir: {e}"))?;
+    let safe = crate::graph::sanitize_id(&km.id);
+    let path = dir.join(format!(
+        "{safe}-{}-{}.csv",
+        km.entries.len(),
+        std::process::id()
+    ));
+    let body = key_map_seed_csv_cols(&km.entries, from_cols, to_col);
+    let mut file =
+        std::fs::File::create(&path).map_err(|e| format!("keymap preview csv: {e}"))?;
+    file.write_all(body.as_bytes())
+        .map_err(|e| format!("keymap preview csv write: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn compile_step(

@@ -1,5 +1,6 @@
 import {
   applyKeyMapOntoProject,
+  applyKeyMapTabMapChange,
   dirtyDeltaHasChanges,
   mapForProjectAst,
   mergeFromValuesIntoMap,
@@ -242,13 +243,65 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
     map: {
       id: "m",
       name: "M",
+      storage: {
+        kind: "source",
+        source: "public",
+        table: "a",
+        connection_id: "c1",
+      },
+      entries: [
+        { from: "A_ONLY", to: "1" },
+        { from: "SHARED", to: "old" },
+      ],
+    },
+    contentHash: "hash-A",
+    dirtyDelta: { upserts: [{ from: "A_ONLY", to: "1" }], deletedFroms: [] },
+    saveApi: {
+      captureSave: () => null,
+      confirmSave: () => {},
+      abortSave: () => {},
+      isSaving: () => false,
+    },
+  };
+  const rebound = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    storage: {
+      kind: "source",
+      source: "public",
+      table: "b",
+      connection_id: "c1",
+    },
+    entries: [
+      { from: "B_ONLY", to: "9" },
+      { from: "SHARED", to: "new" },
+    ],
+  } as never);
+  assert(rebound.contentHash === undefined, "rebind clears hash");
+  assert(rebound.dirtyDelta === null, "rebind clears dirty");
+  assert(rebound.saveApi === undefined, "rebind invalidates saveApi");
+  assert(
+    !rebound.map.entries.some((e) => e.from === "A_ONLY"),
+    "source A rows must not follow binding B",
+  );
+  assert(
+    rebound.map.entries.some((e) => e.from === "B_ONLY" && e.to === "9"),
+    "source B rows present",
+  );
+  assert(rebound.map.entries.length === 2, "only B relation rows");
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
       storage: { kind: "seed" },
       entries: [{ from: "A", to: "1" }],
     },
-    contentHash: "keep-me",
-    dirtyDelta: { upserts: [{ from: "A", to: "1" }], deletedFroms: [] },
+    saveInFlight: true,
   };
-  const rebound = mergeKeyMapTabSession(prev, {
+  const refused = applyKeyMapTabMapChange(prev, {
     id: "m",
     name: "M",
     storage: {
@@ -257,10 +310,81 @@ assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
       table: "t",
       connection_id: "c1",
     },
-    entries: [{ from: "A", to: "1" }],
+    entries: [],
   } as never);
-  assert(rebound.contentHash === undefined, "rebind clears hash");
-  assert(rebound.dirtyDelta === null, "rebind clears dirty");
+  assert(!refused.ok, "refuse rebind while save in flight");
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      entries: [{ from: "gone", to: "1" }],
+    },
+    dirtyDelta: {
+      upserts: [],
+      deletedFroms: ["gone"],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    entries: [{ from: "gone", to: "1" }],
+  } as never);
+  assert(
+    !merged.map.entries.some((e) => e.from === "gone"),
+    "deletedFroms not resurrected",
+  );
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      from_columns: ["sys", "code"],
+      entries: [{ from: "ERP", from_parts: ["ERP", "100"], to: "1" }],
+    },
+    dirtyDelta: {
+      upserts: [],
+      deletedFroms: [],
+      deletedFromParts: [["ERP", "100"]],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    from_columns: ["sys", "code"],
+    entries: [{ from: "ERP", from_parts: ["ERP", "100"], to: "1" }],
+  } as never);
+  assert(merged.map.entries.length === 0, "deletedFromParts not resurrected");
+}
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      storage: { kind: "seed" },
+      entries: [{ from: "A", to: "local", attrs: { reason: "draft" } }],
+    },
+    dirtyDelta: {
+      upserts: [{ from: "A", to: "local", attrs: { reason: "draft" } }],
+      deletedFroms: [],
+    },
+  };
+  const merged = mergeKeyMapTabSession(prev, {
+    id: "m",
+    name: "M",
+    storage: { kind: "seed" },
+    entries: [{ from: "A", to: "remote", attrs: { reason: "file" } }],
+  } as never);
+  assert(
+    merged.map.entries[0]?.to === "local" &&
+      merged.map.entries[0]?.attrs?.reason === "draft",
+    "seed dirty draft survives refresh",
+  );
 }
 
 console.log("keyMap/service.test.ts: ok");

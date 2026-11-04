@@ -132,6 +132,8 @@ import {
   applyKeyMapOntoProject,
   dirtyDeltaHasChanges,
   mergeFromValuesIntoMap,
+  applyKeyMapTabMapChange,
+  keyMapBindingFingerprint,
   mergeKeyMapTabSession,
   normalizeKeyMapForEditor,
   refSaveResult,
@@ -3139,6 +3141,7 @@ function App() {
       }
       const tab = keyMapTabs.find((t) => t.map.id === map.id);
       const expectedHash = tab?.contentHash;
+      const bindingAtStart = keyMapBindingFingerprint(map);
       // One in-flight WH Save per mapping.
       if (tab?.saveInFlight || tab?.saveApi?.isSaving()) {
         const result = sourceSaveSkipped("KeyMap save already in progress");
@@ -3166,21 +3169,33 @@ function App() {
       patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: true }));
       try {
         const r = await writeKeyMap(map, resolved.dsn, expectedHash, delta);
-        if (tab?.saveApi && saveToken != null) {
-          tab.saveApi.confirmSave(saveToken);
-          patchKeyMapTab(map.id, (s) => ({
-            ...s,
-            contentHash: r.content_hash,
-            saveInFlight: false,
-          }));
-        } else {
-          patchKeyMapTab(map.id, (s) => ({
+        // Late ack must not settle a rebound tab (different WH relation).
+        const settle = { kind: "drop" as "apply" | "drop" };
+        patchKeyMapTab(map.id, (s) => {
+          if (keyMapBindingFingerprint(s.map) !== bindingAtStart) {
+            settle.kind = "drop";
+            return { ...s, saveInFlight: false };
+          }
+          settle.kind = "apply";
+          if (tab?.saveApi && saveToken != null) {
+            return {
+              ...s,
+              contentHash: r.content_hash,
+              saveInFlight: false,
+            };
+          }
+          return {
             ...s,
             contentHash: r.content_hash,
             dirtyDelta: null,
             dirtyResetSeq: (s.dirtyResetSeq ?? 0) + 1,
             saveInFlight: false,
-          }));
+          };
+        });
+        if (settle.kind === "apply" && tab?.saveApi && saveToken != null) {
+          tab.saveApi.confirmSave(saveToken);
+        } else if (settle.kind === "drop" && saveToken != null) {
+          tab?.saveApi?.abortSave(saveToken);
         }
         const result = sourceSaveSynced({
           schema: r.schema,
@@ -4998,10 +5013,18 @@ function App() {
                     return [stem, `stg_${stem}`, `int_${stem}`, `mart_${stem}`];
                   })}
                   onChange={(map) =>
-                    patchKeyMapTab(keyMapEditor.map.id, (s) => ({
-                      ...s,
-                      map: { ...map, id: keyMapEditor.map.id },
-                    }))
+                    patchKeyMapTab(keyMapEditor.map.id, (s) => {
+                      const transition = applyKeyMapTabMapChange(s, {
+                        ...map,
+                        id: keyMapEditor.map.id,
+                      });
+                      if (!transition.ok) {
+                        setError(transition.reason);
+                        setExportMsg(transition.reason);
+                        return s;
+                      }
+                      return transition.session;
+                    })
                   }
                   onWarehouseRead={(contentHash, totalCount) =>
                     patchKeyMapTab(keyMapEditor.map.id, (s) => {

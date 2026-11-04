@@ -1,10 +1,13 @@
 export {
   applyKeyMapOntoProject,
+  applyKeyMapTabMapChange,
   dirtyDeltaHasChanges,
+  isKeyMapSaveBusy,
   isSyncConflictMessage,
   mapForProjectAst,
   mergeFromValuesIntoMap,
   isKeyMapBindingChanged,
+  keyMapBindingFingerprint,
   keyMapEntryIdentity,
   mergeKeyMapTabSession,
   normalizeKeyMapForEditor,

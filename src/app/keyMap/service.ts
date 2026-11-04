@@ -77,6 +77,14 @@ function dirtyTouchesEntry(
   ) {
     return true;
   }
+  return dirtyDeletesEntry(delta, entry);
+}
+
+function dirtyDeletesEntry(
+  delta: KeyMapDirtyDelta | null | undefined,
+  entry: KeyMapEntry,
+): boolean {
+  if (!delta) return false;
   const parts = fromPartsEff(entry).map((p) => p.trim());
   if (parts.length <= 1) {
     const from = parts[0] ?? entry.from.trim();
@@ -85,6 +93,48 @@ function dirtyTouchesEntry(
   return (delta.deletedFromParts ?? []).some(
     (d) => tupleKey(d) === tupleKey(parts),
   );
+}
+
+/** True when a warehouse Save is awaiting response for this tab. */
+export function isKeyMapSaveBusy(session: KeyMapTabSession): boolean {
+  return Boolean(session.saveInFlight || session.saveApi?.isSaving());
+}
+
+/**
+ * Apply an editor map patch. Binding changes reset concurrency / dirty state
+ * and never union rows from the previous relation. In-flight Save → refuse.
+ */
+export function applyKeyMapTabMapChange(
+  prev: KeyMapTabSession,
+  nextMap: KeyMapDef,
+):
+  | { ok: true; session: KeyMapTabSession }
+  | { ok: false; reason: string } {
+  const normalized = normalizeKeyMapForEditor(nextMap);
+  if (!isKeyMapBindingChanged(prev.map, normalized)) {
+    return { ok: true, session: { ...prev, map: normalized } };
+  }
+  if (isKeyMapSaveBusy(prev)) {
+    return {
+      ok: false,
+      reason:
+        "KeyMap warehouse save still in progress — wait or abort before changing storage binding.",
+    };
+  }
+  return {
+    ok: true,
+    session: {
+      ...prev,
+      map: normalized,
+      contentHash: undefined,
+      dirtyDelta: null,
+      saveInFlight: false,
+      dirtyResetSeq: undefined,
+      totalCount: undefined,
+      // Invalidate capture/confirm wired to the previous binding's store.
+      saveApi: undefined,
+    },
+  };
 }
 
 /** After ApplyKeyMap insert, Join may shift; find the same Join by right + ON + type. */
@@ -159,10 +209,26 @@ export function normalizeKeyMapForEditor(map: KeyMapDef): KeyMapDef {
   };
 }
 
+function entrySnapshotsEqual(a: KeyMapEntry, b: KeyMapEntry): boolean {
+  if (a.from.trim() !== b.from.trim() || a.to.trim() !== b.to.trim()) {
+    return false;
+  }
+  const ap = fromPartsEff(a).map((p) => p.trim());
+  const bp = fromPartsEff(b).map((p) => p.trim());
+  if (tupleKey(ap) !== tupleKey(bp)) return false;
+  const aa = a.attrs ?? {};
+  const ba = b.attrs ?? {};
+  const keys = new Set([...Object.keys(aa), ...Object.keys(ba)]);
+  for (const k of keys) {
+    if ((aa[k] ?? "").trim() !== (ba[k] ?? "").trim()) return false;
+  }
+  return true;
+}
+
 /**
  * Merge incoming map rows into an open tab.
  * Preserves editor lifecycle (contentHash / dirtyDelta / saveApi) on reopen;
- * clears concurrency state only when warehouse binding changes.
+ * binding change replaces rows (no union with the previous relation).
  */
 export function mergeKeyMapTabSession(
   prev: KeyMapTabSession,
@@ -175,6 +241,25 @@ export function mergeKeyMapTabSession(
   },
 ): KeyMapTabSession {
   const normalized = normalizeKeyMapForEditor(incoming);
+  if (isKeyMapBindingChanged(prev.map, normalized)) {
+    // Never union previous binding rows into the new relation.
+    const rebound = applyKeyMapTabMapChange(prev, normalized);
+    const base = rebound.ok
+      ? rebound.session
+      : {
+          // Busy save: keep prior session; caller should surface refusal.
+          ...prev,
+        };
+    const next: KeyMapTabSession = { ...base };
+    if (opts && "pickTo" in opts) next.pickTo = opts.pickTo;
+    if (opts && "suggestedFrom" in opts) next.suggestedFrom = opts.suggestedFrom;
+    if (opts && "suggestedFromParts" in opts) {
+      next.suggestedFromParts = opts.suggestedFromParts;
+    }
+    if (opts && "joinCtx" in opts) next.joinCtx = opts.joinCtx;
+    return next;
+  }
+
   const meta: KeyMapIdentityMeta = {
     time_mode: normalized.time_mode ?? prev.map.time_mode,
     valid_from_column:
@@ -184,9 +269,19 @@ export function mergeKeyMapTabSession(
   const byId = new Map(
     prev.map.entries.map((e) => [keyMapEntryIdentity(e, meta), e] as const),
   );
+  // Seed/ref drafts normally flow through dirtyDelta (editor toDelta). When the
+  // delta reports changes, treat divergent prev rows as protected even if the
+  // upsert list omitted an identity (e.g. attr-only local edit race).
+  const protectLocalDrafts = dirtyDeltaHasChanges(prev.dirtyDelta);
+
   for (const e of normalized.entries) {
     const id = keyMapEntryIdentity(e, meta);
     if (!id || id === "[]" || id.startsWith("[]\0")) continue;
+    // Deleted drafts must not be resurrected by a SoT/suggest refresh.
+    if (dirtyDeletesEntry(prev.dirtyDelta, e)) {
+      byId.delete(id);
+      continue;
+    }
     const cur = byId.get(id);
     if (!cur) {
       byId.set(id, e);
@@ -194,6 +289,9 @@ export function mergeKeyMapTabSession(
     }
     // Local dirty draft wins over SoT/suggest refresh for this identity.
     if (dirtyTouchesEntry(prev.dirtyDelta, cur, meta)) {
+      continue;
+    }
+    if (protectLocalDrafts && !entrySnapshotsEqual(cur, e)) {
       continue;
     }
     const toIn = e.to.trim();
@@ -206,6 +304,7 @@ export function mergeKeyMapTabSession(
       });
     } else if (e.attrs && Object.keys(e.attrs).length > 0) {
       // Same To (or both empty): attrs / SCD bound updates.
+      // Incoming omitted attr keys are left as-is (not treated as explicit clear).
       byId.set(id, {
         ...cur,
         to: toIn || cur.to,
@@ -216,7 +315,6 @@ export function mergeKeyMapTabSession(
     }
   }
 
-  const rebound = isKeyMapBindingChanged(prev.map, normalized);
   const next: KeyMapTabSession = {
     ...prev,
     map: {
@@ -231,14 +329,12 @@ export function mergeKeyMapTabSession(
     next.suggestedFromParts = opts.suggestedFromParts;
   }
   if (opts && "joinCtx" in opts) next.joinCtx = opts.joinCtx;
-  if (rebound) {
-    next.contentHash = undefined;
-    next.dirtyDelta = null;
-    next.saveInFlight = false;
-    next.dirtyResetSeq = undefined;
-    next.totalCount = undefined;
-  }
   return next;
+}
+
+/** Binding fingerprint for late Save-ack isolation. */
+export function keyMapBindingFingerprint(map: KeyMapDef): string {
+  return storageBindingKey(map.storage);
 }
 
 /**

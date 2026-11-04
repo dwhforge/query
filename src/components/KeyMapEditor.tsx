@@ -777,6 +777,7 @@ export function KeyMapEditor({
         <select
           value={storageKind(map.storage)}
           onChange={(e) => {
+            if (saving) return;
             const kind = e.target.value as "seed" | "ref" | "source";
             const storage: KeyMapStorage =
               kind === "seed"
@@ -791,6 +792,7 @@ export function KeyMapEditor({
             onChange({ ...map, storage });
             if (kind === "source") setRebindOpen(true);
           }}
+          disabled={saving}
           className={fieldClass}
         >
           <option value="seed">dbt seed (seeds/map_*.csv)</option>
@@ -1826,6 +1828,12 @@ export function KeyMapEditor({
           }}
           onCancel={() => setRebindOpen(false)}
           onConfirm={(bind: KeyMapBindResult) => {
+            // Do not clear drafts while a warehouse Save is in flight — parent
+            // refuses binding changes and would leave an empty local store.
+            if (saving) {
+              setRebindOpen(false);
+              return;
+            }
             storeRef.current.clear();
             pageRef.current = [];
             newIdsRef.current = [];

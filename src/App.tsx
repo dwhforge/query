@@ -124,7 +124,6 @@ import {
   confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
   createMappingCheck,
   findJoinHostsForMap,
-  mergeRemapDirtyIntoTab,
   planCheckInspect,
   recordCheckRun,
   resolveActiveMappingCheck,
@@ -150,7 +149,6 @@ import {
   upsertKeyMapIntoProject,
   type KeyMapApplyIntent,
   type KeyMapApplyResult,
-  type KeyMapJoinCtx,
   type KeyMapTabSession,
 } from "./app/keyMap";
 import { isHostCancelled } from "./lib/hostRpc";
@@ -227,6 +225,7 @@ import {
   setAppSettings,
   setGlobalConnections,
   syncKeyMapsFromExport,
+  readKeyMap,
   writeKeyMap,
   parseExport,
   buildExport,
@@ -435,6 +434,12 @@ function App() {
       );
       return;
     }
+    if (hosts.length > 1) {
+      setError(
+        `“${map.name}” is wired to ${hosts.length} Joins — open the Join you mean, then create the check (ambiguous host).`,
+      );
+      return;
+    }
     const hostHit = hosts[0]!;
     const created = createMappingCheck({
       checks: project.mapping_checks ?? [],
@@ -442,6 +447,7 @@ function App() {
       queries,
       mapId: map.id,
       hostQueryId: hostHit.host.id,
+      joinStepIndex: hostHit.joinStepIndex,
       leftAttr: hostHit.leftOn[0] ?? "key",
       rightAttr: hostHit.rightOn[0] ?? "id",
       sampleColumn: hostHit.leftOn[0] ?? "key",
@@ -3370,37 +3376,93 @@ function App() {
     });
   }
 
-  function confirmFrozenCheckRemap() {
+  async function confirmFrozenCheckRemap() {
     if (!frozenRemap) return;
+    const frozen = frozenRemap;
+    const map = (project.workspace.key_maps ?? []).find(
+      (m) => m.id === frozen.map_id,
+    );
+    if (!map) {
+      setError("KeyMap missing — refresh the remap preview.");
+      return;
+    }
+    const openTab = keyMapTabs.find((t) => t.map.id === map.id);
+
+    let priorEntries = map.entries;
+    if (map.storage?.kind === "source") {
+      let conns = project.connections;
+      let resolved = resolveKeyMapConnection(project, map, conns, true);
+      if (!resolved.ok) {
+        try {
+          conns = await getGlobalConnections();
+          if (conns.length) {
+            setProject((p) => ({ ...p, connections: conns }));
+          }
+          resolved = resolveKeyMapConnection(project, map, conns, true);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!resolved.ok) {
+        setError(
+          `Cannot read warehouse baselines for Confirm: ${resolved.error}`,
+        );
+        return;
+      }
+      try {
+        // Exact From lookups — absence in WH is the only valid existed:false.
+        const found: typeof map.entries = [];
+        const seen = new Set<string>();
+        for (const change of frozen.changes) {
+          const from = change.from.trim();
+          if (!from || seen.has(from)) continue;
+          seen.add(from);
+          const page = await readKeyMap(map, resolved.dsn, {
+            fromPrefix: from,
+            limit: 32,
+          });
+          for (const e of page.entries) {
+            const key = (e.from_parts?.[0] ?? e.from).trim();
+            if (key === from && !found.some((x) => (x.from_parts?.[0] ?? x.from).trim() === key)) {
+              found.push(e);
+            }
+          }
+        }
+        priorEntries = found;
+      } catch (e) {
+        setError(
+          `Cannot read warehouse baselines for Confirm: ${typeof e === "string" ? e : String(e)}`,
+        );
+        return;
+      }
+    }
+
     const result = confirmFrozenCheckRemapSvc({
-      frozen: frozenRemap,
+      frozen,
       workspace: project.workspace,
       checks: project.mapping_checks ?? [],
+      priorEntries,
+      openTabDirty: openTab?.dirtyDelta,
+      openTabLocalDraft: openTab?.localDraft,
     });
     if (!result.ok) {
       setError(result.error);
       return;
     }
-    // Single KeyMap mutation path: project AST + Apply snapshots (not key_maps alone).
+    // Literal Confirm: only frozen dirtyDelta — never merge unrelated editor drafts.
     setProject((p) => upsertKeyMapIntoProject(p, result.nextMap));
-    const openTab = keyMapTabs.find((t) => t.map.id === result.nextMap.id);
-    const mergedDirty = mergeRemapDirtyIntoTab(
-      openTab?.dirtyDelta,
-      result.dirtyDelta,
-    );
     patchKeyMapTab(result.nextMap.id, (s) => ({
       ...s,
       map: { ...result.nextMap, id: s.map.id },
-      dirtyDelta: mergeRemapDirtyIntoTab(s.dirtyDelta, result.dirtyDelta),
+      dirtyDelta: result.dirtyDelta,
       localDraft: true,
     }));
     setFrozenRemap(null);
     setExportMsg(result.message);
     setCenterTab(QUALITY_TAB);
     lastCheckRunFingerprint.current = null;
-    // Seed export / source WH write-back through the normal Save path.
     void saveKeyMapToProject(result.nextMap, {
-      dirtyDelta: mergedDirty,
+      dirtyDelta: result.dirtyDelta,
     });
   }
 
@@ -3450,10 +3512,12 @@ function App() {
       outputColumn: opts?.outputColumn,
     });
     const { joinCtx, toValues, fromParts } = planned;
+    const applyLeftOn = joinCtx.applyLeftOn ?? [
+      joinCtx.leftOn[0] ?? "key",
+    ];
     if (maps.length === 0) {
       const arity = applyLeftOn.length;
-      const from_columns =
-        arity > 1 ? applyLeftOn : ["from"];
+      const from_columns = arity > 1 ? applyLeftOn : ["from"];
       openMapWithFromValues(
         {
           ...emptyKeyMap("join aliases"),

@@ -49,6 +49,11 @@ export type NewCheckInput = {
   mapId: string;
   /** Required: Join-host query that ApplyKeyMap-wires this map. */
   hostQueryId: string;
+  /**
+   * Required when the host has more than one Join wired to this map.
+   * Ambiguous hostQueryId alone is refused.
+   */
+  joinStepIndex?: number;
   leftAttr: string;
   rightAttr: string;
   sampleColumn?: string;
@@ -129,11 +134,27 @@ export function createMappingCheck(input: NewCheckInput): NewCheckResult {
     };
   }
   const hosts = findJoinHostsForMap(input.queries, map.id);
-  const hostHit = hosts.find((h) => h.host.id === input.hostQueryId);
-  if (!hostHit) {
+  const onHost = hosts.filter((h) => h.host.id === input.hostQueryId);
+  if (!onHost.length) {
     return {
       ok: false,
       error: `Query “${input.hostQueryId}” has no ApplyKeyMap for map “${map.name}”. Pick a Join host that uses this map.`,
+    };
+  }
+  let hostHit = onHost[0]!;
+  if (input.joinStepIndex != null) {
+    const exact = onHost.find((h) => h.joinStepIndex === input.joinStepIndex);
+    if (!exact) {
+      return {
+        ok: false,
+        error: `Join step ${input.joinStepIndex} on “${input.hostQueryId}” is not wired to map “${map.name}”.`,
+      };
+    }
+    hostHit = exact;
+  } else if (onHost.length > 1) {
+    return {
+      ok: false,
+      error: `Query “${input.hostQueryId}” has ${onHost.length} Joins wired to “${map.name}” — pick joinStepIndex explicitly.`,
     };
   }
   const sample = (input.sampleColumn ?? left).trim() || left;
@@ -213,9 +234,13 @@ export function recordCheckRun(args: {
     .filter((r) => r.check_id === check.id)
     .at(-1);
   const attr = prev ? attributeDelta(prev, run) : null;
-  // Truncated top-N cells must not invent zero for groups that fell out of budget.
+  // Full matrices only; skip when definition moved (group axes may not be comparable).
   const cellNote =
-    prev && !prev.cells_incomplete && !run.cells_incomplete
+    prev &&
+    !prev.cells_incomplete &&
+    !run.cells_incomplete &&
+    attr !== "definition_changed" &&
+    attr !== "limited"
       ? summarizeCellDeltas(prev.cells, run.cells)
       : null;
   const truncNote =
@@ -368,15 +393,30 @@ function entryFromKey(entry: KeyMapDef["entries"][number]): string {
   return (fromPartsEff(entry)[0] ?? entry.from).trim();
 }
 
-/** Dirty delta for Confirm: preserve attrs; freeze baselines for concurrency. */
+/**
+ * Dirty delta for Confirm: preserve attrs; freeze baselines for concurrency.
+ *
+ * `priorEntries` is the authoritative pre-image for baselines:
+ * - seed/ref: typically `map.entries`
+ * - source: warehouse rows for the remapped From keys (never infer absence
+ *   from empty metadata-only `map.entries`)
+ */
 export function dirtyDeltaFromFrozenRemap(
   map: KeyMapDef,
   changes: FrozenRemapPreview["changes"],
   nextMap: KeyMapDef,
+  priorEntries?: KeyMapDef["entries"],
 ): KeyMapDirtyDelta {
+  const isSource = map.storage?.kind === "source";
+  if (isSource && priorEntries === undefined) {
+    throw new Error(
+      "Source KeyMap Confirm requires warehouse baselines for the remapped From keys.",
+    );
+  }
   const editable = map.editable_columns ?? [];
+  const baselineRows = priorEntries ?? map.entries;
   const prevByFrom = new Map(
-    map.entries.map((e) => [entryFromKey(e), e] as const),
+    baselineRows.map((e) => [entryFromKey(e), e] as const),
   );
   const nextByFrom = new Map(
     nextMap.entries.map((e) => [entryFromKey(e), e] as const),
@@ -387,13 +427,18 @@ export function dirtyDeltaFromFrozenRemap(
     const from = c.from.trim();
     const next = nextByFrom.get(from);
     const prev = prevByFrom.get(from);
+    const attrsFromPrior = prev?.attrs ? { ...prev.attrs } : {};
     if (next) {
-      upserts.push({ ...next });
+      const nextAttrs =
+        next.attrs && Object.keys(next.attrs).length > 0
+          ? { ...next.attrs }
+          : attrsFromPrior;
+      upserts.push({ ...next, attrs: nextAttrs });
     } else {
       upserts.push({
         from,
         to: c.to,
-        attrs: prev?.attrs ? { ...prev.attrs } : {},
+        attrs: attrsFromPrior,
       });
     }
     if (prev) {
@@ -411,6 +456,7 @@ export function dirtyDeltaFromFrozenRemap(
         attrs,
       });
     } else {
+      // Absence only after a real prior read (source) or seed entries scan.
       baselines.push({
         fromParts: [from],
         existed: false,
@@ -422,35 +468,6 @@ export function dirtyDeltaFromFrozenRemap(
   return { upserts, deletedFroms: [], baselines };
 }
 
-/** Merge Confirm delta into an open editor delta without dropping unrelated drafts. */
-export function mergeRemapDirtyIntoTab(
-  existing: KeyMapDirtyDelta | null | undefined,
-  remap: KeyMapDirtyDelta,
-): KeyMapDirtyDelta {
-  if (!existing || !dirtyDeltaHasLocalChanges(existing)) {
-    return remap;
-  }
-  const remapFroms = new Set(
-    remap.upserts.map((u) => entryFromKey(u)),
-  );
-  const upserts = [
-    ...existing.upserts.filter((u) => !remapFroms.has(entryFromKey(u))),
-    ...remap.upserts,
-  ];
-  const baselines = [
-    ...(existing.baselines ?? []).filter(
-      (b) => !remapFroms.has((b.fromParts[0] ?? "").trim()),
-    ),
-    ...(remap.baselines ?? []),
-  ];
-  return {
-    upserts,
-    deletedFroms: existing.deletedFroms,
-    deletedFromParts: existing.deletedFromParts,
-    baselines,
-  };
-}
-
 function dirtyDeltaHasLocalChanges(delta: KeyMapDirtyDelta): boolean {
   return (
     delta.upserts.length > 0 ||
@@ -460,14 +477,57 @@ function dirtyDeltaHasLocalChanges(delta: KeyMapDirtyDelta): boolean {
 }
 
 /**
+ * Confirm applies only frozen changes — refuse when the open editor has
+ * unrelated unsaved drafts (do not silently merge / publish them).
+ */
+export function unrelatedDraftBlocksConfirm(args: {
+  frozenFroms: string[];
+  dirtyDelta?: KeyMapDirtyDelta | null;
+  localDraft?: boolean;
+}): string | null {
+  const frozen = new Set(args.frozenFroms.map((f) => f.trim()).filter(Boolean));
+  const delta = args.dirtyDelta;
+  if (delta && dirtyDeltaHasLocalChanges(delta)) {
+    const draftFroms = new Set<string>();
+    for (const u of delta.upserts) {
+      draftFroms.add(entryFromKey(u));
+    }
+    for (const f of delta.deletedFroms) {
+      draftFroms.add(f.trim());
+    }
+    for (const parts of delta.deletedFromParts ?? []) {
+      draftFroms.add((parts[0] ?? "").trim());
+    }
+    for (const f of draftFroms) {
+      if (!f) continue;
+      if (!frozen.has(f)) {
+        return `KeyMap has unsaved edits outside the check preview (e.g. “${f}”). Save or discard them before Confirm.`;
+      }
+    }
+  } else if (args.localDraft) {
+    // Seed/ref draft without a dirty wire — cannot prove it is only frozen Froms.
+    return "Save or discard KeyMap editor drafts before confirming check remap.";
+  }
+  return null;
+}
+
+/**
  * Build the next map revision for Confirm.
  * Caller MUST apply via upsertKeyMapIntoProject (+ source Save with dirtyDelta) —
  * never patch `key_maps` alone (Apply snapshots / WH would stay stale).
+ *
+ * Confirm is literal: only frozen changes. Unrelated editor drafts → refuse.
+ * Source maps require `priorEntries` from a warehouse read of affected From keys.
  */
 export function confirmFrozenCheckRemap(args: {
   frozen: FrozenRemapPreview;
   workspace: Workspace;
   checks: MappingCheck[];
+  /** Warehouse (or seed) pre-image rows for remapped From keys. */
+  priorEntries?: KeyMapDef["entries"];
+  /** Open tab dirty — must not contain From keys outside the freeze. */
+  openTabDirty?: KeyMapDirtyDelta | null;
+  openTabLocalDraft?: boolean;
 }): ConfirmRemapResult {
   const { frozen, workspace, checks } = args;
   try {
@@ -481,8 +541,38 @@ export function confirmFrozenCheckRemap(args: {
         error: "Stage at least one From→To in Join Lens before confirming.",
       };
     }
-    const nextMap = applyFrozenRemapToMap(map!, frozen, workspace, check);
-    const dirtyDelta = dirtyDeltaFromFrozenRemap(map!, frozen.changes, nextMap);
+    const blocked = unrelatedDraftBlocksConfirm({
+      frozenFroms: frozen.changes.map((c) => c.from),
+      dirtyDelta: args.openTabDirty,
+      localDraft: args.openTabLocalDraft,
+    });
+    if (blocked) {
+      return { ok: false, error: blocked };
+    }
+    const isSource = map!.storage?.kind === "source";
+    const priorEntries = isSource
+      ? args.priorEntries
+      : (args.priorEntries ?? map!.entries);
+    if (isSource && priorEntries === undefined) {
+      return {
+        ok: false,
+        error:
+          "Source KeyMap Confirm needs warehouse baselines for remapped keys — refresh and retry.",
+      };
+    }
+    const nextMap = applyFrozenRemapToMap(
+      map!,
+      frozen,
+      workspace,
+      check,
+      priorEntries,
+    );
+    const dirtyDelta = dirtyDeltaFromFrozenRemap(
+      map!,
+      frozen.changes,
+      nextMap,
+      priorEntries,
+    );
     return {
       ok: true,
       nextMap,
@@ -496,7 +586,7 @@ export function confirmFrozenCheckRemap(args: {
 
 /**
  * Compare aggregate cells by stable group id (row\\0column\\0signal).
- * Only call for complete (non-top-N) runs — missing keys are treated as real zeros.
+ * Call only for complete, definition-compatible runs — missing keys are real zeros.
  */
 export function summarizeCellDeltas(
   prevCells: Array<{
@@ -520,13 +610,13 @@ export function summarizeCellDeltas(
   }) => `${c.row}\0${c.column}\0${c.signal}`;
   const prev = new Map(prevCells.map((c) => [keyOf(c), c.positions]));
   const next = new Map(nextCells.map((c) => [keyOf(c), c.positions]));
-  // Intersection-only: do not invent 0 for a group absent from one side.
-  const keys = [...prev.keys()].filter((k) => next.has(k));
+  // Full matrices: absence ≡ 0 (appear / disappear are real Δ).
+  const keys = new Set([...prev.keys(), ...next.keys()]);
   const changes: Array<{ key: string; from: number; to: number; d: number }> =
     [];
   for (const k of keys) {
-    const a = prev.get(k)!;
-    const b = next.get(k)!;
+    const a = prev.get(k) ?? 0;
+    const b = next.get(k) ?? 0;
     if (a === b) continue;
     changes.push({ key: k, from: a, to: b, d: b - a });
   }

@@ -296,6 +296,11 @@ export function applyFrozenRemapToMap(
   freeze: FrozenRemapPreview,
   workspace?: Workspace,
   check?: MappingCheck,
+  /**
+   * Rows known before Confirm (seed: map.entries; source: warehouse read).
+   * Source maps must not invent rows from empty workspace.entries.
+   */
+  priorEntries?: KeyMapDef["entries"],
 ): KeyMapDef {
   assertRemapConfirmable(freeze, map, workspace, check);
   const arity = fromColumnsEff(map).length;
@@ -304,15 +309,23 @@ export function applyFrozenRemapToMap(
       "Frozen batch remap v1 supports only static arity-1 maps (not composite / range SCD).",
     );
   }
+  const isSource = map.storage?.kind === "source";
+  if (isSource && priorEntries === undefined) {
+    throw new Error(
+      "Source KeyMap Confirm requires warehouse baselines for the remapped From keys.",
+    );
+  }
+  const base = isSource ? priorEntries! : map.entries;
   const byFrom = new Map(freeze.changes.map((c) => [c.from.trim(), c.to]));
-  const entries = map.entries.map((e) => {
-    const hit = byFrom.get(fromPartsEff(e)[0]?.trim() || e.from.trim());
+  const entries = base.map((e) => {
+    const fromKey = fromPartsEff(e)[0]?.trim() || e.from.trim();
+    const hit = byFrom.get(fromKey);
     if (hit == null) return e;
-    byFrom.delete(e.from.trim());
+    byFrom.delete(fromKey);
     return { ...e, to: hit };
   });
   for (const [from, to] of byFrom) {
-    entries.push({ from, to });
+    entries.push({ from, to, attrs: {} });
   }
   return { ...map, entries };
 }

@@ -4,11 +4,11 @@ import {
   createMappingCheck,
   dirtyDeltaFromFrozenRemap,
   findJoinHostsForMap,
-  mergeRemapDirtyIntoTab,
   recordCheckRun,
   resolveActiveMappingCheck,
   stageFrozenRemapChanges,
   summarizeCellDeltas,
+  unrelatedDraftBlocksConfirm,
 } from "./service";
 import { keyMapRevision, labMappingCheck } from "../../lib/mappingCheck";
 import { upsertKeyMapIntoProject } from "../keyMap";
@@ -223,11 +223,15 @@ const recorded2 = recordCheckRun({
   ],
   totalPositions: 10000,
 });
+// Lab fixture inputs are not versionable → limited attribution; no group Δ claimed.
 assert(
-  recorded2.deltaNote.includes("10000→2000") ||
-    recorded2.deltaNote.includes("10000 → 2000") ||
-    recorded2.deltaNote.includes("A→B"),
-  `cell Δ in note: ${recorded2.deltaNote}`,
+  recorded2.deltaNote.includes("Limited") ||
+    recorded2.deltaNote.includes("10000"),
+  `delta note recorded: ${recorded2.deltaNote}`,
+);
+assert(
+  !recorded2.deltaNote.includes("groups "),
+  `no group Δ under limited comparability: ${recorded2.deltaNote}`,
 );
 
 {
@@ -292,7 +296,7 @@ assert(frozen.changes.length === 1 && frozen.changes[0].to === "NEW", "stage");
   }
 }
 
-// Confirm dirtyDelta preserves attrs + baselines; merge keeps unrelated drafts.
+// Confirm dirtyDelta preserves attrs + baselines from prior rows.
 {
   const richMap = {
     id: "map_rich",
@@ -339,26 +343,119 @@ assert(frozen.changes.length === 1 && frozen.changes[0].to === "NEW", "stage");
       delta.baselines[0]!.attrs?.note === "keep",
     "Confirm baseline freezes prior To+attrs",
   );
-  const merged = mergeRemapDirtyIntoTab(
-    {
-      upserts: [{ from: "y", to: "Y2", attrs: { note: "draft" } }],
-      deletedFroms: [],
-      baselines: [
-        {
-          fromParts: ["y"],
-          existed: true,
-          to: "Y1",
-          attrs: { note: "other" },
-        },
-      ],
+}
+
+// Source metadata-only map: refuse Confirm without WH prior; with prior → existed:true.
+{
+  const sourceMap = {
+    id: "map_src",
+    name: "Src",
+    editable_columns: ["note"],
+    entries: [] as Array<{
+      from: string;
+      to: string;
+      attrs?: Record<string, string>;
+    }>,
+    storage: {
+      kind: "source" as const,
+      connection_id: "c",
+      schema: "s",
+      table: "t",
     },
-    delta,
+  };
+  const srcFrozen = stageFrozenRemapChanges(
+    {
+      check_id: check.id,
+      map_id: sourceMap.id,
+      expected_map_revision: keyMapRevision(sourceMap as never),
+      expected_input_revisions: [],
+      changes: [],
+      previewed_at: "t",
+    },
+    ["x"],
+    ["NEW"],
   );
-  assert(
-    merged.upserts.some((u) => u.from === "y" && u.to === "Y2") &&
-      merged.upserts.some((u) => u.from === "x" && u.to === "NEW"),
-    "merge keeps tab draft + remap",
-  );
+  const noPrior = confirmFrozenCheckRemap({
+    frozen: srcFrozen,
+    workspace: {
+      queries: [joinQuery],
+      focus_query_id: "q_host",
+      key_maps: [sourceMap as never],
+    },
+    checks: [check],
+  });
+  assert(noPrior.ok === false, "source Confirm refuses without WH prior");
+
+  const whRows = [
+    { from: "x", to: "OLD", attrs: { note: "wh-note" } },
+  ];
+  const withPrior = confirmFrozenCheckRemap({
+    frozen: srcFrozen,
+    workspace: {
+      queries: [joinQuery],
+      focus_query_id: "q_host",
+      key_maps: [sourceMap as never],
+    },
+    checks: [check],
+    priorEntries: whRows as never,
+  });
+  assert(withPrior.ok === true, "source Confirm with WH prior");
+  if (withPrior.ok) {
+    assert(
+      withPrior.dirtyDelta.baselines?.[0]?.existed === true &&
+        withPrior.dirtyDelta.baselines?.[0]?.to === "OLD" &&
+        withPrior.dirtyDelta.baselines?.[0]?.attrs?.note === "wh-note",
+      "WH baseline existed:true + attrs",
+    );
+    assert(
+      withPrior.dirtyDelta.upserts[0]?.attrs?.note === "wh-note",
+      "upsert preserves WH attrs",
+    );
+    // Empty workspace.entries must not invent existed:false for known WH row.
+    let threw = false;
+    try {
+      dirtyDeltaFromFrozenRemap(
+        sourceMap as never,
+        srcFrozen.changes,
+        { ...sourceMap, entries: [{ from: "x", to: "NEW" }] } as never,
+      );
+    } catch {
+      threw = true;
+    }
+    assert(threw, "source dirtyDelta without priorEntries throws");
+  }
+}
+
+// Unrelated editor draft B blocks Confirm of frozen A.
+{
+  const blocked = unrelatedDraftBlocksConfirm({
+    frozenFroms: ["A"],
+    dirtyDelta: {
+      upserts: [{ from: "B", to: "2" }],
+      deletedFroms: [],
+    },
+  });
+  assert(blocked != null && blocked.includes("B"), `block unrelated: ${blocked}`);
+
+  const sameKeyOk = unrelatedDraftBlocksConfirm({
+    frozenFroms: ["A"],
+    dirtyDelta: {
+      upserts: [{ from: "A", to: "draft" }],
+      deletedFroms: [],
+    },
+  });
+  assert(sameKeyOk == null, "same From draft allowed (Confirm overwrites)");
+
+  const refuseConfirm = confirmFrozenCheckRemap({
+    frozen,
+    workspace: project.workspace,
+    checks: [check],
+    openTabDirty: {
+      upserts: [{ from: "other", to: "z" }],
+      deletedFroms: [],
+    },
+  });
+  assert(refuseConfirm.ok === false, "Confirm refuses unrelated dirty");
 }
 
 // Incomplete top-N CheckRun: store flags; do not invent cell Δ zeros.
@@ -424,18 +521,87 @@ assert(frozen.changes.length === 1 && frozen.changes[0].to === "NEW", "stage");
 }
 
 {
-  // Intersection-only Δ: missing group on one side is not a zero.
+  // Full matrices: disappearance / appearance are real zeros.
   const note = summarizeCellDeltas(
-    [
-      { row: "A", column: "B", signal: "mismatch", positions: 10 },
-      { row: "C", column: "D", signal: "mismatch", positions: 5 },
-    ],
-    [{ row: "A", column: "B", signal: "mismatch", positions: 7 }],
+    [{ row: "A", column: "B", signal: "mismatch", positions: 100 }],
+    [{ row: "A", column: "A", signal: "aligned", positions: 100 }],
   );
   assert(
-    note != null && note.includes("10→7") && !note.includes("C→D"),
-    `intersection Δ only: ${note}`,
+    note != null &&
+      note.includes("mismatch") &&
+      note.includes("aligned") &&
+      (note.includes("100→0") || note.includes("0→100")),
+    `full matrix appear/disappear: ${note}`,
   );
+}
+
+// Ambiguous multi-Join host without joinStepIndex is refused.
+{
+  const multiJoin: QueryDef = {
+    id: "q_multi",
+    name: "multi",
+    steps: [
+      {
+        type: "ApplyKeyMap",
+        payload: {
+          map_id: "map_actual",
+          column: "sku",
+          entries: [],
+        },
+      },
+      {
+        type: "Join",
+        payload: {
+          right_query_id: "q_r1",
+          join_type: "left",
+          left_on: ["sku"],
+          right_on: ["id"],
+        },
+      },
+      {
+        type: "ApplyKeyMap",
+        payload: {
+          map_id: "map_actual",
+          column: "sku2",
+          entries: [],
+        },
+      },
+      {
+        type: "Join",
+        payload: {
+          right_query_id: "q_r2",
+          join_type: "left",
+          left_on: ["sku2"],
+          right_on: ["id"],
+        },
+      },
+    ],
+  };
+  // Wire map_actual onto both Joins via column match (sku / sku2 need Apply on those cols).
+  // findApplyKeyMapIdForJoin uses left_on[0] — first Join sees Apply sku; second sees Apply sku2.
+  const hosts = findJoinHostsForMap([multiJoin], "map_actual");
+  assert(hosts.length === 2, `two join hosts, got ${hosts.length}`);
+  const ambiguous = createMappingCheck({
+    checks: [],
+    keyMaps: [map as never],
+    queries: [multiJoin],
+    mapId: "map_actual",
+    hostQueryId: "q_multi",
+    leftAttr: "sku",
+    rightAttr: "id",
+  });
+  assert(ambiguous.ok === false, "refuse multi-Join without joinStepIndex");
+  const explicit = createMappingCheck({
+    checks: [],
+    keyMaps: [map as never],
+    queries: [multiJoin],
+    mapId: "map_actual",
+    hostQueryId: "q_multi",
+    joinStepIndex: hosts[1]!.joinStepIndex,
+    leftAttr: "sku2",
+    rightAttr: "id",
+  });
+  assert(explicit.ok === true, "ok with explicit joinStepIndex");
 }
 
 console.log("mappingChecks/service.test.ts: ok");

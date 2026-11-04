@@ -30,6 +30,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Fetch dbt venv
         run: ./scripts/fetch-dbt-venv.sh
+      - name: Generate KeyMap lab fixtures
+        # fixtures/examples/* is gitignored; demos + dwh-host lab tests need CSVs.
+        run: python3 scripts/examples/generate_all.py
       - name: Unit tests
         run: |
           cargo test -p dwh-pipeline --lib

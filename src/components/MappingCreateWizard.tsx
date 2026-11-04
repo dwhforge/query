@@ -68,6 +68,8 @@ export function MappingCreateWizard({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [plan, setPlan] = useState<MappingCreatePlan | null>(null);
+  /** In-app discard confirm — avoids blocking `window.confirm` (Playwright hangs ~30s). */
+  const [discardOpen, setDiscardOpen] = useState(false);
 
   /** Bumped to drop in-flight describe results. */
   const describeGen = useRef(0);
@@ -84,12 +86,14 @@ export function MappingCreateWizard({
       setPlan(null);
       setSchemas([]);
       setBusy(false);
+      setDiscardOpen(false);
       setDraft(emptyDraft(listLocalQueries(project.workspace)));
       sessionWsFp.current = workspaceQueryDefsFingerprint(project.workspace);
     }
     if (!open && wasOpen.current) {
       describeGen.current += 1;
       setBusy(false);
+      setDiscardOpen(false);
     }
     wasOpen.current = open;
   }, [open, project.workspace]);
@@ -122,14 +126,19 @@ export function MappingCreateWizard({
     setPlan(null);
   }
 
-  function requestClose() {
-    if (draftLooksFilled(draft)) {
-      const ok = window.confirm("Discard this mapping draft?");
-      if (!ok) return;
-    }
+  function forceClose() {
     describeGen.current += 1;
     setBusy(false);
+    setDiscardOpen(false);
     onCancel();
+  }
+
+  function requestClose() {
+    if (draftLooksFilled(draft)) {
+      setDiscardOpen(true);
+      return;
+    }
+    forceClose();
   }
 
   async function describePair(
@@ -379,6 +388,40 @@ export function MappingCreateWizard({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      {discardOpen && (
+        <div
+          className="absolute inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
+          data-testid="mapping-create-discard"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="mapping-create-discard-title"
+        >
+          <div className="w-full max-w-sm rounded-lg border border-slate-600 bg-slate-900 px-4 py-3 shadow-2xl">
+            <p
+              id="mapping-create-discard-title"
+              className="text-sm text-slate-100"
+            >
+              Discard this mapping draft?
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded border border-slate-600 px-3 py-1.5 text-sm text-slate-200 hover:border-slate-400"
+                onClick={() => setDiscardOpen(false)}
+              >
+                Keep editing
+              </button>
+              <button
+                type="button"
+                className="rounded bg-teal-600 px-3 py-1.5 text-sm font-medium text-slate-950 hover:bg-teal-500"
+                onClick={forceClose}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div
         role="dialog"
         aria-modal="true"

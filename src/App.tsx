@@ -3798,8 +3798,9 @@ function App() {
   }
 
   /**
-   * Electron Playwright hooks — only when built with `DWH_E2E=1`
-   * (`import.meta.env.DWH_E2E`). Production / normal electron packs omit these.
+   * Electron Playwright / website-capture hooks — only when built with
+   * `DWH_E2E=1` or `DWH_CAPTURE=1` (both set `import.meta.env.DWH_E2E`).
+   * Production / normal electron packs omit these.
    */
   useEffect(() => {
     if (String(import.meta.env.DWH_E2E ?? "") !== "1") return;

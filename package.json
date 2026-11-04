@@ -14,6 +14,7 @@
     "types:check": "bash scripts/check-generated-types.sh",
     "test:unit": "node scripts/run-unit-tests.mjs",
     "test:e2e:electron": "node scripts/run-electron-e2e.mjs",
+    "capture:website": "node scripts/run-website-capture.mjs",
     "electron:dev": "npm run host:build && node scripts/electron-dev.mjs",
     "electron:pack": "npm run host:build && npm run build && node scripts/pack-portable-electron.mjs",
     "start": "npm run electron:dev"

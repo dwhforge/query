@@ -46,6 +46,7 @@
         </button>
         <nav class="nav" id="site-nav">
           <a href="./#features">Features</a>
+          <a href="./#mapping">Mappings</a>
           <a href="./#workflow">Workflow</a>
           <a href="docs.html" aria-current="page">Docs</a>
           <a class="nav-cta" href="download.html">Download</a>
@@ -105,8 +106,31 @@
                   <strong>Mapping workflows</strong>
                   <span
                     >Join Lens This row / No match, Clean up join keys, From→To
-                    editor, Apply to left/right; seed, Postgres table, or dbt
-                    ref storage.</span
+                    editor (incl. composite), Apply to left/right; seed, Postgres
+                    table, or dbt ref storage.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/mapping-quality-lab.md"
+                >
+                  <strong>Mapping quality lab</strong>
+                  <span
+                    >100K offline overview aggregates, Inspect → Join Lens,
+                    MappingCheck / CheckRun closed loop (ADR-0026 / 0027).</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0034-keymap-authoring-context.md"
+                >
+                  <strong>ADR-0034 — Query-based KeyMap create</strong>
+                  <span
+                    >Create a seed map from two local queries + optional last-Fields
+                    restore; typed authoring_context; all-or-nothing commit into
+                    the editor.</span
                   >
                 </a>
               </li>
@@ -118,6 +142,17 @@
                   <span
                     >Why mapping is a first-class tool: suggest → accept → seed /
                     warehouse SoT; no automatic fuzzy Join ON.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0024-keymap-composite.md"
+                >
+                  <strong>ADR-0024 — Composite From</strong>
+                  <span
+                    >Tuple keys (offer id + day) and multi-key Join Auto; no glued
+                    From strings.</span
                   >
                 </a>
               </li>
@@ -148,8 +183,8 @@
                 <a href="./#mapping">
                   <strong>Site: mapping toolkit</strong>
                   <span
-                    >Product overview of Join Lens, mappings, storage modes, and
-                    optional LLM assist.</span
+                    >Product overview: create from queries, Join Lens, composite
+                    keys, quality overview, storage modes, optional LLM.</span
                   >
                 </a>
               </li>

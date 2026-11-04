@@ -83,6 +83,8 @@ export function prepareIsolatedHome() {
       2,
     ),
   );
+  // Join Lens first-use modal (localStorage key is per origin; Electron file://
+  // may still show it — capture script also clicks "Got it").
   return home;
 }
 
@@ -257,6 +259,18 @@ export async function closeIsolatedSession(session) {
 export async function openCreateWizard(page) {
   await page.getByTestId("create-mapping-from-data").click();
   await page.getByTestId("mapping-create-wizard").waitFor({ state: "visible" });
+}
+
+/** Close create wizard, accepting the in-app discard confirm when draft is filled. */
+export async function closeCreateWizard(page) {
+  const dlg = wizard(page);
+  if (!(await dlg.isVisible().catch(() => false))) return;
+  await dlg.getByRole("button", { name: "Cancel" }).click();
+  const discard = page.getByTestId("mapping-create-discard");
+  if (await discard.isVisible().catch(() => false)) {
+    await discard.getByRole("button", { name: "Discard" }).click();
+  }
+  await dlg.waitFor({ state: "hidden", timeout: 15_000 });
 }
 
 export function wizard(page) {

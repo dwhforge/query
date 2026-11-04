@@ -172,8 +172,10 @@ test.describe("mapping create Electron smoke", () => {
     });
 
     // Close while describe is held (✕ stays actionable; Cancel also enabled).
-    page.once("dialog", (d) => d.accept());
     await dlg.getByTestId("mapping-create-close").click();
+    await page.getByTestId("mapping-create-discard").getByRole("button", {
+      name: "Discard",
+    }).click();
     await expect(dlg).toBeHidden();
 
     // Reopen fresh session before releasing the held reply.
@@ -279,8 +281,10 @@ test.describe("mapping create Electron smoke", () => {
     expect(mapCount).toBe(0);
 
     // Explicit discard confirm for this test only (draft still filled).
-    page.once("dialog", (d) => d.accept());
     await dlg.getByRole("button", { name: "Cancel" }).click();
+    await page.getByTestId("mapping-create-discard").getByRole("button", {
+      name: "Discard",
+    }).click();
     await expect(dlg).toBeHidden();
   });
 

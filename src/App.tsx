@@ -476,13 +476,32 @@ function App() {
       );
       return;
     }
+    // Prefer the Join currently selected on the canvas when the map is on several hosts.
+    let hostHit = hosts[0]!;
     if (hosts.length > 1) {
-      setError(
-        `“${map.name}” is wired to ${hosts.length} Joins — open the Join you mean, then create the check (ambiguous host).`,
-      );
-      return;
+      const onActiveStep =
+        activeQueryId && selectedStepIndex != null
+          ? hosts.find(
+              (h) =>
+                h.host.id === activeQueryId &&
+                h.joinStepIndex === selectedStepIndex,
+            )
+          : undefined;
+      const onActiveQuery =
+        !onActiveStep && activeQueryId
+          ? hosts.filter((h) => h.host.id === activeQueryId)
+          : [];
+      const resolved =
+        onActiveStep ??
+        (onActiveQuery.length === 1 ? onActiveQuery[0] : undefined);
+      if (!resolved) {
+        setError(
+          `“${map.name}” is wired to ${hosts.length} Joins — select the Join step on the canvas, then create the check again.`,
+        );
+        return;
+      }
+      hostHit = resolved;
     }
-    const hostHit = hosts[0]!;
     const created = createMappingCheck({
       checks: project.mapping_checks ?? [],
       keyMaps,

@@ -5,7 +5,7 @@ import type { MappingCheckProjection } from "../../types/mappingCheck";
 import type { ConnectionDef, SourceDef, Workspace } from "../../types/pipeline";
 import {
   axes,
-  parseQualitySummary,
+  parseQualitySummaryDetailed,
   parseQualityTargets,
   qualityProjectionCacheKey,
   QUALITY_SUMMARY,
@@ -97,6 +97,10 @@ export function MappingQualityOverview({
   projection = { kind: "lab_v1" },
 }: Props) {
   const [cells, setCells] = useState<QualityCell[]>([]);
+  const [aggregateNote, setAggregateNote] = useState<string | null>(null);
+  const [reportedTotalPositions, setReportedTotalPositions] = useState<
+    number | null
+  >(null);
   const [targets, setTargets] = useState<QualityTarget[]>([]);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -232,9 +236,14 @@ export function MappingQualityOverview({
         } else {
           setLoadPhase("targets");
         }
+        const detailed = parseQualitySummaryDetailed(summary);
         return {
-          cells: parseQualitySummary(summary),
+          cells: detailed.cells,
           targets,
+          totalPositions: detailed.totalPositions,
+          incomplete: detailed.incomplete,
+          groupCount: detailed.groupCount,
+          coveredPositions: detailed.coveredPositions,
         };
       };
       let lastError: unknown = null;
@@ -253,16 +262,21 @@ export function MappingQualityOverview({
           if (!parsed || token !== request.current) return;
           setCells(parsed.cells);
           setTargets(parsed.targets);
+          setReportedTotalPositions(parsed.totalPositions);
+          setAggregateNote(
+            parsed.incomplete
+              ? `Showing top ${parsed.cells.length} of ${parsed.groupCount} groups ` +
+                  `(${parsed.coveredPositions.toLocaleString()}/${parsed.totalPositions.toLocaleString()} positions). ` +
+                  `Coarsen attributes or filter the cohort for a full matrix.`
+              : null,
+          );
           setCacheStamp(stamp);
           setBusy(false);
           setElapsedMs(Date.now() - started);
           reportProgress(null);
           onCheckRunRef.current?.({
             cells: parsed.cells,
-            totalPositions: parsed.cells.reduce(
-              (sum, cell) => sum + cell.positions,
-              0,
-            ),
+            totalPositions: parsed.totalPositions,
           });
           return;
         } catch (reason) {
@@ -273,6 +287,8 @@ export function MappingQualityOverview({
       if (token !== request.current) return;
       setCells([]);
       setTargets([]);
+      setAggregateNote(null);
+      setReportedTotalPositions(null);
       setCacheStamp(null);
       setError(String(lastError ?? "Analysis is unavailable"));
       setBusy(false);
@@ -287,7 +303,8 @@ export function MappingQualityOverview({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- workspace/projection via stamp
   }, [active, hasFreshCache, stamp, connections, sources]);
 
-  const total = cells.reduce((sum, cell) => sum + cell.positions, 0);
+  const coveredTotal = cells.reduce((sum, cell) => sum + cell.positions, 0);
+  const total = reportedTotalPositions ?? coveredTotal;
   const totalRevenue = cells.reduce((sum, cell) => sum + cell.revenue, 0);
   const signalCounts = useMemo(() => {
     const result = new Map<string, number>();
@@ -410,11 +427,20 @@ export function MappingQualityOverview({
         </div>
       ) : (
         <>
+          {aggregateNote ? (
+            <p className="quality-load-meta" role="status">
+              {aggregateNote}
+            </p>
+          ) : null}
           <div className="quality-stats">
             <div>
               <small>Commercial positions</small>
               <strong>{count(total)}</strong>
-              <span>Full input, not a sample</span>
+              <span>
+                {aggregateNote
+                  ? "Full input total · matrix is top groups"
+                  : "Full input, not a sample"}
+              </span>
             </div>
             <div>
               <small>Catalog coverage</small>

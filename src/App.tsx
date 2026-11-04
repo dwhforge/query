@@ -123,6 +123,7 @@ import {
   appendMappingCheck,
   confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
   createMappingCheck,
+  findJoinHostsForMap,
   planCheckInspect,
   recordCheckRun,
   resolveActiveMappingCheck,
@@ -416,10 +417,32 @@ function App() {
   }
 
   function handleNewMappingCheck() {
+    const keyMaps = project.workspace.key_maps ?? [];
+    const map =
+      (selectedKeyMapId
+        ? keyMaps.find((m) => m.id === selectedKeyMapId)
+        : null) ?? keyMaps[0];
+    if (!map) {
+      setError("Add a KeyMap before creating a mapping check.");
+      return;
+    }
+    const hosts = findJoinHostsForMap(queries, map.id);
+    if (!hosts.length) {
+      setError(
+        `No Join query ApplyKeyMap-wires “${map.name}”. Apply the map on a Join host first, then create the check.`,
+      );
+      return;
+    }
+    const hostHit = hosts[0]!;
     const created = createMappingCheck({
       checks: project.mapping_checks ?? [],
-      keyMaps: project.workspace.key_maps ?? [],
+      keyMaps,
       queries,
+      mapId: map.id,
+      hostQueryId: hostHit.host.id,
+      leftAttr: hostHit.leftOn[0] ?? "key",
+      rightAttr: hostHit.rightOn[0] ?? "id",
+      sampleColumn: hostHit.leftOn[0] ?? "key",
     });
     if (!created.ok) {
       setError(created.error);
@@ -3087,7 +3110,13 @@ function App() {
     }
   }
 
-  async function saveKeyMapToProject(map: KeyMapDef): Promise<KeyMapSaveResult> {
+  async function saveKeyMapToProject(
+    map: KeyMapDef,
+    opts?: {
+      /** When set (e.g. check Confirm), prefer this over editor capture/tab delta. */
+      dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
+    },
+  ): Promise<KeyMapSaveResult> {
     // Persist to project AST first (local). External sync reports separately.
     setProject((p) => upsertKeyMapIntoProject(p, map));
     setSelectedKeyMapId(map.id);
@@ -3156,14 +3185,19 @@ function App() {
         setExportMsg(result.message);
         return result;
       }
-      const captured = tab?.saveApi?.captureSave() ?? null;
-      if (tab?.saveApi && !captured) {
+      const forcedDelta = opts?.dirtyDelta;
+      const captured =
+        forcedDelta !== undefined ? null : (tab?.saveApi?.captureSave() ?? null);
+      if (forcedDelta === undefined && tab?.saveApi && !captured) {
         const result = sourceSaveSkipped("KeyMap save already in progress");
         setExportMsg(result.message);
         return result;
       }
       const saveToken = captured?.token;
-      const delta = captured?.delta ?? tab?.dirtyDelta ?? null;
+      const delta =
+        forcedDelta !== undefined
+          ? forcedDelta
+          : (captured?.delta ?? tab?.dirtyDelta ?? null);
       if (!dirtyDeltaHasChanges(delta)) {
         if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
         // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
@@ -3345,19 +3379,22 @@ function App() {
       setError(result.error);
       return;
     }
-    setProject((p) => ({
-      ...p,
-      workspace: {
-        ...p.workspace,
-        key_maps: (p.workspace.key_maps ?? []).map((m) =>
-          m.id === result.nextMap.id ? result.nextMap : m,
-        ),
-      },
+    // Single KeyMap mutation path: project AST + Apply snapshots (not key_maps alone).
+    setProject((p) => upsertKeyMapIntoProject(p, result.nextMap));
+    patchKeyMapTab(result.nextMap.id, (s) => ({
+      ...s,
+      map: { ...result.nextMap, id: s.map.id },
+      dirtyDelta: result.dirtyDelta,
+      localDraft: true,
     }));
     setFrozenRemap(null);
     setExportMsg(result.message);
     setCenterTab(QUALITY_TAB);
     lastCheckRunFingerprint.current = null;
+    // Seed export / source WH write-back through the normal Save path.
+    void saveKeyMapToProject(result.nextMap, {
+      dirtyDelta: result.dirtyDelta,
+    });
   }
 
   function handleMapKeyFromLens(
@@ -3371,11 +3408,16 @@ function App() {
     },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
-    // ADR-0027: stage concrete From→To against the frozen check preview.
-    if (frozenRemap && opts?.toValues?.length) {
-      setFrozenRemap((prev) =>
-        prev ? stageFrozenRemapChanges(prev, fromValues, opts.toValues!) : prev,
-      );
+    // Check Inspect mode: stage only — do not open/mutate the live map until Confirm.
+    if (frozenRemap) {
+      if (opts?.toValues?.length) {
+        setFrozenRemap((prev) =>
+          prev
+            ? stageFrozenRemapChanges(prev, fromValues, opts.toValues!)
+            : prev,
+        );
+      }
+      return;
     }
     const {
       leftOn: lensLeftOn,

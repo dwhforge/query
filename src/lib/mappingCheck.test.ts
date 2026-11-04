@@ -1,4 +1,5 @@
 import {
+  attrsSummarySql,
   applyFrozenRemapToMap,
   assertRemapConfirmable,
   attributeDelta,
@@ -444,6 +445,13 @@ assert(
       "inspect reads QUALITY_JOIN",
     );
   }
+}
+
+{
+  const sql = attrsSummarySql("host", "left_a", "right_a", "left_a");
+  assert(sql.includes("group_count"), "attrs sql exposes group_count");
+  assert(sql.includes("LIMIT 40"), "attrs sql self-limits under preview window");
+  assert(sql.includes("stats AS"), "attrs sql has stats CTE");
 }
 
 console.log("mappingCheck.test.ts: ok");

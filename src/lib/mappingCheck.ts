@@ -24,7 +24,7 @@ import {
   QUALITY_MAP,
   QUALITY_SAMPLE_COLUMN,
   isMappingQualityLab,
-  parseQualitySummary,
+  parseQualitySummaryDetailed,
   type QualityCell,
 } from "./mappingQuality";
 import type { PreviewResult } from "../types/pipeline";
@@ -387,9 +387,9 @@ export function buildCheckRun(args: {
 
 export function cellsFromQualitySummary(
   result: PreviewResult,
-): { cells: CheckAggregateCell[]; total: number } {
-  const parsed = parseQualitySummary(result);
-  const cells: CheckAggregateCell[] = parsed.map((c) => ({
+): { cells: CheckAggregateCell[]; total: number; incomplete: boolean } {
+  const detailed = parseQualitySummaryDetailed(result);
+  const cells: CheckAggregateCell[] = detailed.cells.map((c) => ({
     row: c.sourceFamily,
     column: c.targetFamily,
     signal: c.signal,
@@ -397,8 +397,11 @@ export function cellsFromQualitySummary(
     revenue: c.revenue,
     samples: c.samples,
   }));
-  const total = cells.reduce((s, c) => s + c.positions, 0);
-  return { cells, total };
+  return {
+    cells,
+    total: detailed.totalPositions,
+    incomplete: detailed.incomplete,
+  };
 }
 
 /**
@@ -608,15 +611,25 @@ ORDER BY ${quoteIdent(sampleColumn)}
   };
 }
 
+/** Max aggregate groups returned for attrs overview (under preview LIMIT 50). */
+export const CHECK_ATTRS_GROUP_BUDGET = 40;
+
+/**
+ * Attrs overview SQL with an explicit group budget.
+ * Full group_count + total_positions come from `stats`; `kept` is top-N by size
+ * so a truncated matrix does not silently claim completeness via preview LIMIT.
+ */
 export function attrsSummarySql(
   hostQueryId: string,
   leftAttr: string,
   rightAttr: string,
   sampleColumn: string,
+  groupBudget: number = CHECK_ATTRS_GROUP_BUDGET,
 ): string {
   const L = quoteIdent(leftAttr);
   const R = quoteIdent(rightAttr);
   const S = quoteIdent(sampleColumn);
+  const budget = Math.max(1, Math.min(groupBudget, 40));
   return `
 WITH observed AS (
   SELECT *,
@@ -624,20 +637,44 @@ WITH observed AS (
          WHEN CAST(${L} AS VARCHAR) IS DISTINCT FROM CAST(${R} AS VARCHAR) THEN 'attribute_difference'
          ELSE 'aligned_attributes' END AS signal
   FROM {{query:${hostQueryId}}}
+),
+agg AS (
+  SELECT CAST(${L} AS VARCHAR) AS source_family,
+         COALESCE(CAST(${R} AS VARCHAR), 'Unmapped') AS target_family,
+         '—' AS source_grade,
+         '—' AS target_grade,
+         'rule' AS decision_method,
+         signal,
+         COUNT(*) AS positions,
+         0::DOUBLE AS revenue,
+         to_json(list_sort(list(CAST(${S} AS VARCHAR)))[1:6]) AS sample_keys
+  FROM observed
+  GROUP BY 1,2,3,4,5,6
+),
+stats AS (
+  SELECT COUNT(*)::BIGINT AS group_count,
+         COALESCE(SUM(positions), 0)::BIGINT AS total_positions
+  FROM agg
+),
+kept AS (
+  SELECT * FROM agg
+  ORDER BY positions DESC, source_family, target_family
+  LIMIT ${budget}
 )
-SELECT CAST(${L} AS VARCHAR) AS source_family,
-       COALESCE(CAST(${R} AS VARCHAR), 'Unmapped') AS target_family,
-       '—' AS source_grade,
-       '—' AS target_grade,
-       'rule' AS decision_method,
-       signal,
-       COUNT(*) AS positions,
-       SUM(COUNT(*)) OVER() AS total_positions,
-       0::DOUBLE AS revenue,
-       to_json(list_sort(list(CAST(${S} AS VARCHAR)))[1:6]) AS sample_keys
-FROM observed
-GROUP BY 1,2,3,4,5,6
-ORDER BY 1,2
+SELECT k.source_family,
+       k.target_family,
+       k.source_grade,
+       k.target_grade,
+       k.decision_method,
+       k.signal,
+       k.positions,
+       s.total_positions,
+       k.revenue,
+       k.sample_keys,
+       s.group_count
+FROM kept k
+CROSS JOIN stats s
+ORDER BY k.positions DESC, k.source_family, k.target_family
 `.trim();
 }
 

@@ -256,8 +256,33 @@ function samples(value: unknown): string[] {
     throw new Error("Invalid sample keys.");
   return parsed.slice(0, 6);
 }
+export type QualitySummaryParse = {
+  cells: QualityCell[];
+  totalPositions: number;
+  groupCount: number;
+  /** True when returned groups are a budgeted subset of the full aggregate. */
+  incomplete: boolean;
+  coveredPositions: number;
+};
+
+/**
+ * Parse overview aggregates. Prefer SQL that carries `group_count` + full
+ * `total_positions` (attrsSummarySql). Legacy full-return rows still work when
+ * sum(positions) === total_positions.
+ */
 export function parseQualitySummary(result: PreviewResult): QualityCell[] {
+  return parseQualitySummaryDetailed(result).cells;
+}
+
+export function parseQualitySummaryDetailed(
+  result: PreviewResult,
+): QualitySummaryParse {
   const rows = records(result);
+  if (!rows.length) {
+    throw new Error(
+      "The aggregate result is empty — no groups to display.",
+    );
+  }
   const cells = rows.map((row) => {
     const signal = String(row.signal);
     if (!SIGNALS[signal]) throw new Error("Unknown quality signal.");
@@ -273,16 +298,30 @@ export function parseQualitySummary(result: PreviewResult): QualityCell[] {
       samples: samples(row.sample_keys),
     };
   });
-  const total = cells.reduce((sum, cell) => sum + cell.positions, 0);
-  if (
-    !rows.length ||
-    rows.some((row) => number(row.total_positions) !== total)
-  ) {
+  const coveredPositions = cells.reduce((sum, cell) => sum + cell.positions, 0);
+  const reportedTotal = number(rows[0]!.total_positions);
+  const groupCountRaw = rows[0]!.group_count;
+  const groupCount =
+    groupCountRaw == null || groupCountRaw === ""
+      ? cells.length
+      : number(groupCountRaw);
+  const incomplete =
+    groupCount > cells.length || coveredPositions !== reportedTotal;
+  if (incomplete && groupCountRaw == null) {
+    // Old path: preview LIMIT truncated groups without stats — refuse.
     throw new Error(
-      "The aggregate result is incomplete. A truncated preview cannot represent the whole mapping.",
+      `The aggregate result is incomplete (${cells.length} groups, ` +
+        `${coveredPositions}/${reportedTotal} positions). ` +
+        `Coarsen group attributes or re-run with a budgeted attrs summary.`,
     );
   }
-  return cells;
+  return {
+    cells,
+    totalPositions: reportedTotal,
+    groupCount,
+    incomplete,
+    coveredPositions,
+  };
 }
 export function parseQualityTargets(result: PreviewResult): QualityTarget[] {
   return records(result).map((row) => ({

@@ -39,51 +39,117 @@ export type NewCheckInput = {
   checks: MappingCheck[];
   keyMaps: KeyMapDef[];
   queries: QueryDef[];
+  /** Required: map the check measures — not “first in list”. */
+  mapId: string;
+  /** Required: Join-host query that ApplyKeyMap-wires this map. */
+  hostQueryId: string;
+  leftAttr: string;
+  rightAttr: string;
+  sampleColumn?: string;
 };
 
 export type NewCheckResult =
   | { ok: true; check: MappingCheck; note: string }
   | { ok: false; error: string };
 
-/** Build a new attrs MappingCheck for the first KeyMap + Join host. */
-export function createMappingCheck(input: NewCheckInput): NewCheckResult {
-  const map = input.keyMaps[0];
-  if (!map) {
-    return { ok: false, error: "Add a KeyMap before creating a mapping check." };
+/** Host queries whose Join path ApplyKeyMap-references `mapId`. */
+export function findJoinHostsForMap(
+  queries: QueryDef[],
+  mapId: string,
+): Array<{
+  host: QueryDef;
+  joinStepIndex: number;
+  leftOn: string[];
+  rightOn: string[];
+}> {
+  const out: Array<{
+    host: QueryDef;
+    joinStepIndex: number;
+    leftOn: string[];
+    rightOn: string[];
+  }> = [];
+  for (const q of queries) {
+    for (let i = 0; i < q.steps.length; i++) {
+      const s = q.steps[i];
+      if (s?.type !== "Join") continue;
+      const before = q.steps.slice(0, i);
+      const wired = before.some(
+        (st) =>
+          st.type === "ApplyKeyMap" &&
+          (typeof st.payload.map_id === "string"
+            ? st.payload.map_id
+            : String(st.payload.map_id)) === mapId,
+      );
+      // Also accept ApplyKeyMap after Join (right-side / post-join remap).
+      const after = q.steps.slice(i + 1);
+      const wiredAfter = after.some(
+        (st) =>
+          st.type === "ApplyKeyMap" &&
+          (typeof st.payload.map_id === "string"
+            ? st.payload.map_id
+            : String(st.payload.map_id)) === mapId,
+      );
+      if (!wired && !wiredAfter) continue;
+      out.push({
+        host: q,
+        joinStepIndex: i,
+        leftOn: s.payload.left_on,
+        rightOn: s.payload.right_on,
+      });
+    }
   }
-  const host =
-    input.queries.find(
-      (q) => q.steps.length > 0 && q.steps[q.steps.length - 1]?.type === "Join",
-    ) ?? null;
-  const join = host?.steps[host.steps.length - 1];
-  if (!host || join?.type !== "Join") {
+  return out;
+}
+
+/**
+ * Build an attrs MappingCheck for an explicit map ↔ Join-host ↔ attribute triple.
+ * Refuses first-of-list heuristics (ADR-0027 binding integrity).
+ */
+export function createMappingCheck(input: NewCheckInput): NewCheckResult {
+  const map = input.keyMaps.find((m) => m.id === input.mapId);
+  if (!map) {
     return {
       ok: false,
-      error: "Need a query whose last step is Join (ApplyKeyMap host).",
+      error: `KeyMap “${input.mapId}” not found — pick a map that exists in the project.`,
     };
   }
-  const left = join.payload.left_on[0] ?? "key";
-  const right = join.payload.right_on[0] ?? "id";
+  const left = input.leftAttr.trim();
+  const right = input.rightAttr.trim();
+  if (!left || !right) {
+    return {
+      ok: false,
+      error: "Choose left and right check attributes (Join keys or mapped columns).",
+    };
+  }
+  const hosts = findJoinHostsForMap(input.queries, map.id);
+  const hostHit = hosts.find((h) => h.host.id === input.hostQueryId);
+  if (!hostHit) {
+    return {
+      ok: false,
+      error: `Query “${input.hostQueryId}” has no ApplyKeyMap for map “${map.name}”. Pick a Join host that uses this map.`,
+    };
+  }
+  const sample = (input.sampleColumn ?? left).trim() || left;
   const check: MappingCheck = {
     id: newCheckId(input.checks.map((c) => c.id)),
     name: `Check · ${map.name}`,
     map_id: map.id,
-    input_refs: [host.id],
+    input_refs: [hostHit.host.id],
     group_attributes: [left, right],
     cohort_predicate: "",
     projection: {
       kind: "attrs",
-      host_query_id: host.id,
+      host_query_id: hostHit.host.id,
       left_attr: left,
       right_attr: right,
-      sample_column: left,
+      sample_column: sample,
     },
     allow_decisions: [],
   };
   return {
     ok: true,
     check,
-    note: `Created ${check.name} · attrs ${left} ↔ ${right}`,
+    note: `Created ${check.name} · ${hostHit.host.name} · attrs ${left} ↔ ${right}`,
   };
 }
 
@@ -131,12 +197,16 @@ export function recordCheckRun(args: {
   const prev = (project.mapping_check_runs ?? [])
     .filter((r) => r.check_id === check.id)
     .at(-1);
+  const attr = prev ? attributeDelta(prev, run) : null;
+  const cellNote = prev ? summarizeCellDeltas(prev.cells, run.cells) : null;
   const deltaNote = prev
-    ? `${deltaLabel(attributeDelta(prev, run))}${
+    ? `${deltaLabel(attr!)}${
         run.comparability.kind === "limited"
           ? ` (${run.comparability.reason})`
           : ""
-      } · positions ${prev.total_positions} → ${run.total_positions}`
+      } · positions ${prev.total_positions} → ${run.total_positions}${
+        cellNote ? ` · ${cellNote}` : ""
+      }`
     : `CheckRun recorded · ${run.total_positions.toLocaleString()} positions`;
 
   const mapping_checks =
@@ -262,9 +332,23 @@ export function planCheckInspect(args: {
 }
 
 export type ConfirmRemapResult =
-  | { ok: true; nextMap: KeyMapDef; message: string }
+  | {
+      ok: true;
+      nextMap: KeyMapDef;
+      /** Upserts for source Save — seed/ref may ignore and still sync Apply snapshots. */
+      dirtyDelta: {
+        upserts: KeyMapDef["entries"];
+        deletedFroms: string[];
+      };
+      message: string;
+    }
   | { ok: false; error: string };
 
+/**
+ * Build the next map revision for Confirm.
+ * Caller MUST apply via upsertKeyMapIntoProject (+ source Save with dirtyDelta) —
+ * never patch `key_maps` alone (Apply snapshots / WH would stay stale).
+ */
 export function confirmFrozenCheckRemap(args: {
   frozen: FrozenRemapPreview;
   workspace: Workspace;
@@ -283,14 +367,74 @@ export function confirmFrozenCheckRemap(args: {
       };
     }
     const nextMap = applyFrozenRemapToMap(map!, frozen, workspace, check);
+    const dirtyDelta = {
+      upserts: frozen.changes.map((c) => ({
+        from: c.from,
+        to: c.to,
+      })),
+      deletedFroms: [] as string[],
+    };
     return {
       ok: true,
       nextMap,
+      dirtyDelta,
       message: `Check remap confirmed · ${frozen.changes.length} link(s) via KeyMap`,
     };
   } catch (reason) {
     return { ok: false, error: String(reason) };
   }
+}
+
+/** Compare aggregate cells by stable group id (row\\0column\\0signal). */
+export function summarizeCellDeltas(
+  prevCells: Array<{
+    row: string;
+    column: string;
+    signal: string;
+    positions: number;
+  }>,
+  nextCells: Array<{
+    row: string;
+    column: string;
+    signal: string;
+    positions: number;
+  }>,
+  focusGroupKey?: string,
+): string | null {
+  const keyOf = (c: {
+    row: string;
+    column: string;
+    signal: string;
+  }) => `${c.row}\0${c.column}\0${c.signal}`;
+  const prev = new Map(prevCells.map((c) => [keyOf(c), c.positions]));
+  const next = new Map(nextCells.map((c) => [keyOf(c), c.positions]));
+  const keys = new Set([...prev.keys(), ...next.keys()]);
+  const changes: Array<{ key: string; from: number; to: number; d: number }> =
+    [];
+  for (const k of keys) {
+    const a = prev.get(k) ?? 0;
+    const b = next.get(k) ?? 0;
+    if (a === b) continue;
+    changes.push({ key: k, from: a, to: b, d: b - a });
+  }
+  if (!changes.length) return null;
+  changes.sort((x, y) => Math.abs(y.d) - Math.abs(x.d));
+  const label = (k: string) => {
+    const [row, col, signal] = k.split("\0");
+    return `${row}→${col} (${signal})`;
+  };
+  if (focusGroupKey) {
+    const hit = changes.find((c) => label(c.key).startsWith(focusGroupKey));
+    if (hit) {
+      return `${label(hit.key)} ${hit.from} → ${hit.to}`;
+    }
+  }
+  const top = changes.slice(0, 3).map((c) => {
+    const sign = c.d > 0 ? "+" : "";
+    return `${label(c.key)} ${c.from}→${c.to} (${sign}${c.d})`;
+  });
+  const more = changes.length > 3 ? ` (+${changes.length - 3} groups)` : "";
+  return `groups ${top.join("; ")}${more}`;
 }
 
 /** Stage From→To pairs onto a frozen remap preview (Join Lens). */

@@ -13,8 +13,10 @@ import {
   inputRevisionForQuery,
   keyMapRevision,
   labMappingCheck,
+  resolveInspectJoinLensTarget,
   upsertAllowDecision,
 } from "./mappingCheck";
+import { QUALITY_JOIN } from "./mappingQuality";
 import type { CheckRun, MappingCheck } from "../types/mappingCheck";
 import type { KeyMapDef, Workspace } from "../types/pipeline";
 import { parseQualitySummary, SIGNALS } from "./mappingQuality";
@@ -389,6 +391,43 @@ assert(
     sample.steps.some((s) => s.type === "Filter"),
     "inspect adds cohort Filter",
   );
+}
+
+{
+  const labWs: Workspace = {
+    focus_query_id: QUALITY_JOIN,
+    key_maps: [],
+    queries: [
+      {
+        id: QUALITY_JOIN,
+        name: "joined",
+        steps: [
+          { type: "LoadParquet", payload: { path: "a.parquet" } },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              join_type: "left",
+              left_on: ["sku"],
+              right_on: ["id"],
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const labInspect = cohortInspectionQuery(labWs, {
+    ...labMappingCheck(),
+    cohort_predicate: `signal = 'aligned_attributes'`,
+  });
+  assert(
+    labInspect.steps.every((s) => s.type !== "Join"),
+    "lab inspect is SqlModel wrapper",
+  );
+  const lens = resolveInspectJoinLensTarget(labWs, labInspect);
+  assert(lens?.hostQueryId === QUALITY_JOIN, "lab lens → QUALITY_JOIN");
+  assert(lens?.joinStepIndex === 1, "lab join step index");
+  assert(lens?.leftOn[0] === "sku", "lab left_on");
 }
 
 console.log("mappingCheck.test.ts: ok");

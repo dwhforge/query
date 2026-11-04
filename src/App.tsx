@@ -111,6 +111,7 @@ import {
 import {
   ensureLabCheck,
   labMappingCheck,
+  resolveInspectJoinLensTarget,
   type FrozenRemapPreview,
 } from "./lib/mappingCheck";
 import type {
@@ -3826,38 +3827,26 @@ function App() {
       ? activeQuery.steps[selectedStepIndex]
       : null;
 
-  // Join Lens needs the Join step payload. For Inspect cohorts the selected step
-  // may stay on Join while preview includes Filter — resolve Join by index either way.
+  // Join Lens needs Join payload. Inspect attrs embed Join; lab SqlModel wraps
+  // QUALITY_JOIN — resolve via resolveInspectJoinLensTarget (not findIndex alone).
   const joinLensTarget = (() => {
-    if (
-      !activeQueryId ||
-      !activeQuery ||
-      isFullQualityJoin(activeQueryId) ||
-      selectedStepIndex === null
-    ) {
+    if (!activeQueryId || !activeQuery || selectedStepIndex === null) {
       return null;
     }
-    const joinStepIndex = isQualityInspectionQuery(activeQueryId)
-      ? activeQuery.steps.findIndex((s) => s.type === "Join")
-      : selectedStep?.type === "Join"
-        ? selectedStepIndex
-        : -1;
-    const joinStep =
-      joinStepIndex >= 0 ? activeQuery.steps[joinStepIndex] : null;
-    if (
-      !joinStep ||
-      joinStep.type !== "Join" ||
-      joinStep.payload.left_on.length === 0
-    ) {
+    if (isQualityInspectionQuery(activeQueryId)) {
+      return resolveInspectJoinLensTarget(project.workspace, activeQuery);
+    }
+    if (isFullQualityJoin(activeQueryId)) return null;
+    if (selectedStep?.type !== "Join" || selectedStep.payload.left_on.length === 0) {
       return null;
     }
     return {
       hostQueryId: activeQueryId,
-      joinStepIndex,
-      rightQueryId: targetKey(joinStep.payload.right_query_id),
-      leftOn: joinStep.payload.left_on,
-      rightOn: joinStep.payload.right_on,
-      joinType: joinStep.payload.join_type,
+      joinStepIndex: selectedStepIndex,
+      rightQueryId: targetKey(selectedStep.payload.right_query_id),
+      leftOn: selectedStep.payload.left_on,
+      rightOn: selectedStep.payload.right_on,
+      joinType: selectedStep.payload.join_type,
     };
   })();
 

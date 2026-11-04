@@ -28,4 +28,33 @@ assert(
   "legacy cancelled string",
 );
 
+// Envelope shape that Electron main must resolve (not reject) so errorDetail survives.
+function decodeInvokeReply(reply: unknown): HostRpcError | { ok: true; result: unknown } {
+  if (reply && typeof reply === "object" && "ok" in reply) {
+    const env = reply as {
+      ok: boolean;
+      result?: unknown;
+      message?: string;
+      errorDetail?: { kind: string; message: string } | null;
+    };
+    if (env.ok) return { ok: true, result: env.result };
+    return normalizeHostReject({
+      message: env.message ?? "host error",
+      errorDetail: env.errorDetail ?? null,
+    });
+  }
+  throw new Error("expected envelope");
+}
+
+const okEnv = decodeInvokeReply({ ok: true, result: { n: 1 } });
+assert("ok" in okEnv && okEnv.ok && (okEnv.result as { n: number }).n === 1, "ok envelope");
+
+const errEnv = decodeInvokeReply({
+  ok: false,
+  message: "superseded",
+  errorDetail: { kind: "cancelled", message: "superseded" },
+});
+assert(errEnv instanceof HostRpcError, "err envelope → HostRpcError");
+assert(isHostCancelled(errEnv), "envelope preserves cancelled");
+
 console.log("hostRpc.test.ts: ok");

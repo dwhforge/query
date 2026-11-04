@@ -174,15 +174,31 @@ impl Project {
 }
 
 /// Peek on-disk `format_version` without full migrate (default 0). Used for `.bak` on save.
+/// Malformed values are treated as 0 so bak still runs; load path validates strictly.
 pub fn peek_format_version(raw: &str) -> u32 {
     serde_json::from_str::<Value>(raw)
         .ok()
-        .and_then(|v| {
-            v.get("format_version")
-                .and_then(|x| x.as_u64())
-                .map(|n| n as u32)
-        })
+        .and_then(|v| v.as_object().and_then(|o| read_format_version(o).ok()))
         .unwrap_or(0)
+}
+
+/// Only absence → v0. Wrong type / non-integer / out of u32 range → error (ADR-0030).
+fn read_format_version(obj: &serde_json::Map<String, Value>) -> Result<u32, String> {
+    match obj.get("format_version") {
+        None => Ok(0),
+        Some(Value::Number(n)) => {
+            let Some(u) = n.as_u64() else {
+                return Err(
+                    "format_version must be a non-negative integer (not float/negative)".into(),
+                );
+            };
+            if u > u32::MAX as u64 {
+                return Err(format!("format_version {u} out of range for u32"));
+            }
+            Ok(u as u32)
+        }
+        Some(_) => Err("format_version must be a JSON number".into()),
+    }
 }
 
 /// Ordered document migrations + stamp [`PROJECT_FORMAT_VERSION`] (ADR-0030).
@@ -190,10 +206,7 @@ pub fn migrate_project_document(v: &mut Value) -> Result<(), String> {
     let Some(obj) = v.as_object_mut() else {
         return Err("project root must be a JSON object".into());
     };
-    let mut ver = obj
-        .get("format_version")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+    let mut ver = read_format_version(obj)?;
     if ver > PROJECT_FORMAT_VERSION {
         return Err(format!(
             "Unsupported project format_version {ver} (this app supports ≤ {PROJECT_FORMAT_VERSION})"
@@ -225,21 +238,65 @@ fn strip_source_keymap_entries(obj: &mut serde_json::Map<String, Value>) {
     let Some(ws) = obj.get_mut("workspace").and_then(|w| w.as_object_mut()) else {
         return;
     };
-    let Some(maps) = ws.get_mut("key_maps").and_then(|m| m.as_array_mut()) else {
+    let mut source_ids = std::collections::HashSet::new();
+    if let Some(maps) = ws.get_mut("key_maps").and_then(|m| m.as_array_mut()) {
+        for map in maps {
+            let Some(m) = map.as_object_mut() else {
+                continue;
+            };
+            let is_source = m
+                .get("storage")
+                .and_then(|s| s.as_object())
+                .and_then(|s| s.get("kind"))
+                .and_then(|k| k.as_str())
+                == Some("source");
+            if is_source {
+                if let Some(id) = m.get("id").and_then(|x| x.as_str()) {
+                    source_ids.insert(id.to_string());
+                }
+                m.insert("entries".into(), Value::Array(vec![]));
+            }
+        }
+    }
+    // Also clear embedded ApplyKeyMap snapshots for source maps.
+    let Some(queries) = ws.get_mut("queries").and_then(|q| q.as_array_mut()) else {
         return;
     };
-    for map in maps {
-        let Some(m) = map.as_object_mut() else {
+    for query in queries {
+        let Some(steps) = query
+            .as_object_mut()
+            .and_then(|q| q.get_mut("steps"))
+            .and_then(|s| s.as_array_mut())
+        else {
             continue;
         };
-        let is_source = m
-            .get("storage")
-            .and_then(|s| s.as_object())
-            .and_then(|s| s.get("kind"))
-            .and_then(|k| k.as_str())
-            == Some("source");
-        if is_source {
-            m.insert("entries".into(), Value::Array(vec![]));
+        for step in steps {
+            let Some(s) = step.as_object_mut() else {
+                continue;
+            };
+            if s.get("type").and_then(|t| t.as_str()) != Some("ApplyKeyMap") {
+                continue;
+            }
+            let map_id = s
+                .get("map_id")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    s.get("payload")
+                        .and_then(|p| p.as_object())
+                        .and_then(|p| p.get("map_id"))
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string())
+                });
+            let Some(mid) = map_id else { continue };
+            if !source_ids.contains(&mid) {
+                continue;
+            }
+            if let Some(payload) = s.get_mut("payload").and_then(|p| p.as_object_mut()) {
+                payload.insert("entries".into(), Value::Array(vec![]));
+            } else {
+                s.insert("entries".into(), Value::Array(vec![]));
+            }
         }
     }
 }
@@ -541,6 +598,39 @@ mod tests {
     fn peek_format_version_defaults_to_zero() {
         assert_eq!(peek_format_version(r#"{"id":"p"}"#), 0);
         assert_eq!(peek_format_version(r#"{"format_version":1}"#), 1);
+    }
+
+    #[test]
+    fn format_version_string_refused() {
+        let raw = r#"{
+            "format_version": "2",
+            "id": "p",
+            "name": "bad",
+            "connections": [],
+            "sources": [],
+            "workspace": { "queries": [], "focus_query_id": "", "key_maps": [] },
+            "dbt_target": "v1"
+        }"#;
+        let err = Project::from_json(raw).unwrap_err();
+        assert!(
+            err.contains("format_version must be a JSON number"),
+            "err={err}"
+        );
+    }
+
+    #[test]
+    fn format_version_out_of_u32_refused() {
+        let raw = r#"{
+            "format_version": 4294967297,
+            "id": "p",
+            "name": "bad",
+            "connections": [],
+            "sources": [],
+            "workspace": { "queries": [], "focus_query_id": "", "key_maps": [] },
+            "dbt_target": "v1"
+        }"#;
+        let err = Project::from_json(raw).unwrap_err();
+        assert!(err.contains("out of range"), "err={err}");
     }
 
     #[test]

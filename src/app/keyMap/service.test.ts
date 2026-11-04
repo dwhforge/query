@@ -3,12 +3,13 @@ import {
   dirtyDeltaHasChanges,
   mapForProjectAst,
   mergeFromValuesIntoMap,
+  mergeKeyMapTabSession,
   normalizeKeyMapForEditor,
   resolveJoinStepFromCtx,
   seedSaveResult,
   upsertKeyMapIntoProject,
 } from "./service";
-import type { KeyMapJoinCtx } from "./types";
+import type { KeyMapJoinCtx, KeyMapTabSession } from "./types";
 import type { Project } from "../../types/pipeline";
 
 function assert(cond: boolean, msg: string) {
@@ -111,5 +112,37 @@ assert(
 
 assert(seedSaveResult({ exportPath: null }).external === "skipped", "no export");
 assert(seedSaveResult({ exportPath: "/x" }).external === "synced", "synced");
+
+{
+  const prev: KeyMapTabSession = {
+    map: {
+      id: "m",
+      name: "M",
+      from_columns: ["sys", "code"],
+      entries: [
+        { from: "ERP", from_parts: ["ERP", "100"], to: "A" },
+        { from: "ERP", from_parts: ["ERP", "200"], to: "B" },
+      ],
+    },
+  };
+  const incoming = {
+    id: "m",
+    name: "M",
+    from_columns: ["sys", "code"],
+    entries: [{ from: "ERP", from_parts: ["ERP", "100"], to: "A2" }],
+  };
+  const merged = mergeKeyMapTabSession(prev, incoming as never);
+  assert(merged.map.entries.length === 2, "composite rows not collapsed");
+  assert(
+    merged.map.entries.some(
+      (e) => e.from_parts?.[1] === "100" && e.to === "A2",
+    ),
+    "updated tuple",
+  );
+  assert(
+    merged.map.entries.some((e) => e.from_parts?.[1] === "200" && e.to === "B"),
+    "sibling tuple kept",
+  );
+}
 
 console.log("keyMap/service.test.ts: ok");

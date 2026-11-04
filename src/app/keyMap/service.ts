@@ -4,7 +4,9 @@
 import type { KeyMapDirtyDelta, KeyMapSaveResult } from "../../lib/bridge";
 import {
   applyKeyMapToWorkspace,
+  fromPartsEff,
   syncApplyKeyMapEntries,
+  tupleKey,
   upsertKeyMapList,
 } from "../../lib/keyMap";
 import type {
@@ -15,6 +17,22 @@ import type {
   Workspace,
 } from "../../types/pipeline";
 import { targetKey } from "../../types/pipeline";
+
+/** Row identity for tab merge — full From tuple; range SCD includes bounds. */
+export function keyMapEntryIdentity(
+  entry: KeyMapEntry,
+  map: Pick<KeyMapDef, "time_mode" | "valid_from_column" | "valid_to_column">,
+): string {
+  const parts = tupleKey(fromPartsEff(entry));
+  if (map.time_mode === "range_scd") {
+    const vf = map.valid_from_column?.trim() || "valid_from";
+    const vt = map.valid_to_column?.trim() || "valid_to";
+    const from = (entry.attrs?.[vf] ?? "").trim();
+    const to = (entry.attrs?.[vt] ?? "").trim();
+    return `${parts}\0${from}\0${to}`;
+  }
+  return parts;
+}
 import type {
   KeyMapApplyIntent,
   KeyMapApplyResult,
@@ -106,25 +124,40 @@ export function mergeKeyMapTabSession(
   },
 ): KeyMapTabSession {
   const normalized = normalizeKeyMapForEditor(incoming);
-  const byFrom = new Map(
-    prev.map.entries.map((e) => [e.from.trim(), e] as const),
+  const meta = {
+    time_mode: normalized.time_mode ?? prev.map.time_mode,
+    valid_from_column:
+      normalized.valid_from_column ?? prev.map.valid_from_column,
+    valid_to_column: normalized.valid_to_column ?? prev.map.valid_to_column,
+  };
+  // Identity = full From tuple (ADR-0024); range SCD also keys on bounds (ADR-0028).
+  // Never collapse composite rows that share only the first From part.
+  const byId = new Map(
+    prev.map.entries.map(
+      (e) => [keyMapEntryIdentity(e, meta), e] as const,
+    ),
   );
   for (const e of normalized.entries) {
-    const from = e.from.trim();
-    if (!from) continue;
-    const cur = byFrom.get(from);
+    const id = keyMapEntryIdentity(e, meta);
+    if (!id || id === "[]" || id.startsWith("[]\0")) continue;
+    const cur = byId.get(id);
     if (!cur) {
-      byFrom.set(from, e);
-    } else if (e.to.trim() && !cur.to.trim()) {
-      byFrom.set(from, { ...cur, to: e.to });
+      byId.set(id, e);
     } else if (e.to.trim() && e.to.trim() !== cur.to.trim()) {
-      byFrom.set(from, { ...cur, to: e.to });
+      // Replace whole row — keep incoming attrs (avoid stale SCD bounds).
+      byId.set(id, { ...e });
+    } else if (e.to.trim() && !cur.to.trim()) {
+      byId.set(id, {
+        ...cur,
+        to: e.to,
+        ...(e.attrs ? { attrs: { ...cur.attrs, ...e.attrs } } : {}),
+      });
     }
   }
   return {
     map: {
       ...normalized,
-      entries: [...byFrom.values()],
+      entries: [...byId.values()],
       storage: normalized.storage ?? prev.map.storage,
     },
     pickTo: opts?.pickTo,

@@ -1,9 +1,10 @@
 //! Strip / merge connection secrets for on-disk Project vs local secrets store (ADR-0012 follow-up).
 
 use crate::connection::{ConnectionDef, ConnectionKind, PostgresParams, S3Params};
+use crate::model::{KeyMapStorage, TransformationStep};
 use crate::project::Project;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Secret payload for one connection (stored outside the project file).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -212,7 +213,36 @@ pub fn project_for_disk(project: &Project) -> (Project, BTreeMap<String, Connect
             src.connection_string = None;
         }
     }
+    // ADR-0033: source KeyMaps are metadata-only on disk (editor draft may still hold rows).
+    strip_source_keymap_row_bodies(&mut disk);
     (disk, secrets)
+}
+
+/// Clear source-map `entries` and matching ApplyKeyMap snapshots before serialize.
+pub fn strip_source_keymap_row_bodies(project: &mut Project) {
+    let source_ids: HashSet<String> = project
+        .workspace
+        .key_maps
+        .iter()
+        .filter(|m| matches!(m.storage, KeyMapStorage::Source { .. }))
+        .map(|m| m.id.clone())
+        .collect();
+    for map in &mut project.workspace.key_maps {
+        if matches!(map.storage, KeyMapStorage::Source { .. }) {
+            map.entries.clear();
+        }
+    }
+    for query in &mut project.workspace.queries {
+        for step in &mut query.steps {
+            if let TransformationStep::ApplyKeyMap { map_id, entries, .. } = step {
+                if let Ok(id) = map_id.compiler_id() {
+                    if source_ids.contains(id) {
+                        entries.clear();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Apply a secret map onto the project's connections (in place).
@@ -306,6 +336,74 @@ mod tests {
         let json = disk.to_json_pretty().unwrap();
         assert!(!json.contains("root_path"));
         assert!(!json.contains("postgresql://"));
+    }
+
+    #[test]
+    fn project_for_disk_strips_source_keymap_entries() {
+        use crate::dialect::WarehouseDialect;
+        use crate::model::{
+            KeyMapDef, KeyMapEntry, KeyMapStorage, ObjectTarget, QueryDef, TransformationStep,
+            Workspace,
+        };
+        use crate::producers::DbtTarget;
+
+        let mut map = KeyMapDef::new("map_wh", "WH");
+        map.entries = vec![KeyMapEntry::pair("a", "1")];
+        map.storage = KeyMapStorage::Source {
+            source: "public".into(),
+            table: "aliases".into(),
+            connection_id: Some("c1".into()),
+            db_schema: None,
+        };
+        let p = Project {
+            format_version: crate::project::PROJECT_FORMAT_VERSION,
+            id: "proj".into(),
+            name: "demo".into(),
+            project_uid: String::new(),
+            references: vec![],
+            connection_bindings: vec![],
+            root_path: None,
+            connections: vec![],
+            sources: vec![],
+            workspace: Workspace {
+                queries: vec![QueryDef {
+                    id: "q".into(),
+                    name: "q".into(),
+                    steps: vec![TransformationStep::ApplyKeyMap {
+                        column: "sku".into(),
+                        columns: vec![],
+                        output_column: None,
+                        as_of_column: None,
+                        map_id: ObjectTarget::Local("map_wh".into()),
+                        entries: vec![KeyMapEntry::pair("a", "1")],
+                    }],
+                    execution: Default::default(),
+                }],
+                focus_query_id: "q".into(),
+                key_maps: vec![map],
+            },
+            dbt_target: DbtTarget::V1,
+            execution_engine: crate::destination::ExecutionEngine::Duckdb,
+            destination: crate::destination::Destination::duckdb("local.duckdb"),
+            outputs: vec![],
+            materialization: crate::destination::Materialization::Table,
+            target_dialect: WarehouseDialect::Duckdb,
+            target_connection_id: None,
+            last_dbt_export_path: None,
+            canvas: None,
+            mapping_checks: vec![],
+            mapping_check_runs: vec![],
+        };
+        let (disk, _) = project_for_disk(&p);
+        assert!(disk.workspace.key_maps[0].entries.is_empty());
+        match &disk.workspace.queries[0].steps[0] {
+            TransformationStep::ApplyKeyMap { entries, .. } => {
+                assert!(entries.is_empty(), "ApplyKeyMap snapshot cleared");
+            }
+            _ => panic!("expected ApplyKeyMap"),
+        }
+        // Runtime draft unchanged.
+        assert_eq!(p.workspace.key_maps[0].entries.len(), 1);
     }
 
     #[test]

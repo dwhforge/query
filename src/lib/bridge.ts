@@ -13,6 +13,20 @@ import type {
   Workspace,
 } from "../types/pipeline";
 import { normalizeHostReject } from "./hostRpc";
+import type { HostError } from "../types/hostError";
+import type { KeyMapWhArgs } from "../types/generated/KeyMapWhArgs";
+import type { LoadProjectArgs } from "../types/generated/LoadProjectArgs";
+import type { SaveProjectArgs } from "../types/generated/SaveProjectArgs";
+
+/** Successful IPC result vs structured host failure (survives Electron handle). */
+export type InvokeReply<T> =
+  | { ok: true; result: T }
+  | {
+      ok: false;
+      message: string;
+      errorDetail?: HostError | null;
+      error_detail?: HostError | null;
+    };
 
 export type DbtTarget = "v1" | "v2";
 
@@ -45,10 +59,22 @@ function bridge() {
   return dwh;
 }
 
-/** IPC → dwh-host JSON-RPC (ADR-0029: structured HostError via errorDetail). */
+/** IPC → dwh-host JSON-RPC (ADR-0029: structured HostError via ok:false envelope). */
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   return bridge()
-    .invoke<T>(cmd, args)
+    .invoke<InvokeReply<T> | T>(cmd, args)
+    .then((reply) => {
+      if (reply && typeof reply === "object" && "ok" in (reply as object)) {
+        const env = reply as InvokeReply<T>;
+        if (env.ok) return env.result;
+        throw normalizeHostReject({
+          message: env.message,
+          errorDetail: env.errorDetail ?? env.error_detail ?? null,
+        });
+      }
+      // Legacy / non-envelope (tests, direct mocks).
+      return reply as T;
+    })
     .catch((e: unknown) => {
       throw normalizeHostReject(e);
     });
@@ -690,10 +716,10 @@ export function writeKeyMap(
   expectedContentHash?: string | null,
   delta?: KeyMapDirtyDelta | null,
 ): Promise<KeyMapWriteResult> {
-  return invoke("write_key_map", {
+  const args = {
     keyMap,
     connectionString,
-    expectedContentHash: expectedContentHash ?? null,
+    expectedContentHash: expectedContentHash ?? undefined,
     delta: delta
       ? {
           upserts: delta.upserts,
@@ -701,8 +727,9 @@ export function writeKeyMap(
           deletedFromParts: delta.deletedFromParts ?? [],
           baselines: delta.baselines ?? [],
         }
-      : null,
-  });
+      : undefined,
+  } satisfies KeyMapWhArgs;
+  return invoke("write_key_map", args as Record<string, unknown>);
 }
 
 export function readKeyMap(
@@ -714,13 +741,14 @@ export function readKeyMap(
     fromPrefix?: string;
   },
 ): Promise<KeyMapReadResult> {
-  return invoke("read_key_map", {
+  const args = {
     keyMap,
     connectionString,
-    limit: opts?.limit ?? null,
-    offset: opts?.offset ?? null,
-    fromPrefix: opts?.fromPrefix ?? null,
-  });
+    limit: opts?.limit,
+    offset: opts?.offset,
+    fromPrefix: opts?.fromPrefix,
+  } satisfies KeyMapWhArgs;
+  return invoke("read_key_map", args as Record<string, unknown>);
 }
 
 export interface ExportResult {
@@ -893,7 +921,8 @@ export function testPostgresConnection(
 }
 
 export function saveProject(path: string, project: Project): Promise<Project> {
-  return invoke<Project>("save_project", { path, project });
+  const args = { path, project } satisfies SaveProjectArgs;
+  return invoke<Project>("save_project", args as Record<string, unknown>);
 }
 
 export type ReferenceState =
@@ -1006,10 +1035,11 @@ export function loadProject(
   path: string,
   opts?: { remember?: boolean },
 ): Promise<Project> {
-  return invoke<Project>("load_project", {
+  const args = {
     path,
     remember: opts?.remember ?? false,
-  });
+  } satisfies LoadProjectArgs;
+  return invoke<Project>("load_project", args as Record<string, unknown>);
 }
 
 export function getLastProjectPath(): Promise<string | null> {

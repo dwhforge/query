@@ -11,7 +11,13 @@ import type {
   FrozenRemapPreview,
   MappingCheck,
 } from "../types/mappingCheck";
-import type { KeyMapDef, QueryDef, Workspace } from "../types/pipeline";
+import type {
+  JoinType,
+  KeyMapDef,
+  QueryDef,
+  Workspace,
+} from "../types/pipeline";
+import { targetKey } from "../types/pipeline";
 import {
   QUALITY_INSPECTION,
   QUALITY_JOIN,
@@ -462,6 +468,57 @@ export function cohortPredicateFromSamples(
  * Ephemeral Inspect: post-join cohort filter (ADR-0027).
  * Sample keys are not the cohort — they only order/focus Lens.
  */
+/**
+ * Join Lens context for an Inspect query. Lab wrappers are SqlModel-only —
+ * Lens must target {@link QUALITY_JOIN}, not search for Join inside the wrapper.
+ */
+export function resolveInspectJoinLensTarget(
+  workspace: Workspace,
+  inspection: QueryDef,
+): {
+  hostQueryId: string;
+  joinStepIndex: number;
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+  joinType: JoinType;
+} | null {
+  const localIdx = inspection.steps.findIndex((s) => s.type === "Join");
+  if (localIdx >= 0) {
+    const step = inspection.steps[localIdx]!;
+    if (step.type !== "Join" || step.payload.left_on.length === 0) return null;
+    return {
+      hostQueryId: inspection.id,
+      joinStepIndex: localIdx,
+      rightQueryId: targetKey(step.payload.right_query_id),
+      leftOn: step.payload.left_on,
+      rightOn: step.payload.right_on,
+      joinType: step.payload.join_type,
+    };
+  }
+  const lab = workspace.queries.find((q) => q.id === QUALITY_JOIN);
+  if (!lab) return null;
+  let joinStepIndex = -1;
+  for (let i = lab.steps.length - 1; i >= 0; i--) {
+    if (lab.steps[i]?.type === "Join") {
+      joinStepIndex = i;
+      break;
+    }
+  }
+  const step = joinStepIndex >= 0 ? lab.steps[joinStepIndex] : null;
+  if (!step || step.type !== "Join" || step.payload.left_on.length === 0) {
+    return null;
+  }
+  return {
+    hostQueryId: QUALITY_JOIN,
+    joinStepIndex,
+    rightQueryId: targetKey(step.payload.right_query_id),
+    leftOn: step.payload.left_on,
+    rightOn: step.payload.right_on,
+    joinType: step.payload.join_type,
+  };
+}
+
 export function cohortInspectionQuery(
   workspace: Workspace,
   check: MappingCheck,

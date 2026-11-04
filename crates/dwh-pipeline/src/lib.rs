@@ -70,7 +70,8 @@ pub use export_manifest::{
 };
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{
-    apply_keymap_columns, JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, KeyMapTimeMode,
+    apply_keymap_columns, JoinType, KeyMapAuthoringContext, KeyMapDef, KeyMapEntry, KeyMapStorage,
+    KeyMapTimeMode,
     NormalizeOp, ObjectKind,
     ObjectTarget, QueryDef, TransformationStep, Workspace,
 };

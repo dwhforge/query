@@ -202,7 +202,16 @@ export type KeyMapStorage =
 /** Effectivity mode ([ADR-0028](../../docs/adr/0028-keymap-stewardship-shapes.md)). */
 export type KeyMapTimeMode = "none" | "range_scd";
 
-/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028). */
+/** Creation intent from query-based mapping wizard ([ADR-0034]). */
+export interface KeyMapAuthoringContext {
+  source_query_id: string;
+  /** Ordered From columns on the source query. */
+  source_columns: string[];
+  target_query_id: string;
+  target_column: string;
+}
+
+/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -221,6 +230,8 @@ export interface KeyMapDef {
   valid_from_column?: string;
   /** Range end column when `time_mode = range_scd` (default valid_to; empty = open). */
   valid_to_column?: string;
+  /** Optional query-based create intent; absent on legacy maps. */
+  authoring_context?: KeyMapAuthoringContext;
 }
 
 /** Preview engine for this Query node only (ADR-0014). */

@@ -64,6 +64,8 @@ interface ExplorerTreeProps {
   onRenameSource: (sourceId: string, name: string) => void;
   onSelectKeyMap: (map: KeyMapDef) => void;
   onAddKeyMap: () => void;
+  /** Query-based mapping create wizard (ADR-0034 / v0.3.1). */
+  onCreateKeyMapFromData?: () => void;
   onRenameKeyMap: (mapId: string, name: string) => void;
   onDeleteKeyMap: (mapId: string) => void;
 }
@@ -286,6 +288,7 @@ export function ExplorerTree({
   onRenameSource,
   onSelectKeyMap,
   onAddKeyMap,
+  onCreateKeyMapFromData,
   onRenameKeyMap,
   onDeleteKeyMap,
 }: ExplorerTreeProps) {
@@ -723,9 +726,19 @@ export function ExplorerTree({
             count={keyMaps.length}
             onToggle={() => onToggle("keyMaps")}
             actions={
-              <IconBtn title="New mapping" onClick={onAddKeyMap}>
-                +
-              </IconBtn>
+              <>
+                {onCreateKeyMapFromData && (
+                  <IconBtn
+                    title="Create from data"
+                    onClick={onCreateKeyMapFromData}
+                  >
+                    ◇
+                  </IconBtn>
+                )}
+                <IconBtn title="New mapping" onClick={onAddKeyMap}>
+                  +
+                </IconBtn>
+              </>
             }
           />
           {keyMapsOpen && (

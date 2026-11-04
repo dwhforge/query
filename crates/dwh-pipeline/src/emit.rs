@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 fn require_prev(prev: &str, op: &str) -> Result<(), String> {
     if prev.is_empty() {
-        Err(format!("{op} требует предыдущий шаг в той же query"))
+        Err(format!("{op} requires a previous step in the same query"))
     } else {
         Ok(())
     }

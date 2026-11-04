@@ -385,6 +385,18 @@ fn default_to_col() -> String {
     "to".into()
 }
 
+/// User intent for how a KeyMap was authored from workspace queries
+/// ([ADR-0034](../../../docs/adr/0034-keymap-authoring-context.md)).
+/// Not ownership of a Join / MappingCheck — Apply consumers are computed separately.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeyMapAuthoringContext {
+    pub source_query_id: String,
+    /// Ordered From columns on the source query (composite arity ≥ 1).
+    pub source_columns: Vec<String>,
+    pub target_query_id: String,
+    pub target_column: String,
+}
+
 /// Named join-key alias table (project resource).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct KeyMapDef {
@@ -419,6 +431,10 @@ pub struct KeyMapDef {
     /// Map column for range end when `time_mode = range_scd` (default `valid_to`; NULL = open).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_to_column: Option<String>,
+    /// Optional creation intent from query-based mapping wizard ([ADR-0034](../../../docs/adr/0034-keymap-authoring-context.md)).
+    /// Absent on legacy maps. No `format_version` bump (additive optional; old readers may drop on re-save).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_context: Option<KeyMapAuthoringContext>,
 }
 
 fn is_time_mode_none(m: &KeyMapTimeMode) -> bool {
@@ -439,6 +455,7 @@ impl KeyMapDef {
             time_mode: KeyMapTimeMode::None,
             valid_from_column: None,
             valid_to_column: None,
+            authoring_context: None,
         }
     }
 
@@ -947,5 +964,43 @@ impl Workspace {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod authoring_context_tests {
+    use super::{KeyMapAuthoringContext, KeyMapDef, KeyMapStorage};
+
+    #[test]
+    fn authoring_context_round_trips_on_keymap() {
+        let mut map = KeyMapDef::new("map_supplier", "Supplier→Catalog");
+        map.authoring_context = Some(KeyMapAuthoringContext {
+            source_query_id: "supplier_products".into(),
+            source_columns: vec!["supplier_id".into(), "product_code".into()],
+            target_query_id: "catalog_products".into(),
+            target_column: "product_id".into(),
+        });
+        let json = serde_json::to_string_pretty(&map).unwrap();
+        assert!(json.contains("authoring_context"));
+        assert!(json.contains("supplier_id"));
+        let back: KeyMapDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.authoring_context, map.authoring_context);
+        assert_eq!(back.storage, KeyMapStorage::Seed);
+    }
+
+    #[test]
+    fn legacy_keymap_without_authoring_context_deserializes() {
+        let legacy = r#"{
+            "id": "map_old",
+            "name": "old",
+            "entries": [{"from": "a", "to": "b"}],
+            "storage": {"kind": "seed"},
+            "from_column": "from",
+            "to_column": "to"
+        }"#;
+        let map: KeyMapDef = serde_json::from_str(legacy).unwrap();
+        assert!(map.authoring_context.is_none());
+        let out = serde_json::to_value(&map).unwrap();
+        assert!(out.get("authoring_context").is_none());
     }
 }

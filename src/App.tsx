@@ -135,6 +135,13 @@ import {
   type ConfirmRemapApplyResult,
 } from "./app/mappingChecks";
 import {
+  applyMappingCreateOntoProject,
+  type MappingCreateApplyIntent,
+  type MappingCreateApplyResult,
+  type MappingCreatePlan,
+} from "./app/mappingCreate";
+import { MappingCreateWizard } from "./components/MappingCreateWizard";
+import {
   applyKeyMapOntoProject,
   dirtyDeltaHasChanges,
   mergeFromValuesIntoMap,
@@ -293,6 +300,8 @@ type ProjectBag = {
   keyMapApplyResult: KeyMapApplyResult | null;
   /** Set by confirm_remap; cleared after UI handles save/error. */
   confirmRemapResult: ConfirmRemapApplyResult | null;
+  /** Set by create_mapping; cleared after editor handoff. */
+  mappingCreateResult: MappingCreateApplyResult | null;
 };
 
 type ProjectBagAction =
@@ -300,7 +309,9 @@ type ProjectBagAction =
   | { type: "apply_keymap"; intent: KeyMapApplyIntent }
   | { type: "clear_keymap_apply_result" }
   | { type: "confirm_remap"; intent: ConfirmRemapApplyIntent }
-  | { type: "clear_confirm_remap_result" };
+  | { type: "clear_confirm_remap_result" }
+  | { type: "create_mapping"; intent: MappingCreateApplyIntent }
+  | { type: "clear_mapping_create_result" };
 
 function projectBagReducer(
   state: ProjectBag,
@@ -327,6 +338,15 @@ function projectBagReducer(
     }
     case "clear_confirm_remap_result":
       return { ...state, confirmRemapResult: null };
+    case "create_mapping": {
+      const { project, result } = applyMappingCreateOntoProject(
+        state.project,
+        action.intent,
+      );
+      return { ...state, project, mappingCreateResult: result };
+    }
+    case "clear_mapping_create_result":
+      return { ...state, mappingCreateResult: null };
     default:
       return state;
   }
@@ -337,6 +357,7 @@ function App() {
     project: emptyProject("Untitled"),
     keyMapApplyResult: null,
     confirmRemapResult: null,
+    mappingCreateResult: null,
   });
   const project = projectBag.project;
   const setProject = useCallback((update: SetStateAction<Project>) => {
@@ -598,6 +619,8 @@ function App() {
   const [confirmRemapBusy, setConfirmRemapBusy] = useState(false);
   /** Matches reducer result.opId so effects ignore superseded confirms. */
   const pendingConfirmOpIdRef = useRef<string | null>(null);
+  const [mappingCreateOpen, setMappingCreateOpen] = useState(false);
+  const pendingMappingCreateOpIdRef = useRef<string | null>(null);
   /** Center workspace tab: canvas or open KeyMap id. */
   const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
   useEffect(() => {
@@ -1749,6 +1772,24 @@ function App() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- save/patch close over latest handlers
   }, [projectBag.confirmRemapResult]);
+
+  // After create_mapping — open existing editor only on applied (no WH Save).
+  useEffect(() => {
+    const result = projectBag.mappingCreateResult;
+    if (!result) return;
+    dispatchProject({ type: "clear_mapping_create_result" });
+    if (pendingMappingCreateOpIdRef.current !== result.opId) return;
+    pendingMappingCreateOpIdRef.current = null;
+    if (result.status === "stale" || result.status === "error") {
+      setError(result.reason);
+      return;
+    }
+    setMappingCreateOpen(false);
+    setExportMsg(result.message);
+    setTreeExpanded((e) => ({ ...e, keyMaps: true }));
+    openKeyMapEditor(result.map);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectBag.mappingCreateResult]);
 
   // Keep forms in sync when steps change; clamp selected step index.
   useEffect(() => {
@@ -2913,7 +2954,7 @@ function App() {
         victim.type === "LoadDuckdb" ||
         victim.type === "FromQuery" ||
         victim.type === "SqlModel";
-      // Deleting the root while later transforms remain → "требует предыдущий шаг".
+      // Deleting the root while later transforms remain → "requires a previous step".
       if (isRoot && steps.length > 1) {
         setError("Remove later steps first, or clear the query — root step is required.");
         return steps;
@@ -3350,6 +3391,17 @@ function App() {
     void saveKeyMapToProject(map);
     openKeyMapEditor(map);
     setTreeExpanded((e) => ({ ...e, keyMaps: true }));
+  }
+
+  function handleMappingCreateConfirm(plan: MappingCreatePlan) {
+    const opId = `create_${Date.now().toString(36)}_${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    pendingMappingCreateOpIdRef.current = opId;
+    dispatchProject({
+      type: "create_mapping",
+      intent: { opId, plan },
+    });
   }
 
   function handleRenameKeyMap(mapId: string, name: string) {
@@ -4523,6 +4575,13 @@ function App() {
       />
       {opProgress && <OpProgress state={opProgress} />}
 
+      <MappingCreateWizard
+        open={mappingCreateOpen}
+        project={project}
+        onCancel={() => setMappingCreateOpen(false)}
+        onConfirm={handleMappingCreateConfirm}
+      />
+
       {frozenRemap && (
         <div
           className="fixed inset-x-0 bottom-0 z-[81] border-t border-amber-800/50 bg-[#140f08]/95 px-4 py-3 shadow-[0_-8px_32px_rgba(0,0,0,0.45)] backdrop-blur-sm"
@@ -4897,6 +4956,7 @@ function App() {
                   openKeyMapEditor(map);
                 }}
                 onAddKeyMap={handleAddKeyMap}
+                onCreateKeyMapFromData={() => setMappingCreateOpen(true)}
                 onRenameKeyMap={handleRenameKeyMap}
                 onDeleteKeyMap={handleDeleteKeyMap}
               />

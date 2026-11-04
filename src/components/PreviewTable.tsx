@@ -239,7 +239,7 @@ function PreviewTableImpl({
   if (columns.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-slate-500">
-        Нет данных для превью
+        No preview data
       </div>
     );
   }

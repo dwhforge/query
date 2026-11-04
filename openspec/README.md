@@ -20,6 +20,7 @@ openspec/
 
 Active changes:
 
+- [`changes/query-based-mapping-create/`](changes/query-based-mapping-create/) — query-based KeyMap create v0.3.1 ([ADR-0034](../docs/adr/0034-keymap-authoring-context.md))
 - ~~[`changes/typed-wire-contract/`](changes/typed-wire-contract/)~~ — **merged** → [`specs/typed-wire-contract/`](specs/typed-wire-contract/) ([ADR-0029](../docs/adr/0029-typed-wire-contract.md))
 - ~~[`changes/ui-host-decomposition/`](changes/ui-host-decomposition/)~~ — **merged** → [`specs/ui-host-decomposition/`](specs/ui-host-decomposition/) ([ADR-0032](../docs/adr/0032-ui-host-decomposition.md))
 - ~~[`changes/mapping-data-plane/`](changes/mapping-data-plane/)~~ — **merged** → [`specs/mapping-data-plane/`](specs/mapping-data-plane/) ([ADR-0033](../docs/adr/0033-mapping-data-plane.md))

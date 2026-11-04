@@ -241,7 +241,14 @@ function onHostData(chunk) {
     if (pending) {
       rpcPending.delete(id);
       if (parsed.ok) pending.resolve(parsed.result);
-      else pending.reject(new Error(parsed.error || "host error"));
+      else {
+        // ADR-0029: preserve structured HostError across IPC (plain Error drops fields).
+        pending.reject({
+          name: "HostRpcError",
+          message: parsed.error || "host error",
+          errorDetail: parsed.error_detail ?? null,
+        });
+      }
     }
   }
 }

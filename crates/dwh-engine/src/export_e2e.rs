@@ -335,6 +335,7 @@ mod tests {
             KeyMapEntry::parts(vec!["SYS".into(), "P2".into()], "CAN-2"),
         ];
         let mut owner = Project {
+            format_version: dwh_pipeline::PROJECT_FORMAT_VERSION,
             id: "proj_owner".into(),
             name: "Owner".into(),
             project_uid: "uid-owner".into(),
@@ -372,6 +373,7 @@ mod tests {
 
         let consumer_path = consumer_dir.join("app.dwhproj.json");
         let mut consumer = Project {
+            format_version: dwh_pipeline::PROJECT_FORMAT_VERSION,
             id: "proj_consumer".into(),
             name: "Consumer".into(),
             project_uid: "uid-consumer".into(),

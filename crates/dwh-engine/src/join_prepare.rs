@@ -14,9 +14,11 @@ use crate::compile::{compile_ctes_from, graph_compiler, workspace_schemas};
 use crate::preview::{ColumnMetadata, PreviewResult};
 use crate::session::DbSession;
 use dwh_pipeline::{
-    cte_name, emit_transform_step, join_left_input_is_expensive, join_right_input_is_expensive,
-    ConnectionDef, JoinType, SourceDef, TransformationStep, WarehouseDialect, Workspace,
+    cte_name, emit_transform_step, escape_sql_string, join_left_input_is_expensive,
+    join_right_input_is_expensive, quote_ident, ConnectionDef, JoinType, SourceDef,
+    TransformationStep, WarehouseDialect, Workspace,
 };
+use serde_json::Value as JsonValue;
 use duckdb::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -903,36 +905,60 @@ pub fn prepared_cte_names() -> (&'static str, &'static str, &'static str) {
 }
 
 /// Sample rows from a prepared side (LIMIT). TEMP or stored live SQL.
+///
+/// When `key_columns` + `key_tuples` are set, restrict to those join-key values
+/// so Join Lens "This row" can pin parents beyond a blind LIMIT 50 head sample.
 pub fn preview_prepared_join_side(
     db: &DbSession,
     side: &str,
     limit: u64,
 ) -> Result<PreviewResult, String> {
+    preview_prepared_join_side_filtered(db, side, limit, &[], &[])
+}
+
+pub fn preview_prepared_join_side_filtered(
+    db: &DbSession,
+    side: &str,
+    limit: u64,
+    key_columns: &[String],
+    key_tuples: &[Vec<JsonValue>],
+) -> Result<PreviewResult, String> {
     let h = db
         .join_prep_get()
         .ok_or_else(|| "Join inputs not prepared — run Prepare first".to_string())?;
     let side = side.trim().to_ascii_lowercase();
+    let filter = key_in_predicate(key_columns, key_tuples)?;
     let sql = match side.as_str() {
         "left" => {
             if h.left_materialized {
-                format!("SELECT * FROM {PREP_LEFT} LIMIT {limit};")
+                match &filter {
+                    Some(pred) => {
+                        format!("SELECT * FROM {PREP_LEFT} WHERE {pred} LIMIT {limit};")
+                    }
+                    None => format!("SELECT * FROM {PREP_LEFT} LIMIT {limit};"),
+                }
             } else {
                 let base = h
                     .left_live_sql
                     .as_deref()
                     .ok_or("left side has no live SQL")?;
-                wrap_limit(base, limit)
+                wrap_limit_filtered(base, limit, filter.as_deref())
             }
         }
         "right" => {
             if h.right_materialized {
-                format!("SELECT * FROM {PREP_RIGHT} LIMIT {limit};")
+                match &filter {
+                    Some(pred) => {
+                        format!("SELECT * FROM {PREP_RIGHT} WHERE {pred} LIMIT {limit};")
+                    }
+                    None => format!("SELECT * FROM {PREP_RIGHT} LIMIT {limit};"),
+                }
             } else {
                 let base = h
                     .right_live_sql
                     .as_deref()
                     .ok_or("right side has no live SQL")?;
-                wrap_limit(base, limit)
+                wrap_limit_filtered(base, limit, filter.as_deref())
             }
         }
         other => return Err(format!("side must be left|right (got '{other}')")),
@@ -958,9 +984,70 @@ pub fn preview_prepared_join_side(
     })
 }
 
-fn wrap_limit(select_sql: &str, limit: u64) -> String {
+fn json_to_sql_literal(v: &JsonValue) -> String {
+    match v {
+        JsonValue::Null => "NULL".into(),
+        JsonValue::Bool(b) => {
+            if *b {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            }
+        }
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => format!("'{}'", escape_sql_string(s)),
+        other => format!("'{}'", escape_sql_string(&other.to_string())),
+    }
+}
+
+/// `(c1, c2) IN ((v1, v2), …)` — empty inputs → no filter.
+fn key_in_predicate(
+    key_columns: &[String],
+    key_tuples: &[Vec<JsonValue>],
+) -> Result<Option<String>, String> {
+    if key_columns.is_empty() || key_tuples.is_empty() {
+        return Ok(None);
+    }
+    if key_tuples.len() > 500 {
+        return Err("key filter: at most 500 tuples".into());
+    }
+    for t in key_tuples {
+        if t.len() != key_columns.len() {
+            return Err(format!(
+                "key filter: tuple arity {} != {} columns",
+                t.len(),
+                key_columns.len()
+            ));
+        }
+    }
+    let cols = key_columns
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tuples = key_tuples
+        .iter()
+        .map(|t| {
+            let cells = t
+                .iter()
+                .map(json_to_sql_literal)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({cells})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Some(format!("({cols}) IN ({tuples})")))
+}
+
+fn wrap_limit_filtered(select_sql: &str, limit: u64, filter: Option<&str>) -> String {
     let trimmed = select_sql.trim().trim_end_matches(';');
-    format!("SELECT * FROM ({trimmed}) AS _dwh_prep_sample LIMIT {limit};")
+    match filter {
+        Some(pred) => format!(
+            "SELECT * FROM ({trimmed}) AS _dwh_prep_sample WHERE {pred} LIMIT {limit};"
+        ),
+        None => format!("SELECT * FROM ({trimmed}) AS _dwh_prep_sample LIMIT {limit};"),
+    }
 }
 
 #[cfg(test)]

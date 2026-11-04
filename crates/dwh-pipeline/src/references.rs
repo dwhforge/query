@@ -607,6 +607,7 @@ struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     fn load_root(&mut self) {
         let mut project = Project {
+            format_version: crate::project::PROJECT_FORMAT_VERSION,
             id: "root".into(),
             name: "root".into(),
             project_uid: self.input.project_uid.to_string(),
@@ -1824,6 +1825,7 @@ mod tests {
 
     fn bare_project(name: &str, uid: &str) -> Project {
         Project {
+            format_version: crate::project::PROJECT_FORMAT_VERSION,
             id: format!("proj_{name}"),
             name: name.into(),
             project_uid: uid.into(),

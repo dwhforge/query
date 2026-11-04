@@ -346,6 +346,9 @@ export function JoinLensAuto({
             <p>{report.disabled_reason}</p>
             {report.left_on.length > 1 && (
               <div className="flex flex-wrap gap-1">
+                <span className="w-full text-[11px] font-medium text-amber-100">
+                  Next step — pick how to suggest (required for multi-key Join):
+                </span>
                 <span className="w-full text-[11px] text-amber-200/70">
                   Per-column — remap which join key:
                 </span>
@@ -392,10 +395,29 @@ export function JoinLensAuto({
         )}
 
         <div className="min-h-0 flex-1 overflow-auto">
-          {report && report.suggestions.length === 0 && !loading && (
-            <div className="border-b border-slate-800 px-2 py-2 text-[10px] text-slate-400">
-              No fuzzy pairs above the cutoff. Use the LLM chat below for leftovers,
-              or No match for one-by-one fixes.
+          {report &&
+            !report.disabled_reason &&
+            report.suggestions.length === 0 &&
+            !loading && (
+            <div className="space-y-1.5 border-b border-slate-800 px-2 py-2 text-[10px] text-slate-400">
+              <p>
+                No fuzzy pairs above the cutoff. Use the LLM chat below for
+                leftovers, or{" "}
+                <span className="font-semibold text-teal-200/90">No match</span>{" "}
+                for one-by-one fixes.
+              </p>
+              {report.left_on.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setKeyIndex(null);
+                    setCompositeMode(false);
+                  }}
+                  className="rounded border border-amber-800/70 px-2 py-1 text-[11px] text-amber-100 hover:border-amber-500"
+                >
+                  ← Change which join key to suggest
+                </button>
+              )}
             </div>
           )}
           {report?.suggestions.map((p, i) => (

@@ -311,7 +311,12 @@ export interface CanvasLayout {
  * IDE / dbt project container (ADR-0009 + ADR-0012).
  * Engine ≠ destination (four routes).
  */
+/** On-disk project document version (ADR-0030). Missing ⇒ 0 at load. */
+export const PROJECT_FORMAT_VERSION = 1 as const;
+
 export interface Project {
+  /** Document schema version (ADR-0030). */
+  format_version?: number;
   id: string;
   name: string;
   /** Immutable global identity (ADR-0025). Empty until first save. */
@@ -425,6 +430,7 @@ export function emptyProject(
     "duckdb";
   const destKind = defaults?.default_destination_kind ?? engine;
   return {
+    format_version: PROJECT_FORMAT_VERSION,
     id: newProjectId(name),
     name,
     project_uid: crypto.randomUUID(),
@@ -447,6 +453,11 @@ export function emptyProject(
 
 /** Normalize legacy projects that only have `target_dialect`. */
 export function migrateProject(p: Project): Project {
+  if ((p.format_version ?? 0) > PROJECT_FORMAT_VERSION) {
+    throw new Error(
+      `Unsupported project format_version ${p.format_version} (app supports ≤ ${PROJECT_FORMAT_VERSION})`,
+    );
+  }
   const engine: ExecutionEngine =
     p.execution_engine ?? p.target_dialect ?? "duckdb";
   let destination = p.destination;
@@ -471,6 +482,7 @@ export function migrateProject(p: Project): Project {
   }
   return {
     ...p,
+    format_version: PROJECT_FORMAT_VERSION,
     project_uid: p.project_uid?.trim() ? p.project_uid : crypto.randomUUID(),
     references: p.references ?? [],
     connection_bindings: p.connection_bindings ?? [],

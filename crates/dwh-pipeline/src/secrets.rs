@@ -254,6 +254,7 @@ mod tests {
         use crate::dialect::WarehouseDialect;
 
         let p = Project {
+            format_version: crate::project::PROJECT_FORMAT_VERSION,
             id: "proj_demo".into(),
             name: "demo".into(),
             project_uid: String::new(),

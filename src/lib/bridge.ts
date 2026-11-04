@@ -12,6 +12,7 @@ import type {
   WarehouseDialect,
   Workspace,
 } from "../types/pipeline";
+import { normalizeHostReject } from "./hostRpc";
 
 export type DbtTarget = "v1" | "v2";
 
@@ -44,9 +45,13 @@ function bridge() {
   return dwh;
 }
 
-/** IPC → dwh-host JSON-RPC. */
+/** IPC → dwh-host JSON-RPC (ADR-0029: structured HostError via errorDetail). */
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return bridge().invoke<T>(cmd, args);
+  return bridge()
+    .invoke<T>(cmd, args)
+    .catch((e: unknown) => {
+      throw normalizeHostReject(e);
+    });
 }
 
 export function previewWorkspace(
@@ -224,8 +229,18 @@ export function joinPrepareProgress(): Promise<JoinPrepareProgress> {
 export function previewPreparedJoinSide(
   side: "left" | "right",
   limit = 50,
+  keyFilter?: {
+    keyColumns: string[];
+    /** Distinct join-key tuples (JSON-serializable cell values). */
+    keyTuples: unknown[][];
+  },
 ): Promise<PreviewResult> {
-  return invoke<PreviewResult>("preview_prepared_join_side", { side, limit });
+  return invoke<PreviewResult>("preview_prepared_join_side", {
+    side,
+    limit,
+    keyColumns: keyFilter?.keyColumns,
+    keyTuples: keyFilter?.keyTuples,
+  });
 }
 
 export type PreviewDbtModel = {
@@ -629,13 +644,8 @@ export function removeKeyMapFromExport(
   return invoke("remove_key_map_from_export", { exportPath, mapId });
 }
 
-export type KeyMapWriteResult = {
-  schema: string;
-  table: string;
-  rows_written: number;
-  created_table: boolean;
-  content_hash: string;
-};
+/** @deprecated Prefer generated KeyMapWriteResultDto — alias kept for call sites. */
+export type KeyMapWriteResult = import("../types/generated").KeyMapWriteResultDto;
 
 /** Warehouse snapshot at first local edit of a From key (ADR-0022 row-level concurrency). */
 export type KeyMapDirtyBaseline = {

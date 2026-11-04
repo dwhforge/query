@@ -4,7 +4,9 @@ import {
   attributeDelta,
   buildCheckRun,
   checkDefinitionRevision,
+  cohortInspectionQuery,
   cohortPredicateForTarget,
+  cohortPredicateFromAttrCells,
   cohortPredicateFromCells,
   collectInputRevisions,
   deltaLabel,
@@ -13,7 +15,7 @@ import {
   labMappingCheck,
   upsertAllowDecision,
 } from "./mappingCheck";
-import type { CheckRun } from "../types/mappingCheck";
+import type { CheckRun, MappingCheck } from "../types/mappingCheck";
 import type { KeyMapDef, Workspace } from "../types/pipeline";
 import { parseQualitySummary, SIGNALS } from "./mappingQuality";
 import { validateKeyMapEntries } from "./keyMap";
@@ -316,5 +318,77 @@ assert(
   cohortPredicateForTarget("SKU-1").includes("canonical_key"),
   "target cohort",
 );
+
+{
+  const hostWs: Workspace = {
+    focus_query_id: "pos_mapped",
+    key_maps: [],
+    queries: [
+      {
+        id: "pos_mapped",
+        name: "pos_mapped",
+        steps: [
+          { type: "LoadParquet", payload: { path: "a.parquet" } },
+          {
+            type: "ApplyKeyMap",
+            payload: {
+              column: "sku_code",
+              map_id: "map_pos",
+              entries: [{ from: "CC-1", to: "WH-BEV-1101" }],
+            },
+          },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "wms",
+              join_type: "left",
+              left_on: ["item_code"],
+              right_on: ["item_code"],
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const attrsCheck: MappingCheck = {
+    ...labMappingCheck(),
+    id: "check_attrs",
+    map_id: "map_pos",
+    input_refs: ["pos_mapped"],
+    cohort_predicate: cohortPredicateFromAttrCells("item_code", "item_code", [
+      {
+        sourceFamily: "WH-BEV-1101",
+        targetFamily: "WH-BEV-1101",
+        sourceGrade: "—",
+        targetGrade: "—",
+        method: "rule",
+        signal: "aligned_attributes",
+        positions: 1,
+        revenue: 0,
+        samples: ["WH-BEV-1101"],
+      },
+    ]),
+    projection: {
+      kind: "attrs",
+      host_query_id: "pos_mapped",
+      left_attr: "item_code",
+      right_attr: "item_code",
+      sample_column: "item_code",
+    },
+  };
+  const sample = cohortInspectionQuery(hostWs, attrsCheck);
+  const apply = sample.steps.find((s) => s.type === "ApplyKeyMap");
+  assert(apply?.type === "ApplyKeyMap", "inspect keeps ApplyKeyMap");
+  if (apply?.type === "ApplyKeyMap") {
+    assert(
+      (apply.payload.entries ?? []).some((e) => e.to === "WH-BEV-1101"),
+      "inspect must not wipe host KeyMap entries",
+    );
+  }
+  assert(
+    sample.steps.some((s) => s.type === "Filter"),
+    "inspect adds cohort Filter",
+  );
+}
 
 console.log("mappingCheck.test.ts: ok");

@@ -330,12 +330,21 @@ export function qualityInspectionQuery(
   const literals = bounded
     .map((key) => `'${key.replace(/'/g, "''")}'`)
     .join(", ");
-  // Drop embedded seed rows — compiler resolves ApplyKeyMap from workspace.key_maps.
+  // Keep ApplyKeyMap entries (or fill from workspace.key_maps). Clearing them
+  // made preview a no-op remap when the seed lived only on the step snapshot.
   const rest = template.steps.slice(1).map((step) => {
     if (step.type !== "ApplyKeyMap") return step;
+    const existing = step.payload.entries ?? [];
+    if (existing.length > 0) return step;
+    const mapId =
+      typeof step.payload.map_id === "string" ? step.payload.map_id : null;
+    const map = mapId
+      ? (workspace.key_maps ?? []).find((m) => m.id === mapId)
+      : undefined;
+    if (!map?.entries?.length) return step;
     return {
       ...step,
-      payload: { ...step.payload, entries: [] },
+      payload: { ...step.payload, entries: map.entries },
     };
   });
   return {

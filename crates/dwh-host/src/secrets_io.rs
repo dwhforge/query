@@ -48,6 +48,7 @@ pub fn save_secrets_file(file: &SecretsFile) -> Result<(), String> {
 
 pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<Project, String> {
     let mut project = project.clone();
+    project.format_version = dwh_pipeline::PROJECT_FORMAT_VERSION;
     // Mint a uid only when both memory and the file lack one (ADR-0025).
     ensure_project_uid(&mut project, Some(Path::new(path)));
     // Migrate any inline project connections into the global store first.
@@ -60,6 +61,7 @@ pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<Projec
     if let Some(parent) = PathBuf::from(path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    backup_if_format_upgrade(path)?;
     fs::write(path, json).map_err(|e| e.to_string())?;
 
     if !extracted.is_empty() {
@@ -81,6 +83,23 @@ pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<Projec
     }
     project.root_path = Some(path.to_string());
     Ok(project)
+}
+
+/// ADR-0030: if `path` exists and is an older format, copy to `<path>.bak`.
+pub fn backup_if_format_upgrade(path: &str) -> Result<(), String> {
+    let path_buf = PathBuf::from(path);
+    if !path_buf.is_file() {
+        return Ok(());
+    }
+    let existing = fs::read_to_string(&path_buf).map_err(|e| e.to_string())?;
+    let on_disk_ver = dwh_pipeline::peek_format_version(&existing);
+    if on_disk_ver < dwh_pipeline::PROJECT_FORMAT_VERSION {
+        let bak = format!("{path}.bak");
+        fs::copy(&path_buf, &bak).map_err(|e| {
+            format!("Failed to write backup before format upgrade ({bak}): {e}")
+        })?;
+    }
+    Ok(())
 }
 
 pub fn load_project_with_secrets(path: &str) -> Result<Project, String> {
@@ -123,4 +142,36 @@ pub fn load_project_with_secrets(path: &str) -> Result<Project, String> {
     }
 
     Ok(project)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dwh_pipeline::PROJECT_FORMAT_VERSION;
+
+    #[test]
+    fn backup_if_format_upgrade_writes_bak_for_v0() {
+        let dir = std::env::temp_dir().join(format!("dwh_bak_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.dwhproj.json");
+        let v0 = include_str!("../../dwh-pipeline/tests/fixtures/projects/v0_legacy_duckdb.json");
+        fs::write(&path, v0).unwrap();
+        assert_eq!(dwh_pipeline::peek_format_version(v0), 0);
+
+        backup_if_format_upgrade(path.to_str().unwrap()).unwrap();
+        let bak = PathBuf::from(format!("{}.bak", path.display()));
+        assert!(bak.is_file());
+        assert_eq!(fs::read_to_string(&bak).unwrap(), v0);
+
+        // Current version: no further bak overwrite required for equal version.
+        let mut upgraded = Project::from_json(v0).unwrap();
+        upgraded.format_version = PROJECT_FORMAT_VERSION;
+        fs::write(&path, upgraded.to_json_pretty().unwrap()).unwrap();
+        let bak_before = fs::read_to_string(&bak).unwrap();
+        backup_if_format_upgrade(path.to_str().unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(&bak).unwrap(), bak_before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

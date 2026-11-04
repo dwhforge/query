@@ -650,6 +650,29 @@ function GraphCanvasInner({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeInfo | null>(null);
+  // Canvas stays mounted under `hidden` while Mapping quality / KeyMap tabs are
+  // open — React Flow then measures 0×0 and paints Background/MiniMap as NaN.
+  const flowHostRef = useRef<HTMLDivElement>(null);
+  const [flowReady, setFlowReady] = useState(false);
+  useEffect(() => {
+    const el = flowHostRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const sync = () => {
+      const ready = el.clientWidth > 1 && el.clientHeight > 1;
+      setFlowReady((prev) => (prev === ready ? prev : ready));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!flowReady) return;
+    const id = window.requestAnimationFrame(() => {
+      fitView({ padding: 0.2 });
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [flowReady, fitView]);
 
   // Seed from persisted project positions once / when project changes.
   useEffect(() => {

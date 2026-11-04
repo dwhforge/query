@@ -57,7 +57,26 @@ const percent = (part: number, total: number) =>
   total ? `${((100 * part) / total).toFixed(1)}%` : "0%";
 
 function isPreviewPreempted(reason: unknown): boolean {
-  return /preview superseded|preview cancelled|superseded/i.test(String(reason));
+  // ADR-0029 HostRpcError — match kind or legacy message text.
+  if (
+    reason &&
+    typeof reason === "object" &&
+    "errorDetail" in reason &&
+    (reason as { errorDetail?: { kind?: string } }).errorDetail?.kind ===
+      "cancelled"
+  ) {
+    return true;
+  }
+  const msg =
+    reason instanceof Error
+      ? reason.message
+      : typeof reason === "object" &&
+          reason &&
+          "message" in reason &&
+          typeof (reason as { message: unknown }).message === "string"
+        ? (reason as { message: string }).message
+        : String(reason);
+  return /preview superseded|preview cancelled|superseded/i.test(msg);
 }
 
 type LoadPhase = "matrix" | "targets" | "retry";
@@ -138,8 +157,9 @@ export function MappingQualityOverview({
   useEffect(() => {
     if (!active) return;
     if (hasFreshCache) {
-      setBusy(false);
-      setError(null);
+      // Avoid setState when already idle — parent progress callbacks re-render App.
+      setBusy((b) => (b ? false : b));
+      setError((e) => (e != null ? null : e));
       reportProgress(null);
       return;
     }
@@ -262,9 +282,10 @@ export function MappingQualityOverview({
       request.current++;
       window.clearInterval(tick);
     };
-    // hasFreshCache intentionally gates the fetch; stamp captures projection+revision.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- workspace via stamp/projectionKey
-  }, [active, hasFreshCache, stamp, connections, sources, projection]);
+    // hasFreshCache gates the fetch; stamp captures projection+workspace (do not
+    // depend on `projection` object identity — unstable fallbacks re-fire forever).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- workspace/projection via stamp
+  }, [active, hasFreshCache, stamp, connections, sources]);
 
   const total = cells.reduce((sum, cell) => sum + cell.positions, 0);
   const totalRevenue = cells.reduce((sum, cell) => sum + cell.revenue, 0);

@@ -106,6 +106,28 @@ function keyValuesFromRow(
   });
 }
 
+/** Distinct join-key tuples from center result (for keyed parent fetch). */
+function uniqueResultKeyTuples(
+  resultRows: unknown[][],
+  resultColumns: ColumnMetadata[],
+  resultKeyNames: string[],
+  max = 500,
+): unknown[][] {
+  if (resultKeyNames.length === 0 || resultRows.length === 0) return [];
+  const seen = new Set<string>();
+  const out: unknown[][] = [];
+  for (const row of resultRows) {
+    const tup = keyValuesFromRow(row, resultColumns, resultKeyNames);
+    if (tup.every((v) => v == null)) continue;
+    const stamp = JSON.stringify(tup);
+    if (seen.has(stamp)) continue;
+    seen.add(stamp);
+    out.push(tup);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function keysEqual(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((v, i) => valuesEqual(v, b[i]));
@@ -361,6 +383,7 @@ function SidePanel({
               >
                 {displayCols.map(({ col: c, idx: ci }) => {
                   const isKey = keyFold.has(fold(c.name));
+                  const val = cellStr(row[ci]);
                   return (
                     <div
                       key={c.name}
@@ -375,8 +398,9 @@ function SidePanel({
                       </span>
                       <span
                         className={`min-w-0 truncate font-mono ${isKey ? "text-teal-50" : "text-slate-300"}`}
+                        title={val && val !== "∅" ? val : undefined}
                       >
-                        {cellStr(row[ci])}
+                        {val}
                       </span>
                     </div>
                   );
@@ -687,10 +711,37 @@ function JoinLensImpl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, hostQueryId, joinStepIndex, workspace, sources]);
 
+  const resultKeysFetchedRef = useRef("");
+  const resultKeysStamp = useMemo(() => {
+    const tuples = uniqueResultKeyTuples(rows, columns, leftOn);
+    return `${tuples.length}:${JSON.stringify(tuples)}`;
+  }, [rows, columns, leftOn]);
+
   useEffect(() => {
     autoDiagAttemptedRef.current = "";
     autoSamplesAttemptedRef.current = "";
+    resultKeysFetchedRef.current = "";
   }, [hostQueryId, joinStepIndex]);
+
+  // Re-fetch parents when the center result's join keys change (Inspect cohort,
+  // filter, etc.) — keyed L/R load, not a blind LIMIT 50 head.
+  useEffect(() => {
+    if (!enabled || sideMode !== "linked" || !prepared) return;
+    if (!hostQueryId || joinStepIndex < 1) return;
+    if (rows.length === 0) return;
+    if (resultKeysFetchedRef.current === resultKeysStamp) return;
+    resultKeysFetchedRef.current = resultKeysStamp;
+    void loadLinkedSamples({ forcePrepared: true, reason: "manual" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one fetch per key set
+  }, [
+    enabled,
+    sideMode,
+    prepared,
+    resultKeysStamp,
+    hostQueryId,
+    joinStepIndex,
+    rows.length,
+  ]);
 
   // Small joins / prepared sides: auto-load This-row parent samples.
   // Also recovers when an earlier attempt was aborted (gen bump) while the
@@ -856,10 +907,23 @@ function JoinLensImpl({
         let right: { columns: ColumnMetadata[]; rows: unknown[][] } | null =
           null;
         if (usePrepared) {
+          // Prefer parents for keys present in the center result. Blind LIMIT 50
+          // only covers early rows — Inspect cohorts (row 3+) looked empty.
+          // Values come from result left_on; column names are side-specific ON.
+          const keyTuples = uniqueResultKeyTuples(rows, columns, leftOn);
+          const limit = Math.max(50, keyTuples.length);
+          const leftFilter =
+            keyTuples.length > 0 && leftOn.length > 0
+              ? { keyColumns: leftOn, keyTuples }
+              : undefined;
+          const rightFilter =
+            keyTuples.length > 0 && rightOn.length > 0
+              ? { keyColumns: rightOn, keyTuples }
+              : undefined;
           // Fetch both before writing — never leave "right only" mid-flight.
-          left = await previewPreparedJoinSide("left", 50);
+          left = await previewPreparedJoinSide("left", limit, leftFilter);
           if (gen !== samplesLoadGenRef.current) return;
-          right = await previewPreparedJoinSide("right", 50);
+          right = await previewPreparedJoinSide("right", limit, rightFilter);
         } else if (leftInputWs && rightInputWs) {
           left = await previewWorkspace(
             leftInputWs,

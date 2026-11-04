@@ -517,10 +517,24 @@ ORDER BY ${quoteIdent(sampleColumn)}
   if (!template || template.steps[template.steps.length - 1]?.type !== "Join") {
     throw new Error("Check host query must end with a Join.");
   }
-  // Attrs: Filter after Join so right-side attributes exist.
+  // Keep host ApplyKeyMap entries as-is. Overview aggregates via {{query:host}}
+  // with those rows; wiping them made Inspect a no-op remap (empty VALUES) so
+  // cohort filters like item_code = 'WH-BEV-…' matched nothing.
+  // Seed fills from workspace.key_maps when the step snapshot is already empty.
   const body = template.steps.map((step) => {
     if (step.type !== "ApplyKeyMap") return step;
-    return { ...step, payload: { ...step.payload, entries: [] } };
+    const existing = step.payload.entries ?? [];
+    if (existing.length > 0) return step;
+    const mapId =
+      typeof step.payload.map_id === "string" ? step.payload.map_id : null;
+    const map = mapId
+      ? (workspace.key_maps ?? []).find((m) => m.id === mapId)
+      : undefined;
+    if (!map?.entries?.length) return step;
+    return {
+      ...step,
+      payload: { ...step.payload, entries: map.entries },
+    };
   });
   return {
     ...template,

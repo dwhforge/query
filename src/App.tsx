@@ -101,7 +101,6 @@ import { MappingQualityOverview } from "./components/mapping-quality/MappingQual
 import {
   QUALITY_INSPECTION,
   QUALITY_JOIN,
-  QUALITY_SAMPLE_COLUMN,
   QUALITY_TAB,
   isFullQualityJoin,
   isMappingQualityLab,
@@ -110,33 +109,54 @@ import {
   upsertQualityInspection,
 } from "./lib/mappingQuality";
 import {
-  applyFrozenRemapToMap,
-  assertRemapConfirmable,
-  attributeDelta,
-  buildCheckRun,
-  cohortInspectionQuery,
-  cohortPredicateForTarget,
-  cohortPredicateFromAttrCells,
-  cohortPredicateFromCells,
-  collectInputRevisions,
-  deltaLabel,
   ensureLabCheck,
-  keyMapRevision,
   labMappingCheck,
-  newCheckId,
-  upsertAllowDecision,
   type FrozenRemapPreview,
 } from "./lib/mappingCheck";
-import type { MappingCheck } from "./types/mappingCheck";
+import type {
+  MappingCheck,
+  MappingCheckProjection,
+} from "./types/mappingCheck";
 import {
-  applyKeyMapToWorkspace,
+  allowCheckDifference,
+  appendMappingCheck,
+  confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
+  createMappingCheck,
+  planCheckInspect,
+  recordCheckRun,
+  resolveActiveMappingCheck,
+  stageFrozenRemapChanges,
+} from "./app/mappingChecks";
+import {
+  applyKeyMapOntoProject,
+  dirtyDeltaHasChanges,
+  mergeFromValuesIntoMap,
+  mergeKeyMapTabSession,
+  normalizeKeyMapForEditor,
+  refSaveResult,
+  resolveJoinStepFromCtx,
+  seedSaveResult,
+  sourceSaveFailed,
+  sourceSaveSkipped,
+  sourceSaveSynced,
+  upsertKeyMapIntoProject,
+  type KeyMapApplyIntent,
+  type KeyMapApplyResult,
+  type KeyMapJoinCtx,
+  type KeyMapTabSession,
+} from "./app/keyMap";
+import { isHostCancelled } from "./lib/hostRpc";
+import {
+  createRequestGen,
+  isCurrentRequest,
+  nextRequestGen,
+} from "./lib/requestGen";
+import {
   applyNormalizeToWorkspace,
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
   findApplyKeyMapIdForJoin,
   resolveKeyMapConnection,
-  syncApplyKeyMapEntries,
-  upsertKeyMapList,
   type ApplySide,
 } from "./lib/keyMap";
 import { PanelResizeHandle } from "./components/PanelResizeHandle";
@@ -252,128 +272,8 @@ import {
   type Workspace,
 } from "./types/pipeline";
 
-type KeyMapJoinCtx = {
-  hostQueryId: string;
-  joinStepIndex: number;
-  rightQueryId: string;
-  leftOn: string[];
-  rightOn: string[];
-  /** Join type at open time — LEFT→INNER during Save must abort Apply. */
-  joinType: JoinType;
-  /** Side whose unmatched key opened Add to map… */
-  probeSide?: "left" | "right";
-  /** Fact columns for ApplyKeyMap (selected Join keys, ADR-0024). */
-  applyLeftOn?: string[];
-  applyRightOn?: string[];
-  /** Output column on the left (host) ApplyKeyMap. */
-  outputColumnLeft?: string;
-  /** Output column on the right ApplyKeyMap (may differ, e.g. sku vs item_code). */
-  outputColumnRight?: string;
-};
-
-type KeyMapTabSession = {
-  map: KeyMapDef;
-  /** Optimistic concurrency token from last warehouse read (source storage). */
-  contentHash?: string;
-  /** ADR-0022 dirty delta for source Save. */
-  dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
-  /** Editor store Save API — one in-flight capture; confirm/abort take its token. */
-  saveApi?: {
-    captureSave: () => {
-      token: number;
-      delta: import("./lib/bridge").KeyMapDirtyDelta | null;
-    } | null;
-    confirmSave: (token: number) => void;
-    abortSave: (token: number) => void;
-    isSaving: () => boolean;
-  };
-  /** True while a warehouse write for this tab is awaiting a response. */
-  saveInFlight?: boolean;
-  /** Bumped after successful WH Save when editor saveApi is absent. */
-  dirtyResetSeq?: number;
-  totalCount?: number | null;
-  pickTo?: string[];
-  suggestedFrom?: string[];
-  suggestedFromParts?: string[][];
-  joinCtx?: KeyMapJoinCtx;
-};
-
-/** Intent to insert ApplyKeyMap after a successful KeyMap Save. */
-type KeyMapApplyIntent = {
-  map: KeyMapDef;
-  ctx: KeyMapJoinCtx;
-  side: ApplySide;
-  leftCols: string[];
-  rightCols: string[];
-  outputColumnLeft: string;
-  outputColumnRight: string;
-};
-
-type KeyMapApplyResult =
-  | { status: "ok"; mapId: string; workspace: Workspace }
-  | { status: "join_gone"; mapId: string };
-
-/**
- * After ApplyKeyMap insert, Join may shift; find the same Join by right + ON + type.
- */
-function resolveJoinStepFromCtx(
-  ws: Workspace,
-  ctx: KeyMapJoinCtx,
-): number | null {
-  const q = ws.queries.find((x) => x.id === ctx.hostQueryId);
-  if (!q) return null;
-  const leftKey = ctx.leftOn.join("\0");
-  const rightKey = ctx.rightOn.join("\0");
-  const matches = (
-    s: TransformationStep | undefined,
-  ): s is TransformationStep & { type: "Join" } =>
-    s?.type === "Join" &&
-    targetKey(s.payload.right_query_id) === ctx.rightQueryId &&
-    s.payload.left_on.join("\0") === leftKey &&
-    s.payload.right_on.join("\0") === rightKey &&
-    s.payload.join_type === ctx.joinType;
-  const at = q.steps[ctx.joinStepIndex];
-  if (matches(at)) return ctx.joinStepIndex;
-  for (let i = 0; i < q.steps.length; i++) {
-    if (matches(q.steps[i])) return i;
-  }
-  return null;
-}
-
-/** Pure: fold ApplyKeyMap into the latest project workspace. */
-function applyKeyMapOntoProject(
-  project: Project,
-  intent: KeyMapApplyIntent,
-): { project: Project; result: KeyMapApplyResult } {
-  const joinIdx = resolveJoinStepFromCtx(project.workspace, intent.ctx);
-  if (joinIdx == null) {
-    return {
-      project,
-      result: { status: "join_gone", mapId: intent.map.id },
-    };
-  }
-  const workspace = applyKeyMapToWorkspace(
-    {
-      ...project.workspace,
-      key_maps: upsertKeyMapList(project.workspace.key_maps ?? [], intent.map),
-    },
-    intent.ctx.hostQueryId,
-    joinIdx,
-    intent.ctx.rightQueryId,
-    intent.side,
-    intent.leftCols[0]!,
-    intent.rightCols[0]!,
-    intent.map,
-    intent.leftCols,
-    intent.rightCols,
-    intent.outputColumnLeft,
-    intent.outputColumnRight,
-  );
-  return {
-    project: { ...project, workspace },
-    result: { status: "ok", mapId: intent.map.id, workspace },
-  };
-}
+/** Stable default — inline `{ kind: "lab_v1" }` in JSX re-triggers overview effects. */
+const LAB_V1_PROJECTION: MappingCheckProjection = { kind: "lab_v1" };
 
 type ProjectBag = {
   project: Project;
@@ -495,58 +395,40 @@ function App() {
       setSelectedStepIndex(0);
       setJoinLensOn(false);
       setPreview(null);
+    } else if (isQualityInspectionQuery(activeQueryId)) {
+      // Re-entering canvas with an Inspect cohort: keep Join selected so DATA
+      // mounts Join Lens instead of an empty post-Filter PreviewTable.
+      const q = queries.find((x) => x.id === activeQueryId);
+      const joinIdx = q?.steps.findIndex((s) => s.type === "Join") ?? -1;
+      if (joinIdx >= 0) {
+        setSelectedStepIndex(joinIdx);
+        setJoinLensOn(true);
+        setBottomTab("data");
+      }
     }
     setCenterTab("canvas");
     setSelectedKeyMapId(null);
   }
 
   function handleNewMappingCheck() {
-    const maps = project.workspace.key_maps ?? [];
-    const map = maps[0];
-    if (!map) {
-      setError("Add a KeyMap before creating a mapping check.");
+    const created = createMappingCheck({
+      checks: project.mapping_checks ?? [],
+      keyMaps: project.workspace.key_maps ?? [],
+      queries,
+    });
+    if (!created.ok) {
+      setError(created.error);
       return;
     }
-    const host =
-      queries.find(
-        (q) => q.steps.length > 0 && q.steps[q.steps.length - 1]?.type === "Join",
-      ) ?? null;
-    const join = host?.steps[host.steps.length - 1];
-    if (!host || join?.type !== "Join") {
-      setError("Need a query whose last step is Join (ApplyKeyMap host).");
-      return;
-    }
-    const left = join.payload.left_on[0] ?? "key";
-    const right = join.payload.right_on[0] ?? "id";
-    const check: MappingCheck = {
-      id: newCheckId((project.mapping_checks ?? []).map((c) => c.id)),
-      name: `Check · ${map.name}`,
-      map_id: map.id,
-      input_refs: [host.id],
-      group_attributes: [left, right],
-      cohort_predicate: "",
-      projection: {
-        kind: "attrs",
-        host_query_id: host.id,
-        left_attr: left,
-        right_attr: right,
-        sample_column: left,
-      },
-      allow_decisions: [],
-    };
-    setProject((p) => ({
-      ...p,
-      mapping_checks: [...(p.mapping_checks ?? []), check],
-    }));
+    setProject((p) => appendMappingCheck(p, created.check));
     setCenterTab(QUALITY_TAB);
-    setCheckDeltaNote(`Created ${check.name} · attrs ${left} ↔ ${right}`);
+    setCheckDeltaNote(created.note);
     setError(null);
   }
 
-  const activeMappingCheck: MappingCheck | null =
-    (project.mapping_checks ?? []).find((c) => c.id === "check_lab_quality") ??
-    (project.mapping_checks ?? []).at(-1) ??
-    null;
+  const activeMappingCheck: MappingCheck | null = resolveActiveMappingCheck(
+    project.mapping_checks,
+  );
 
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(
@@ -691,8 +573,8 @@ function App() {
   const [modelError, setModelError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  /** Monotonic id so a slow preview for node A cannot overwrite node B. */
-  const previewReqIdRef = useRef(0);
+  /** Monotonic id so a slow preview for node A cannot overwrite node B (ADR-0031). */
+  const previewReqGenRef = useRef(createRequestGen());
   /** Bottom dock: sample rows vs generated model SQL (H0 projection; H1 editable later). */
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -767,10 +649,13 @@ function App() {
     const q = queries.find((x) => x.id === id);
     // While a Join step is selected, preview *through that Join only* so Join Lens
     // row offsets match this join's output (chained Joins change grain/rows).
+    // Exception: Mapping-quality Inspect — keep post-Join Filter/Sort so DATA is
+    // the cohort (otherwise LIMIT 50 of the unfiltered Join lands on unrelated rows).
     if (
       q &&
       selectedStepIndex != null &&
-      q.steps[selectedStepIndex]?.type === "Join"
+      q.steps[selectedStepIndex]?.type === "Join" &&
+      !isQualityInspectionQuery(id)
     ) {
       const upto = selectedStepIndex + 1;
       return {
@@ -820,6 +705,23 @@ function App() {
   const connections = project.connections;
   const sources = project.sources;
 
+  const onQualityProgress = useCallback(
+    (state: { phase: string; percent: number } | null) => {
+      if (!state) {
+        setOpProgress((cur) =>
+          cur?.kind === "quality" ? null : cur,
+        );
+        return;
+      }
+      setOpProgress({
+        kind: "quality",
+        phase: state.phase,
+        percent: state.percent,
+      });
+    },
+    [],
+  );
+
   const runPreview = useCallback(
     async (
       ws: Workspace,
@@ -828,24 +730,24 @@ function App() {
       projectRef = projectRefContext(project),
     ) => {
       // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
-      const reqId = ++previewReqIdRef.current;
+      const reqId = nextRequestGen(previewReqGenRef.current);
       setLoading(true);
       try {
         const result = await previewWorkspace(ws, conns, srcs, projectRef);
-        if (reqId !== previewReqIdRef.current) return;
+        if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
         setPreview(result);
         setError(null);
       } catch (e) {
-        if (reqId !== previewReqIdRef.current) return;
+        if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
         const msg = typeof e === "string" ? e : String(e);
         // Preempted by a newer preview / prepare — keep UI quiet.
-        if (/preview cancelled|superseded/i.test(msg)) {
+        if (isHostCancelled(e)) {
           return;
         }
         setPreview(null);
         setError(msg);
       } finally {
-        if (reqId === previewReqIdRef.current) {
+        if (isCurrentRequest(previewReqGenRef.current, reqId)) {
           setLoading(false);
         }
       }
@@ -903,7 +805,7 @@ function App() {
   // Free the preview lane when the quality overview takes over.
   useEffect(() => {
     if (centerTab !== QUALITY_TAB) return;
-    previewReqIdRef.current += 1;
+    nextRequestGen(previewReqGenRef.current);
     setLoading(false);
     cancelHeavyQuery();
   }, [centerTab]);
@@ -1078,7 +980,7 @@ function App() {
     setJoinPrepareLoading(true);
     setJoinDiagError(null);
     void cancelRunningQuery().catch(() => {});
-    previewReqIdRef.current += 1;
+    nextRequestGen(previewReqGenRef.current);
     setLoading(false);
     setOpProgress({
       kind: "prepare",
@@ -1114,10 +1016,9 @@ function App() {
       .catch((e) => {
         setJoinPrepareLoading(false);
         setOpProgress(null);
-        const msg = typeof e === "string" ? e : String(e);
-        if (!/preview cancelled|superseded/i.test(msg)) {
-          setJoinDiagError(msg);
-        }
+        if (isHostCancelled(e)) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        setJoinDiagError(msg);
       })
       .finally(() => {
         window.clearInterval(poll);
@@ -1144,7 +1045,7 @@ function App() {
     setJoinDiagLoading(true);
     setJoinDiagError(null);
     void cancelRunningQuery().catch(() => {});
-    previewReqIdRef.current += 1;
+    nextRequestGen(previewReqGenRef.current);
     setLoading(false);
     setOpProgress({
       kind: "prepare",
@@ -1181,10 +1082,9 @@ function App() {
         setJoinDiag(null);
         setJoinDiagLoading(false);
         setOpProgress(null);
-        const msg = typeof e === "string" ? e : String(e);
-        if (!/preview cancelled|superseded/i.test(msg)) {
-          setJoinDiagError(msg);
-        }
+        if (isHostCancelled(e)) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        setJoinDiagError(msg);
       })
       .finally(() => {
         window.clearInterval(poll);
@@ -1363,9 +1263,18 @@ function App() {
       setActiveQueryId(id);
       const q = queries.find((x) => x.id === id);
       syncInspectorFromQuery(q);
-      const last = q && q.steps.length > 0 ? q.steps.length - 1 : null;
-      setSelectedStepIndex(last);
-      if (last !== null && q) loadStepIntoEditor(q.steps[last]);
+      if (!q || q.steps.length === 0) {
+        setSelectedStepIndex(null);
+        return;
+      }
+      // Ephemeral check cohort: land on Join so Join Lens mounts (Filter/Sort
+      // alone shows PreviewTable — often empty after a tight cohort predicate).
+      const joinIdx = isQualityInspectionQuery(id)
+        ? q.steps.findIndex((s) => s.type === "Join")
+        : -1;
+      const idx = joinIdx >= 0 ? joinIdx : q.steps.length - 1;
+      setSelectedStepIndex(idx);
+      loadStepIntoEditor(q.steps[idx]);
     },
     [queries, syncInspectorFromQuery, loadStepIntoEditor],
   );
@@ -3125,60 +3034,30 @@ function App() {
       joinCtx?: NonNullable<KeyMapTabSession["joinCtx"]>;
     },
   ) {
-    const normalized: KeyMapDef = {
-      storage: { kind: "seed" },
-      from_column: "from",
-      from_columns: map.from_columns?.length
-        ? map.from_columns
-        : [map.from_column ?? "from"],
-      to_column: "to",
-      ...map,
-    };
+    const normalized = normalizeKeyMapForEditor(map);
     setSelectedKeyMapId(normalized.id);
     setKeyMapTabs((tabs) => {
       const i = tabs.findIndex((t) => t.map.id === normalized.id);
-      const session: KeyMapTabSession = {
-        map: normalized,
-        pickTo: opts?.pickTo,
-        suggestedFrom: opts?.suggestedFrom,
-        suggestedFromParts: opts?.suggestedFromParts,
-        joinCtx: opts?.joinCtx,
-      };
-      if (i < 0) return [...tabs, session];
-      // Merge new From→To into the open tab (don't drop freshly added Suggest/Save rows).
-      const prev = tabs[i]!;
-      const byFrom = new Map(
-        prev.map.entries.map((e) => [e.from.trim(), e] as const),
-      );
-      for (const e of normalized.entries) {
-        const from = e.from.trim();
-        if (!from) continue;
-        const cur = byFrom.get(from);
-        if (!cur) {
-          byFrom.set(from, e);
-        } else if (e.to.trim() && !cur.to.trim()) {
-          byFrom.set(from, { ...cur, to: e.to });
-        } else if (e.to.trim() && e.to.trim() !== cur.to.trim()) {
-          byFrom.set(from, { ...cur, to: e.to });
-        }
+      if (i < 0) {
+        return [
+          ...tabs,
+          {
+            map: normalized,
+            pickTo: opts?.pickTo,
+            suggestedFrom: opts?.suggestedFrom,
+            suggestedFromParts: opts?.suggestedFromParts,
+            joinCtx: opts?.joinCtx,
+          },
+        ];
       }
       const next = [...tabs];
-      next[i] = {
-        ...session,
-        map: {
-          ...normalized,
-          entries: [...byFrom.values()],
-          storage: normalized.storage ?? prev.map.storage,
-        },
-      };
+      next[i] = mergeKeyMapTabSession(tabs[i]!, normalized, opts);
       return next;
     });
     setCenterTab(normalized.id);
     // Source-backed: KeyMapEditor loads paged rows (ADR-0022). Do not full-read here —
     // a late unbounded read would replace the page and drop dirty overlays.
-    const sourceStorage =
-      normalized.storage?.kind === "source" ? normalized.storage : null;
-    if (sourceStorage) {
+    if (normalized.storage?.kind === "source") {
       void (async () => {
         let conns = project.connections;
         try {
@@ -3205,55 +3084,32 @@ function App() {
 
   async function saveKeyMapToProject(map: KeyMapDef): Promise<KeyMapSaveResult> {
     // Persist to project AST first (local). External sync reports separately.
-    // ADR-0022: source maps keep WH as SoT — do not stash full dictionary in project.
-    const forAst: KeyMapDef =
-      map.storage?.kind === "source" ? { ...map, entries: [] } : map;
-    setProject((p) => {
-      const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], forAst);
-      const queries = syncApplyKeyMapEntries(p.workspace.queries, forAst);
-      return {
-        ...p,
-        workspace: { ...p.workspace, key_maps, queries },
-      };
-    });
+    setProject((p) => upsertKeyMapIntoProject(p, map));
     setSelectedKeyMapId(map.id);
     const kind = map.storage?.kind ?? "seed";
     if (kind === "seed") {
       const exportPath = project.last_dbt_export_path;
       if (!exportPath) {
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "skipped",
-          message: "KeyMap saved in project (not exported yet — no seed CSV)",
-        };
+        const result = seedSaveResult({ exportPath: null });
         setExportMsg(result.message);
         return result;
       }
       try {
         await pushKeyMapToExport(exportPath, map);
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "synced",
-          message: "KeyMap saved in project · synced → seeds (export tree)",
-        };
+        const result = seedSaveResult({ exportPath });
         setExportMsg(result.message);
         setError(null);
         return result;
       } catch (e) {
         const msg = typeof e === "string" ? e : String(e);
-        const isConflict = /refused|hash mismatch|conflict/i.test(msg);
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: isConflict ? "conflict" : "error",
-          message: msg,
-        };
+        const result = seedSaveResult({ exportPath, syncError: msg });
         setError(
-          isConflict
+          result.external === "conflict"
             ? msg
             : `KeyMap saved in project, but seed sync failed: ${msg}`,
         );
         setExportMsg(
-          isConflict
+          result.external === "conflict"
             ? "KeyMap saved in project · seed CONFLICT"
             : "KeyMap saved in project · seed sync FAILED",
         );
@@ -3275,11 +3131,7 @@ function App() {
         }
       }
       if (!resolved.ok) {
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "skipped",
-          message: resolved.error,
-        };
+        const result = sourceSaveSkipped(resolved.error);
         setError(resolved.error);
         setExportMsg("KeyMap saved in project · warehouse write skipped");
         return result;
@@ -3288,40 +3140,24 @@ function App() {
       const expectedHash = tab?.contentHash;
       // One in-flight WH Save per mapping.
       if (tab?.saveInFlight || tab?.saveApi?.isSaving()) {
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "skipped",
-          message: "KeyMap save already in progress",
-        };
+        const result = sourceSaveSkipped("KeyMap save already in progress");
         setExportMsg(result.message);
         return result;
       }
       const captured = tab?.saveApi?.captureSave() ?? null;
       if (tab?.saveApi && !captured) {
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "skipped",
-          message: "KeyMap save already in progress",
-        };
+        const result = sourceSaveSkipped("KeyMap save already in progress");
         setExportMsg(result.message);
         return result;
       }
       const saveToken = captured?.token;
       const delta = captured?.delta ?? tab?.dirtyDelta ?? null;
-      const hasDelta =
-        !!delta &&
-        (delta.upserts.length > 0 ||
-          delta.deletedFroms.length > 0 ||
-          (delta.deletedFromParts?.length ?? 0) > 0);
-      if (!hasDelta) {
+      if (!dirtyDeltaHasChanges(delta)) {
         if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
         // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "skipped",
-          message:
-            "KeyMap saved in project · no dirty rows — warehouse unchanged",
-        };
+        const result = sourceSaveSkipped(
+          "KeyMap saved in project · no dirty rows — warehouse unchanged",
+        );
         setExportMsg(result.message);
         setError(null);
         return result;
@@ -3345,12 +3181,12 @@ function App() {
             saveInFlight: false,
           }));
         }
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: "synced",
-          message: `KeyMap saved in project · upsert → ${r.schema}.${r.table} (${r.rows_written} dirty rows)`,
+        const result = sourceSaveSynced({
+          schema: r.schema,
+          table: r.table,
+          rowsWritten: r.rows_written,
           contentHash: r.content_hash,
-        };
+        });
         setExportMsg(result.message);
         setError(null);
         return result;
@@ -3358,32 +3194,21 @@ function App() {
         if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
         patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: false }));
         const msg = typeof e === "string" ? e : String(e);
-        const isConflict = /refused|concurrently|hash/i.test(msg);
-        // Conflict/error: abort capture, keep drafts for retry.
-        const result: KeyMapSaveResult = {
-          local: "saved",
-          external: isConflict ? "conflict" : "error",
-          message: msg,
-        };
+        const result = sourceSaveFailed(msg);
         setError(
-          isConflict
+          result.external === "conflict"
             ? msg
             : `KeyMap saved in project, but warehouse write-back failed: ${msg}`,
         );
         setExportMsg(
-          isConflict
+          result.external === "conflict"
             ? "KeyMap saved in project · warehouse CONFLICT"
             : "KeyMap saved in project · warehouse write FAILED",
         );
         return result;
       }
     }
-    // ref: project cache only
-    const result: KeyMapSaveResult = {
-      local: "saved",
-      external: "none",
-      message: "KeyMap saved in project (ref storage — no warehouse write-back)",
-    };
+    const result = refSaveResult();
     setExportMsg(result.message);
     return result;
   }
@@ -3465,66 +3290,15 @@ function App() {
     toValues?: string[],
     fromParts?: string[][],
   ) {
-    const entries = [...map.entries];
-    const indexByFrom = new Map(
-      entries.map((e, i) => {
-        const parts =
-          e.from_parts?.length ? e.from_parts : e.from.trim() ? [e.from] : [];
-        return [JSON.stringify(parts.map((p) => p.trim())), i] as const;
-      }),
-    );
-    fromValues.forEach((rawFrom, i) => {
-      const parts = (
-        fromParts?.[i]?.length
-          ? fromParts[i]!
-          : rawFrom.trim()
-            ? [rawFrom]
-            : []
-      ).map((p) => p.trim());
-      if (!parts.length || parts.some((p) => !p)) return;
-      const key = JSON.stringify(parts);
-      const to = (toValues?.[i] ?? "").trim();
-      const existing = indexByFrom.get(key);
-      if (existing !== undefined) {
-        if (to && !entries[existing]!.to.trim()) {
-          entries[existing] = { ...entries[existing]!, to };
-        }
-        return;
-      }
-      indexByFrom.set(key, entries.length);
-      entries.push({ from: parts[0]!, from_parts: parts, to });
+    const merged = mergeFromValuesIntoMap({
+      map,
+      fromValues,
+      joinCtx,
+      toValues,
+      fromParts,
     });
-    const arity = Math.max(
-      map.from_columns?.length ?? 0,
-      joinCtx.applyLeftOn?.length ?? 0,
-      fromParts?.find((p) => p.length)?.length ?? 1,
-      1,
-    );
-    const from_columns =
-      map.from_columns?.length === arity
-        ? map.from_columns
-        : joinCtx.applyLeftOn && joinCtx.applyLeftOn.length === arity
-          ? joinCtx.applyLeftOn
-          : arity > 1 && joinCtx.leftOn.length >= arity
-            ? joinCtx.leftOn.slice(0, arity)
-            : map.from_columns?.length
-              ? map.from_columns
-              : [map.from_column ?? "from"];
-    const merged = {
-      ...map,
-      from_columns,
-      from_column: from_columns[0],
-      entries,
-    };
     // Persist into the project so Join Lens can hide mapped unmatched keys immediately.
-    setProject((p) => {
-      const key_maps = upsertKeyMapList(p.workspace.key_maps ?? [], merged);
-      const queries = syncApplyKeyMapEntries(p.workspace.queries, merged);
-      return {
-        ...p,
-        workspace: { ...p.workspace, key_maps, queries },
-      };
-    });
+    setProject((p) => upsertKeyMapIntoProject(p, merged));
     openKeyMapEditor(merged, {
       suggestedFrom: fromValues,
       suggestedFromParts: fromParts,
@@ -3534,48 +3308,28 @@ function App() {
 
   function confirmFrozenCheckRemap() {
     if (!frozenRemap) return;
-    try {
-      const map = (project.workspace.key_maps ?? []).find(
-        (m) => m.id === frozenRemap.map_id,
-      );
-      const check =
-        (project.mapping_checks ?? []).find(
-          (c) => c.id === frozenRemap.check_id,
-        ) ?? labMappingCheck();
-      assertRemapConfirmable(
-        frozenRemap,
-        map,
-        project.workspace,
-        check,
-      );
-      if (!frozenRemap.changes.length) {
-        setError("Stage at least one From→To in Join Lens before confirming.");
-        return;
-      }
-      const nextMap = applyFrozenRemapToMap(
-        map!,
-        frozenRemap,
-        project.workspace,
-        check,
-      );
-      setProject((p) => ({
-        ...p,
-        workspace: {
-          ...p.workspace,
-          key_maps: (p.workspace.key_maps ?? []).map((m) =>
-            m.id === nextMap.id ? nextMap : m,
-          ),
-        },
-      }));
-      setFrozenRemap(null);
-      setExportMsg(
-        `Check remap confirmed · ${frozenRemap.changes.length} link(s) via KeyMap`,
-      );
-      setCenterTab(QUALITY_TAB);
-      lastCheckRunFingerprint.current = null;
-    } catch (reason) {
-      setError(String(reason));
+    const result = confirmFrozenCheckRemapSvc({
+      frozen: frozenRemap,
+      workspace: project.workspace,
+      checks: project.mapping_checks ?? [],
+    });
+    if (!result.ok) {
+      setError(result.error);
+      return;
     }
+    setProject((p) => ({
+      ...p,
+      workspace: {
+        ...p.workspace,
+        key_maps: (p.workspace.key_maps ?? []).map((m) =>
+          m.id === result.nextMap.id ? result.nextMap : m,
+        ),
+      },
+    }));
+    setFrozenRemap(null);
+    setExportMsg(result.message);
+    setCenterTab(QUALITY_TAB);
+    lastCheckRunFingerprint.current = null;
   }
 
   function handleMapKeyFromLens(
@@ -3591,19 +3345,9 @@ function App() {
     if (!joinLensTarget || fromValues.length === 0) return;
     // ADR-0027: stage concrete From→To against the frozen check preview.
     if (frozenRemap && opts?.toValues?.length) {
-      setFrozenRemap((prev) => {
-        if (!prev) return prev;
-        const staged = [...prev.changes];
-        for (let i = 0; i < fromValues.length; i++) {
-          const from = fromValues[i]?.trim();
-          const to = opts.toValues?.[i]?.trim();
-          if (!from || to == null || to === "") continue;
-          const idx = staged.findIndex((c) => c.from === from);
-          if (idx >= 0) staged[idx] = { from, to };
-          else staged.push({ from, to });
-        }
-        return { ...prev, changes: staged };
-      });
+      setFrozenRemap((prev) =>
+        prev ? stageFrozenRemapChanges(prev, fromValues, opts.toValues!) : prev,
+      );
     }
     const {
       leftOn: lensLeftOn,
@@ -4082,21 +3826,40 @@ function App() {
       ? activeQuery.steps[selectedStepIndex]
       : null;
 
-  const joinLensTarget =
-    activeQueryId &&
-    !isFullQualityJoin(activeQueryId) &&
-    selectedStepIndex !== null &&
-    selectedStep?.type === "Join" &&
-    selectedStep.payload.left_on.length > 0
-      ? {
-          hostQueryId: activeQueryId,
-          joinStepIndex: selectedStepIndex,
-          rightQueryId: targetKey(selectedStep.payload.right_query_id),
-          leftOn: selectedStep.payload.left_on,
-          rightOn: selectedStep.payload.right_on,
-          joinType: selectedStep.payload.join_type,
-        }
-      : null;
+  // Join Lens needs the Join step payload. For Inspect cohorts the selected step
+  // may stay on Join while preview includes Filter — resolve Join by index either way.
+  const joinLensTarget = (() => {
+    if (
+      !activeQueryId ||
+      !activeQuery ||
+      isFullQualityJoin(activeQueryId) ||
+      selectedStepIndex === null
+    ) {
+      return null;
+    }
+    const joinStepIndex = isQualityInspectionQuery(activeQueryId)
+      ? activeQuery.steps.findIndex((s) => s.type === "Join")
+      : selectedStep?.type === "Join"
+        ? selectedStepIndex
+        : -1;
+    const joinStep =
+      joinStepIndex >= 0 ? activeQuery.steps[joinStepIndex] : null;
+    if (
+      !joinStep ||
+      joinStep.type !== "Join" ||
+      joinStep.payload.left_on.length === 0
+    ) {
+      return null;
+    }
+    return {
+      hostQueryId: activeQueryId,
+      joinStepIndex,
+      rightQueryId: targetKey(joinStep.payload.right_query_id),
+      leftOn: joinStep.payload.left_on,
+      rightOn: joinStep.payload.right_on,
+      joinType: joinStep.payload.join_type,
+    };
+  })();
 
   /** Columns to pick from — prefer live preview of the active/focus query. */
   // When editing SelectColumns, load columns from the query truncated *before* that step
@@ -5072,173 +4835,91 @@ function App() {
               <div className={centerTab === QUALITY_TAB ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={centerTab !== QUALITY_TAB}>
                 <MappingQualityOverview
                   active={centerTab === QUALITY_TAB}
-                  projection={activeMappingCheck?.projection ?? { kind: "lab_v1" }}
+                  projection={
+                    activeMappingCheck?.projection ?? LAB_V1_PROJECTION
+                  }
                   workspace={project.workspace}
                   connections={project.connections}
                   sources={project.sources}
-                  onProgress={(state) => {
-                    if (!state) {
-                      setOpProgress((cur) =>
-                        cur?.kind === "quality" ? null : cur,
-                      );
-                      return;
-                    }
-                    setOpProgress({
-                      kind: "quality",
-                      phase: state.phase,
-                      percent: state.percent,
-                    });
-                  }}
+                  onProgress={onQualityProgress}
                   onCanvas={() => openMappingQualityCanvas()}
                   deltaNote={checkDeltaNote}
                   allowNote={checkAllowNote}
                   onCheckRun={({ cells, totalPositions }) => {
                     const check = activeMappingCheck ?? labMappingCheck();
-                    const map = (project.workspace.key_maps ?? []).find(
-                      (m) => m.id === check.map_id,
-                    );
-                    // Explicit user recalculation always creates a CheckRun (ADR-0027).
-                    const run = buildCheckRun({
+                    const recorded = recordCheckRun({
+                      project,
                       check,
-                      workspace: project.workspace,
-                      map,
-                      cells: cells.map((c) => ({
-                        row: c.sourceFamily,
-                        column: c.targetFamily,
-                        signal: c.signal,
-                        positions: c.positions,
-                        revenue: c.revenue,
-                        samples: c.samples,
-                      })),
+                      cells,
                       totalPositions,
                     });
-                    const prev = (project.mapping_check_runs ?? [])
-                      .filter((r) => r.check_id === check.id)
-                      .at(-1);
-                    if (prev) {
-                      const attr = attributeDelta(prev, run);
-                      setCheckDeltaNote(
-                        `${deltaLabel(attr)}${
-                          run.comparability.kind === "limited"
-                            ? ` (${run.comparability.reason})`
-                            : ""
-                        } · positions ${prev.total_positions} → ${run.total_positions}`,
-                      );
-                    } else {
-                      setCheckDeltaNote(
-                        `CheckRun recorded · ${run.total_positions.toLocaleString()} positions`,
-                      );
-                    }
-                    lastCheckRunFingerprint.current = run.id;
+                    setCheckDeltaNote(recorded.deltaNote);
+                    lastCheckRunFingerprint.current = recorded.run.id;
                     setProject((p) => ({
                       ...p,
-                      mapping_checks:
-                        check.id === "check_lab_quality"
-                          ? ensureLabCheck(p.mapping_checks ?? [])
-                          : (p.mapping_checks?.some((c) => c.id === check.id)
-                              ? p.mapping_checks
-                              : [...(p.mapping_checks ?? []), check]),
-                      mapping_check_runs: [
-                        ...(p.mapping_check_runs ?? []),
-                        run,
-                      ].slice(-20),
+                      mapping_checks: recorded.mapping_checks,
+                      mapping_check_runs: recorded.mapping_check_runs,
                     }));
                   }}
                   onAllowDifference={(groupKey, explanation) => {
-                    try {
-                      const checkId = activeMappingCheck?.id ?? "check_lab_quality";
-                      setProject((p) => {
-                        const checks =
-                          checkId === "check_lab_quality"
-                            ? ensureLabCheck(p.mapping_checks ?? [])
-                            : (p.mapping_checks ?? []);
-                        const next = checks.map((c) =>
-                          c.id === checkId
-                            ? upsertAllowDecision(c, groupKey, explanation)
-                            : c,
-                        );
-                        return { ...p, mapping_checks: next };
-                      });
-                      setCheckAllowNote(`Allowed · ${groupKey}`);
-                    } catch (reason) {
-                      setError(String(reason));
+                    const checkId =
+                      activeMappingCheck?.id ?? "check_lab_quality";
+                    const allowed = allowCheckDifference({
+                      checks: project.mapping_checks ?? [],
+                      checkId,
+                      groupKey,
+                      explanation,
+                    });
+                    if (!allowed.ok) {
+                      setError(allowed.error);
+                      return;
                     }
+                    setProject((p) => ({
+                      ...p,
+                      mapping_checks: allowed.mapping_checks,
+                    }));
+                    setCheckAllowNote(allowed.allowNote);
                   }}
                   onInspect={(payload) => {
                     try {
                       const check = activeMappingCheck ?? labMappingCheck();
-                      const sampleColumn =
-                        check.projection.kind === "attrs"
-                          ? check.projection.sample_column
-                          : QUALITY_SAMPLE_COLUMN;
-                      const samples = payload.samples;
-                      const orderedKeys = [...new Set(samples)]
-                        .sort((a, b) => a.localeCompare(b))
-                        .slice(0, 24);
-                      const predicate =
-                        payload.kind === "target"
-                          ? cohortPredicateForTarget(payload.targetKey)
-                          : check.projection.kind === "attrs"
-                            ? cohortPredicateFromAttrCells(
-                                check.projection.left_attr,
-                                check.projection.right_attr,
-                                payload.cohortCells,
-                              )
-                            : cohortPredicateFromCells(payload.cohortCells);
-                      setProject((p) => {
-                        const checks =
-                          check.id === "check_lab_quality"
-                            ? ensureLabCheck(p.mapping_checks ?? [])
-                            : (p.mapping_checks ?? []);
-                        return {
-                          ...p,
-                          mapping_checks: checks.map((c) =>
-                            c.id === check.id
-                              ? { ...c, cohort_predicate: predicate }
-                              : c,
-                          ),
-                        };
+                      const plan = planCheckInspect({
+                        project,
+                        check,
+                        payload,
                       });
-                      const sample = cohortInspectionQuery(project.workspace, {
-                        ...check,
-                        cohort_predicate: predicate,
-                      });
-                      const focusValue = orderedKeys[0] ?? "";
-                      setQueries((queries) =>
-                        upsertQualityInspection(queries, sample),
+                      setProject((p) => ({
+                        ...p,
+                        mapping_checks: plan.mapping_checks,
+                      }));
+                      const focusValue = plan.orderedKeys[0] ?? "";
+                      setQueries((qs) =>
+                        upsertQualityInspection(qs, plan.sampleQuery),
                       );
                       setActiveQueryId(QUALITY_INSPECTION);
-                      setSelectedStepIndex(sample.steps.length - 1);
+                      // JoinLens mounts only when the selected step is Join
+                      // (preview rows + joinCtx). Last step is Filter/Sort — that
+                      // left DATA as an empty PreviewTable after Inspect.
+                      const joinStepIdx = plan.sampleQuery.steps.findIndex(
+                        (s) => s.type === "Join",
+                      );
+                      setSelectedStepIndex(
+                        joinStepIdx >= 0
+                          ? joinStepIdx
+                          : Math.max(0, plan.sampleQuery.steps.length - 1),
+                      );
                       setDiagView(null);
+                      setPreview(null);
                       setLensFocusHint(
                         focusValue
-                          ? { column: sampleColumn, value: focusValue }
+                          ? { column: plan.sampleColumn, value: focusValue }
                           : null,
                       );
-                      const map = (project.workspace.key_maps ?? []).find(
-                        (m) => m.id === check.map_id,
-                      );
-                      if (map) {
-                        setFrozenRemap({
-                          check_id: check.id,
-                          map_id: map.id,
-                          expected_map_revision: keyMapRevision(map),
-                          expected_input_revisions: collectInputRevisions(
-                            project.workspace,
-                            { ...check, cohort_predicate: predicate },
-                          ),
-                          changes: [],
-                          previewed_at: new Date().toISOString(),
-                        });
-                      }
+                      if (plan.frozenRemap) setFrozenRemap(plan.frozenRemap);
                       qualityHandoffRef.current = true;
                       setOpProgress({
                         kind: "quality",
-                        phase: `Opening check cohort${
-                          orderedKeys.length
-                            ? ` (${orderedKeys.length} sample keys)`
-                            : ""
-                        }…`,
+                        phase: plan.progressPhase,
                         percent: 15,
                       });
                       focusJoinLensLayout();

@@ -32,6 +32,10 @@ jobs:
         run: |
           cargo test -p dwh-pipeline --lib
           cargo test -p dwh-engine --lib
+      - name: Generated TS bindings freshness (ADR-0029)
+        run: |
+          ./scripts/export-ts-types.sh
+          git diff --exit-code -- src/types/generated
       - name: Host build
         run: cargo build -p dwh-host --release
 

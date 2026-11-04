@@ -195,11 +195,14 @@ function PreviewTableImpl({
       const value = row.original[index];
       const origin = columnOrigins?.[index];
       const on = origin === "key" || hi.has(foldKey(col.name));
+      const text =
+        value === null || value === undefined ? "∅" : String(value);
       return (
         <span
+          title={text === "∅" ? undefined : text}
           className={`block truncate ${originCellClass(origin ?? (on ? "key" : undefined))}`}
         >
-          {value === null || value === undefined ? "∅" : String(value)}
+          {text}
         </span>
       );
     },

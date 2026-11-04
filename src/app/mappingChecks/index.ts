@@ -1,0 +1,17 @@
+export {
+  allowCheckDifference,
+  appendMappingCheck,
+  confirmFrozenCheckRemap,
+  createMappingCheck,
+  planCheckInspect,
+  recordCheckRun,
+  resolveActiveMappingCheck,
+  stageFrozenRemapChanges,
+  type AllowResult,
+  type ConfirmRemapResult,
+  type InspectPayload,
+  type InspectPlan,
+  type NewCheckResult,
+  type OverviewCell,
+  type RecordCheckRunResult,
+} from "./service";

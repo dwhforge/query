@@ -12,7 +12,7 @@
 //! Most commands run on the accept thread. `llm_chat` runs on a worker thread so
 //! DuckDB/preview RPCs are not blocked by the HTTP wait (Electron correlates by id).
 
-use dwh_host::{configure_paths, HostState};
+use dwh_host::{configure_paths, HostState, RpcError};
 use serde::Deserialize;
 use serde_json::json;
 use std::io::{Read, Write};
@@ -209,7 +209,7 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
             thread::spawn(move || {
                 let reply = match st.dispatch(&cmd, args) {
                     Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-                    Err(error) => json!({ "id": id, "ok": false, "error": error }),
+                    Err(error) => rpc_error_reply(id, error),
                 };
                 match w.lock() {
                     Ok(mut guard) => {
@@ -224,10 +224,27 @@ fn handle_clonable_stream<S: ClonableStream>(stream: S, state: Arc<HostState>) -
         }
         let reply = match state.dispatch(&rpc.cmd, rpc.args) {
             Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-            Err(error) => json!({ "id": id, "ok": false, "error": error }),
+            Err(error) => rpc_error_reply(id, error),
         };
         let mut w = writer.lock().map_err(|e| e.to_string())?;
         write_frame(&mut *w, &reply)?;
+    }
+}
+
+fn rpc_error_reply(id: Option<u64>, error: RpcError) -> serde_json::Value {
+    let message = error.message();
+    match error.detail() {
+        Some(detail) => json!({
+            "id": id,
+            "ok": false,
+            "error": message,
+            "error_detail": detail,
+        }),
+        None => json!({
+            "id": id,
+            "ok": false,
+            "error": message,
+        }),
     }
 }
 

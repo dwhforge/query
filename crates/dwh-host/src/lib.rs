@@ -1,11 +1,15 @@
 pub mod api;
+pub mod commands;
 pub mod connections_io;
 pub mod dbt_setup;
 pub mod demo_keymap_labs;
 pub mod demo_mapping_quality;
+pub mod error;
 pub mod llm;
 pub mod secrets_io;
 pub mod settings_io;
+
+pub use error::{HostError, RpcError};
 
 pub use api::{configure_paths, HostState};
 pub use settings_io::AppSettings;

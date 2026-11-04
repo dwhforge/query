@@ -9,6 +9,7 @@ pub mod export_manifest;
 pub mod export_tree;
 pub mod graph;
 pub mod key_map_sync;
+pub mod mapping_check;
 pub mod model;
 pub mod parquet_scan;
 pub mod postgres_attach;
@@ -86,8 +87,13 @@ pub use producers::{
     preview_dbt_model_sql_with_seeds_and_sources, DbtProducer, DbtTarget, OutputProducer,
     PreviewDbtModel,
 };
+pub use mapping_check::{
+    CheckAggregateCell, CheckComparability, CheckDeltaAttribution, CheckInputRevision, CheckRun,
+    MappingAllowDecision, MappingCheck, MappingCheckProjection,
+};
 pub use project::{
-    parquet_hive_partitioning, CanvasLayout, CanvasPosition, Project, SourceDef, SourceKind,
+    migrate_project_document, parquet_hive_partitioning, peek_format_version, CanvasLayout,
+    CanvasPosition, Project, SourceDef, SourceKind, PROJECT_FORMAT_VERSION,
 };
 pub use secrets::{
     connections_for_disk, extract_connection_secret, merge_connection_list_secrets,

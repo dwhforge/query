@@ -10,6 +10,8 @@
     "build": "tsc && node scripts/vite-build-electron.mjs",
     "preview": "vite preview",
     "host:build": "cargo build -p dwh-host --release",
+    "types:generate": "bash scripts/export-ts-types.sh",
+    "types:check": "bash scripts/export-ts-types.sh && git diff --exit-code -- src/types/generated",
     "electron:dev": "npm run host:build && node scripts/electron-dev.mjs",
     "electron:pack": "npm run host:build && npm run build && node scripts/pack-portable-electron.mjs",
     "start": "npm run electron:dev"

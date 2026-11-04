@@ -20,6 +20,11 @@ openspec/
 
 Active changes:
 
+- ~~[`changes/typed-wire-contract/`](changes/typed-wire-contract/)~~ — **merged** → [`specs/typed-wire-contract/`](specs/typed-wire-contract/) ([ADR-0029](../docs/adr/0029-typed-wire-contract.md))
+- ~~[`changes/ui-host-decomposition/`](changes/ui-host-decomposition/)~~ — **merged** → [`specs/ui-host-decomposition/`](specs/ui-host-decomposition/) ([ADR-0032](../docs/adr/0032-ui-host-decomposition.md))
+- ~~[`changes/mapping-data-plane/`](changes/mapping-data-plane/)~~ — **merged** → [`specs/mapping-data-plane/`](specs/mapping-data-plane/) ([ADR-0033](../docs/adr/0033-mapping-data-plane.md))
+- ~~[`changes/project-format-version/`](changes/project-format-version/)~~ — **merged** → [`specs/project-format-version/`](specs/project-format-version/) ([ADR-0030](../docs/adr/0030-project-format-version.md))
+- ~~[`changes/execution-lifecycle/`](changes/execution-lifecycle/)~~ — **merged** → [`specs/execution-lifecycle/`](specs/execution-lifecycle/) ([ADR-0031](../docs/adr/0031-execution-lifecycle.md))
 - ~~[`changes/keymap-stewardship-shapes/`](changes/keymap-stewardship-shapes/)~~ — **merged** → [`specs/keymap-stewardship-shapes/`](specs/keymap-stewardship-shapes/) ([ADR-0028](../docs/adr/0028-keymap-stewardship-shapes.md))
 - [`changes/return-and-edit-foundation/`](changes/return-and-edit-foundation/) — seeds → safe re-export → e2e
 - [`changes/join-key-mapping/`](changes/join-key-mapping/) — KeyMap / NormalizeKey / near-miss ([ADR-0020](../docs/adr/0020-join-key-mapping.md))

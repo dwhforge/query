@@ -3,7 +3,7 @@
 **Status:** Phases 0–3 acceptance closed after persistence/review fixes; Phases 4–6 gated follow-ups  
 **Reviewed baseline SHA:** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
 **Tested SHA (start):** `a62ff1f35f0d7b9cb4f9829b4e2abec471d16ba6`  
-**Tested functional tip:** post-review commit on `feature/mapping_wow` (see git log)  
+**Tested functional tip:** `436c9d5`
 **Branch:** `feature/mapping_wow`  
 **Prepared:** 2026-11-04  
 **Scope agreement:** full unit inventory + KeyMap binding isolation + atomic persistence; Phases 4–6 deferred.
@@ -77,6 +77,7 @@ Logs: `docs/stabilization/logs/` (gitignored).
 | Secrets temp chmod-after-write | `OpenOptionsExt::mode` at create |
 | Fake pre-commit test | `AtomicWriteFault` injection on production path |
 | Seed/ref drafts without `dirtyDelta` | session `localDraft` + merge protect |
+| Seed/ref delete resurrect / mid-save clear | freeze union while draft; `settleSeedDraftAfterSave` |
 
 ## Remaining limitations / debt
 

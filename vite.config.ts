@@ -11,6 +11,10 @@ export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
   // Relative asset URLs for Electron file:// / asar load.
   base: electron || process.env.DWH_ELECTRON_BUILD === "1" ? "./" : "/",
+  // Explicit E2E build flag — not the same as DWH_ELECTRON_BUILD (desktop pack).
+  define: {
+    "import.meta.env.DWH_E2E": JSON.stringify(process.env.DWH_E2E ?? ""),
+  },
   clearScreen: false,
   server: {
     port: 1420,

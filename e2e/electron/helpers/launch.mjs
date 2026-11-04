@@ -4,10 +4,13 @@
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { _electron as electron } from "@playwright/test";
+import { expect, _electron as electron } from "@playwright/test";
+
+const require = createRequire(import.meta.url);
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -83,10 +86,39 @@ export function prepareIsolatedHome() {
   return home;
 }
 
+/**
+ * Resolve the host binary Electron main would pick (portable beside app wins).
+ * @returns {{ path: string, via: string }}
+ */
+export function resolveHostBinary() {
+  const name = process.platform === "win32" ? "dwh-host.exe" : "dwh-host";
+  const portable = path.join(root, name);
+  if (fs.existsSync(portable)) {
+    return { path: portable, via: "portable-beside-app" };
+  }
+  const release = path.join(root, "target/release", name);
+  if (fs.existsSync(release)) {
+    return { path: release, via: "target/release" };
+  }
+  const debug = path.join(root, "target/debug", name);
+  return { path: debug, via: "target/debug" };
+}
+
+/**
+ * Ensure host + UI exist for Playwright workers.
+ * Freshness: `scripts/run-electron-e2e.mjs` always `cargo build`s before tests.
+ * Here we rebuild only when the binary is missing, unless
+ * `DWH_E2E_FORCE_HOST_BUILD=1` (or skip via `DWH_E2E_SKIP_HOST_BUILD=1`).
+ */
 export function ensureHostAndUiBuilt() {
   const hostName = process.platform === "win32" ? "dwh-host.exe" : "dwh-host";
-  const hostBin = path.join(root, "target/release", hostName);
-  if (!fs.existsSync(hostBin)) {
+  const releaseBin = path.join(root, "target/release", hostName);
+  const skipHost = process.env.DWH_E2E_SKIP_HOST_BUILD === "1";
+  const forceHost = process.env.DWH_E2E_FORCE_HOST_BUILD === "1";
+  if (skipHost) {
+    console.log("skipping host build (DWH_E2E_SKIP_HOST_BUILD=1)");
+  } else if (forceHost || !fs.existsSync(releaseBin)) {
+    console.log("building dwh-host (release)…");
     const r = spawnSync("cargo", ["build", "-p", "dwh-host", "--release"], {
       cwd: root,
       stdio: "inherit",
@@ -94,22 +126,45 @@ export function ensureHostAndUiBuilt() {
     });
     if (r.status !== 0) throw new Error("host:build failed");
   }
+  const resolved = resolveHostBinary();
+  console.log(`e2e host binary: ${resolved.path} (${resolved.via})`);
+  if (!fs.existsSync(resolved.path)) {
+    throw new Error(`dwh-host missing at ${resolved.path}`);
+  }
+  if (resolved.via === "portable-beside-app") {
+    console.warn(
+      "WARNING: portable dwh-host beside the app takes precedence over target/release — rebuild that binary too if host sources changed.",
+    );
+  }
   const indexHtml = path.join(root, "dist/index.html");
   if (!fs.existsSync(indexHtml)) {
     throw new Error(
-      "dist/index.html missing — run `npm run test:e2e:electron` (builds UI) or `npm run build`",
+      "dist/index.html missing — run `npm run test:e2e:electron` (builds UI with DWH_E2E=1) or rebuild dist",
     );
   }
+  return resolved;
+}
+
+function electronExecutable() {
+  // Real Chromium binary. Do not use node_modules/.bin/electron (cli.js wrapper):
+  // Playwright must own the process stderr to see DevTools / inspect lines.
+  try {
+    const dist = require("electron");
+    if (typeof dist === "string" && fs.existsSync(dist)) return dist;
+  } catch {
+    /* fall through */
+  }
+  return path.join(root, "node_modules", "electron", "dist", "electron");
 }
 
 /**
- * @returns {Promise<{ app: import('@playwright/test').ElectronApplication, page: import('@playwright/test').Page, home: string, userData: string }>}
+ * @returns {Promise<{ app: import('@playwright/test').ElectronApplication, page: import('@playwright/test').Page, home: string, userData: string, host: { path: string, via: string } }>}
  */
 export async function launchApp() {
-  ensureHostAndUiBuilt();
+  const host = ensureHostAndUiBuilt();
   const home = prepareIsolatedHome();
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "dwh-e2e-ud-"));
-  const electronBin = path.join(root, "node_modules", ".bin", "electron");
+  const electronBin = electronExecutable();
   const app = await electron.launch({
     executablePath: electronBin,
     args: [
@@ -129,6 +184,10 @@ export async function launchApp() {
       };
       // Prefer dist/index.html (no Vite) for deterministic smoke.
       delete env.VITE_DEV_SERVER_URL;
+      // Agent / IDE shells often set this; Electron then behaves as Node and
+      // rejects --remote-debugging-port (Playwright cannot attach).
+      delete env.ELECTRON_RUN_AS_NODE;
+      delete env.NODE_OPTIONS;
       return env;
     })(),
     timeout: 120_000,
@@ -140,7 +199,13 @@ export async function launchApp() {
     state: "visible",
     timeout: 60_000,
   });
-  return { app, page, home, userData };
+  // E2E hooks must exist — proves dist was built with DWH_E2E=1.
+  await page.waitForFunction(
+    () => typeof window.__dwhE2eOpenProject === "function",
+    null,
+    { timeout: 60_000 },
+  );
+  return { app, page, home, userData, host };
 }
 
 /**
@@ -167,6 +232,28 @@ export async function openFixtureProject(page) {
   return { projectPath, dir };
 }
 
+/**
+ * Fresh Electron + materialized project for one test (isolation).
+ * @returns {Promise<{ app, page, home, userData, fixtureWorkDir, projectPath, host }>}
+ */
+export async function launchIsolatedSession() {
+  const { app, page, home, userData, host } = await launchApp();
+  const { dir: fixtureWorkDir, projectPath } = await openFixtureProject(page);
+  return { app, page, home, userData, fixtureWorkDir, projectPath, host };
+}
+
+export async function closeIsolatedSession(session) {
+  if (!session) return;
+  await session.app?.close().catch(() => {});
+  for (const p of [session.home, session.userData, session.fixtureWorkDir]) {
+    try {
+      if (p) fs.rmSync(p, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export async function openCreateWizard(page) {
   await page.getByTestId("create-mapping-from-data").click();
   await page.getByTestId("mapping-create-wizard").waitFor({ state: "visible" });
@@ -174,4 +261,24 @@ export async function openCreateWizard(page) {
 
 export function wizard(page) {
   return page.getByTestId("mapping-create-wizard");
+}
+
+/** Click Include for an exact excluded column label; fail if missing. */
+export async function includeExcludedColumn(dlg, name) {
+  const rows = dlg.locator("li").filter({ hasText: name });
+  const n = await rows.count();
+  for (let i = 0; i < n; i++) {
+    const row = rows.nth(i);
+    const mono = (await row.locator(".font-mono").innerText()).trim();
+    if (mono === name) {
+      const include = row.getByRole("button", { name: "Include" });
+      await expect(include).toBeVisible({ timeout: 15_000 });
+      await include.click();
+      await expect(row.getByRole("button", { name: "Remove" })).toBeVisible({
+        timeout: 15_000,
+      });
+      return;
+    }
+  }
+  throw new Error(`Include control for excluded column "${name}" not found`);
 }

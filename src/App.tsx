@@ -3798,48 +3798,82 @@ function App() {
   }
 
   /**
-   * Electron Playwright smoke hooks (no native dialogs).
-   * - `__dwhE2eOpenProject(path)`
-   * - `__dwhE2ePatchProject(updater)` — mutate open Project for stale/digest scenarios
+   * Electron Playwright hooks — only when built with `DWH_E2E=1`
+   * (`import.meta.env.DWH_E2E`). Production / normal electron packs omit these.
    */
   useEffect(() => {
-    function openPath(path: string) {
-      void (async () => {
-        try {
-          const loaded = await loadProject(path, { remember: true });
-          applyLoadedProject(loaded, path);
-          setExportMsg(`Opened ${path}`);
-          await rememberRecentProject(path);
-        } catch (e) {
-          setError(typeof e === "string" ? e : String(e));
+    if (String(import.meta.env.DWH_E2E ?? "") !== "1") return;
+    let cancelled = false;
+    void import("./lib/e2eBridge").then(
+      ({
+        e2eArmDescribeHold,
+        e2eReleaseDescribeHold,
+        e2eWaitDescribeSettled,
+        e2eWaitDescribeStarted,
+      }) => {
+        if (cancelled) return;
+        function openPath(path: string) {
+          void (async () => {
+            try {
+              const loaded = await loadProject(path, { remember: true });
+              applyLoadedProject(loaded, path);
+              setExportMsg(`Opened ${path}`);
+              await rememberRecentProject(path);
+            } catch (e) {
+              setError(typeof e === "string" ? e : String(e));
+            }
+          })();
         }
-      })();
-    }
-    function onE2eOpen(ev: Event) {
-      const path = (ev as CustomEvent<{ path?: string }>).detail?.path;
-      if (typeof path === "string" && path) openPath(path);
-    }
-    window.addEventListener("dwh-e2e-open-project", onE2eOpen);
-    const w = window as unknown as {
-      __dwhE2eOpenProject?: (path: string) => void;
-      __dwhE2ePatchProject?: (updater: (p: Project) => Project) => void;
-      __dwhE2eSaveProject?: (path: string) => Promise<void>;
-    };
-    w.__dwhE2eOpenProject = openPath;
-    w.__dwhE2ePatchProject = (updater) => {
-      setProject((p) => updater(p));
-    };
-    w.__dwhE2eSaveProject = async (path: string) => {
-      const toSave = { ...projectRef.current, root_path: path };
-      await saveProject(path, toSave);
-      setProject(toSave);
-      setExportMsg(`Saved ${path}`);
-    };
+        function onE2eOpen(ev: Event) {
+          const path = (ev as CustomEvent<{ path?: string }>).detail?.path;
+          if (typeof path === "string" && path) openPath(path);
+        }
+        window.addEventListener("dwh-e2e-open-project", onE2eOpen);
+        const w = window as unknown as {
+          __dwhE2eOpenProject?: (path: string) => void;
+          __dwhE2ePatchProject?: (updater: (p: Project) => Project) => void;
+          __dwhE2eSaveProject?: (path: string) => Promise<void>;
+          __dwhE2eGetProject?: () => Project;
+          __dwhE2eArmDescribeHold?: () => void;
+          __dwhE2eReleaseDescribeHold?: () => void;
+          __dwhE2eWaitDescribeStarted?: () => Promise<void>;
+          __dwhE2eWaitDescribeSettled?: () => Promise<void>;
+        };
+        w.__dwhE2eOpenProject = openPath;
+        w.__dwhE2ePatchProject = (updater) => {
+          setProject((p) => updater(p));
+        };
+        w.__dwhE2eGetProject = () => projectRef.current;
+        w.__dwhE2eSaveProject = async (path: string) => {
+          const toSave = { ...projectRef.current, root_path: path };
+          await saveProject(path, toSave);
+          setProject(toSave);
+          setExportMsg(`Saved ${path}`);
+        };
+        w.__dwhE2eArmDescribeHold = e2eArmDescribeHold;
+        w.__dwhE2eReleaseDescribeHold = e2eReleaseDescribeHold;
+        w.__dwhE2eWaitDescribeStarted = e2eWaitDescribeStarted;
+        w.__dwhE2eWaitDescribeSettled = e2eWaitDescribeSettled;
+        (
+          window as unknown as { __dwhE2eCleanup?: () => void }
+        ).__dwhE2eCleanup = () => {
+          window.removeEventListener("dwh-e2e-open-project", onE2eOpen);
+          delete w.__dwhE2eOpenProject;
+          delete w.__dwhE2ePatchProject;
+          delete w.__dwhE2eSaveProject;
+          delete w.__dwhE2eGetProject;
+          delete w.__dwhE2eArmDescribeHold;
+          delete w.__dwhE2eReleaseDescribeHold;
+          delete w.__dwhE2eWaitDescribeStarted;
+          delete w.__dwhE2eWaitDescribeSettled;
+        };
+      },
+    );
     return () => {
-      window.removeEventListener("dwh-e2e-open-project", onE2eOpen);
-      delete w.__dwhE2eOpenProject;
-      delete w.__dwhE2ePatchProject;
-      delete w.__dwhE2eSaveProject;
+      cancelled = true;
+      (
+        window as unknown as { __dwhE2eCleanup?: () => void }
+      ).__dwhE2eCleanup?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- e2e hook once
   }, []);

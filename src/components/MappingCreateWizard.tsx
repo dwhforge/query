@@ -396,6 +396,8 @@ export function MappingCreateWizard({
           <button
             type="button"
             className="text-slate-500 hover:text-slate-300"
+            data-testid="mapping-create-close"
+            aria-label="Close"
             onClick={requestClose}
           >
             ✕
@@ -627,9 +629,8 @@ export function MappingCreateWizard({
         <footer className="flex justify-end gap-2 border-t border-slate-800 px-4 py-3">
           <button
             type="button"
-            className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500"
+            className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500 disabled:opacity-40"
             onClick={requestClose}
-            disabled={busy}
           >
             Cancel
           </button>

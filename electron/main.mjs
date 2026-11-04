@@ -126,6 +126,7 @@ function resourceDirs() {
 function startHost() {
   return new Promise((resolve, reject) => {
     const bin = hostBinaryPath();
+    console.log(`[dwh] using host binary: ${bin}`);
     if (!fs.existsSync(bin)) {
       reject(
         new Error(

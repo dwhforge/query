@@ -55,13 +55,25 @@ function bridge() {
 }
 
 /** IPC → dwh-host JSON-RPC (ADR-0029: structured HostError via ok:false envelope). */
-function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return bridge()
-    .invoke<InvokeReply<T> | T>(cmd, args)
-    .then((reply) => unpackInvokeReply(reply))
-    .catch((e: unknown) => {
-      throw normalizeHostReject(e);
-    });
+async function invoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  const e2e = String(import.meta.env.DWH_E2E ?? "") === "1";
+  let e2eBridge: typeof import("./e2eBridge") | null = null;
+  if (e2e) {
+    e2eBridge = await import("./e2eBridge");
+    await e2eBridge.e2eMaybeHoldDescribe(cmd);
+  }
+  try {
+    return await bridge()
+      .invoke<InvokeReply<T> | T>(cmd, args)
+      .then((reply) => unpackInvokeReply(reply));
+  } catch (e: unknown) {
+    throw normalizeHostReject(e);
+  } finally {
+    e2eBridge?.e2eNotifyDescribeSettled(cmd);
+  }
 }
 
 export function previewWorkspace(

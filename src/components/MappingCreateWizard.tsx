@@ -383,6 +383,7 @@ export function MappingCreateWizard({
         role="dialog"
         aria-modal="true"
         aria-labelledby="mapping-create-title"
+        data-testid="mapping-create-wizard"
         className="flex max-h-[90vh] w-full max-w-xl flex-col rounded-lg border border-slate-700 bg-slate-950 shadow-xl"
       >
         <header className="flex items-center justify-between border-b border-slate-800 px-4 py-3">

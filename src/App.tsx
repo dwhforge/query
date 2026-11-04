@@ -360,6 +360,8 @@ function App() {
     mappingCreateResult: null,
   });
   const project = projectBag.project;
+  const projectRef = useRef(project);
+  projectRef.current = project;
   const setProject = useCallback((update: SetStateAction<Project>) => {
     dispatchProject({
       type: "set",
@@ -3794,6 +3796,53 @@ function App() {
       setError(typeof e === "string" ? e : String(e));
     }
   }
+
+  /**
+   * Electron Playwright smoke hooks (no native dialogs).
+   * - `__dwhE2eOpenProject(path)`
+   * - `__dwhE2ePatchProject(updater)` — mutate open Project for stale/digest scenarios
+   */
+  useEffect(() => {
+    function openPath(path: string) {
+      void (async () => {
+        try {
+          const loaded = await loadProject(path, { remember: true });
+          applyLoadedProject(loaded, path);
+          setExportMsg(`Opened ${path}`);
+          await rememberRecentProject(path);
+        } catch (e) {
+          setError(typeof e === "string" ? e : String(e));
+        }
+      })();
+    }
+    function onE2eOpen(ev: Event) {
+      const path = (ev as CustomEvent<{ path?: string }>).detail?.path;
+      if (typeof path === "string" && path) openPath(path);
+    }
+    window.addEventListener("dwh-e2e-open-project", onE2eOpen);
+    const w = window as unknown as {
+      __dwhE2eOpenProject?: (path: string) => void;
+      __dwhE2ePatchProject?: (updater: (p: Project) => Project) => void;
+      __dwhE2eSaveProject?: (path: string) => Promise<void>;
+    };
+    w.__dwhE2eOpenProject = openPath;
+    w.__dwhE2ePatchProject = (updater) => {
+      setProject((p) => updater(p));
+    };
+    w.__dwhE2eSaveProject = async (path: string) => {
+      const toSave = { ...projectRef.current, root_path: path };
+      await saveProject(path, toSave);
+      setProject(toSave);
+      setExportMsg(`Saved ${path}`);
+    };
+    return () => {
+      window.removeEventListener("dwh-e2e-open-project", onE2eOpen);
+      delete w.__dwhE2eOpenProject;
+      delete w.__dwhE2ePatchProject;
+      delete w.__dwhE2eSaveProject;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- e2e hook once
+  }, []);
 
   // Load app settings + global connections, then restore last project.
   useEffect(() => {

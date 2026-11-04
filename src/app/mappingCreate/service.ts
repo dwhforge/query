@@ -25,8 +25,31 @@ import type {
 } from "./types";
 import { fingerprintSteps, schemaDigest } from "./types";
 
-const SQL_QUERY_PLACEHOLDER =
-  /\{\{\s*query:([a-zA-Z0-9_]+)\s*\}\}/g;
+/**
+ * Extract `{{query:…}}` ids — same grammar as Rust `graph::extract_query_placeholders`:
+ * text between `{{query:` and `}}`, trim edges; no charset restriction (hyphens ok).
+ */
+export function extractQueryPlaceholders(rawSql: string): string[] {
+  const out: string[] = [];
+  let rest = rawSql;
+  const open = "{{query:";
+  while (true) {
+    const start = rest.indexOf(open);
+    if (start < 0) break;
+    rest = rest.slice(start + open.length);
+    const end = rest.indexOf("}}");
+    if (end < 0) break;
+    const id = rest.slice(0, end).trim();
+    if (id) out.push(id);
+    rest = rest.slice(end + 2);
+  }
+  return out;
+}
+
+/** @deprecated use extractQueryPlaceholders — kept name for call sites below. */
+function sqlPlaceholderQueryIds(rawSql: string): string[] {
+  return extractQueryPlaceholders(rawSql);
+}
 
 /** Local workspace queries only (no xref:…). */
 export function listLocalQueries(workspace: Workspace): QueryDef[] {
@@ -35,15 +58,6 @@ export function listLocalQueries(workspace: Workspace): QueryDef[] {
 
 export function isLocalQueryId(id: string): boolean {
   return Boolean(id.trim()) && !id.startsWith("xref:");
-}
-
-/** Align with Rust `graph::direct_deps` — SqlModel and CustomSql both use `{{query:id}}`. */
-function sqlPlaceholderQueryIds(rawSql: string): string[] {
-  const out: string[] = [];
-  for (const m of rawSql.matchAll(SQL_QUERY_PLACEHOLDER)) {
-    if (m[1]) out.push(m[1]);
-  }
-  return out;
 }
 
 /**

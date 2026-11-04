@@ -8,6 +8,7 @@ export {
   directQueryConsumers,
   directUpstreamQueryIds,
   excludedByLastFields,
+  extractQueryPlaceholders,
   isLocalQueryId,
   listLocalQueries,
   makeSchemaEvidence,

@@ -728,12 +728,18 @@ export function ExplorerTree({
             actions={
               <>
                 {onCreateKeyMapFromData && (
-                  <IconBtn
+                  <button
+                    type="button"
                     title="Create from data"
-                    onClick={onCreateKeyMapFromData}
+                    data-testid="create-mapping-from-data"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCreateKeyMapFromData();
+                    }}
+                    className="flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-800 hover:text-teal-300"
                   >
                     ◇
-                  </IconBtn>
+                  </button>
                 )}
                 <IconBtn title="New mapping" onClick={onAddKeyMap}>
                   +

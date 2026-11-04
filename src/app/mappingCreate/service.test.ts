@@ -521,10 +521,10 @@ function ev(
 }
 
 {
-  // CustomSql placeholders in basis + consumers + stale fold.
+  // CustomSql + hyphenated query id (Rust graph grammar, not [A-Za-z0-9_]+ only).
   const lookup: QueryDef = {
-    id: "lookup",
-    name: "lookup",
+    id: "lookup-v2",
+    name: "lookup-v2",
     steps: [{ type: "LoadCsv", payload: { path: "lookup.csv" } }],
   };
   const withCustom: QueryDef = {
@@ -535,7 +535,8 @@ function ev(
       {
         type: "CustomSql",
         payload: {
-          raw_sql: "select * from {{prev_step}} join {{query:lookup}} using (id)",
+          raw_sql:
+            "select * from {{prev_step}} join {{query:lookup-v2}} using (id)",
         },
       },
       { type: "SelectColumns", payload: { columns: ["id"] } },
@@ -551,17 +552,20 @@ function ev(
     workspace: customWs,
   } as Project;
   assert(
-    directUpstreamQueryIds(withCustom).includes("lookup"),
-    "CustomSql upstream",
+    directUpstreamQueryIds(withCustom).includes("lookup-v2"),
+    "CustomSql upstream lookup-v2",
   );
   assert(
-    directQueryConsumers(customWs, "lookup").some(
+    directQueryConsumers(customWs, "lookup-v2").some(
       (c) => c.queryId === "enriched" && c.via.includes("CustomSql"),
     ),
-    "CustomSql consumer",
+    "CustomSql consumer lookup-v2",
   );
   const basis = basisQueryFingerprints(customWs, "enriched");
-  assert(basis.ok === true && basis.ok && basis.defs.lookup != null, "basis has lookup");
+  assert(
+    basis.ok === true && basis.ok && basis.defs["lookup-v2"] != null,
+    "basis has lookup-v2",
+  );
   const up = ["id", "code"];
   const draft = {
     name: "CustomSql map",
@@ -585,13 +589,16 @@ function ev(
   });
   assert(plan.ok === true, "customsql plan");
   if (plan.ok) {
-    assert(plan.plan.expectedQueryDefs.lookup != null, "expected includes lookup");
+    assert(
+      plan.plan.expectedQueryDefs["lookup-v2"] != null,
+      "expected includes lookup-v2",
+    );
     const moved: Project = {
       ...customProject,
       workspace: {
         ...customWs,
         queries: customWs.queries.map((q) =>
-          q.id === "lookup"
+          q.id === "lookup-v2"
             ? {
                 ...q,
                 steps: [...q.steps, { type: "Limit", payload: { n: 1 } }],
@@ -612,7 +619,7 @@ function ev(
     });
     assert(
       fold.result.status === "stale" && fold.project === moved,
-      "CustomSql upstream stale",
+      "lookup-v2 upstream stale",
     );
   }
 }

@@ -444,7 +444,14 @@ mod tests {
             focus_query_id: "q_fact".into(),
             key_maps: vec![km],
         };
-        let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
+        let mut seeds = HashMap::new();
+        seeds.insert("q_fact".into(), vec!["alias".into()]);
+        seeds.insert("q_map".into(), vec!["alias".into(), "canon".into()]);
+        let schemas = crate::schema::infer_workspace_schemas(&ws, &seeds).unwrap();
+        let sql = GraphCompiler::new(&ws)
+            .with_schemas(&schemas)
+            .to_sql(true)
+            .unwrap();
         assert!(
             sql.contains("q_q_map_s0") || sql.contains("q_map"),
             "must reference map query CTE: {sql}"
@@ -545,8 +552,12 @@ mod tests {
             s3: None,
             duckdb: None,
         }];
+        let mut seeds = HashMap::new();
+        seeds.insert("q1".into(), vec!["channel".into()]);
+        let schemas = crate::schema::infer_workspace_schemas(&ws, &seeds).unwrap();
         let sql = GraphCompiler::new(&ws)
             .with_connections(&conns)
+            .with_schemas(&schemas)
             .to_sql(true)
             .unwrap();
         assert!(

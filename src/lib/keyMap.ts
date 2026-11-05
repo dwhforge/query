@@ -100,22 +100,179 @@ export function formatJoinOn(left: string[], right: string[]): string {
   return `${left.join(", ")} = ${right.join(", ")}`;
 }
 
-/** Validate review panel input; returns an error message or null. */
+/** One map output row in the Apply+Join review. */
+export type ApplyReviewOutputRow = {
+  mapColumn: string;
+  destination: string;
+  /** Include in ApplyKeyMap output_bindings. */
+  includeApply: boolean;
+  /** Include destination = rightCol in the rewritten Join ON. */
+  includeJoin: boolean;
+  rightCol: string;
+};
+
+/** Existing Join equality the user may keep when rewriting ON. */
+export type ApplyReviewKeepEquality = {
+  left: string;
+  right: string;
+  keep: boolean;
+};
+
+export type ApplyReviewState = {
+  side: ApplySide;
+  outputs: ApplyReviewOutputRow[];
+  keepEqualities: ApplyReviewKeepEquality[];
+  rewriteJoin: boolean;
+};
+
+/** Build the initial review state for a multi-output Apply. */
+export function buildApplyReviewState(args: {
+  side: ApplySide;
+  outCols: string[];
+  leftOnCols: string[];
+  rightOnCols: string[];
+}): ApplyReviewState {
+  const dests = defaultReviewDestinations(
+    args.outCols,
+    args.leftOnCols[0] ?? "",
+  );
+  const rights = defaultReviewRightCols(dests, args.rightOnCols);
+  // Default Join participation: one equality per current ON slot (extra
+  // outputs like category_id stay Apply-only). Existing ON is opt-in keep
+  // so rewritten keys are not duplicated beside new destinations.
+  const joinSlots = Math.max(1, Math.min(args.outCols.length, args.leftOnCols.length || 1));
+  return {
+    side: args.side,
+    outputs: args.outCols.map((mapColumn, i) => ({
+      mapColumn,
+      destination: dests[i]!,
+      includeApply: true,
+      includeJoin: i < joinSlots,
+      rightCol: rights[i]!,
+    })),
+    keepEqualities: args.leftOnCols.map((left, i) => ({
+      left,
+      right: args.rightOnCols[i] ?? args.rightOnCols[0] ?? left,
+      keep: false,
+    })),
+    rewriteJoin: false,
+  };
+}
+
+/** Route confirmed bindings to the Apply side the user chose. */
+export function applyReviewBindingsForSide(
+  side: ApplySide,
+  bindings: ApplyKeyMapOutputBinding[],
+): {
+  outputBindingsLeft?: ApplyKeyMapOutputBinding[];
+  outputBindingsRight?: ApplyKeyMapOutputBinding[];
+} {
+  if (side === "left") return { outputBindingsLeft: bindings };
+  if (side === "right") return { outputBindingsRight: bindings };
+  return {
+    outputBindingsLeft: bindings,
+    outputBindingsRight: bindings,
+  };
+}
+
+/** Collect Apply bindings + optional Join rewrite from review state. */
+export function confirmApplyReview(state: ApplyReviewState): {
+  bindings: ApplyKeyMapOutputBinding[];
+  joinRewrite?: { leftOn: string[]; rightOn: string[] };
+  error: string | null;
+} {
+  const included = state.outputs.filter((o) => o.includeApply);
+  if (!included.length) {
+    return { bindings: [], error: "Select at least one output to Apply." };
+  }
+  const seen = new Set<string>();
+  for (const o of included) {
+    const k = o.destination.trim().toLowerCase();
+    if (!k) {
+      return {
+        bindings: [],
+        error: "Every included output needs a destination column.",
+      };
+    }
+    if (seen.has(k)) {
+      return {
+        bindings: [],
+        error: `Duplicate destination column "${o.destination.trim()}".`,
+      };
+    }
+    seen.add(k);
+  }
+  const bindings = included.map((o) => ({
+    map_column: o.mapColumn,
+    destination_column: o.destination.trim(),
+  }));
+
+  if (!state.rewriteJoin || state.side === "right") {
+    return { bindings, error: null };
+  }
+
+  const leftOn: string[] = [];
+  const rightOn: string[] = [];
+  for (const eq of state.keepEqualities) {
+    if (!eq.keep) continue;
+    if (!eq.left.trim() || !eq.right.trim()) {
+      return {
+        bindings: [],
+        error: "Kept Join equalities need both left and right columns.",
+      };
+    }
+    leftOn.push(eq.left.trim());
+    rightOn.push(eq.right.trim());
+  }
+  for (const o of state.outputs) {
+    if (!o.includeJoin) continue;
+    if (!o.includeApply) {
+      return {
+        bindings: [],
+        error: `Join uses "${o.mapColumn}" — include it in Apply too.`,
+      };
+    }
+    if (!o.rightCol.trim()) {
+      return {
+        bindings: [],
+        error: "Every Join equality needs a right column.",
+      };
+    }
+    leftOn.push(o.destination.trim());
+    rightOn.push(o.rightCol.trim());
+  }
+  if (!leftOn.length) {
+    return {
+      bindings: [],
+      error: "Join rewrite needs at least one equality (keep old or map output).",
+    };
+  }
+  return {
+    bindings,
+    joinRewrite: { leftOn, rightOn },
+    error: null,
+  };
+}
+
+/** @deprecated Prefer confirmApplyReview — kept for older unit checks. */
 export function validateApplyReview(
   destinations: string[],
   rights: string[],
   rewriteJoin: boolean,
 ): string | null {
-  const seen = new Set<string>();
-  for (const d of destinations) {
-    const k = d.trim().toLowerCase();
-    if (!k) return "Every output needs a destination column.";
-    if (seen.has(k)) return `Duplicate destination column "${d.trim()}".`;
-    seen.add(k);
-  }
-  if (rewriteJoin && rights.some((r) => !r.trim()))
-    return "Every Join equality needs a right column.";
-  return null;
+  const state: ApplyReviewState = {
+    side: "left",
+    outputs: destinations.map((destination, i) => ({
+      mapColumn: `out_${i}`,
+      destination,
+      includeApply: true,
+      includeJoin: rewriteJoin,
+      rightCol: rights[i] ?? "",
+    })),
+    keepEqualities: [],
+    rewriteJoin,
+  };
+  return confirmApplyReview(state).error;
 }
 
 /** Stable key for dirty-buffer / uniqueness (JSON tuple). */

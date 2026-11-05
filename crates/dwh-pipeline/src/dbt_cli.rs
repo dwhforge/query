@@ -501,12 +501,14 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert("q".into(), vec!["c".into()]);
         let plan = build_export_plan(
             "leadzero",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         assert!(

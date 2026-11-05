@@ -168,6 +168,89 @@ assert(applied.result.status === "ok", "apply ok");
   );
 }
 
+{
+  // Right-side Apply must honour review destinations (not defaults).
+  const rightWs = {
+    queries: [
+      {
+        id: "fact",
+        name: "fact",
+        steps: [
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              left_on: ["sku"],
+              right_on: ["sku"],
+              join_type: "left",
+            },
+          },
+        ],
+      },
+      { id: "dim", name: "dim", steps: [] },
+    ],
+    focus_query_id: "fact",
+    key_maps: [map],
+  } as never;
+  const right = applyKeyMapOntoProject(
+    { ...project, workspace: rightWs } as never,
+    {
+      map: {
+        ...map,
+        output_columns: ["product_id", "variant_code"],
+        to_column: "product_id",
+      } as never,
+      ctx: {
+        hostQueryId: "fact",
+        joinStepIndex: 0,
+        rightQueryId: "dim",
+        leftOn: ["sku"],
+        rightOn: ["sku"],
+        joinType: "left",
+      },
+      side: "right",
+      leftCols: ["sku"],
+      rightCols: ["sku"],
+      outputColumnLeft: "sku",
+      outputColumnRight: "sku",
+      outputBindingsRight: [
+        {
+          map_column: "product_id",
+          destination_column: "canonical_product_id",
+        },
+        {
+          map_column: "variant_code",
+          destination_column: "canonical_variant_code",
+        },
+      ],
+    },
+  );
+  assert(right.result.status === "ok", "right apply ok");
+  const dimSteps =
+    right.result.status === "ok"
+      ? right.result.workspace.queries.find((q) => q.id === "dim")!.steps
+      : [];
+  const applyStep = dimSteps.find((s) => s.type === "ApplyKeyMap");
+  assert(!!applyStep && applyStep.type === "ApplyKeyMap", "Apply on dim");
+  const bindings =
+    applyStep && applyStep.type === "ApplyKeyMap"
+      ? applyStep.payload.output_bindings ?? []
+      : [];
+  assert(
+    bindings.some(
+      (b) =>
+        b.map_column === "product_id" &&
+        b.destination_column === "canonical_product_id",
+    ) &&
+      bindings.some(
+        (b) =>
+          b.map_column === "variant_code" &&
+          b.destination_column === "canonical_variant_code",
+      ),
+    `right Apply payload destinations: ${JSON.stringify(bindings)}`,
+  );
+}
+
 const sourceMap = {
   ...map,
   storage: { kind: "source" as const, connection_id: "c", schema: "s", table: "t" },

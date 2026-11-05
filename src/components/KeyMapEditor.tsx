@@ -27,19 +27,20 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
 import type { Workspace } from "../types/pipeline";
 import {
-  defaultReviewDestinations,
-  defaultReviewRightCols,
+  applyReviewBindingsForSide,
+  buildApplyReviewState,
+  confirmApplyReview,
   formatJoinOn,
   fromColumnsEff,
   fromPartsEff,
   keyMapSeedName,
-  validateApplyReview,
   mergeLensOutputCells,
   outputColumnsEff,
   outputValuesEff,
   parseFromToPaste,
   tupleKey,
   validateKeyMapEntries,
+  type ApplyReviewState,
   type ApplySide,
 } from "../lib/keyMap";
 import {
@@ -104,6 +105,7 @@ export type KeyMapEditorProps = {
     side: ApplySide,
     opts?: {
       outputBindingsLeft?: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
+      outputBindingsRight?: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
       joinRewrite?: { leftOn: string[]; rightOn: string[] };
     },
   ) => void;
@@ -179,12 +181,7 @@ export function KeyMapEditor({
   const [pasteText, setPasteText] = useState("");
   const [showOtherApplySides, setShowOtherApplySides] = useState(false);
   /** ADR-0037 inline Apply+Join review (multi-output + Join context). */
-  const [applyReview, setApplyReview] = useState<{
-    side: ApplySide;
-    dests: string[];
-    rights: string[];
-    rewriteJoin: boolean;
-  } | null>(null);
+  const [applyReview, setApplyReview] = useState<ApplyReviewState | null>(null);
   const [applyReviewError, setApplyReviewError] = useState<string | null>(null);
   const [pgTableOptions, setPgTableOptions] = useState<KeyMapSourceOption[]>(
     [],
@@ -2055,42 +2052,63 @@ export function KeyMapEditor({
         const review = applyReview;
         const leftOnCols = joinApplyContext.leftOnCols ?? [joinApplyContext.leftOn];
         const rightOnCols = joinApplyContext.rightOnCols ?? [joinApplyContext.rightOn];
-        const dests = outCols.map((c, i) => review.dests[i] ?? c);
-        const rights = outCols.map(
-          (_, i) => review.rights[i] ?? defaultReviewRightCols(dests, rightOnCols)[i]!,
-        );
         const canRewrite = review.side !== "right";
         const rewrite = canRewrite && review.rewriteJoin;
-        const patch = (p: Partial<typeof review>) =>
-          setApplyReview({ ...review, dests, rights, ...p });
+        const patchOutput = (
+          i: number,
+          p: Partial<(typeof review.outputs)[number]>,
+        ) => {
+          const outputs = review.outputs.map((o, j) =>
+            j === i ? { ...o, ...p } : o,
+          );
+          setApplyReview({ ...review, outputs });
+        };
+        const patchKeep = (i: number, keep: boolean) => {
+          const keepEqualities = review.keepEqualities.map((e, j) =>
+            j === i ? { ...e, keep } : e,
+          );
+          setApplyReview({ ...review, keepEqualities });
+        };
+        const preview = (() => {
+          if (!rewrite) return null;
+          const left: string[] = [];
+          const right: string[] = [];
+          for (const eq of review.keepEqualities) {
+            if (!eq.keep) continue;
+            left.push(eq.left);
+            right.push(eq.right);
+          }
+          for (const o of review.outputs) {
+            if (!o.includeJoin) continue;
+            left.push(o.destination.trim() || o.mapColumn);
+            right.push(o.rightCol.trim() || "?");
+          }
+          return { left, right };
+        })();
         const confirm = (withJoin: boolean) => {
-          const err = validateApplyReview(dests, rights, withJoin);
-          if (err) {
-            setApplyReviewError(err);
+          const state: ApplyReviewState = {
+            ...review,
+            rewriteJoin: withJoin && canRewrite,
+          };
+          const conf = confirmApplyReview(state);
+          if (conf.error) {
+            setApplyReviewError(conf.error);
             return;
           }
-          const bindings = outCols.map((map_column, i) => ({
-            map_column,
-            destination_column: dests[i]!.trim(),
-          }));
           setApplyReview(null);
           setApplyReviewError(null);
           onApply(review.side, {
-            outputBindingsLeft: bindings,
-            joinRewrite: withJoin
-              ? {
-                  leftOn: dests.map((d) => d.trim()),
-                  rightOn: rights.map((r) => r.trim()),
-                }
-              : undefined,
+            ...applyReviewBindingsForSide(review.side, conf.bindings),
+            joinRewrite: withJoin ? conf.joinRewrite : undefined,
           });
         };
         const listId = "keymap-apply-review-right-cols";
+        const applyCount = review.outputs.filter((o) => o.includeApply).length;
         return (
           <div className="shrink-0 space-y-3 border-t border-teal-900/50 bg-slate-900/70 px-4 py-3 text-[12px] text-slate-300">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <p className="font-semibold text-teal-200">
-                Review Apply — {outCols.length} outputs
+                Review Apply — {applyCount}/{review.outputs.length} outputs
                 <span className="ml-2 font-normal text-slate-500">
                   on {joinApplyContext.hostQueryName} · {review.side}
                 </span>
@@ -2098,38 +2116,61 @@ export function KeyMapEditor({
             </div>
             <div className="space-y-1.5">
               <p className="text-[11px] text-slate-500">
-                1. Destination column for each map output
-                {rewrite ? " · 2. right Join column for each equality" : ""}
+                Include in Apply → destination
+                {rewrite ? " · Include in Join → right column" : ""}
               </p>
-              {outCols.map((c, i) => (
-                <div key={`${c}-${i}`} className="flex flex-wrap items-center gap-2">
-                  <span className="w-32 truncate font-mono text-slate-400" title={c}>
-                    {c}
-                  </span>
+              {review.outputs.map((o, i) => (
+                <div key={`${o.mapColumn}-${i}`} className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-slate-400">
+                    <input
+                      type="checkbox"
+                      checked={o.includeApply}
+                      onChange={(e) =>
+                        patchOutput(i, {
+                          includeApply: e.target.checked,
+                          includeJoin: e.target.checked ? o.includeJoin : false,
+                        })
+                      }
+                      aria-label={`Include ${o.mapColumn} in Apply`}
+                      className="accent-teal-500"
+                    />
+                    <span className="w-28 truncate font-mono" title={o.mapColumn}>
+                      {o.mapColumn}
+                    </span>
+                  </label>
                   <span className="text-slate-600">→</span>
                   <input
-                    value={dests[i]}
-                    onChange={(e) => {
-                      const next = [...dests];
-                      next[i] = e.target.value;
-                      patch({ dests: next });
-                    }}
-                    aria-label={`Destination for ${c}`}
-                    className="w-44 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[12px] text-slate-200 focus:border-teal-600 focus:outline-none"
+                    value={o.destination}
+                    disabled={!o.includeApply}
+                    onChange={(e) => patchOutput(i, { destination: e.target.value })}
+                    aria-label={`Destination for ${o.mapColumn}`}
+                    className="w-40 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[12px] text-slate-200 focus:border-teal-600 focus:outline-none disabled:opacity-40"
                   />
                   {rewrite && (
                     <>
+                      <label className="ml-1 flex items-center gap-1 text-slate-500">
+                        <input
+                          type="checkbox"
+                          checked={o.includeJoin}
+                          disabled={!o.includeApply}
+                          onChange={(e) =>
+                            patchOutput(i, { includeJoin: e.target.checked })
+                          }
+                          aria-label={`Include ${o.mapColumn} in Join`}
+                          className="accent-teal-500"
+                        />
+                        Join
+                      </label>
                       <span className="text-slate-600">=</span>
                       <input
-                        value={rights[i]}
+                        value={o.rightCol}
                         list={listId}
-                        onChange={(e) => {
-                          const next = [...rights];
-                          next[i] = e.target.value;
-                          patch({ rights: next });
-                        }}
-                        aria-label={`Right Join column for ${dests[i]}`}
-                        className="w-44 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[12px] text-slate-200 focus:border-teal-600 focus:outline-none"
+                        disabled={!o.includeApply || !o.includeJoin}
+                        onChange={(e) =>
+                          patchOutput(i, { rightCol: e.target.value })
+                        }
+                        aria-label={`Right Join column for ${o.destination}`}
+                        className="w-40 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[12px] text-slate-200 focus:border-teal-600 focus:outline-none disabled:opacity-40"
                       />
                     </>
                   )}
@@ -2146,11 +2187,34 @@ export function KeyMapEditor({
                 <input
                   type="checkbox"
                   checked={review.rewriteJoin}
-                  onChange={(e) => patch({ rewriteJoin: e.target.checked })}
+                  onChange={(e) =>
+                    setApplyReview({ ...review, rewriteJoin: e.target.checked })
+                  }
                   className="accent-teal-500"
                 />
                 Also change Join ON
               </label>
+            )}
+            {rewrite && review.keepEqualities.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-[11px] text-slate-500">
+                  Keep existing equalities (e.g. day = day)
+                </p>
+                {review.keepEqualities.map((eq, i) => (
+                  <label
+                    key={`${eq.left}-${eq.right}-${i}`}
+                    className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-slate-400"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={eq.keep}
+                      onChange={(e) => patchKeep(i, e.target.checked)}
+                      className="accent-teal-500"
+                    />
+                    {eq.left} = {eq.right}
+                  </label>
+                ))}
+              </div>
             )}
             <div className="space-y-0.5 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 font-mono text-[11px]">
               <p className="text-slate-500">
@@ -2161,8 +2225,12 @@ export function KeyMapEditor({
               </p>
               <p className={rewrite ? "text-teal-200" : "text-slate-600"}>
                 new ON{" "}
-                {rewrite ? (
-                  formatJoinOn(dests, rights)
+                {rewrite && preview ? (
+                  preview.left.length ? (
+                    formatJoinOn(preview.left, preview.right)
+                  ) : (
+                    <span className="text-amber-200">(no equalities selected)</span>
+                  )
                 ) : (
                   <>unchanged — {formatJoinOn(leftOnCols, rightOnCols)}</>
                 )}
@@ -2235,17 +2303,15 @@ export function KeyMapEditor({
             const rightOnCols = joinApplyContext.rightOnCols ?? [
               joinApplyContext.rightOn,
             ];
-            const dests = defaultReviewDestinations(
-              outCols,
-              leftOnCols[0] ?? joinApplyContext.leftOn,
-            );
             setApplyReviewError(null);
-            setApplyReview({
-              side,
-              dests,
-              rights: defaultReviewRightCols(dests, rightOnCols),
-              rewriteJoin: false,
-            });
+            setApplyReview(
+              buildApplyReviewState({
+                side,
+                outCols,
+                leftOnCols,
+                rightOnCols,
+              }),
+            );
             return;
           }
           onApply!(side);

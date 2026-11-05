@@ -10,11 +10,11 @@
 
 ## 2. Apply emit + uniqueness
 - [x] 2.1–2.6 Multi-dest emit, miss/NULL abort, guard WHERE, collision-safe map aliases vs fact names
-- [x] 2.7 Internal alias **allocator** vs prev/fact/dest (`_dwh_rid` → `_dwh_rid_1` …)
+- [x] 2.7 Internal alias **allocator** vs full `prev_columns` (refuse unknown schema / SELECT *)
 - [x] 2.8 Postgres abort = row-dependent subquery (not constant `1/0`)
 
 ## 3. Adapters
-- [x] 3.1 Seed CSV + push/sync by **all** header names (From, outputs, attrs, SCD bounds); reject dup headers
+- [x] 3.1 Seed CSV: `RequireHeader` sync (all fields by name, dup headers) vs explicit `Headerless` import
 - [x] 3.2–3.6 Source baselines, query, ref, YAML not_null on outputs
 
 ## 4. Editor + create + Lens
@@ -22,7 +22,9 @@
 - [x] 4.2 Create wizard multi target
 - [x] 4.3 Lens named cells + Apply `output_bindings`
 - [x] 4.4 **Required** UI review: destinations + Join ON preview → Apply only / Apply+Join
-- [x] 4.5 Apply+Join preserves **exact Join identity** after insert (no right-query-only fallback)
+- [x] 4.5 Apply+Join preserves **exact Join identity** after insert
+- [x] 4.6 Review routes bindings by side (`left`/`right`/`both`); right destinations land in step payload
+- [x] 4.7 Review: subset Apply outputs + independent Join equalities + keep existing ON
 
 ## 5–6. Checks / merge
 - [x] MappingCheck fingerprint; specs merged into `openspec/specs/keymap-multi-output-*`
@@ -33,4 +35,4 @@ cargo test -p dwh-pipeline --lib
 npx tsc --noEmit
 npm run test:unit
 ```
-Still open as acceptance gates (not claimed done): live Postgres matrix; DuckDB `COUNT(*)` prune harness; preview↔dbt **result** parity (SQL-shape only today).
+Still open as acceptance gates (not claimed done): live Postgres matrix; DuckDB `COUNT(*)` prune harness; preview↔dbt **result** parity (SQL-shape only today); Electron left/right multi-output Apply e2e.

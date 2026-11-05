@@ -1594,12 +1594,14 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert("q".into(), vec!["channel".into()]);
         let plan = build_export_plan(
             "keymap_demo",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         assert!(plan.contains_key("seeds/map_channel_alias.csv"));
@@ -1631,7 +1633,7 @@ mod tests {
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         assert_eq!(
@@ -1678,12 +1680,14 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert("q".into(), vec!["channel".into()]);
         let plan = build_export_plan(
             "keymap_src",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         let sources = &plan["models/sources.yml"];

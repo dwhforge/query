@@ -571,23 +571,18 @@ fn alloc_apply_aliases(
     output_cols: &[String],
     as_of: Option<&str>,
 ) -> Result<ApplyInternalAliases, String> {
+    // SELECT * / EXCLUDE shares the user namespace with internal aliases. Without the
+    // full prior schema we cannot prove uniqueness (DuckDB renames duplicate ids).
+    let Some(prev) = prev_columns else {
+        return Err(
+            "ApplyKeyMap: prev_columns required to allocate collision-safe internal \
+             aliases (SELECT * projection cannot prove uniqueness against an unknown schema)"
+                .into(),
+        );
+    };
     let mut reserved: Vec<&str> = Vec::new();
-    if let Some(cols) = prev_columns {
-        for c in cols {
-            reserved.push(c.as_str());
-        }
-    } else {
-        // Unknown full schema: refuse if fact/dest already look like our namespace —
-        // otherwise allocate against the names we do know.
-        for c in fact_cols.iter().chain(dest_cols.iter()) {
-            if ascii_fold_name(c).starts_with("_dwh_") {
-                return Err(
-                    "ApplyKeyMap: prev_columns required when fact/destination \
-                     names use the reserved _dwh_ prefix (cannot prove alias uniqueness)"
-                        .into(),
-                );
-            }
-        }
+    for c in prev {
+        reserved.push(c.as_str());
     }
     for c in fact_cols {
         reserved.push(c.as_str());
@@ -1108,6 +1103,16 @@ pub enum KeyMapCsvMode<'a> {
     Headerless,
 }
 
+/// Header policy for multi-output / stewardship seed CSV ([ADR-0037]).
+/// Do not mix: either require a named header row, or treat row 1 as data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedCsvHeaderPolicy {
+    /// Seed sync / export: first row must name all declared fields; dup headers refused.
+    RequireHeader,
+    /// Explicit headerless import: first row is data; no header/dup checks.
+    Headerless,
+}
+
 /// Parse KeyMap seed CSV via the `csv` crate (handles quoted newlines).
 /// Default mode expects a `from`/`to` header when present; never guesses headers
 /// from alphanumeric content (so `www,web` stays a data row).
@@ -1208,8 +1213,7 @@ pub fn parse_key_map_seed_csv_cols(
 }
 
 /// Parse seed with optional stewardship columns after To ([ADR-0028]).
-/// When `extra_cols` is empty, trailing header columns beyond From+To are treated as attrs
-/// if a matching header row is present.
+/// Requires a named header row (seed sync / export contract).
 pub fn parse_key_map_seed_csv_full(
     body: &str,
     from_cols: &[String],
@@ -1219,14 +1223,30 @@ pub fn parse_key_map_seed_csv_full(
     parse_key_map_seed_csv_outputs(body, from_cols, &[to_col.to_string()], extra_cols)
 }
 
-/// Parse seed with one or more output columns ([ADR-0037]). All declared fields
-/// (From, outputs, attrs / SCD bounds) match by header name — never by position
-/// alone when a header row is present.
+/// Parse seed with one or more output columns ([ADR-0037]). Seed sync contract:
+/// named header required; all declared fields resolve by name.
 pub fn parse_key_map_seed_csv_outputs(
     body: &str,
     from_cols: &[String],
     output_cols: &[String],
     extra_cols: &[String],
+) -> Result<Vec<KeyMapEntry>, String> {
+    parse_key_map_seed_csv_outputs_ex(
+        body,
+        from_cols,
+        output_cols,
+        extra_cols,
+        SeedCsvHeaderPolicy::RequireHeader,
+    )
+}
+
+/// Parse multi-output seed with an explicit header policy (no auto-guess).
+pub fn parse_key_map_seed_csv_outputs_ex(
+    body: &str,
+    from_cols: &[String],
+    output_cols: &[String],
+    extra_cols: &[String],
+    policy: SeedCsvHeaderPolicy,
 ) -> Result<Vec<KeyMapEntry>, String> {
     let n = from_cols.len();
     let out_n = output_cols.len();
@@ -1257,76 +1277,61 @@ pub fn parse_key_map_seed_csv_outputs(
         .map(|i| first.get(i).unwrap_or("").trim().to_string())
         .collect();
 
-    // Reject ambiguous duplicate header names under ASCII case-fold.
-    {
-        let mut seen = std::collections::HashSet::new();
-        for h in &header_cells {
-            if h.is_empty() {
-                continue;
-            }
-            let k = h.to_ascii_lowercase();
-            if !seen.insert(k) {
-                return Err(format!(
-                    "key map seed CSV: duplicate header '{h}' (case-insensitive)"
-                ));
-            }
-        }
-    }
-
-    let positional_from_out = (0..n).all(|i| {
-        header_cells
-            .get(i)
-            .map(|h| h.eq_ignore_ascii_case(from_cols[i].trim()))
-            .unwrap_or(false)
-    }) && (0..out_n).all(|i| {
-        header_cells
-            .get(n + i)
-            .map(|h| h.eq_ignore_ascii_case(output_cols[i].trim()))
-            .unwrap_or(false)
-    });
-
     let find_idx = |want: &str| -> Option<usize> {
         header_cells
             .iter()
             .position(|h| h.eq_ignore_ascii_case(want.trim()))
     };
 
-    // Infer extras from trailing headers when caller did not name them and
-    // From/outputs are positional at the start.
     let extras: Vec<String> = if !extra_cols.is_empty() {
         extra_cols.to_vec()
-    } else if positional_from_out && header_cells.len() > n + out_n {
-        header_cells[n + out_n..]
+    } else if policy == SeedCsvHeaderPolicy::RequireHeader
+        && from_cols.iter().all(|c| find_idx(c).is_some())
+        && output_cols.iter().all(|c| find_idx(c).is_some())
+        && header_cells.len() > n + out_n
+    {
+        // Trailing unnamed headers become attrs only under a recognized header row.
+        let named: std::collections::HashSet<String> = from_cols
             .iter()
-            .filter(|s| !s.is_empty())
+            .chain(output_cols.iter())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        header_cells
+            .iter()
+            .filter(|h| !h.is_empty() && !named.contains(&h.to_ascii_lowercase()))
             .cloned()
             .collect()
     } else {
         vec![]
     };
 
-    // Unified name → index for From + outputs + extras (reorder-safe).
-    let mut name_map: Vec<(String, usize)> = Vec::new();
-    let resolve_all = || -> Result<Vec<(String, usize)>, String> {
-        let mut out = Vec::with_capacity(n + out_n + extras.len());
-        for c in from_cols.iter().chain(output_cols.iter()).chain(extras.iter()) {
-            let i = find_idx(c).ok_or_else(|| {
-                format!("key map seed CSV: missing header for column '{c}'")
-            })?;
-            out.push((c.clone(), i));
+    let name_map: Vec<(String, usize)> = match policy {
+        SeedCsvHeaderPolicy::RequireHeader => {
+            // Resolve declared names first. Only then treat row 1 as a header
+            // (dup check). Data rows like `A,A` must not be mistaken for headers.
+            let mut out = Vec::with_capacity(n + out_n + extras.len());
+            for c in from_cols.iter().chain(output_cols.iter()).chain(extras.iter()) {
+                let i = find_idx(c).ok_or_else(|| {
+                    format!("key map seed CSV: missing header for column '{c}'")
+                })?;
+                out.push((c.clone(), i));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for h in &header_cells {
+                if h.is_empty() {
+                    continue;
+                }
+                let k = h.to_ascii_lowercase();
+                if !seen.insert(k) {
+                    return Err(format!(
+                        "key map seed CSV: duplicate header '{h}' (case-insensitive)"
+                    ));
+                }
+            }
+            out
         }
-        Ok(out)
+        SeedCsvHeaderPolicy::Headerless => Vec::new(),
     };
-
-    let header_ok = find_idx(&from_cols[0]).is_some()
-        && find_idx(&output_cols[0]).is_some()
-        && from_cols.iter().all(|c| find_idx(c).is_some())
-        && output_cols.iter().all(|c| find_idx(c).is_some())
-        && extras.iter().all(|c| find_idx(c).is_some());
-
-    if header_ok {
-        name_map = resolve_all()?;
-    }
 
     let allow_dup_from = !extras.is_empty(); // SCD / attrs maps may repeat From
     let mut entries = Vec::new();
@@ -1336,7 +1341,6 @@ pub fn parse_key_map_seed_csv_outputs(
         if let Some((_, i)) = name_map.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
             return rec.get(*i).unwrap_or("").to_string();
         }
-        // Positional fallback only when no header map (headerless data).
         String::new()
     };
 
@@ -1382,7 +1386,6 @@ pub fn parse_key_map_seed_csv_outputs(
         let mut entry = KeyMapEntry::parts_multi(parts, outs);
         for c in &extras {
             let v = if name_map.is_empty() {
-                // No header: extras follow From+outputs in declared order.
                 let base = n + out_n;
                 let i = extras.iter().position(|x| x == c).unwrap_or(0);
                 rec.get(base + i).unwrap_or("").to_string()
@@ -1397,17 +1400,7 @@ pub fn parse_key_map_seed_csv_outputs(
         Ok(())
     };
     let mut lineno = 1usize;
-    if !header_ok {
-        // Arity-1 single output without known extras: fall back to classic parser.
-        if n == 1 && out_n == 1 && extras.is_empty() {
-            return parse_key_map_seed_csv_mode(
-                body,
-                KeyMapCsvMode::Header {
-                    from_col: from_cols[0].as_str(),
-                    to_col: output_cols[0].as_str(),
-                },
-            );
-        }
+    if policy == SeedCsvHeaderPolicy::Headerless {
         push_row(&first, lineno)?;
     }
     for rec in records {
@@ -2299,8 +2292,18 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let sql = emit_transform_step(&step, "s0", &HashMap::new(), WarehouseDialect::Duckdb)
-            .unwrap();
+        let prev = vec!["channel".into()];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                prev_columns: Some(&prev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(sql.contains("VALUES"));
         assert!(sql.contains("LEFT JOIN"));
         assert!(sql.contains("_dwh_match_n"));
@@ -2328,6 +2331,7 @@ mod tests {
             "offers".into(),
             (vec!["ext_id".into(), "day".into()], vec!["offer_sk".into()]),
         );
+        let prev = vec!["ext_id".into(), "day".into()];
         let sql = emit_transform_step_ex(
             &step,
             "s0",
@@ -2335,6 +2339,7 @@ mod tests {
             WarehouseDialect::Duckdb,
             EmitSchemaOpts {
                 key_map_columns: Some(&cols),
+                prev_columns: Some(&prev),
                 ..Default::default()
             },
         )
@@ -2428,12 +2433,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_key_map_unknown_schema_refuses_non_fact_output() {
+    fn apply_key_map_unknown_schema_refuses_alias_allocation() {
         use crate::model::KeyMapEntry;
+        // Even overwrite of a fact column is unsafe without the full prior schema:
+        // unknown inputs may already use `_dwh_*` and collide under SELECT *.
         let step = TransformationStep::ApplyKeyMap {
-            column: "ext".into(),
-            columns: vec!["ext".into()],
-            output_column: Some("canonical".into()),
+            column: "sku".into(),
+            columns: vec!["sku".into()],
+            output_column: Some("sku".into()),
             output_bindings: vec![],
             as_of_column: None,
             map_id: "m".into(),
@@ -2448,8 +2455,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.contains("cannot tell if output_column"),
-            "must refuse ambiguous overwrite: {err}"
+            err.contains("prev_columns required"),
+            "must refuse unknown schema for SELECT * aliases: {err}"
         );
     }
 
@@ -2531,6 +2538,7 @@ mod tests {
         };
         let mut range = HashMap::new();
         range.insert("scd".into(), ("valid_from".into(), "valid_to".into()));
+        let prev = vec!["sku".into(), "event_day".into()];
         let sql = emit_transform_step_ex(
             &step,
             "s0",
@@ -2538,6 +2546,7 @@ mod tests {
             WarehouseDialect::Duckdb,
             EmitSchemaOpts {
                 key_map_range: Some(&range),
+                prev_columns: Some(&prev),
                 ..Default::default()
             },
         )
@@ -2595,6 +2604,39 @@ X1,reviewed,P100,BLUE-M,2024-01-01,2024-06-01\n";
         )
         .unwrap_err();
         assert!(err.contains("duplicate header"), "{err}");
+    }
+
+    #[test]
+    fn parse_seed_csv_headerless_allows_duplicate_data_cells() {
+        // Row 1 is data (A→A), not a header — must not trip duplicate-header.
+        let entries = parse_key_map_seed_csv_outputs_ex(
+            "A,A\nB,C\n",
+            &["from".into()],
+            &["to".into()],
+            &[],
+            SeedCsvHeaderPolicy::Headerless,
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].from, "A");
+        assert_eq!(entries[0].to, "A");
+        assert_eq!(entries[1].from, "B");
+        assert_eq!(entries[1].to, "C");
+    }
+
+    #[test]
+    fn parse_seed_csv_require_header_refuses_missing_columns() {
+        let err = parse_key_map_seed_csv_outputs(
+            "A,A\nB,C\n",
+            &["from".into()],
+            &["to".into()],
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("missing header"),
+            "RequireHeader must not fall back to positional data: {err}"
+        );
     }
 
     #[test]

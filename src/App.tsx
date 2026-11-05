@@ -5784,6 +5784,24 @@ function App() {
                                       factCols: leftCols,
                                       mapColumnHint: outs[0] ?? "to",
                                     });
+                            const outputBindingsRight =
+                              opts?.outputBindingsRight?.length
+                                ? opts.outputBindingsRight
+                                : ctx.outputBindingsRight?.length
+                                  ? ctx.outputBindingsRight
+                                  : outs.length > 1
+                                    ? outs.map((map_column, i) => ({
+                                        map_column,
+                                        destination_column:
+                                          i === 0
+                                            ? outputColumnRight
+                                            : map_column,
+                                      }))
+                                    : applyKeymapOutputBindings({
+                                        output_column: outputColumnRight,
+                                        factCols: rightCols,
+                                        mapColumnHint: outs[0] ?? "to",
+                                      });
                             // Commit Apply via reducer — outcome lives in
                             // keyMapApplyResult and is handled after commit.
                             dispatchProject({
@@ -5799,7 +5817,7 @@ function App() {
                                 outputColumnLeft,
                                 outputColumnRight,
                                 outputBindingsLeft,
-                                outputBindingsRight: ctx.outputBindingsRight,
+                                outputBindingsRight,
                                 // Prefer review opts; "Apply map only" must not
                                 // inherit a ctx rewrite (service falls back on undefined).
                                 joinRewrite: opts

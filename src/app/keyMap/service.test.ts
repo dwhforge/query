@@ -15,6 +15,7 @@ import {
   settleSeedDraftAfterSave,
   upsertKeyMapIntoProject,
 } from "./service";
+import { keyMapRevisionFingerprint } from "./applyPlan";
 import type { KeyMapJoinCtx, KeyMapTabSession } from "./types";
 import type { KeyMapDef, Project } from "../../types/pipeline";
 import { findApplyKeyMapIdForJoin } from "../../lib/keyMap";
@@ -79,11 +80,17 @@ const applied = applyKeyMapOntoProject(project, {
   rightCols: ["id"],
   outputColumnLeft: "sku_mapped",
   outputColumnRight: "id",
+  expectedMapRevision: keyMapRevisionFingerprint(map as never, project.workspace),
 });
 assert(applied.result.status === "ok", "apply ok");
 
 {
   // Two Joins to the same right query — rewrite must hit Join #2 only.
+  const dualMap = {
+    ...map,
+    output_columns: ["product_id", "variant_code"],
+    to_column: "product_id",
+  };
   const dualWs = {
     queries: [
       {
@@ -114,7 +121,7 @@ assert(applied.result.status === "ok", "apply ok");
       { id: "dim", name: "dim", steps: [] },
     ],
     focus_query_id: "fact",
-    key_maps: [map],
+    key_maps: [dualMap],
   } as never;
   const dualCtx = {
     hostQueryId: "fact",
@@ -127,11 +134,7 @@ assert(applied.result.status === "ok", "apply ok");
   const dual = applyKeyMapOntoProject(
     { ...project, workspace: dualWs } as never,
     {
-      map: {
-        ...map,
-        output_columns: ["product_id", "variant_code"],
-        to_column: "product_id",
-      } as never,
+      map: dualMap as never,
       ctx: dualCtx,
       side: "left",
       leftCols: ["external_sku"],
@@ -146,6 +149,10 @@ assert(applied.result.status === "ok", "apply ok");
         leftOn: ["product_id", "variant_code"],
         rightOn: ["product_id", "variant_code"],
       },
+      expectedMapRevision: keyMapRevisionFingerprint(
+        dualMap as never,
+        dualWs,
+      ),
     },
   );
   assert(dual.result.status === "ok", "dual join apply ok");
@@ -170,6 +177,11 @@ assert(applied.result.status === "ok", "apply ok");
 
 {
   // Right-side Apply must honour review destinations (not defaults).
+  const rightMap = {
+    ...map,
+    output_columns: ["product_id", "variant_code"],
+    to_column: "product_id",
+  };
   const rightWs = {
     queries: [
       {
@@ -190,16 +202,12 @@ assert(applied.result.status === "ok", "apply ok");
       { id: "dim", name: "dim", steps: [] },
     ],
     focus_query_id: "fact",
-    key_maps: [map],
+    key_maps: [rightMap],
   } as never;
   const right = applyKeyMapOntoProject(
     { ...project, workspace: rightWs } as never,
     {
-      map: {
-        ...map,
-        output_columns: ["product_id", "variant_code"],
-        to_column: "product_id",
-      } as never,
+      map: rightMap as never,
       ctx: {
         hostQueryId: "fact",
         joinStepIndex: 0,
@@ -223,6 +231,10 @@ assert(applied.result.status === "ok", "apply ok");
           destination_column: "canonical_variant_code",
         },
       ],
+      expectedMapRevision: keyMapRevisionFingerprint(
+        rightMap as never,
+        rightWs,
+      ),
     },
   );
   assert(right.result.status === "ok", "right apply ok");

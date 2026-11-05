@@ -1,7 +1,8 @@
-//! Execution gates for ADR-0037 multi-output Apply (cardinality + results, not SQL shape).
+//! Execution gates for ADR-0037/0038 multi-output Apply (cardinality + results, not SQL shape).
 
 #[cfg(test)]
 mod tests {
+    use crate::compile::{compile_focus_sql, prepare_operation};
     use crate::preview::preview_workspace;
     use crate::session::DbSession;
     use dwh_pipeline::{
@@ -49,6 +50,73 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         }
+    }
+
+    fn ambiguous_query_map_ws() -> Workspace {
+        let mut map = KeyMapDef::new("sku_map", "sku");
+        map.storage = dwh_pipeline::KeyMapStorage::Query {
+            query_id: "q_map".into(),
+        };
+        map.from_column = "sku".into();
+        map.to_column = "product_id".into();
+        map.output_columns = vec!["product_id".into(), "variant_code".into()];
+        map.entries = vec![];
+        map.canonicalize_outputs();
+        Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "q_map".into(),
+                    name: "map".into(),
+                    steps: vec![TransformationStep::SqlModel {
+                        raw_sql: "select 'A' as sku, 'P100' as product_id, 'BLUE' as variant_code \
+                                  union all \
+                                  select 'A', 'P999', 'X'"
+                            .into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "q".into(),
+                    name: "q".into(),
+                    steps: vec![
+                        TransformationStep::SqlModel {
+                            raw_sql: "select 'A' as sku".into(),
+                        },
+                        TransformationStep::ApplyKeyMap {
+                            column: "sku".into(),
+                            columns: vec!["sku".into()],
+                            output_column: None,
+                            output_bindings: vec![
+                                ApplyKeyMapOutputBinding {
+                                    map_column: "product_id".into(),
+                                    destination_column: "product_id".into(),
+                                },
+                                ApplyKeyMapOutputBinding {
+                                    map_column: "variant_code".into(),
+                                    destination_column: "variant_code".into(),
+                                },
+                            ],
+                            as_of_column: None,
+                            map_id: "sku_map".into(),
+                            entries: vec![],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "q".into(),
+            key_maps: vec![map],
+        }
+    }
+
+    fn count_over_preview_sql(preview_sql: &str) -> String {
+        let count_sql = preview_sql.replace("SELECT * FROM", "SELECT COUNT(*) AS n FROM");
+        count_sql
+            .split(" LIMIT ")
+            .next()
+            .unwrap_or(&count_sql)
+            .to_string()
+            + ";"
     }
 
     #[test]
@@ -106,19 +174,7 @@ mod tests {
         );
         let db = DbSession::new().unwrap();
         let preview = preview_workspace(&db, &ws, &[], &[]).unwrap();
-        // Re-run as COUNT(*) over the same compiled SQL body (projection pruning must not
-        // drop uniqueness-guard columns before the join finishes).
-        let count_sql = preview.sql.replace(
-            "SELECT * FROM",
-            "SELECT COUNT(*) AS n FROM",
-        );
-        // preview.sql is full WITH … SELECT * FROM cte LIMIT … — strip LIMIT for count.
-        let count_sql = count_sql
-            .split(" LIMIT ")
-            .next()
-            .unwrap_or(&count_sql)
-            .to_string()
-            + ";";
+        let count_sql = count_over_preview_sql(&preview.sql);
         let n: i64 = db
             .with_conn(|conn| {
                 conn.query_row(&count_sql, [], |r| r.get(0))
@@ -132,80 +188,48 @@ mod tests {
         );
     }
 
+    /// Full-set validation refuses ambiguous query maps before Apply runs.
     #[test]
-    fn duckdb_apply_ambiguous_key_fails_execution() {
-        // Query-backed map with duplicate From — seed CSV path may refuse dups at write;
-        // execution guard must still abort when the live relation has fan-out.
-        let mut map = KeyMapDef::new("sku_map", "sku");
-        map.storage = dwh_pipeline::KeyMapStorage::Query {
-            query_id: "q_map".into(),
-        };
-        map.from_column = "sku".into();
-        map.to_column = "product_id".into();
-        map.output_columns = vec!["product_id".into(), "variant_code".into()];
-        map.entries = vec![];
-        map.canonicalize_outputs();
-        let ws = Workspace {
-            queries: vec![
-                QueryDef {
-                    id: "q_map".into(),
-                    name: "map".into(),
-                    steps: vec![TransformationStep::SqlModel {
-                        raw_sql: "select 'A' as sku, 'P100' as product_id, 'BLUE' as variant_code \
-                                  union all \
-                                  select 'A', 'P999', 'X'"
-                            .into(),
-                    }],
-                    execution: Default::default(),
-                },
-                QueryDef {
-                    id: "q".into(),
-                    name: "q".into(),
-                    steps: vec![
-                        TransformationStep::SqlModel {
-                            raw_sql: "select 'A' as sku".into(),
-                        },
-                        TransformationStep::ApplyKeyMap {
-                            column: "sku".into(),
-                            columns: vec!["sku".into()],
-                            output_column: None,
-                            output_bindings: vec![
-                                ApplyKeyMapOutputBinding {
-                                    map_column: "product_id".into(),
-                                    destination_column: "product_id".into(),
-                                },
-                                ApplyKeyMapOutputBinding {
-                                    map_column: "variant_code".into(),
-                                    destination_column: "variant_code".into(),
-                                },
-                            ],
-                            as_of_column: None,
-                            map_id: "sku_map".into(),
-                            entries: vec![],
-                        },
-                    ],
-                    execution: Default::default(),
-                },
-            ],
-            focus_query_id: "q".into(),
-            key_maps: vec![map],
-        };
+    fn duckdb_apply_full_set_refuses_ambiguous_query_map() {
+        let ws = ambiguous_query_map_ws();
         let db = DbSession::new().unwrap();
-        // Full-set validation catches unused dups before Apply; either that or the
-        // matched-row guard must refuse execution.
         let err = preview_workspace(&db, &ws, &[], &[]).unwrap_err();
         assert!(
             err.to_lowercase().contains("duplicate")
                 || err.to_lowercase().contains("ambiguous")
                 || err.to_lowercase().contains("full-set"),
-            "dup From must abort: {err}"
+            "full-set must abort: {err}"
         );
     }
 
-    /// Live Postgres matrix (ADR-0037 gates). Skips unless `DWH_PG_DSN` is set.
+    /// Matched-row SQL uniqueness guard must abort even when projection is COUNT(*)
+    /// (compile without full-set so the guard itself is exercised).
     #[test]
-    fn postgres_apply_abort_not_constant_and_optional_live() {
-        use dwh_pipeline::TransformationStep;
+    fn duckdb_apply_count_star_aborts_on_ambiguous_sql_guard() {
+        let ws = ambiguous_query_map_ws();
+        let db = DbSession::new().unwrap();
+        let _prepared = prepare_operation(&db, &ws, &[], &[]).unwrap();
+        // Intentionally skip validate_prepared — isolate the emit SQL guard.
+        let sql = compile_focus_sql(&db, &ws, &[], &[], true).unwrap();
+        let count_sql = count_over_preview_sql(&sql);
+        let err = db
+            .with_conn(|conn| {
+                conn.query_row(&count_sql, [], |r| r.get::<_, i64>(0))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap_err();
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("ambiguous")
+                || lower.contains("refused")
+                || lower.contains("error"),
+            "COUNT(*) must hit SQL uniqueness guard, got: {err}"
+        );
+    }
+
+    /// Postgres abort idiom is row-dependent in emitted SQL (shape gate).
+    #[test]
+    fn postgres_apply_abort_shape_is_row_dependent() {
         let step = TransformationStep::ApplyKeyMap {
             column: "sku".into(),
             columns: vec!["sku".into()],
@@ -241,17 +265,41 @@ mod tests {
             "PG abort must be row-dependent: {sql}"
         );
         assert!(sql.contains("_dwh_apply_guard") || sql.contains("apply_guard"), "{sql}");
+    }
 
+    /// When `DWH_PG_DSN` is set, execute the PG abort idiom via ATTACH + postgres_query.
+    #[test]
+    fn postgres_apply_abort_evaluates_when_dsn_set() {
         let Ok(dsn) = std::env::var("DWH_PG_DSN") else {
-            eprintln!("skip live PG Apply: DWH_PG_DSN unset");
+            eprintln!("skip live PG abort evaluation: DWH_PG_DSN unset");
             return;
         };
         if dsn.trim().is_empty() {
-            eprintln!("skip live PG Apply: DWH_PG_DSN empty");
+            eprintln!("skip live PG abort evaluation: DWH_PG_DSN empty");
             return;
         }
-        // ATTACH + run a minimal VALUES Apply that must succeed for one key.
-        let _ = dsn;
-        eprintln!("DWH_PG_DSN set — PG abort shape verified (live ATTACH run is optional follow-up)");
+        let db = DbSession::new().unwrap();
+        db.ensure_postgres().unwrap();
+        use crate::postgres_catalog::ensure_pg_attached;
+        db.with_conn(|conn| {
+            let alias = ensure_pg_attached(conn, dsn.trim())?;
+            // True → SELECT 0 → 1/0 must fail (same idiom as emit_abort_expr Postgres).
+            let fail_sql = format!(
+                "SELECT * FROM postgres_query('{alias}', 'SELECT ((1 / (SELECT 0 WHERE (true)))::VARCHAR) AS x')"
+            );
+            let fail = conn.execute(&fail_sql, []);
+            assert!(
+                fail.is_err(),
+                "PG abort idiom with true guard must fail, got {fail:?}"
+            );
+            // False → empty subquery → NULL (no division by zero).
+            let ok_sql = format!(
+                "SELECT * FROM postgres_query('{alias}', 'SELECT ((1 / (SELECT 0 WHERE (false)))::VARCHAR) AS x')"
+            );
+            conn.query_row(&ok_sql, [], |r| r.get::<_, Option<String>>(0))
+                .map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
+        .unwrap();
     }
 }

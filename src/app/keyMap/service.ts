@@ -22,6 +22,7 @@ import type {
   Workspace,
 } from "../../types/pipeline";
 import { targetKey } from "../../types/pipeline";
+import { keyMapRevisionFingerprint } from "./applyPlan";
 import type {
   KeyMapApplyIntent,
   KeyMapApplyResult,
@@ -173,6 +174,31 @@ export function applyKeyMapOntoProject(
   project: Project,
   intent: KeyMapApplyIntent,
 ): { project: Project; result: KeyMapApplyResult } {
+  const liveMap = (project.workspace.key_maps ?? []).find(
+    (m) => m.id === intent.map.id,
+  );
+  if (!liveMap) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        mapId: intent.map.id,
+        reason: `KeyMap '${intent.map.id}' is missing from the project — re-open Apply.`,
+      },
+    };
+  }
+  const liveRevision = keyMapRevisionFingerprint(liveMap, project.workspace);
+  if (liveRevision !== intent.expectedMapRevision) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        mapId: intent.map.id,
+        reason:
+          "KeyMap changed since Apply was prepared — re-open the map and Apply again.",
+      },
+    };
+  }
   const joinIdx = resolveJoinStepFromCtx(project.workspace, intent.ctx);
   if (joinIdx == null) {
     return {
@@ -181,18 +207,16 @@ export function applyKeyMapOntoProject(
     };
   }
   const joinRewrite = intent.joinRewrite ?? intent.ctx.joinRewrite;
+  // Use the live Project map — never replace R2 with a stale plan snapshot.
   const applied = applyKeyMapToWorkspace(
-    {
-      ...project.workspace,
-      key_maps: upsertKeyMapList(project.workspace.key_maps ?? [], intent.map),
-    },
+    project.workspace,
     intent.ctx.hostQueryId,
     joinIdx,
     intent.ctx.rightQueryId,
     intent.side,
     intent.leftCols[0]!,
     intent.rightCols[0]!,
-    intent.map,
+    liveMap,
     intent.leftCols,
     intent.rightCols,
     intent.outputColumnLeft,

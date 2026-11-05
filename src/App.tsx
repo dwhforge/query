@@ -1904,6 +1904,13 @@ function App() {
       );
       return;
     }
+    if (result.status === "stale") {
+      setError(
+        result.reason?.trim() ||
+          "KeyMap changed since Apply was prepared — re-open the map and Apply again.",
+      );
+      return;
+    }
     closeKeyMapTab(result.mapId, result.workspace);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- closeKeyMapTab closes over latest tabs/project
   }, [projectBag.keyMapApplyResult]);
@@ -5742,6 +5749,7 @@ function App() {
                                     joinRewrite: choice.joinRewrite,
                                   }
                                 : undefined,
+                              project.workspace,
                             );
                             if ("error" in plan) {
                               setError(plan.error);

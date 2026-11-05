@@ -5,17 +5,18 @@
 import {
   applyKeymapOutputBindings,
   applyReviewBindingsForSide,
+  fromColumnsEff,
   outputColumnsEff,
   type ApplyKeyMapOutputBinding,
   type ApplySide,
 } from "../../lib/keyMap";
-import type { KeyMapDef } from "../../types/pipeline";
+import type { KeyMapDef, Workspace } from "../../types/pipeline";
 import type { KeyMapApplyIntent, KeyMapJoinCtx } from "./types";
 
 /** Confirmed review / Lens choice — no App-side defaults after this. */
 export type ApplyUserChoice = {
   side: ApplySide;
-  /** Included output bindings (subset allowed). */
+  /** Included output bindings (subset allowed). Empty array is invalid when choice is present. */
   bindings: ApplyKeyMapOutputBinding[];
   /** When set, rewrite Join ON (requires frozen identity in resolve). */
   joinRewrite?: { leftOn: string[]; rightOn: string[] };
@@ -33,16 +34,85 @@ export type ApplyPlan = {
   outputBindingsLeft?: ApplyKeyMapOutputBinding[];
   outputBindingsRight?: ApplyKeyMapOutputBinding[];
   joinRewrite?: { leftOn: string[]; rightOn: string[] };
-  /** Fingerprint for stale refuse (map id + storage + output list). */
+  /** Fingerprint checked at commit against the live Project map. */
   mapRevision: string;
 };
 
 export type ResolveApplyPlanError = { error: string };
 
-export function keyMapRevisionFingerprint(map: KeyMapDef): string {
-  const outs = outputColumnsEff(map).join("\0");
-  const storage = JSON.stringify(map.storage ?? { kind: "seed" });
-  return `${map.id}|${storage}|${outs}|${map.entries?.length ?? 0}`;
+/**
+ * Apply-operation revision (ADR-0038).
+ * - seed: definition + entry values (not only row count)
+ * - query: binding + relevant query definition (not result rows)
+ * - source/ref: definition/binding only — not a claim about warehouse content
+ */
+export function keyMapRevisionFingerprint(
+  map: KeyMapDef,
+  workspace?: Workspace | null,
+): string {
+  const from = fromColumnsEff(map);
+  const outs = outputColumnsEff(map);
+  const schema = JSON.stringify({
+    from_columns: from,
+    output_columns: outs,
+    editable_columns: map.editable_columns ?? [],
+    time_mode: map.time_mode ?? "none",
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
+  });
+  const kind = map.storage?.kind ?? "seed";
+  if (kind === "query") {
+    const qid =
+      map.storage && map.storage.kind === "query"
+        ? map.storage.query_id.trim()
+        : "";
+    const q = workspace?.queries.find((x) => x.id === qid);
+    const qFinger = q
+      ? JSON.stringify({
+          id: q.id,
+          steps: q.steps,
+          execution: q.execution ?? "local",
+        })
+      : `missing:${qid}`;
+    return `apply:${map.id}:query:${hashStr(qFinger + "|" + schema)}`;
+  }
+  if (kind === "source" || kind === "ref") {
+    // Binding/definition only — local entry cache is not external SoT.
+    return `apply:${map.id}:${kind}:${hashStr(schema)}`;
+  }
+  const rows = [...(map.entries ?? [])]
+    .map((e) => {
+      const fromKey = (
+        e.from_parts?.length ? e.from_parts.join("\0") : e.from ?? ""
+      ).trim();
+      const outsKey = (
+        e.output_values?.length
+          ? e.output_values
+          : e.to != null && e.to !== ""
+            ? [e.to]
+            : []
+      )
+        .map((v) => String(v).trim())
+        .join("\0");
+      const attrs = Object.entries(e.attrs ?? {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k}=${v}`)
+        .join(";");
+      return `${fromKey}\t${outsKey}\t${attrs}`;
+    })
+    .sort();
+  return `apply:${map.id}:seed:${hashStr(rows.join("\n") + "|" + schema)}`;
+}
+
+function hashStr(s: string): string {
+  // FNV-1a 32-bit — stable, short, adequate for stale refuse.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 function factColsFromCtx(
@@ -53,31 +123,117 @@ function factColsFromCtx(
   const applyOn = which === "left" ? ctx.applyLeftOn : ctx.applyRightOn;
   if (applyOn?.length) return applyOn;
   const on = which === "left" ? ctx.leftOn : ctx.rightOn;
-  const from = map.from_columns?.length
-    ? map.from_columns
-    : map.from_column
-      ? [map.from_column]
-      : [];
+  const from = fromColumnsEff(map);
   if (from.length > 1 && on.length >= from.length) {
     return on.slice(0, from.length);
   }
   return [on[0] ?? "key"];
 }
 
+function validateBindings(
+  bindings: ApplyKeyMapOutputBinding[],
+  mapOuts: string[],
+  label: string,
+): ResolveApplyPlanError | null {
+  if (!bindings.length) {
+    return { error: `${label}: confirmed Apply choice has no output bindings.` };
+  }
+  const outFold = new Set(mapOuts.map((c) => c.toLowerCase()));
+  const seenMap = new Set<string>();
+  const seenDest = new Set<string>();
+  for (const b of bindings) {
+    const mc = b.map_column?.trim() ?? "";
+    const dc = b.destination_column?.trim() ?? "";
+    if (!mc || !dc) {
+      return {
+        error: `${label}: each binding needs map_column and destination_column.`,
+      };
+    }
+    if (!outFold.has(mc.toLowerCase())) {
+      return {
+        error: `${label}: unknown map output '${mc}' (map has: ${mapOuts.join(", ")}).`,
+      };
+    }
+    const mk = mc.toLowerCase();
+    const dk = dc.toLowerCase();
+    if (seenMap.has(mk)) {
+      return { error: `${label}: duplicate map_column '${mc}'.` };
+    }
+    if (seenDest.has(dk)) {
+      return { error: `${label}: duplicate destination '${dc}'.` };
+    }
+    seenMap.add(mk);
+    seenDest.add(dk);
+  }
+  return null;
+}
+
+function validateMapBasics(map: KeyMapDef): ResolveApplyPlanError | null {
+  const from = fromColumnsEff(map);
+  const outs = outputColumnsEff(map);
+  if (!from.length || from.some((c) => !c.trim())) {
+    return { error: `KeyMap '${map.id}': from columns are required.` };
+  }
+  if (!outs.length || outs.some((c) => !c.trim())) {
+    return { error: `KeyMap '${map.id}': output columns are required.` };
+  }
+  const names = new Set<string>();
+  for (const c of [...from, ...outs]) {
+    const k = c.toLowerCase();
+    if (names.has(k)) {
+      return {
+        error: `KeyMap '${map.id}': duplicate map column name '${c}'.`,
+      };
+    }
+    names.add(k);
+  }
+  if (map.storage?.kind === "query" && !map.storage.query_id?.trim()) {
+    return { error: `KeyMap '${map.id}': query_id is empty.` };
+  }
+  return null;
+}
+
 /**
  * Resolve user choice + Join context into an ApplyPlan.
- * When `choice` is omitted (scalar Apply without review), builds default
- * single/multi bindings from map outputs — still in this module, not App.
+ *
+ * - `choice` omitted → defaults for the scalar / no-review path.
+ * - `choice` present with empty or invalid bindings → error (not silent defaults).
+ *
+ * Schema existence of destination columns is a prepare/describe concern;
+ * this layer refuses elementary binding / map ambiguity only.
  */
 export function resolveApplyPlan(
   map: KeyMapDef,
   ctx: KeyMapJoinCtx,
   side: ApplySide,
   choice?: ApplyUserChoice,
+  workspace?: Workspace | null,
 ): ApplyPlan | ResolveApplyPlanError {
+  const mapErr = validateMapBasics(map);
+  if (mapErr) return mapErr;
+
   const leftCols = factColsFromCtx(ctx, map, "left");
   const rightCols = factColsFromCtx(ctx, map, "right");
+  const from = fromColumnsEff(map);
   const outs = outputColumnsEff(map);
+
+  if (
+    (side === "left" || side === "both") &&
+    leftCols.length < from.length
+  ) {
+    return {
+      error: `Apply left keys (${leftCols.length}) must cover map From arity (${from.length}).`,
+    };
+  }
+  if (
+    (side === "right" || side === "both") &&
+    rightCols.length < from.length
+  ) {
+    return {
+      error: `Apply right keys (${rightCols.length}) must cover map From arity (${from.length}).`,
+    };
+  }
+
   const outputColumnLeft = ctx.outputColumnLeft?.trim() || leftCols[0]!;
   const outLeftIdx = leftCols.findIndex(
     (c) => c.toLowerCase() === outputColumnLeft.toLowerCase(),
@@ -90,11 +246,29 @@ export function resolveApplyPlan(
   let bindingsLeft: ApplyKeyMapOutputBinding[] | undefined;
   let bindingsRight: ApplyKeyMapOutputBinding[] | undefined;
   let joinRewrite = choice?.joinRewrite;
+  const resolvedSide = choice?.side ?? side;
 
-  if (choice?.bindings?.length) {
-    const routed = applyReviewBindingsForSide(choice.side, choice.bindings);
+  if (choice !== undefined) {
+    // Confirmed review path — empty/invalid must not fall through to defaults.
+    const routed = applyReviewBindingsForSide(choice.side, choice.bindings ?? []);
     bindingsLeft = routed.outputBindingsLeft;
     bindingsRight = routed.outputBindingsRight;
+    if (choice.side === "left" || choice.side === "both") {
+      const err = validateBindings(
+        bindingsLeft ?? [],
+        outs,
+        "Apply review (left)",
+      );
+      if (err) return err;
+    }
+    if (choice.side === "right" || choice.side === "both") {
+      const err = validateBindings(
+        bindingsRight ?? [],
+        outs,
+        "Apply review (right)",
+      );
+      if (err) return err;
+    }
   } else {
     // No review panel (scalar / single-output): defaults live here, not in App.
     const defaultLeft =
@@ -137,7 +311,7 @@ export function resolveApplyPlan(
   return {
     map,
     ctx,
-    side: choice?.side ?? side,
+    side: resolvedSide,
     leftCols,
     rightCols,
     outputColumnLeft,
@@ -145,7 +319,7 @@ export function resolveApplyPlan(
     outputBindingsLeft: bindingsLeft,
     outputBindingsRight: bindingsRight,
     joinRewrite,
-    mapRevision: keyMapRevisionFingerprint(map),
+    mapRevision: keyMapRevisionFingerprint(map, workspace),
   };
 }
 
@@ -164,5 +338,6 @@ export function intentFromApplyPlan(plan: ApplyPlan): KeyMapApplyIntent {
     outputBindingsLeft: plan.outputBindingsLeft,
     outputBindingsRight: plan.outputBindingsRight,
     joinRewrite: plan.joinRewrite,
+    expectedMapRevision: plan.mapRevision,
   };
 }

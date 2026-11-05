@@ -1,10 +1,13 @@
 import {
   attrsSummarySql,
+  attrsJoinAnchoredSummarySql,
   applyFrozenRemapToMap,
   assertRemapConfirmable,
   attributeDelta,
   buildCheckRun,
   checkDefinitionRevision,
+  CHECK_LEFT_QUERY_ID,
+  CHECK_SUMMARY_QUERY_ID,
   cohortInspectionQuery,
   cohortPredicateForTarget,
   cohortPredicateFromAttrCells,
@@ -14,8 +17,10 @@ import {
   inputRevisionForQuery,
   keyMapRevision,
   labMappingCheck,
+  normalizeAttrsProjection,
   resolveInspectJoinLensTarget,
   upsertAllowDecision,
+  workspaceForJoinAnchoredAttrsOverview,
 } from "./mappingCheck";
 import { QUALITY_JOIN } from "./mappingQuality";
 import type { CheckRun, MappingCheck } from "../types/mappingCheck";
@@ -377,6 +382,9 @@ assert(
       left_attr: "item_code",
       right_attr: "item_code",
       sample_column: "item_code",
+      left_attrs: ["item_code"],
+      right_attrs: ["item_code"],
+      sample_columns: ["item_code"],
     },
   };
   const sample = cohortInspectionQuery(hostWs, attrsCheck);
@@ -452,6 +460,83 @@ assert(
   assert(sql.includes("group_count"), "attrs sql exposes group_count");
   assert(sql.includes("LIMIT 40"), "attrs sql self-limits under preview window");
   assert(sql.includes("stats AS"), "attrs sql has stats CTE");
+}
+
+{
+  const joinSql = attrsJoinAnchoredSummarySql({
+    leftQueryId: CHECK_LEFT_QUERY_ID,
+    rightQueryId: "dim",
+    leftOn: ["ext_offer_id", "as_of_day"],
+    rightOn: ["offer_id", "as_of_day"],
+    leftAttrs: ["ext_offer_id", "as_of_day"],
+    rightAttrs: ["company_name"],
+    sampleColumns: ["ext_offer_id", "as_of_day"],
+  });
+  assert(joinSql.includes("LEFT JOIN"), "join-anchored rebuilds Join");
+  assert(joinSql.includes("concat_ws"), "tuple axis uses concat_ws");
+  assert(joinSql.includes("company_name"), "right attr from right side");
+  assert(
+    !joinSql.includes("hostResultMode"),
+    "no host-result flag in SQL",
+  );
+
+  const ws: Workspace = {
+    focus_query_id: "host",
+    key_maps: [],
+    queries: [
+      {
+        id: "host",
+        name: "host",
+        steps: [
+          { type: "LoadParquet", payload: { path: "a.parquet" } },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              join_type: "left",
+              left_on: ["ext_offer_id", "as_of_day"],
+              right_on: ["offer_id", "as_of_day"],
+            },
+          },
+        ],
+      },
+      {
+        id: "dim",
+        name: "dim",
+        steps: [{ type: "LoadParquet", payload: { path: "b.parquet" } }],
+      },
+    ],
+  };
+  const overview = workspaceForJoinAnchoredAttrsOverview(ws, {
+    hostQueryId: "host",
+    joinStepIndex: 1,
+    rightQueryId: "dim",
+    leftOn: ["ext_offer_id", "as_of_day"],
+    rightOn: ["offer_id", "as_of_day"],
+    leftAttrs: ["ext_offer_id", "as_of_day"],
+    rightAttrs: ["company_name"],
+    sampleColumns: ["ext_offer_id", "as_of_day"],
+  });
+  assert(overview.focus_query_id === CHECK_SUMMARY_QUERY_ID, "focus summary");
+  assert(
+    overview.queries.some((q) => q.id === CHECK_LEFT_QUERY_ID),
+    "ephemeral left",
+  );
+  const leftQ = overview.queries.find((q) => q.id === CHECK_LEFT_QUERY_ID)!;
+  assert(leftQ.steps.length === 1, "left stops before Join");
+
+  const soft = normalizeAttrsProjection({
+    kind: "attrs",
+    host_query_id: "h",
+    left_attr: "a",
+    right_attr: "b",
+    sample_column: "a",
+    left_attrs: [],
+    right_attrs: [],
+    sample_columns: [],
+  });
+  assert(soft.kind === "attrs" && soft.left_attrs[0] === "a", "soft left");
+  assert(soft.kind === "attrs" && soft.right_attrs[0] === "b", "soft right");
 }
 
 console.log("mappingCheck.test.ts: ok");

@@ -98,6 +98,7 @@ import { JoinLens } from "./components/JoinLens";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { KeyMapEditor } from "./components/KeyMapEditor";
 import { MappingQualityOverview } from "./components/mapping-quality/MappingQualityOverview";
+import { MappingCheckSetupDialog } from "./components/MappingCheckSetupDialog";
 import {
   QUALITY_INSPECTION,
   QUALITY_JOIN,
@@ -112,6 +113,7 @@ import {
   ensureLabCheck,
   keyMapRevision,
   labMappingCheck,
+  normalizeAttrsProjection,
   resolveInspectJoinLensTarget,
   type FrozenRemapPreview,
 } from "./lib/mappingCheck";
@@ -127,12 +129,16 @@ import {
   confirmFrozenCheckRemap as confirmFrozenCheckRemapSvc,
   createMappingCheck,
   findJoinHostsForMap,
+  inferCheckAttrsFromJoin,
   planCheckInspect,
   recordCheckRun,
   resolveActiveMappingCheck,
+  resolveAttrsJoinBinding,
   stageFrozenRemapChanges,
+  updateMappingCheckProjection,
   type ConfirmRemapApplyIntent,
   type ConfirmRemapApplyResult,
+  type InferredCheckAttrs,
 } from "./app/mappingChecks";
 import {
   applyMappingCreateOntoProject,
@@ -459,12 +465,44 @@ function App() {
     setSelectedKeyMapId(null);
   }
 
-  function handleNewMappingCheck() {
+  type CheckSetupState = {
+    mode: "create" | "edit";
+    mapId: string;
+    mapName: string;
+    hostQueryId: string;
+    hostName: string;
+    joinStepIndex: number;
+    leftOn: string[];
+    rightOn: string[];
+    rightQueryId: string;
+    leftColumns: string[];
+    rightColumns: string[];
+    inferred: InferredCheckAttrs;
+    checkId?: string;
+    initial?: {
+      leftAttrs: string[];
+      rightAttrs: string[];
+      sampleColumns: string[];
+    } | null;
+  };
+  const [checkSetup, setCheckSetup] = useState<CheckSetupState | null>(null);
+
+  async function openMappingCheckSetup(opts?: {
+    mapId?: string;
+    hostQueryId?: string;
+    joinStepIndex?: number;
+    mode?: "create" | "edit";
+    checkId?: string;
+  }) {
     const keyMaps = project.workspace.key_maps ?? [];
     const map =
+      (opts?.mapId
+        ? keyMaps.find((m) => m.id === opts.mapId)
+        : null) ??
       (selectedKeyMapId
         ? keyMaps.find((m) => m.id === selectedKeyMapId)
-        : null) ?? keyMaps[0];
+        : null) ??
+      keyMaps[0];
     if (!map) {
       setError("Add a KeyMap before creating a mapping check.");
       return;
@@ -476,9 +514,21 @@ function App() {
       );
       return;
     }
-    // Prefer the Join currently selected on the canvas when the map is on several hosts.
     let hostHit = hosts[0]!;
-    if (hosts.length > 1) {
+    if (opts?.hostQueryId != null && opts.joinStepIndex != null) {
+      const exact = hosts.find(
+        (h) =>
+          h.host.id === opts.hostQueryId &&
+          h.joinStepIndex === opts.joinStepIndex,
+      );
+      if (!exact) {
+        setError(
+          `Join on “${opts.hostQueryId}” is not wired to map “${map.name}”.`,
+        );
+        return;
+      }
+      hostHit = exact;
+    } else if (hosts.length > 1) {
       const onActiveStep =
         activeQueryId && selectedStepIndex != null
           ? hosts.find(
@@ -502,22 +552,114 @@ function App() {
       }
       hostHit = resolved;
     }
+    const joinStep = hostHit.host.steps[hostHit.joinStepIndex];
+    if (!joinStep || joinStep.type !== "Join") {
+      setError("Selected host Join step is missing.");
+      return;
+    }
+    const rightQueryId = targetKey(joinStep.payload.right_query_id);
+    try {
+      const cols = await fetchJoinSideColumns(
+        hostHit.host.id,
+        rightQueryId,
+        hostHit.joinStepIndex,
+      );
+      const leftColumns = cols.left.map((c) => c.name);
+      const rightColumns = cols.right.map((c) => c.name);
+      const inferred = inferCheckAttrsFromJoin({
+        map,
+        leftOn: hostHit.leftOn,
+        rightOn: hostHit.rightOn,
+        leftColumns,
+        rightColumns,
+      });
+      let initial: CheckSetupState["initial"] = null;
+      if (opts?.mode === "edit" && opts.checkId) {
+        const existing = (project.mapping_checks ?? []).find(
+          (c) => c.id === opts.checkId,
+        );
+        if (existing?.projection.kind === "attrs") {
+          const n = normalizeAttrsProjection(existing.projection);
+          if (n.kind === "attrs") {
+            initial = {
+              leftAttrs: n.left_attrs,
+              rightAttrs: n.right_attrs,
+              sampleColumns: n.sample_columns,
+            };
+          }
+        }
+      }
+      setCheckSetup({
+        mode: opts?.mode ?? "create",
+        mapId: map.id,
+        mapName: map.name,
+        hostQueryId: hostHit.host.id,
+        hostName: hostHit.host.name,
+        joinStepIndex: hostHit.joinStepIndex,
+        leftOn: hostHit.leftOn,
+        rightOn: hostHit.rightOn,
+        rightQueryId,
+        leftColumns,
+        rightColumns,
+        inferred,
+        checkId: opts?.checkId,
+        initial,
+      });
+      setError(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    }
+  }
+
+  function confirmMappingCheckSetup(result: {
+    leftAttrs: string[];
+    rightAttrs: string[];
+    sampleColumns: string[];
+  }) {
+    if (!checkSetup) return;
+    if (checkSetup.mode === "edit" && checkSetup.checkId) {
+      const updated = updateMappingCheckProjection(
+        project.mapping_checks ?? [],
+        checkSetup.checkId,
+        {
+          kind: "attrs",
+          host_query_id: checkSetup.hostQueryId,
+          left_attr: result.leftAttrs[0] ?? "",
+          right_attr: result.rightAttrs[0] ?? "",
+          sample_column: result.sampleColumns[0] ?? result.leftAttrs[0] ?? "",
+          left_attrs: result.leftAttrs,
+          right_attrs: result.rightAttrs,
+          sample_columns: result.sampleColumns,
+        },
+      );
+      if (!updated.ok) {
+        setError(updated.error);
+        return;
+      }
+      setProject((p) => ({ ...p, mapping_checks: updated.mapping_checks }));
+      setCheckDeltaNote(updated.note);
+      setCheckSetup(null);
+      setCenterTab(QUALITY_TAB);
+      setError(null);
+      return;
+    }
     const created = createMappingCheck({
       checks: project.mapping_checks ?? [],
-      keyMaps,
+      keyMaps: project.workspace.key_maps ?? [],
       queries,
-      mapId: map.id,
-      hostQueryId: hostHit.host.id,
-      joinStepIndex: hostHit.joinStepIndex,
-      leftAttr: hostHit.leftOn[0] ?? "key",
-      rightAttr: hostHit.rightOn[0] ?? "id",
-      sampleColumn: hostHit.leftOn[0] ?? "key",
+      mapId: checkSetup.mapId,
+      hostQueryId: checkSetup.hostQueryId,
+      joinStepIndex: checkSetup.joinStepIndex,
+      leftAttrs: result.leftAttrs,
+      rightAttrs: result.rightAttrs,
+      sampleColumns: result.sampleColumns,
     });
     if (!created.ok) {
       setError(created.error);
       return;
     }
     setProject((p) => appendMappingCheck(p, created.check));
+    setCheckSetup(null);
     setCenterTab(QUALITY_TAB);
     setCheckDeltaNote(created.note);
     setError(null);
@@ -4578,7 +4720,6 @@ function App() {
           handleSetTargetDialect(d)
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
-        onNewMappingCheck={() => handleNewMappingCheck()}
         onOpenHelp={() => setHelpOpen(true)}
         onZoomIn={() => void windowAction("zoom-in")}
         onZoomOut={() => void windowAction("zoom-out")}
@@ -4588,6 +4729,22 @@ function App() {
       />
 
       <HelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {checkSetup && (
+        <MappingCheckSetupDialog
+          open
+          mode={checkSetup.mode}
+          mapName={checkSetup.mapName}
+          hostName={checkSetup.hostName}
+          leftOn={checkSetup.leftOn}
+          rightOn={checkSetup.rightOn}
+          leftColumns={checkSetup.leftColumns}
+          rightColumns={checkSetup.rightColumns}
+          inferred={checkSetup.inferred}
+          initial={checkSetup.initial}
+          onClose={() => setCheckSetup(null)}
+          onConfirm={confirmMappingCheckSetup}
+        />
+      )}
       {addRefPending && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4"
@@ -5224,6 +5381,38 @@ function App() {
                   projection={
                     activeMappingCheck?.projection ?? LAB_V1_PROJECTION
                   }
+                  attrsJoin={
+                    activeMappingCheck
+                      ? (() => {
+                          const b = resolveAttrsJoinBinding(
+                            queries,
+                            activeMappingCheck,
+                          );
+                          return b
+                            ? {
+                                joinStepIndex: b.joinStepIndex,
+                                rightQueryId: b.rightQueryId,
+                                leftOn: b.leftOn,
+                                rightOn: b.rightOn,
+                              }
+                            : null;
+                        })()
+                      : null
+                  }
+                  onChangeAttrs={
+                    activeMappingCheck?.projection.kind === "attrs"
+                      ? () =>
+                          void openMappingCheckSetup({
+                            mode: "edit",
+                            checkId: activeMappingCheck.id,
+                            mapId: activeMappingCheck.map_id,
+                            hostQueryId:
+                              activeMappingCheck.projection.kind === "attrs"
+                                ? activeMappingCheck.projection.host_query_id
+                                : undefined,
+                          })
+                      : undefined
+                  }
                   workspace={project.workspace}
                   connections={project.connections}
                   sources={project.sources}
@@ -5460,6 +5649,12 @@ function App() {
                       ...s,
                       saveApi,
                     }))
+                  }
+                  onMappingCheck={() =>
+                    void openMappingCheckSetup({
+                      mode: "create",
+                      mapId: keyMapEditor.map.id,
+                    })
                   }
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
                   onSave={
@@ -6417,6 +6612,39 @@ function App() {
                         >
                           Apply
                         </button>
+                        {activeQueryId &&
+                          selectedStepIndex != null &&
+                          (() => {
+                            const hosts = (
+                              project.workspace.key_maps ?? []
+                            ).flatMap((m) =>
+                              findJoinHostsForMap(queries, m.id)
+                                .filter(
+                                  (h) =>
+                                    h.host.id === activeQueryId &&
+                                    h.joinStepIndex === selectedStepIndex,
+                                )
+                                .map((h) => ({ map: m, host: h })),
+                            );
+                            const hit = hosts[0];
+                            if (!hit) return null;
+                            return (
+                              <button
+                                type="button"
+                                className="w-full rounded-lg border border-teal-800/40 bg-teal-950/40 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/15"
+                                onClick={() =>
+                                  void openMappingCheckSetup({
+                                    mode: "create",
+                                    mapId: hit.map.id,
+                                    hostQueryId: activeQueryId,
+                                    joinStepIndex: selectedStepIndex,
+                                  })
+                                }
+                              >
+                                Mapping check… ({hit.map.name})
+                              </button>
+                            );
+                          })()}
                         <JoinDiagnosticsPanel
                           loading={joinDiagLoading}
                           error={joinDiagError}

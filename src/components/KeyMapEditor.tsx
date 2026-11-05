@@ -79,6 +79,8 @@ export type KeyMapEditorProps = {
   /** Bumped by App after WH Save when saveApi was absent (legacy clear). */
   dirtyResetSeq?: number;
   onApply?: (side: ApplySide) => void;
+  /** Create a Join-anchored mapping quality check for this KeyMap (ADR-0035). */
+  onMappingCheck?: () => void;
   onClose?: () => void;
   onSave?: () => void;
   onDelete?: () => void;
@@ -129,6 +131,7 @@ export function KeyMapEditor({
   dirtyResetSeq,
   saveInFlight = false,
   onApply,
+  onMappingCheck,
   onClose,
   onSave,
   onDelete,
@@ -1494,6 +1497,16 @@ export function KeyMapEditor({
               )}
           </div>
         </div>
+        {onMappingCheck && (
+          <button
+            type="button"
+            onClick={onMappingCheck}
+            className="rounded-md border border-teal-800/50 bg-teal-500/10 px-2.5 py-1 text-[12px] font-medium text-teal-200 hover:bg-teal-500/20"
+            title="Open mapping quality overview for a Join that ApplyKeyMap-wires this map"
+          >
+            Mapping check…
+          </button>
+        )}
         {onClose && (
           <button
             type="button"

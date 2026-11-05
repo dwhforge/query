@@ -164,6 +164,10 @@ impl Project {
         migrate_project_document(&mut v)?;
         let mut p: Self = serde_json::from_value(v).map_err(|e| e.to_string())?;
         p.format_version = PROJECT_FORMAT_VERSION;
+        // ADR-0035: singular left_attr ↔ left_attrs[] soft-migrate.
+        for check in &mut p.mapping_checks {
+            check.projection = check.projection.clone().normalize_attrs();
+        }
         Ok(p)
     }
 
@@ -539,6 +543,9 @@ mod tests {
             left_attr: "a".into(),
             right_attr: "b".into(),
             sample_column: "id".into(),
+            left_attrs: vec!["a".into()],
+            right_attrs: vec!["b".into()],
+            sample_columns: vec!["id".into()],
         };
         let back2 = Project::from_json(&p.to_json_pretty().unwrap()).unwrap();
         assert!(matches!(

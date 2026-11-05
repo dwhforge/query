@@ -1724,7 +1724,7 @@ function JoinLensImpl({
     }, 3500);
   }
 
-  /** Left unmatched → From, right unmatched → To (dirty names → canon id). */
+  /** Left unmatched → From, right unmatched → To / named output cells (ADR-0037). */
   function emitMapPair() {
     if (!onMapKey || leftSel == null || rightSel == null) return;
     const fromVals = keyValsFor("left", leftSel);
@@ -1734,7 +1734,25 @@ function JoinLensImpl({
     }
     const fromLabel = fromVals.map((v) => v.trim() || "∅").join(" · ");
     pinCenterToFromKey(fromLabel);
-    onMapKey("left", fromVals, { toValues: toVals });
+    // Named cells from the whole right row — App/merge keeps only map output names.
+    const row = rightRows[rightSel];
+    const cellPatches =
+      row && rightCols.length
+        ? [
+            rightCols
+              .map((c, i) => ({
+                column: c.name,
+                value: String(row[i] ?? "").trim(),
+              }))
+              .filter((c) => c.column.trim() && c.value),
+          ]
+        : undefined;
+    onMapKey("left", fromVals.length === 1 ? fromVals : [fromLabel], {
+      // Scalar To list: one suggestion → first right key (not multi-output).
+      toValues: [toVals.map((v) => v.trim()).filter(Boolean)[0] ?? toVals[0] ?? ""],
+      fromParts: [fromVals],
+      cellPatches,
+    });
     const toast = `Opened mapping · ${fromLabel} → ${toVals.map((v) => v.trim() || "∅").join(" · ")}`;
     setMapToast(toast);
     window.setTimeout(() => {

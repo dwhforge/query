@@ -505,6 +505,60 @@ fn fold_authoring_context_targets(m: &mut serde_json::Map<String, Value>) {
     ctx.remove("target_column");
 }
 
+/// Local vs external Apply `map_id` during JSON migrate (before typed ObjectTarget).
+enum MigrateMapTarget {
+    Local(String),
+    External { reference_id: String, id: String },
+}
+
+fn parse_migrate_map_target(map_id: &Value) -> Result<MigrateMapTarget, String> {
+    match map_id {
+        Value::String(s) => {
+            let id = s.trim().to_string();
+            if id.is_empty() {
+                return Err("migrate v2→v3: ApplyKeyMap map_id is empty".into());
+            }
+            Ok(MigrateMapTarget::Local(id))
+        }
+        Value::Object(o) => {
+            let id = o
+                .get("id")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "migrate v2→v3: ApplyKeyMap map_id object needs id".to_string())?
+                .to_string();
+            let reference_id = o
+                .get("reference_id")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            let scope = o
+                .get("scope")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            let is_external = !reference_id.is_empty()
+                || scope.eq_ignore_ascii_case("reference")
+                || scope.eq_ignore_ascii_case("external");
+            if is_external {
+                if reference_id.is_empty() {
+                    return Err(format!(
+                        "migrate v2→v3: external ApplyKeyMap map_id '{id}' needs reference_id"
+                    ));
+                }
+                Ok(MigrateMapTarget::External {
+                    reference_id: reference_id.to_string(),
+                    id,
+                })
+            } else {
+                Ok(MigrateMapTarget::Local(id))
+            }
+        }
+        _ => Err("migrate v2→v3: ApplyKeyMap map_id must be string or object".into()),
+    }
+}
+
 fn fold_apply_keymap_bindings(
     apply: &mut serde_json::Map<String, Value>,
     map_primary_output: &std::collections::HashMap<String, String>,
@@ -515,14 +569,10 @@ fn fold_apply_keymap_bindings(
         .map(|arr| arr.clone())
         .unwrap_or_default();
 
-    let map_id = apply
+    let target = apply
         .get("map_id")
-        .and_then(|m| match m {
-            Value::String(s) => Some(s.clone()),
-            Value::Object(o) => o.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
+        .ok_or_else(|| "migrate v2→v3: ApplyKeyMap missing map_id".to_string())
+        .and_then(parse_migrate_map_target)?;
 
     if !existing.is_empty() {
         if let Some(legacy_out) = json_string_field(apply, "output_column") {
@@ -536,23 +586,36 @@ fn fold_apply_keymap_bindings(
                     "migrate v2→v3: ApplyKeyMap output_column '{legacy_out}' disagrees with first binding destination"
                 ));
             }
-            if let Some(primary) = map_primary_output.get(&map_id) {
-                let first_map = existing
-                    .first()
-                    .and_then(|b| b.as_object())
-                    .and_then(|b| b.get("map_column"))
-                    .and_then(|d| d.as_str());
-                if first_map != Some(primary.as_str()) {
-                    return Err(format!(
-                        "migrate v2→v3: ApplyKeyMap map_column {:?} disagrees with map '{map_id}' output '{primary}'",
-                        first_map
-                    ));
+            // Only local maps may be checked against this document's primary output.
+            if let MigrateMapTarget::Local(ref map_id) = target {
+                if let Some(primary) = map_primary_output.get(map_id) {
+                    let first_map = existing
+                        .first()
+                        .and_then(|b| b.as_object())
+                        .and_then(|b| b.get("map_column"))
+                        .and_then(|d| d.as_str());
+                    if first_map != Some(primary.as_str()) {
+                        return Err(format!(
+                            "migrate v2→v3: ApplyKeyMap map_column {:?} disagrees with map '{map_id}' output '{primary}'",
+                            first_map
+                        ));
+                    }
                 }
             }
         }
         apply.remove("output_column");
         return Ok(());
     }
+
+    let map_id = match &target {
+        MigrateMapTarget::Local(id) => id.clone(),
+        MigrateMapTarget::External { reference_id, id } => {
+            return Err(format!(
+                "migrate v2→v3: ApplyKeyMap external map '{id}' via reference '{reference_id}' \
+                 has no output_bindings — cannot invent map_column from a local map with the same id"
+            ));
+        }
+    };
 
     if map_id.is_empty() || !map_primary_output.contains_key(&map_id) {
         return Err(format!(
@@ -897,6 +960,52 @@ mod tests {
         }"#;
         let p = Project::from_json(v1).unwrap();
         assert_eq!(p.format_version, PROJECT_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn v2_external_apply_without_bindings_refuses_local_id_guess() {
+        let v2 = r#"{
+            "format_version": 2,
+            "id": "p",
+            "name": "v2",
+            "connections": [],
+            "sources": [],
+            "workspace": {
+                "queries": [{
+                    "id": "q1",
+                    "name": "q1",
+                    "steps": [{
+                        "type": "ApplyKeyMap",
+                        "payload": {
+                            "column": "sku",
+                            "output_column": "sku",
+                            "map_id": {
+                                "scope": "reference",
+                                "reference_id": "shared_catalog",
+                                "kind": "key_map",
+                                "id": "map_products"
+                            },
+                            "entries": []
+                        }
+                    }]
+                }],
+                "focus_query_id": "q1",
+                "key_maps": [{
+                    "id": "map_products",
+                    "name": "local",
+                    "entries": [{"from":"a","to":"local_product_id"}],
+                    "storage": {"kind":"seed"},
+                    "from_column": "from",
+                    "to_column": "local_product_id"
+                }]
+            },
+            "dbt_target": "v1"
+        }"#;
+        let err = Project::from_json(v2).unwrap_err();
+        assert!(
+            err.contains("external") && err.contains("cannot invent"),
+            "must refuse inventing map_column from local twin: {err}"
+        );
     }
 
     #[test]

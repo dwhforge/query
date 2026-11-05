@@ -176,10 +176,12 @@ import {
   nextRequestGen,
 } from "./lib/requestGen";
 import {
+  applyKeymapOutputBindings,
   applyNormalizeToWorkspace,
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
   findApplyKeyMapIdForJoin,
+  outputColumnsEff,
   resolveKeyMapConnection,
   type ApplySide,
 } from "./lib/keyMap";
@@ -5762,6 +5764,23 @@ function App() {
                               ctx.outputColumnRight?.trim() ||
                               rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
                               rightCols[0]!;
+                            const outs = outputColumnsEff(map);
+                            const outputBindingsLeft =
+                              ctx.outputBindingsLeft?.length
+                                ? ctx.outputBindingsLeft
+                                : outs.length > 1
+                                  ? outs.map((map_column, i) => ({
+                                      map_column,
+                                      destination_column:
+                                        i === 0
+                                          ? outputColumnLeft
+                                          : map_column,
+                                    }))
+                                  : applyKeymapOutputBindings({
+                                      output_column: outputColumnLeft,
+                                      factCols: leftCols,
+                                      mapColumnHint: outs[0] ?? "to",
+                                    });
                             // Commit Apply via reducer — outcome lives in
                             // keyMapApplyResult and is handled after commit.
                             dispatchProject({
@@ -5774,6 +5793,9 @@ function App() {
                                 rightCols,
                                 outputColumnLeft,
                                 outputColumnRight,
+                                outputBindingsLeft,
+                                outputBindingsRight: ctx.outputBindingsRight,
+                                joinRewrite: ctx.joinRewrite,
                               },
                             });
                           });

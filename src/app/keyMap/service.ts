@@ -196,6 +196,9 @@ export function applyKeyMapOntoProject(
     intent.rightCols,
     intent.outputColumnLeft,
     intent.outputColumnRight,
+    intent.outputBindingsLeft ?? intent.ctx.outputBindingsLeft,
+    intent.outputBindingsRight ?? intent.ctx.outputBindingsRight,
+    intent.joinRewrite ?? intent.ctx.joinRewrite,
   );
   return {
     project: { ...project, workspace },
@@ -607,8 +610,12 @@ export function mergeFromValuesIntoMap(args: {
 }): KeyMapDef {
   const { map, fromValues, joinCtx, toValues, fromParts, cellPatches } = args;
   const outCols = outputColumnsEff(map);
+  const knownOut = new Set(outCols.map((c) => c.trim().toLowerCase()));
   const cellsFor = (i: number): LensOutputCell[] => {
-    const named = cellPatches?.[i] ?? [];
+    // Right-row dumps may include join keys / attrs — keep only map outputs.
+    const named = (cellPatches?.[i] ?? []).filter((c) =>
+      knownOut.has(c.column.trim().toLowerCase()),
+    );
     const to = (toValues?.[i] ?? "").trim();
     if (!to) return named;
     const first = outCols[0]!.trim().toLowerCase();

@@ -47,6 +47,7 @@ pub use emit::{
     key_map_seed_csv_cols, key_map_seed_csv_full, key_map_seed_csv_named, key_map_seed_csv_outputs,
     key_map_seed_name, normalize_column_expr, normalize_key_column_expr, parse_key_map_seed_csv,
     parse_key_map_seed_csv_cols, parse_key_map_seed_csv_full, parse_key_map_seed_csv_mode,
+    parse_key_map_seed_csv_outputs,
     rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
     validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode,

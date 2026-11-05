@@ -359,20 +359,46 @@ export function parseFromToPaste(
   return out;
 }
 
+function defaultOutputBindings(
+  map: KeyMapDef,
+  factCols: string[],
+  outputColumn?: string,
+  explicit?: ApplyKeyMapOutputBinding[],
+): ApplyKeyMapOutputBinding[] {
+  if (explicit?.length) return explicit;
+  const outs = outputColumnsEff(map);
+  if (outs.length <= 1) {
+    return applyKeymapOutputBindings({
+      output_column: outputColumn,
+      factCols,
+      mapColumnHint: outs[0] ?? "to",
+    });
+  }
+  // Multi-output: destination defaults to map column name (new fact cols).
+  // First binding may still use a legacy scalar outputColumn overwrite.
+  return outs.map((map_column, i) => ({
+    map_column,
+    destination_column:
+      i === 0 && outputColumn?.trim() ? outputColumn.trim() : map_column,
+  }));
+}
+
 function upsertApplyStep(
   steps: TransformationStep[],
   at: number,
   columns: string[],
   map: KeyMapDef,
   outputColumn?: string,
+  outputBindings?: ApplyKeyMapOutputBinding[],
 ): TransformationStep[] {
   const next = [...steps];
   const cols = columns.filter((c) => c.trim());
   if (!cols.length) return next;
+  const bindings = defaultOutputBindings(map, cols, outputColumn, outputBindings);
   const payload = {
     column: cols[0]!,
     columns: cols,
-    ...(outputColumn?.trim() ? { output_column: outputColumn.trim() } : {}),
+    output_bindings: bindings,
     map_id: map.id,
     entries: map.entries,
   };
@@ -437,6 +463,11 @@ export function applyKeyMapToWorkspace(
   columnsRight?: string[],
   outputColumnLeft?: string,
   outputColumnRight?: string,
+  /** ADR-0037: explicit multi-output destinations (left Apply). */
+  outputBindingsLeft?: ApplyKeyMapOutputBinding[],
+  outputBindingsRight?: ApplyKeyMapOutputBinding[],
+  /** When set, rewrite Join ON to these left/right equals after Apply. */
+  joinRewrite?: { leftOn: string[]; rightOn: string[] },
 ): Workspace {
   const leftCols = columnsLeft?.length ? columnsLeft : [columnLeft];
   const rightCols = columnsRight?.length ? columnsRight : [columnRight];
@@ -446,16 +477,32 @@ export function applyKeyMapToWorkspace(
     outputColumnRight?.trim() || rightCols[0];
   const queries = workspace.queries.map((q) => {
     if (side !== "right" && q.id === hostQueryId) {
-      return {
-        ...q,
-        steps: upsertApplyStep(
-          q.steps,
-          joinStepIndex,
-          leftCols,
-          map,
-          outLeft,
-        ),
-      };
+      let steps = upsertApplyStep(
+        q.steps,
+        joinStepIndex,
+        leftCols,
+        map,
+        outLeft,
+        outputBindingsLeft,
+      );
+      if (joinRewrite?.leftOn.length && joinRewrite.rightOn.length) {
+        const idx = resolveJoinIndex(steps, joinStepIndex, rightQueryId);
+        if (idx != null) {
+          const s = steps[idx]!;
+          if (s.type === "Join") {
+            steps = [...steps];
+            steps[idx] = {
+              ...s,
+              payload: {
+                ...s.payload,
+                left_on: [...joinRewrite.leftOn],
+                right_on: [...joinRewrite.rightOn],
+              },
+            };
+          }
+        }
+      }
+      return { ...q, steps };
     }
     if (side !== "left" && q.id === rightQueryId) {
       return {
@@ -466,6 +513,7 @@ export function applyKeyMapToWorkspace(
           rightCols,
           map,
           outRight,
+          outputBindingsRight,
         ),
       };
     }
@@ -473,6 +521,30 @@ export function applyKeyMapToWorkspace(
   });
   const key_maps = upsertKeyMapList(workspace.key_maps ?? [], map);
   return { ...workspace, queries, key_maps };
+}
+
+function resolveJoinIndex(
+  steps: TransformationStep[],
+  preferred: number,
+  rightQueryId: string,
+): number | null {
+  const at = steps[preferred];
+  if (
+    at?.type === "Join" &&
+    targetKey(at.payload.right_query_id) === rightQueryId
+  ) {
+    return preferred;
+  }
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (
+      s?.type === "Join" &&
+      targetKey(s.payload.right_query_id) === rightQueryId
+    ) {
+      return i;
+    }
+  }
+  return null;
 }
 
 export function applyNormalizeToWorkspace(

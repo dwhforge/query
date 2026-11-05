@@ -78,4 +78,4 @@ export type KeyMapApplyIntent = {
 
 export type KeyMapApplyResult =
   | { status: "ok"; mapId: string; workspace: Workspace }
-  | { status: "join_gone"; mapId: string };
+  | { status: "join_gone"; mapId: string; reason?: string };

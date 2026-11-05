@@ -180,7 +180,8 @@ export function applyKeyMapOntoProject(
       result: { status: "join_gone", mapId: intent.map.id },
     };
   }
-  const workspace = applyKeyMapToWorkspace(
+  const joinRewrite = intent.joinRewrite ?? intent.ctx.joinRewrite;
+  const applied = applyKeyMapToWorkspace(
     {
       ...project.workspace,
       key_maps: upsertKeyMapList(project.workspace.key_maps ?? [], intent.map),
@@ -198,11 +199,31 @@ export function applyKeyMapOntoProject(
     intent.outputColumnRight,
     intent.outputBindingsLeft ?? intent.ctx.outputBindingsLeft,
     intent.outputBindingsRight ?? intent.ctx.outputBindingsRight,
-    intent.joinRewrite ?? intent.ctx.joinRewrite,
+    joinRewrite,
+    {
+      rightQueryId: intent.ctx.rightQueryId,
+      leftOn: intent.ctx.leftOn,
+      rightOn: intent.ctx.rightOn,
+      joinType: intent.ctx.joinType,
+    },
   );
+  if (!applied.ok) {
+    return {
+      project,
+      result: {
+        status: "join_gone",
+        mapId: intent.map.id,
+        reason: applied.error,
+      },
+    };
+  }
   return {
-    project: { ...project, workspace },
-    result: { status: "ok", mapId: intent.map.id, workspace },
+    project: { ...project, workspace: applied.workspace },
+    result: {
+      status: "ok",
+      mapId: intent.map.id,
+      workspace: applied.workspace,
+    },
   };
 }
 

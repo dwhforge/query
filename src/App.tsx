@@ -1899,7 +1899,8 @@ function App() {
     dispatchProject({ type: "clear_keymap_apply_result" });
     if (result.status === "join_gone") {
       setError(
-        "Join was removed or changed while Save was pending — mapping was saved, but Apply was skipped. Re-open the Join and Apply again.",
+        result.reason?.trim() ||
+          "Join was removed or changed while Save was pending — mapping was saved, but Apply was skipped. Re-open the Join and Apply again.",
       );
       return;
     }
@@ -5706,7 +5707,7 @@ function App() {
                   }
                   onApply={
                     keyMapEditor.joinCtx
-                      ? (side) => {
+                      ? (side, opts) => {
                           const ctx = keyMapEditor.joinCtx!;
                           const map = keyMapEditor.map;
                           void saveKeyMapToProject(map).then((result) => {
@@ -5766,7 +5767,9 @@ function App() {
                               rightCols[0]!;
                             const outs = outputColumnsEff(map);
                             const outputBindingsLeft =
-                              ctx.outputBindingsLeft?.length
+                              opts?.outputBindingsLeft?.length
+                                ? opts.outputBindingsLeft
+                                : ctx.outputBindingsLeft?.length
                                 ? ctx.outputBindingsLeft
                                 : outs.length > 1
                                   ? outs.map((map_column, i) => ({
@@ -5787,7 +5790,9 @@ function App() {
                               type: "apply_keymap",
                               intent: {
                                 map,
-                                ctx,
+                                ctx: opts
+                                  ? { ...ctx, joinRewrite: opts.joinRewrite }
+                                  : ctx,
                                 side,
                                 leftCols,
                                 rightCols,
@@ -5795,7 +5800,11 @@ function App() {
                                 outputColumnRight,
                                 outputBindingsLeft,
                                 outputBindingsRight: ctx.outputBindingsRight,
-                                joinRewrite: ctx.joinRewrite,
+                                // Prefer review opts; "Apply map only" must not
+                                // inherit a ctx rewrite (service falls back on undefined).
+                                joinRewrite: opts
+                                  ? opts.joinRewrite
+                                  : ctx.joinRewrite,
                               },
                             });
                           });

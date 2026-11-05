@@ -68,6 +68,56 @@ export function applyKeymapOutputBindings(args: {
   return [{ map_column: mapCol, destination_column: dest }];
 }
 
+/**
+ * Default destinations for the multi-output Apply review (ADR-0037):
+ * first output → current left ON / fact column, others → map column name.
+ */
+export function defaultReviewDestinations(
+  outCols: string[],
+  currentLeftOn: string,
+): string[] {
+  return outCols.map((c, i) => (i === 0 && currentLeftOn.trim() ? currentLeftOn : c));
+}
+
+/**
+ * Default right Join column per destination: `rightOnCols[i]`, else a
+ * right column with the same name as the destination, else the destination.
+ */
+export function defaultReviewRightCols(
+  destinations: string[],
+  rightOnCols: string[],
+): string[] {
+  return destinations.map(
+    (d, i) =>
+      rightOnCols[i] ??
+      rightOnCols.find((r) => r.toLowerCase() === d.toLowerCase()) ??
+      d,
+  );
+}
+
+/** `a, b = x, y` style ON preview text. */
+export function formatJoinOn(left: string[], right: string[]): string {
+  return `${left.join(", ")} = ${right.join(", ")}`;
+}
+
+/** Validate review panel input; returns an error message or null. */
+export function validateApplyReview(
+  destinations: string[],
+  rights: string[],
+  rewriteJoin: boolean,
+): string | null {
+  const seen = new Set<string>();
+  for (const d of destinations) {
+    const k = d.trim().toLowerCase();
+    if (!k) return "Every output needs a destination column.";
+    if (seen.has(k)) return `Duplicate destination column "${d.trim()}".`;
+    seen.add(k);
+  }
+  if (rewriteJoin && rights.some((r) => !r.trim()))
+    return "Every Join equality needs a right column.";
+  return null;
+}
+
 /** Stable key for dirty-buffer / uniqueness (JSON tuple). */
 export function tupleKey(parts: string[]): string {
   return JSON.stringify(parts.map((p) => p.trim()));
@@ -383,6 +433,13 @@ function defaultOutputBindings(
   }));
 }
 
+/** Result of upserting Apply before a Join index. */
+export type UpsertApplyResult = {
+  steps: TransformationStep[];
+  /** True when a new Apply was spliced at `at` (Join and later steps shift +1). */
+  insertedBefore: boolean;
+};
+
 function upsertApplyStep(
   steps: TransformationStep[],
   at: number,
@@ -390,10 +447,10 @@ function upsertApplyStep(
   map: KeyMapDef,
   outputColumn?: string,
   outputBindings?: ApplyKeyMapOutputBinding[],
-): TransformationStep[] {
+): UpsertApplyResult {
   const next = [...steps];
   const cols = columns.filter((c) => c.trim());
-  if (!cols.length) return next;
+  if (!cols.length) return { steps: next, insertedBefore: false };
   const bindings = defaultOutputBindings(map, cols, outputColumn, outputBindings);
   const payload = {
     column: cols[0]!,
@@ -418,10 +475,10 @@ function upsertApplyStep(
   });
   if (existing >= 0) {
     next[existing] = { type: "ApplyKeyMap", payload };
-    return next;
+    return { steps: next, insertedBefore: false };
   }
   next.splice(at, 0, { type: "ApplyKeyMap", payload });
-  return next;
+  return { steps: next, insertedBefore: true };
 }
 
 function upsertNormalizeBeforeJoin(
@@ -449,7 +506,36 @@ function upsertNormalizeBeforeJoin(
   return next;
 }
 
-/** Insert/update ApplyKeyMap on left (before join) and/or right (append). */
+/** Join identity frozen before Apply insert (right + ON + type). */
+export type JoinStepIdentity = {
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+  joinType: import("../types/pipeline").JoinType;
+};
+
+function joinMatchesIdentity(
+  s: TransformationStep | undefined,
+  id: JoinStepIdentity,
+): s is TransformationStep & { type: "Join" } {
+  return (
+    s?.type === "Join" &&
+    targetKey(s.payload.right_query_id) === id.rightQueryId &&
+    s.payload.left_on.join("\0") === id.leftOn.join("\0") &&
+    s.payload.right_on.join("\0") === id.rightOn.join("\0") &&
+    s.payload.join_type === id.joinType
+  );
+}
+
+export type ApplyKeyMapWorkspaceResult =
+  | { ok: true; workspace: Workspace }
+  | { ok: false; error: string };
+
+/**
+ * Insert/update ApplyKeyMap on left (before join) and/or right (append).
+ * Join rewrite uses the same Join that was at `joinStepIndex` before insert —
+ * never re-search by right query alone (ADR-0037 review).
+ */
 export function applyKeyMapToWorkspace(
   workspace: Workspace,
   hostQueryId: string,
@@ -466,18 +552,49 @@ export function applyKeyMapToWorkspace(
   /** ADR-0037: explicit multi-output destinations (left Apply). */
   outputBindingsLeft?: ApplyKeyMapOutputBinding[],
   outputBindingsRight?: ApplyKeyMapOutputBinding[],
-  /** When set, rewrite Join ON to these left/right equals after Apply. */
+  /** When set, rewrite that Join's ON to these left/right equals after Apply. */
   joinRewrite?: { leftOn: string[]; rightOn: string[] },
-): Workspace {
+  /** Required when joinRewrite is set — identity of the Join before insert. */
+  joinIdentity?: JoinStepIdentity,
+): ApplyKeyMapWorkspaceResult {
   const leftCols = columnsLeft?.length ? columnsLeft : [columnLeft];
   const rightCols = columnsRight?.length ? columnsRight : [columnRight];
   const outLeft =
     outputColumnLeft?.trim() || leftCols[0];
   const outRight =
     outputColumnRight?.trim() || rightCols[0];
+  const wantRewrite =
+    !!joinRewrite?.leftOn.length && !!joinRewrite?.rightOn.length;
+
+  if (wantRewrite && side !== "right") {
+    if (!joinIdentity) {
+      return {
+        ok: false,
+        error:
+          "Apply+Join requires a frozen Join identity (right query, ON, type).",
+      };
+    }
+    const host = workspace.queries.find((q) => q.id === hostQueryId);
+    if (!host || !joinMatchesIdentity(host.steps[joinStepIndex], joinIdentity)) {
+      return {
+        ok: false,
+        error:
+          "Target Join was removed or changed — Apply+Join refused (no ambiguous fallback).",
+      };
+    }
+  }
+
+  let failed: string | null = null;
   const queries = workspace.queries.map((q) => {
+    if (failed) return q;
     if (side !== "right" && q.id === hostQueryId) {
-      let steps = upsertApplyStep(
+      const before = q.steps[joinStepIndex];
+      if (wantRewrite && joinIdentity && !joinMatchesIdentity(before, joinIdentity)) {
+        failed =
+          "Target Join was removed or changed — Apply+Join refused (no ambiguous fallback).";
+        return q;
+      }
+      const { steps: withApply, insertedBefore } = upsertApplyStep(
         q.steps,
         joinStepIndex,
         leftCols,
@@ -485,66 +602,43 @@ export function applyKeyMapToWorkspace(
         outLeft,
         outputBindingsLeft,
       );
-      if (joinRewrite?.leftOn.length && joinRewrite.rightOn.length) {
-        const idx = resolveJoinIndex(steps, joinStepIndex, rightQueryId);
-        if (idx != null) {
-          const s = steps[idx]!;
-          if (s.type === "Join") {
-            steps = [...steps];
-            steps[idx] = {
-              ...s,
-              payload: {
-                ...s.payload,
-                left_on: [...joinRewrite.leftOn],
-                right_on: [...joinRewrite.rightOn],
-              },
-            };
-          }
+      let steps = withApply;
+      if (wantRewrite && joinRewrite && joinIdentity) {
+        const joinIdxAfter = insertedBefore ? joinStepIndex + 1 : joinStepIndex;
+        const j = steps[joinIdxAfter];
+        if (!joinMatchesIdentity(j, joinIdentity)) {
+          failed =
+            "Target Join could not be located after Apply insert — refused without rewriting another Join.";
+          return q;
         }
+        steps = [...steps];
+        steps[joinIdxAfter] = {
+          ...j,
+          payload: {
+            ...j.payload,
+            left_on: [...joinRewrite.leftOn],
+            right_on: [...joinRewrite.rightOn],
+          },
+        };
       }
       return { ...q, steps };
     }
     if (side !== "left" && q.id === rightQueryId) {
-      return {
-        ...q,
-        steps: upsertApplyStep(
-          q.steps,
-          q.steps.length,
-          rightCols,
-          map,
-          outRight,
-          outputBindingsRight,
-        ),
-      };
+      const { steps } = upsertApplyStep(
+        q.steps,
+        q.steps.length,
+        rightCols,
+        map,
+        outRight,
+        outputBindingsRight,
+      );
+      return { ...q, steps };
     }
     return q;
   });
+  if (failed) return { ok: false, error: failed };
   const key_maps = upsertKeyMapList(workspace.key_maps ?? [], map);
-  return { ...workspace, queries, key_maps };
-}
-
-function resolveJoinIndex(
-  steps: TransformationStep[],
-  preferred: number,
-  rightQueryId: string,
-): number | null {
-  const at = steps[preferred];
-  if (
-    at?.type === "Join" &&
-    targetKey(at.payload.right_query_id) === rightQueryId
-  ) {
-    return preferred;
-  }
-  for (let i = 0; i < steps.length; i++) {
-    const s = steps[i];
-    if (
-      s?.type === "Join" &&
-      targetKey(s.payload.right_query_id) === rightQueryId
-    ) {
-      return i;
-    }
-  }
-  return null;
+  return { ok: true, workspace: { ...workspace, queries, key_maps } };
 }
 
 export function applyNormalizeToWorkspace(

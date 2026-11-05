@@ -82,6 +82,92 @@ const applied = applyKeyMapOntoProject(project, {
 });
 assert(applied.result.status === "ok", "apply ok");
 
+{
+  // Two Joins to the same right query — rewrite must hit Join #2 only.
+  const dualWs = {
+    queries: [
+      {
+        id: "fact",
+        name: "fact",
+        steps: [
+          { type: "LoadCsv", payload: { path: "f.csv" } },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              left_on: ["old_product_id"],
+              right_on: ["product_id"],
+              join_type: "left",
+            },
+          },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              left_on: ["external_sku"],
+              right_on: ["sku"],
+              join_type: "left",
+            },
+          },
+        ],
+      },
+      { id: "dim", name: "dim", steps: [] },
+    ],
+    focus_query_id: "fact",
+    key_maps: [map],
+  } as never;
+  const dualCtx = {
+    hostQueryId: "fact",
+    joinStepIndex: 2,
+    rightQueryId: "dim",
+    leftOn: ["external_sku"],
+    rightOn: ["sku"],
+    joinType: "left" as const,
+  };
+  const dual = applyKeyMapOntoProject(
+    { ...project, workspace: dualWs } as never,
+    {
+      map: {
+        ...map,
+        output_columns: ["product_id", "variant_code"],
+        to_column: "product_id",
+      } as never,
+      ctx: dualCtx,
+      side: "left",
+      leftCols: ["external_sku"],
+      rightCols: ["sku"],
+      outputColumnLeft: "product_id",
+      outputColumnRight: "sku",
+      outputBindingsLeft: [
+        { map_column: "product_id", destination_column: "product_id" },
+        { map_column: "variant_code", destination_column: "variant_code" },
+      ],
+      joinRewrite: {
+        leftOn: ["product_id", "variant_code"],
+        rightOn: ["product_id", "variant_code"],
+      },
+    },
+  );
+  assert(dual.result.status === "ok", "dual join apply ok");
+  const steps =
+    dual.result.status === "ok"
+      ? dual.result.workspace.queries.find((q) => q.id === "fact")!.steps
+      : [];
+  const joins = steps.filter((s) => s.type === "Join");
+  assert(joins.length === 2, "still two joins");
+  assert(
+    joins[0]!.type === "Join" &&
+      joins[0]!.payload.left_on.join(",") === "old_product_id" &&
+      joins[0]!.payload.right_on.join(",") === "product_id",
+    "first Join ON unchanged",
+  );
+  assert(
+    joins[1]!.type === "Join" &&
+      joins[1]!.payload.left_on.join(",") === "product_id,variant_code",
+    "second Join ON rewritten",
+  );
+}
+
 const sourceMap = {
   ...map,
   storage: { kind: "source" as const, connection_id: "c", schema: "s", table: "t" },

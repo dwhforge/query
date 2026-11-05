@@ -2,7 +2,7 @@
 
 use crate::graph::{direct_deps_ex, reachable_from};
 use crate::model::{KeyMapDef, KeyMapStorage, TransformationStep, Workspace};
-use crate::sql_escape::quote_ident;
+use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::{HashMap, HashSet};
 
 /// Local query id when `storage = query`.
@@ -137,17 +137,17 @@ pub fn query_map_full_set_check_sql(
     let out_q: Vec<String> = output_cols.iter().map(|c| quote_ident(c)).collect();
     let mut arms = Vec::new();
     for (i, col) in from_q.iter().enumerate() {
+        let label = escape_sql_string(&format!("From part {i} ({})", from_cols[i]));
         arms.push(format!(
-            "(SELECT 'null_from' AS kind, 'From part {i} ({})' AS detail \
-             FROM {map_cte} WHERE {col} IS NULL OR CAST({col} AS VARCHAR) = '' LIMIT 1)",
-            from_cols[i]
+            "(SELECT 'null_from' AS kind, '{label}' AS detail \
+             FROM {map_cte} WHERE {col} IS NULL OR CAST({col} AS VARCHAR) = '' LIMIT 1)"
         ));
     }
     for (i, col) in out_q.iter().enumerate() {
+        let label = escape_sql_string(&format!("output {i} ({})", output_cols[i]));
         arms.push(format!(
-            "(SELECT 'null_output' AS kind, 'output {i} ({})' AS detail \
-             FROM {map_cte} WHERE {col} IS NULL OR CAST({col} AS VARCHAR) = '' LIMIT 1)",
-            output_cols[i]
+            "(SELECT 'null_output' AS kind, '{label}' AS detail \
+             FROM {map_cte} WHERE {col} IS NULL OR CAST({col} AS VARCHAR) = '' LIMIT 1)"
         ));
     }
     let group = from_q.join(", ");
@@ -366,6 +366,27 @@ mod tests {
         assert!(sql.contains("duplicate_from"), "{sql}");
         assert!(sql.contains("\"variant_code\""), "{sql}");
         assert!(!sql.to_lowercase().contains("trim("), "{sql}");
+    }
+
+    #[test]
+    fn full_set_check_sql_escapes_apostrophe_in_column_labels() {
+        let sql = query_map_full_set_check_sql(
+            "q_map_s0",
+            &["customer's_code".into()],
+            &["item's_id".into()],
+        )
+        .unwrap();
+        // Diagnostic string literals must double apostrophes; idents stay quoted.
+        assert!(
+            sql.contains("'From part 0 (customer''s_code)'"),
+            "From label must escape apostrophe: {sql}"
+        );
+        assert!(
+            sql.contains("'output 0 (item''s_id)'"),
+            "output label must escape apostrophe: {sql}"
+        );
+        assert!(sql.contains("\"customer's_code\""), "{sql}");
+        assert!(sql.contains("\"item's_id\""), "{sql}");
     }
 
     #[test]

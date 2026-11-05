@@ -11,6 +11,7 @@ import {
   type ApplySide,
 } from "../../lib/keyMap";
 import type { KeyMapDef, Workspace } from "../../types/pipeline";
+import { basisQueryFingerprints } from "../mappingCreate/service";
 import type { KeyMapApplyIntent, KeyMapJoinCtx } from "./types";
 
 /** Confirmed review / Lens choice — no App-side defaults after this. */
@@ -42,8 +43,9 @@ export type ResolveApplyPlanError = { error: string };
 
 /**
  * Apply-operation revision (ADR-0038).
- * - seed: definition + entry values (not only row count)
- * - query: binding + relevant query definition (not result rows)
+ * - seed: definition + entry values (exact strings — no undocumented trim)
+ * - query: binding + transitive known query defs via `basisQueryFingerprints`
+ *   (FromQuery/Join/Append/SqlModel + ApplyKeyMap→query maps; cycle-safe)
  * - source/ref: definition/binding only — not a claim about warehouse content
  */
 export function keyMapRevisionFingerprint(
@@ -68,41 +70,54 @@ export function keyMapRevisionFingerprint(
         ? map.storage.query_id.trim()
         : "";
     const q = workspace?.queries.find((x) => x.id === qid);
-    const qFinger = q
-      ? JSON.stringify({
-          id: q.id,
-          steps: q.steps,
-          execution: q.execution ?? "local",
-        })
-      : `missing:${qid}`;
+    let basisPart: string;
+    if (!workspace || !qid) {
+      basisPart = `missing:${qid || "?"}`;
+    } else {
+      const basis = basisQueryFingerprints(workspace, qid);
+      if (!basis.ok) {
+        basisPart = `err:${basis.error}`;
+      } else {
+        basisPart = Object.keys(basis.defs)
+          .sort()
+          .map((id) => `${id}=${basis.defs[id]}`)
+          .join("|");
+      }
+    }
+    const qFinger = JSON.stringify({
+      root: qid,
+      basis: basisPart,
+      execution: q?.execution ?? "local",
+    });
     return `apply:${map.id}:query:${hashStr(qFinger + "|" + schema)}`;
   }
   if (kind === "source" || kind === "ref") {
     // Binding/definition only — local entry cache is not external SoT.
     return `apply:${map.id}:${kind}:${hashStr(schema)}`;
   }
+  // Structured JSON — preserves significant whitespace in From/outputs.
   const rows = [...(map.entries ?? [])]
-    .map((e) => {
-      const fromKey = (
-        e.from_parts?.length ? e.from_parts.join("\0") : e.from ?? ""
-      ).trim();
-      const outsKey = (
-        e.output_values?.length
+    .map((e) =>
+      JSON.stringify({
+        from_parts: e.from_parts?.length
+          ? e.from_parts
+          : e.from != null && e.from !== ""
+            ? [e.from]
+            : [],
+        output_values: e.output_values?.length
           ? e.output_values
           : e.to != null && e.to !== ""
             ? [e.to]
-            : []
-      )
-        .map((v) => String(v).trim())
-        .join("\0");
-      const attrs = Object.entries(e.attrs ?? {})
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([k, v]) => `${k}=${v}`)
-        .join(";");
-      return `${fromKey}\t${outsKey}\t${attrs}`;
-    })
+            : [],
+        attrs: Object.fromEntries(
+          Object.entries(e.attrs ?? {}).sort(([a], [b]) =>
+            a.localeCompare(b),
+          ),
+        ),
+      }),
+    )
     .sort();
-  return `apply:${map.id}:seed:${hashStr(rows.join("\n") + "|" + schema)}`;
+  return `apply:${map.id}:seed:${hashStr(JSON.stringify(rows) + "|" + schema)}`;
 }
 
 function hashStr(s: string): string {

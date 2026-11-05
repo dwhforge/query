@@ -206,8 +206,28 @@ mod tests {
     /// (compile without full-set so the guard itself is exercised).
     #[test]
     fn duckdb_apply_count_star_aborts_on_ambiguous_sql_guard() {
-        let ws = ambiguous_query_map_ws();
         let db = DbSession::new().unwrap();
+
+        // Control: same COUNT(*) path on a valid map must succeed.
+        let ok_ws = multi_output_ws(
+            "select 'A' as sku",
+            vec![KeyMapEntry::parts_multi(
+                vec!["A".into()],
+                vec!["P100".into(), "BLUE".into()],
+            )],
+        );
+        let _ = prepare_operation(&db, &ok_ws, &[], &[]).unwrap();
+        let ok_sql = compile_focus_sql(&db, &ok_ws, &[], &[], true).unwrap();
+        let ok_count = count_over_preview_sql(&ok_sql);
+        let n: i64 = db
+            .with_conn(|conn| {
+                conn.query_row(&ok_count, [], |r| r.get(0))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert_eq!(n, 1, "valid map COUNT(*) must run: sql={ok_count}");
+
+        let ws = ambiguous_query_map_ws();
         let _prepared = prepare_operation(&db, &ws, &[], &[]).unwrap();
         // Intentionally skip validate_prepared — isolate the emit SQL guard.
         let sql = compile_focus_sql(&db, &ws, &[], &[], true).unwrap();
@@ -218,12 +238,9 @@ mod tests {
                     .map_err(|e| e.to_string())
             })
             .unwrap_err();
-        let lower = err.to_lowercase();
         assert!(
-            lower.contains("ambiguous")
-                || lower.contains("refused")
-                || lower.contains("error"),
-            "COUNT(*) must hit SQL uniqueness guard, got: {err}"
+            err.contains("KeyMap sku_map: ambiguous From"),
+            "COUNT(*) must hit uniqueness guard message, got: {err}"
         );
     }
 

@@ -236,4 +236,147 @@ const project = {
   );
 }
 
+{
+  // Trailing space in output only → different revision / stale commit.
+  const spaced = {
+    ...map,
+    entries: [{ from: "a", to: "1 ", output_values: ["1 ", "x"] }],
+  };
+  assert(
+    keyMapRevisionFingerprint(spaced as never, project.workspace) !==
+      keyMapRevisionFingerprint(map as never, project.workspace),
+    "significant whitespace must change fingerprint",
+  );
+  const plan = resolveApplyPlan(
+    map as never,
+    ctx,
+    "left",
+    {
+      side: "left",
+      bindings: [
+        { map_column: "product_id", destination_column: "mapped_product_id" },
+        { map_column: "variant_code", destination_column: "mapped_variant_code" },
+      ],
+    },
+    project.workspace,
+  );
+  assert(!("error" in plan), "space setup plan ok");
+  if ("error" in plan) throw new Error(plan.error);
+  const moved = {
+    ...project,
+    workspace: { ...project.workspace, key_maps: [spaced] },
+  } as Project;
+  const fold = applyKeyMapOntoProject(moved, intentFromApplyPlan(plan));
+  assert(fold.result.status === "stale", "whitespace-only change is stale");
+  assert(fold.project === moved, "whitespace stale leaves project untouched");
+}
+
+{
+  // Query map: upstream FromQuery change with map query steps unchanged → stale.
+  const qMap = {
+    id: "qm",
+    name: "QM",
+    entries: [],
+    storage: { kind: "query" as const, query_id: "q_map" },
+    from_column: "sku",
+    output_columns: ["product_id"],
+    to_column: "product_id",
+  };
+  const wsBase = {
+    queries: [
+      {
+        id: "raw_matches",
+        name: "raw",
+        steps: [
+          {
+            type: "SqlModel",
+            payload: { raw_sql: "select 'A' as sku, 'P1' as product_id" },
+          },
+        ],
+      },
+      {
+        id: "q_map",
+        name: "map",
+        steps: [
+          {
+            type: "FromQuery",
+            payload: { query_id: "raw_matches" },
+          },
+        ],
+      },
+      {
+        id: "fact",
+        name: "fact",
+        steps: [
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              join_type: "left",
+              left_on: ["sku"],
+              right_on: ["sku"],
+            },
+          },
+        ],
+      },
+      { id: "dim", name: "dim", steps: [] },
+    ],
+    focus_query_id: "fact",
+    key_maps: [qMap],
+  };
+  const qProject = {
+    ...project,
+    workspace: wsBase,
+  } as Project;
+  const plan = resolveApplyPlan(
+    qMap as never,
+    {
+      hostQueryId: "fact",
+      joinStepIndex: 0,
+      rightQueryId: "dim",
+      leftOn: ["sku"],
+      rightOn: ["sku"],
+      joinType: "left",
+    },
+    "left",
+    {
+      side: "left",
+      bindings: [
+        { map_column: "product_id", destination_column: "product_id" },
+      ],
+    },
+    qProject.workspace,
+  );
+  assert(!("error" in plan), "query plan ok");
+  if ("error" in plan) throw new Error(plan.error);
+
+  const wsUpstream = {
+    ...wsBase,
+    queries: wsBase.queries.map((q) =>
+      q.id === "raw_matches"
+        ? {
+            ...q,
+            steps: [
+              {
+                type: "SqlModel",
+                payload: {
+                  raw_sql: "select 'A' as sku, 'P2' as product_id",
+                },
+              },
+            ],
+          }
+        : q,
+    ),
+  };
+  assert(
+    keyMapRevisionFingerprint(qMap as never, wsUpstream as never) !==
+      plan.mapRevision,
+    "upstream query change must change fingerprint",
+  );
+  const moved = { ...qProject, workspace: wsUpstream } as Project;
+  const fold = applyKeyMapOntoProject(moved, intentFromApplyPlan(plan));
+  assert(fold.result.status === "stale", "upstream change is stale");
+  assert(fold.project === moved, "upstream stale leaves project untouched");
+}
+
 console.log("applyPlan.test.ts: ok");

@@ -62,9 +62,13 @@ export function isLocalQueryId(id: string): boolean {
 
 /**
  * Direct upstream query ids via FromQuery / Join right / Append / SqlModel /
- * CustomSql `{{query:id}}`. Mirrors supported edges in `graph::direct_deps`.
+ * CustomSql `{{query:id}}`, and ApplyKeyMap → query-backed map query_id when
+ * `keyMaps` is provided. Mirrors Rust `graph::direct_deps_ex` (ADR-0036).
  */
-export function directUpstreamQueryIds(query: QueryDef): string[] {
+export function directUpstreamQueryIds(
+  query: QueryDef,
+  keyMaps?: KeyMapDef[] | null,
+): string[] {
   const out: string[] = [];
   for (const s of query.steps) {
     if (s.type === "FromQuery") {
@@ -75,6 +79,13 @@ export function directUpstreamQueryIds(query: QueryDef): string[] {
       for (const t of s.payload.other_query_ids) out.push(targetKey(t));
     } else if (s.type === "SqlModel" || s.type === "CustomSql") {
       out.push(...sqlPlaceholderQueryIds(s.payload.raw_sql));
+    } else if (s.type === "ApplyKeyMap" && keyMaps?.length) {
+      const mid = targetKey(s.payload.map_id);
+      const km = keyMaps.find((m) => m.id === mid);
+      if (km?.storage?.kind === "query") {
+        const qid = km.storage.query_id.trim();
+        if (qid) out.push(qid);
+      }
     }
   }
   return [...new Set(out.filter(Boolean))];
@@ -113,7 +124,9 @@ export function basisQueryFingerprints(
       };
     }
     defs[id] = fingerprintSteps(q.steps);
-    for (const up of directUpstreamQueryIds(q)) stack.push(up);
+    for (const up of directUpstreamQueryIds(q, workspace.key_maps)) {
+      stack.push(up);
+    }
   }
   return { ok: true, defs };
 }

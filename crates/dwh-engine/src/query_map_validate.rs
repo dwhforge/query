@@ -221,4 +221,69 @@ mod tests {
         let out = crate::preview::preview_workspace(&db, &ws, &[], &[]).unwrap();
         assert!(!out.columns.is_empty(), "{out:?}");
     }
+
+    /// Apostrophe in From/output names must not break diagnostic SQL literals.
+    #[test]
+    fn full_set_executes_with_apostrophe_in_column_names() {
+        let mut map = KeyMapDef::new("sku_map", "sku");
+        map.storage = KeyMapStorage::Query {
+            query_id: "q_map".into(),
+        };
+        map.from_column = "customer's_code".into();
+        map.to_column = "item's_id".into();
+        map.output_columns = vec!["item's_id".into()];
+        map.entries = vec![];
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "q_map".into(),
+                    name: "map".into(),
+                    steps: vec![TransformationStep::SqlModel {
+                        // Valid row + NULL output unused by fact → full-set must run and report.
+                        raw_sql: "select 'A' as \"customer's_code\", 'P1' as \"item's_id\" \
+                                  union all \
+                                  select 'B', cast(NULL as varchar)"
+                            .into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "q_fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::SqlModel {
+                            raw_sql: "select 'A' as \"customer's_code\"".into(),
+                        },
+                        TransformationStep::ApplyKeyMap {
+                            column: "customer's_code".into(),
+                            columns: vec!["customer's_code".into()],
+                            output_column: None,
+                            output_bindings: vec![dwh_pipeline::ApplyKeyMapOutputBinding {
+                                map_column: "item's_id".into(),
+                                destination_column: "item's_id".into(),
+                            }],
+                            as_of_column: None,
+                            map_id: "sku_map".into(),
+                            entries: vec![],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "q_fact".into(),
+            key_maps: vec![map],
+        };
+        let db = DbSession::new().unwrap();
+        let err = crate::preview::preview_workspace(&db, &ws, &[], &[]).unwrap_err();
+        assert!(
+            err.contains("full-set")
+                && (err.contains("NULL") || err.contains("null") || err.contains("item")),
+            "must fail full-set (not SQL syntax) with apostrophe columns: {err}"
+        );
+        assert!(
+            !err.to_lowercase().contains("syntax")
+                && !err.to_lowercase().contains("parser"),
+            "apostrophe must not cause SQL parse failure: {err}"
+        );
+    }
 }

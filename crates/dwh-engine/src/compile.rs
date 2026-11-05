@@ -332,6 +332,7 @@ mod tests {
                         column: "ext".into(),
                         columns: vec!["ext".into()],
                         output_column: Some("canonical".into()),
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: "m".into(),
                         entries: map.entries.clone(),

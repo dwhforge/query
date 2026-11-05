@@ -65,4 +65,12 @@ function assert(cond: unknown, msg: string) {
   assert(sql.includes("LIMIT 50"), "limit");
 }
 
+{
+  assert(validateQueryMapRows("m", 1, [["x", "y", "z"]], 2).ok, "multi-output row");
+  assert(!validateQueryMapRows("m", 1, [["x", "y"]], 2).ok, "short row");
+  assert(!validateQueryMapRows("m", 1, [["x", "y", ""]], 2).ok, "empty output");
+  const sql = queryMapPreviewSql("q1", ["a"], ["c", "d"], 5);
+  assert(sql.includes('"c", "d"'), "multi-output preview cols");
+}
+
 console.log("keyMapQuery.test.ts: ok");

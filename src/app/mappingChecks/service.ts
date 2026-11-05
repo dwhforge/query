@@ -26,6 +26,9 @@ import {
   findApplyKeyMapIdForJoin,
   fromColumnsEff,
   fromPartsEff,
+  outputColumnsEff,
+  outputValuesEff,
+  primaryTo,
 } from "../../lib/keyMap";
 import type { KeyMapDirtyBaseline, KeyMapDirtyDelta } from "../../lib/bridge";
 import {
@@ -775,6 +778,7 @@ export function dirtyDeltaFromFrozenRemap(
       upserts.push({
         from,
         to: c.to,
+        output_values: [c.to],
         attrs: attrsFromPrior,
       });
     }
@@ -789,7 +793,10 @@ export function dirtyDeltaFromFrozenRemap(
       baselines.push({
         fromParts: fromPartsEff(prev),
         existed: true,
-        to: prev.to,
+        to: primaryTo(prev),
+        outputs: Object.fromEntries(
+          outputColumnsEff(map).map((c, i) => [c, outputValuesEff(prev)[i] ?? ""]),
+        ),
         attrs,
       });
     } else {
@@ -798,6 +805,7 @@ export function dirtyDeltaFromFrozenRemap(
         fromParts: [from],
         existed: false,
         to: "",
+        outputs: Object.fromEntries(outputColumnsEff(map).map((c) => [c, ""])),
         attrs: {},
       });
     }

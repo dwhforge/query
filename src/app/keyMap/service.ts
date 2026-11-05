@@ -5,9 +5,13 @@ import type { KeyMapDirtyDelta, KeyMapSaveResult } from "../../lib/bridge";
 import {
   applyKeyMapToWorkspace,
   fromPartsEff,
+  mergeLensOutputCells,
+  outputColumnsEff,
+  outputValuesEff,
   syncApplyKeyMapEntries,
   tupleKey,
   upsertKeyMapList,
+  type LensOutputCell,
 } from "../../lib/keyMap";
 import type {
   KeyMapDef,
@@ -208,11 +212,23 @@ export function normalizeKeyMapForEditor(map: KeyMapDef): KeyMapDef {
       : [map.from_column ?? "from"],
     to_column: "to",
     ...map,
+    output_columns: outputColumnsEff(map),
   };
 }
 
+export { mergeLensOutputCells, outputColumnsEff, outputValuesEff };
+export type { LensOutputCell };
+
+function outputsKey(e: KeyMapEntry): string {
+  return JSON.stringify(outputValuesEff(e).map((v) => v.trim()));
+}
+
+function hasAnyOutput(e: KeyMapEntry): boolean {
+  return outputValuesEff(e).some((v) => v.trim());
+}
+
 function entrySnapshotsEqual(a: KeyMapEntry, b: KeyMapEntry): boolean {
-  if (a.from.trim() !== b.from.trim() || a.to.trim() !== b.to.trim()) {
+  if (a.from.trim() !== b.from.trim() || outputsKey(a) !== outputsKey(b)) {
     return false;
   }
   const ap = fromPartsEff(a).map((p) => p.trim());
@@ -247,7 +263,7 @@ export function keyMapEntriesFingerprint(map: KeyMapDef): string {
       const attrPart = attrKeys
         .map((k) => `${k}=${(attrs[k] ?? "").trim()}`)
         .join("&");
-      return `${id}\t${e.to.trim()}\t${attrPart}`;
+      return `${id}\t${outputsKey(e)}\t${attrPart}`;
     })
     .sort();
   return rows.join("\n");
@@ -342,8 +358,8 @@ export function mergeKeyMapTabSession(
     if (protectLocalDrafts && !entrySnapshotsEqual(cur, e)) {
       continue;
     }
-    const toIn = e.to.trim();
-    const toCur = cur.to.trim();
+    const toIn = hasAnyOutput(e) ? outputsKey(e) : "";
+    const toCur = hasAnyOutput(cur) ? outputsKey(cur) : "";
     if (toIn && toIn !== toCur) {
       // Fresh To from SoT/suggest; keep local attrs only if incoming omitted them.
       byId.set(id, {
@@ -355,11 +371,17 @@ export function mergeKeyMapTabSession(
       // Incoming omitted attr keys are left as-is (not treated as explicit clear).
       byId.set(id, {
         ...cur,
-        to: toIn || cur.to,
+        ...(toIn
+          ? { to: e.to, output_values: outputValuesEff(e) }
+          : {}),
         attrs: { ...(cur.attrs ?? {}), ...e.attrs },
       });
     } else if (toIn && !toCur) {
-      byId.set(id, { ...cur, to: e.to });
+      byId.set(id, {
+        ...cur,
+        to: e.to,
+        output_values: outputValuesEff(e),
+      });
     }
   }
 
@@ -569,15 +591,38 @@ export function planMapFillFromLens(args: {
   };
 }
 
-/** Merge From values (and optional To / parts) into a map for Join Lens → editor. */
+/**
+ * Merge From values (and optional To / parts) into a map for Join Lens → editor.
+ * `toValues` fill the first output column only; `cellPatches[i]` name columns
+ * per suggestion (ADR-0037) and merge via `mergeLensOutputCells`.
+ */
 export function mergeFromValuesIntoMap(args: {
   map: KeyMapDef;
   fromValues: string[];
   joinCtx: KeyMapJoinCtx;
   toValues?: string[];
+  /** Parallel to `fromValues`: named output cells per suggestion. */
+  cellPatches?: LensOutputCell[][];
   fromParts?: string[][];
 }): KeyMapDef {
-  const { map, fromValues, joinCtx, toValues, fromParts } = args;
+  const { map, fromValues, joinCtx, toValues, fromParts, cellPatches } = args;
+  const outCols = outputColumnsEff(map);
+  const cellsFor = (i: number): LensOutputCell[] => {
+    const named = cellPatches?.[i] ?? [];
+    const to = (toValues?.[i] ?? "").trim();
+    if (!to) return named;
+    const first = outCols[0]!.trim().toLowerCase();
+    if (named.some((c) => c.column.trim().toLowerCase() === first)) {
+      return named;
+    }
+    return [{ column: outCols[0]!, value: to }, ...named];
+  };
+  const blank = (parts: string[]): KeyMapEntry => ({
+    from: parts[0]!,
+    from_parts: parts,
+    to: "",
+    output_values: outCols.map(() => ""),
+  });
   const entries: KeyMapEntry[] = [...map.entries];
   const indexByFrom = new Map(
     entries.map((e, i) => {
@@ -596,16 +641,26 @@ export function mergeFromValuesIntoMap(args: {
     ).map((p) => p.trim());
     if (!parts.length || parts.some((p) => !p)) return;
     const key = JSON.stringify(parts);
-    const to = (toValues?.[i] ?? "").trim();
+    const cells = cellsFor(i);
     const existing = indexByFrom.get(key);
     if (existing !== undefined) {
-      if (to && !entries[existing]!.to.trim()) {
-        entries[existing] = { ...entries[existing]!, to };
+      const cur = entries[existing]!;
+      if (cells.length) {
+        const r = mergeLensOutputCells(cur, outCols, cells);
+        // Conflicts: keep the filled entry; apply only non-conflicting cells.
+        if (r.ok) {
+          entries[existing] = r.entry;
+        } else if (r.conflicts.length) {
+          const rest = cells.filter((c) => !r.conflicts.includes(c));
+          const r2 = mergeLensOutputCells(cur, outCols, rest);
+          if (r2.ok) entries[existing] = r2.entry;
+        }
       }
       return;
     }
     indexByFrom.set(key, entries.length);
-    entries.push({ from: parts[0]!, from_parts: parts, to });
+    const fresh = mergeLensOutputCells(blank(parts), outCols, cells);
+    entries.push(fresh.ok ? fresh.entry : blank(parts));
   });
   const arity = Math.max(
     map.from_columns?.length ?? 0,
@@ -640,6 +695,7 @@ export function mapEditorFillSnapshot(args: {
   joinCtx: KeyMapJoinCtx;
   fromValues: string[];
   toValues?: string[];
+  cellPatches?: LensOutputCell[][];
   fromParts?: string[][];
 }): {
   entries: KeyMapEntry[];
@@ -655,8 +711,8 @@ export function mapEditorFillSnapshot(args: {
     args.fromParts && args.fromParts.length > 0
       ? args.fromParts.map((p) => p.map((x) => x.trim()))
       : args.fromValues.map((s) => [s.trim()]);
-  const emptyToCount = merged.entries.filter((e) => !e.to.trim()).length;
-  const filledToCount = merged.entries.filter((e) => e.to.trim()).length;
+  const emptyToCount = merged.entries.filter((e) => !hasAnyOutput(e)).length;
+  const filledToCount = merged.entries.filter((e) => hasAnyOutput(e)).length;
   return {
     entries: merged.entries,
     suggestedFrom: args.fromValues,

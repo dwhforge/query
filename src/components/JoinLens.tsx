@@ -496,6 +496,8 @@ export type JoinLensProps = {
       fromParts?: string[][];
       applyColumns?: string[];
       outputColumn?: string;
+      /** ADR-0037: named output cells from one target row (not positional toValues). */
+      cellPatches?: import("../lib/keyMap").LensOutputCell[][];
     },
   ) => void;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */

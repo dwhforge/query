@@ -373,6 +373,7 @@ mod tests {
                         column: "sku".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: ObjectTarget::Local("map_wh".into()),
                         entries: vec![KeyMapEntry::pair("a", "1")],

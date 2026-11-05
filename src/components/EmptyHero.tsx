@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { KeyMapDef } from "../types/pipeline";
-import { emptyKeyMap } from "../lib/keyMap";
+import { emptyKeyMap, primaryTo } from "../lib/keyMap";
 import { KeyMapEditor } from "./KeyMapEditor";
 
 export type DemoId =
@@ -85,7 +85,7 @@ export function EmptyHero({
   const [heroMap, setHeroMap] = useState<KeyMapDef>(initialHeroMap);
   const unmatchedLeft = useMemo(() => {
     const mapped = new Set(
-      heroMap.entries.filter((e) => e.to.trim()).map((e) => e.from.trim()),
+      heroMap.entries.filter((e) => primaryTo(e).trim()).map((e) => e.from.trim()),
     );
     return HERO_UNMATCHED.filter((k) => !mapped.has(k.trim()));
   }, [heroMap.entries]);

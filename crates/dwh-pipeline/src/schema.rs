@@ -139,30 +139,33 @@ fn apply_step_schema_ex(
             column,
             columns,
             output_column,
+            output_bindings,
             ..
         } => {
-            // ADR-0024: new output_column is appended; overwrite keeps the same list.
+            // ADR-0024 / ADR-0037: new destinations are appended; overwrites keep the list.
             let Some(cols) = prev else {
                 return Ok(None);
             };
             let fact = apply_keymap_columns(column, columns);
-            let out = output_column
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .or_else(|| fact.first().map(|s| s.as_str()))
-                .unwrap_or("");
-            if out.is_empty() {
-                return Ok(Some(cols.to_vec()));
-            }
-            let fold = ascii_fold_name(out);
-            if cols.iter().any(|c| ascii_fold_name(c) == fold) {
-                Ok(Some(cols.to_vec()))
-            } else {
-                let mut next = cols.to_vec();
+            let bindings = crate::model::apply_keymap_output_bindings(
+                output_column.as_deref(),
+                output_bindings,
+                &fact,
+                "to",
+            );
+            let mut next = cols.to_vec();
+            for b in &bindings {
+                let out = b.destination_column.trim();
+                if out.is_empty() {
+                    continue;
+                }
+                let fold = ascii_fold_name(out);
+                if next.iter().any(|c| ascii_fold_name(c) == fold) {
+                    continue;
+                }
                 next.push(out.to_string());
-                Ok(Some(next))
             }
+            Ok(Some(next))
         }
         TransformationStep::SelectColumns { columns } => {
             if columns.is_empty() {
@@ -401,6 +404,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "m".into(),
             entries: vec![],
@@ -425,6 +429,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "m".into(),
             entries: vec![],

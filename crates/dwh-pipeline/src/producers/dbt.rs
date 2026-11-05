@@ -104,17 +104,11 @@ fn key_map_relations(
     out
 }
 
-/// map_id → (from_columns, to_column) for ApplyKeyMap join emit.
-fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, String)> {
+/// map_id → (from_columns, output_columns) for ApplyKeyMap join emit.
+fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, Vec<String>)> {
     let mut out = HashMap::new();
     for km in &workspace.key_maps {
-        let froms = km.from_columns_eff();
-        let to = if km.to_column.trim().is_empty() {
-            "to".into()
-        } else {
-            km.to_column.clone()
-        };
-        out.insert(km.id.clone(), (froms, to));
+        out.insert(km.id.clone(), (km.from_columns_eff(), km.output_columns_eff()));
     }
     out
 }
@@ -396,23 +390,23 @@ pub fn build_export_plan_routed(
         seeds_cfg.push_str(&format!("  {pipeline_name}:\n"));
         for map_id in key_maps.keys() {
             let seed = key_map_seed_name(map_id);
-            let (from_cols, to_col, extras) = workspace
+            let (from_cols, out_cols, extras) = workspace
                 .key_map(map_id)
                 .map(|m| {
-                    let froms = m.from_columns_eff();
-                    let to = if m.to_column.trim().is_empty() {
-                        "to".to_string()
-                    } else {
-                        m.to_column.clone()
-                    };
-                    (froms, to, m.stewardship_columns())
+                    (
+                        m.from_columns_eff(),
+                        m.output_columns_eff(),
+                        m.stewardship_columns(),
+                    )
                 })
-                .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
+                .unwrap_or_else(|| (vec!["from".into()], vec!["to".into()], vec![]));
             seeds_cfg.push_str(&format!("    {seed}:\n      +column_types:\n"));
             for fc in &from_cols {
                 seeds_cfg.push_str(&format!("        {fc}: varchar\n"));
             }
-            seeds_cfg.push_str(&format!("        {to_col}: varchar\n"));
+            for oc in &out_cols {
+                seeds_cfg.push_str(&format!("        {oc}: varchar\n"));
+            }
             let temporal: std::collections::HashSet<String> = workspace
                 .key_map(map_id)
                 .filter(|m| m.is_range_scd())
@@ -666,11 +660,7 @@ fn query_backed_keymap_schema_yml(
         let q = query_id.trim();
         let model = models.get(q)?;
         let froms = km.from_columns_eff();
-        let to = if km.to_column.trim().is_empty() {
-            "to".to_string()
-        } else {
-            km.to_column.clone()
-        };
+        let outs = km.output_columns_eff();
         models_block.push_str(&format!("  - name: {model}\n    columns:\n"));
         for (i, fc) in froms.iter().enumerate() {
             models_block.push_str(&format!("      - name: {fc}\n        data_tests:\n          - not_null\n"));
@@ -678,9 +668,11 @@ fn query_backed_keymap_schema_yml(
                 models_block.push_str("          - unique\n");
             }
         }
-        models_block.push_str(&format!(
-            "      - name: {to}\n        data_tests:\n          - not_null\n"
-        ));
+        for oc in &outs {
+            models_block.push_str(&format!(
+                "      - name: {oc}\n        data_tests:\n          - not_null\n"
+            ));
+        }
         if froms.len() > 1 {
             let cols = froms
                 .iter()
@@ -1521,6 +1513,7 @@ mod tests {
         let mut map = KeyMapDef::new("offer_day", "offer");
         map.from_columns = vec!["ext_offer_id".into(), "as_of_day".into()];
         map.to_column = "offer_sk".into();
+        map.output_columns = vec!["offer_sk".into()];
         map.entries = vec![KeyMapEntry::parts(
             vec!["001".into(), "2024-06-01".into()],
             "SK-1",
@@ -1537,6 +1530,7 @@ mod tests {
                         column: String::new(),
                         columns: vec!["ext_offer_id".into(), "day".into()],
                         output_column: Some("offer_sk".into()),
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
@@ -1589,6 +1583,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
@@ -1672,6 +1667,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),

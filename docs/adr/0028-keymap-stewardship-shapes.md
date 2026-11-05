@@ -48,7 +48,7 @@ The product SHALL expose **optional** time-aware modes; authors pick one (or non
 
 - Range columns are **stewardship/schema options**, not mandatory seed columns.
 - Overlap validation belongs in the editor (and optional dbt tests on export), not silent coalesce. Gaps are observable, not auto-filled.
-- Multi-To and automatic fuzzy SCD matching remain out of scope (same as ADR-0024 / ADR-0019).
+- Multi-To is accepted by [ADR-0037](0037-keymap-multi-output.md). Automatic fuzzy SCD matching remains out of scope ([ADR-0019](0019-join-lens-ai-narrator.md)).
 
 ### 4. Create & edit parity
 

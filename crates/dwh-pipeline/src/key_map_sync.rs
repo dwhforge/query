@@ -258,6 +258,7 @@ mod tests {
                     column: "channel".into(),
                     columns: vec![],
                     output_column: None,
+                    output_bindings: vec![],
                     as_of_column: None,
                     map_id: "map_channel".into(),
                     entries: vec![KeyMapEntry {

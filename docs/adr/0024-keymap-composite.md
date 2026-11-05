@@ -49,7 +49,7 @@ No glued `" · "` strings as fake single From (cannot Apply).
 
 ### 5. Out of scope (v1)
 
-- Multi-To (`from* → (to_a, to_b)`).
+- Multi-To (`from* → (to_a, to_b)`) in this ADR's v1. Accepted later by [ADR-0037](0037-keymap-multi-output.md).
 - Automatic choice of mode without user confirmation when both are plausible (default UI: ask).
 - Changing Join ON silently.
 

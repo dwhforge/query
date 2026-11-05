@@ -3636,6 +3636,7 @@ function App() {
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>,
     toValues?: string[],
     fromParts?: string[][],
+    cellPatches?: import("./lib/keyMap").LensOutputCell[][],
   ) {
     const merged = mergeFromValuesIntoMap({
       map,
@@ -3643,6 +3644,7 @@ function App() {
       joinCtx,
       toValues,
       fromParts,
+      cellPatches,
     });
     // Persist into the project so Join Lens can hide mapped unmatched keys immediately.
     setProject((p) => upsertKeyMapIntoProject(p, merged));
@@ -3811,6 +3813,7 @@ function App() {
       fromParts?: string[][];
       applyColumns?: string[];
       outputColumn?: string;
+      cellPatches?: import("./lib/keyMap").LensOutputCell[][];
     },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
@@ -3849,6 +3852,7 @@ function App() {
       outputColumn: opts?.outputColumn,
     });
     const { joinCtx, toValues, fromParts } = planned;
+    const cellPatches = opts?.cellPatches;
     const applyLeftOn = joinCtx.applyLeftOn ?? [
       joinCtx.leftOn[0] ?? "key",
     ];
@@ -3873,6 +3877,7 @@ function App() {
         joinCtx,
         toValues,
         fromParts,
+        cellPatches,
       );
       setMapSwitchOffer(null);
       return;
@@ -3893,6 +3898,7 @@ function App() {
         joinCtx,
         toValues,
         fromParts,
+        cellPatches,
       );
       setMapSwitchOffer({
         fromValues,

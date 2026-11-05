@@ -414,6 +414,7 @@ mod tests {
                     column: "system_code".into(),
                     columns: vec!["system_code".into(), "product_code".into()],
                     output_column: Some("canonical_id".into()),
+            output_bindings: vec![],
                     as_of_column: None,
                     map_id: ObjectTarget::external(
                         &reference.id,

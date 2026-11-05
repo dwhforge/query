@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// On-disk project document version (ADR-0030). Independent of IPC protocol version.
-pub const PROJECT_FORMAT_VERSION: u32 = 2;
+pub const PROJECT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -221,6 +221,8 @@ pub fn migrate_project_document(v: &mut Value) -> Result<(), String> {
             0 => migrate_v0_to_v1(obj),
             // ADR-0036: query-backed KeyMap storage — stamp only, no row rewrite.
             1 => migrate_v1_to_v2(obj),
+            // ADR-0037: multi-output KeyMap fields.
+            2 => migrate_v2_to_v3(obj)?,
             other => {
                 return Err(format!(
                     "missing migration from format_version {other} → {}",
@@ -308,6 +310,297 @@ fn strip_source_keymap_entries(obj: &mut serde_json::Map<String, Value>) {
 
 /// ADR-0036 — query-backed KeyMap: document gate only (no IR rewrite).
 fn migrate_v1_to_v2(_obj: &mut serde_json::Map<String, Value>) {}
+
+/// ADR-0037 — KeyMap multi-output: fold scalar To into output lists; rewrite Apply bindings.
+fn migrate_v2_to_v3(obj: &mut serde_json::Map<String, Value>) -> Result<(), String> {
+    let Some(ws) = obj.get_mut("workspace").and_then(|w| w.as_object_mut()) else {
+        return Ok(());
+    };
+
+    // map_id → single output column name after fold (for Apply bindings).
+    let mut map_primary_output: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    if let Some(maps) = ws.get_mut("key_maps").and_then(|m| m.as_array_mut()) {
+        for map in maps.iter_mut() {
+            let Some(m) = map.as_object_mut() else {
+                continue;
+            };
+            let map_id = m
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let primary = fold_keymap_def_outputs(m)?;
+            if !map_id.is_empty() {
+                map_primary_output.insert(map_id, primary);
+            }
+            if let Some(entries) = m.get_mut("entries").and_then(|e| e.as_array_mut()) {
+                for entry in entries {
+                    let Some(e) = entry.as_object_mut() else {
+                        continue;
+                    };
+                    fold_keymap_entry_outputs(e)?;
+                }
+            }
+            fold_authoring_context_targets(m);
+        }
+    }
+
+    if let Some(queries) = ws.get_mut("queries").and_then(|q| q.as_array_mut()) {
+        for query in queries {
+            let Some(steps) = query
+                .as_object_mut()
+                .and_then(|q| q.get_mut("steps"))
+                .and_then(|s| s.as_array_mut())
+            else {
+                continue;
+            };
+            for step in steps {
+                let Some(s) = step.as_object_mut() else {
+                    continue;
+                };
+                // Serde: `{ "type": "ApplyKeyMap", "payload": { … } }`.
+                if s.get("type").and_then(|t| t.as_str()) != Some("ApplyKeyMap") {
+                    continue;
+                }
+                let Some(apply) = s.get_mut("payload").and_then(|p| p.as_object_mut()) else {
+                    return Err(
+                        "migrate v2→v3: ApplyKeyMap step missing payload object".into(),
+                    );
+                };
+                if let Some(entries) = apply.get_mut("entries").and_then(|e| e.as_array_mut()) {
+                    for entry in entries {
+                        let Some(e) = entry.as_object_mut() else {
+                            continue;
+                        };
+                        fold_keymap_entry_outputs(e)?;
+                    }
+                }
+                fold_apply_keymap_bindings(apply, &map_primary_output)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_string_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn fold_keymap_def_outputs(
+    m: &mut serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let legacy_to = json_string_field(m, "to_column");
+    let existing = m
+        .get("output_columns")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let output_columns = if !existing.is_empty() {
+        if let Some(ref t) = legacy_to {
+            if existing.first().map(String::as_str) != Some(t.as_str()) {
+                return Err(format!(
+                    "migrate v2→v3: to_column '{t}' disagrees with output_columns[0]={:?}",
+                    existing.first()
+                ));
+            }
+        }
+        existing
+    } else if let Some(t) = legacy_to.clone() {
+        vec![t]
+    } else {
+        vec!["to".to_string()]
+    };
+
+    let primary = output_columns
+        .first()
+        .cloned()
+        .ok_or_else(|| "migrate v2→v3: empty output_columns".to_string())?;
+    m.insert(
+        "output_columns".into(),
+        Value::Array(
+            output_columns
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    m.remove("to_column");
+    let _ = legacy_to;
+    Ok(primary)
+}
+
+fn fold_keymap_entry_outputs(e: &mut serde_json::Map<String, Value>) -> Result<(), String> {
+    let legacy_to = e
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let existing = e
+        .get("output_values")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let output_values = if !existing.is_empty() {
+        if let Some(ref t) = legacy_to {
+            if existing.first().map(String::as_str) != Some(t.as_str()) {
+                return Err(format!(
+                    "migrate v2→v3: entry to '{t}' disagrees with output_values[0]={:?}",
+                    existing.first()
+                ));
+            }
+        }
+        existing
+    } else if let Some(t) = legacy_to {
+        vec![t]
+    } else {
+        return Err("migrate v2→v3: KeyMapEntry missing to/output_values".into());
+    };
+
+    e.insert(
+        "output_values".into(),
+        Value::Array(output_values.into_iter().map(Value::String).collect()),
+    );
+    e.remove("to");
+    Ok(())
+}
+
+fn fold_authoring_context_targets(m: &mut serde_json::Map<String, Value>) {
+    let Some(ctx) = m.get_mut("authoring_context").and_then(|c| c.as_object_mut()) else {
+        return;
+    };
+    let existing = ctx
+        .get("target_columns")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !existing.is_empty() {
+        ctx.remove("target_column");
+        return;
+    }
+    if let Some(t) = json_string_field(ctx, "target_column") {
+        ctx.insert(
+            "target_columns".into(),
+            Value::Array(vec![Value::String(t)]),
+        );
+    }
+    ctx.remove("target_column");
+}
+
+fn fold_apply_keymap_bindings(
+    apply: &mut serde_json::Map<String, Value>,
+    map_primary_output: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let existing = apply
+        .get("output_bindings")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.clone())
+        .unwrap_or_default();
+
+    let map_id = apply
+        .get("map_id")
+        .and_then(|m| match m {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(o) => o.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    if !existing.is_empty() {
+        if let Some(legacy_out) = json_string_field(apply, "output_column") {
+            let first_dest = existing
+                .first()
+                .and_then(|b| b.as_object())
+                .and_then(|b| b.get("destination_column"))
+                .and_then(|d| d.as_str());
+            if first_dest != Some(legacy_out.as_str()) {
+                return Err(format!(
+                    "migrate v2→v3: ApplyKeyMap output_column '{legacy_out}' disagrees with first binding destination"
+                ));
+            }
+            if let Some(primary) = map_primary_output.get(&map_id) {
+                let first_map = existing
+                    .first()
+                    .and_then(|b| b.as_object())
+                    .and_then(|b| b.get("map_column"))
+                    .and_then(|d| d.as_str());
+                if first_map != Some(primary.as_str()) {
+                    return Err(format!(
+                        "migrate v2→v3: ApplyKeyMap map_column {:?} disagrees with map '{map_id}' output '{primary}'",
+                        first_map
+                    ));
+                }
+            }
+        }
+        apply.remove("output_column");
+        return Ok(());
+    }
+
+    if map_id.is_empty() || !map_primary_output.contains_key(&map_id) {
+        return Err(format!(
+            "migrate v2→v3: ApplyKeyMap map_id '{map_id}' not found in document (cannot invent map_column)"
+        ));
+    }
+    let map_column = map_primary_output
+        .get(&map_id)
+        .cloned()
+        .expect("checked contains");
+
+    let dest = json_string_field(apply, "output_column").or_else(|| {
+        // fact columns: columns[] or column
+        let cols = apply
+            .get("columns")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !cols.is_empty() {
+            return cols.into_iter().next();
+        }
+        json_string_field(apply, "column")
+    });
+    let Some(destination_column) = dest else {
+        return Err(format!(
+            "migrate v2→v3: ApplyKeyMap for map '{map_id}' has no output_column/columns to bind"
+        ));
+    };
+
+    apply.insert(
+        "output_bindings".into(),
+        Value::Array(vec![Value::Object({
+            let mut b = serde_json::Map::new();
+            b.insert("map_column".into(), Value::String(map_column));
+            b.insert(
+                "destination_column".into(),
+                Value::String(destination_column),
+            );
+            b
+        })]),
+    );
+    apply.remove("output_column");
+    Ok(())
+}
 
 /// Soft-migrate legacy fields (engine/destination). Prefer [`migrate_project_document`].
 pub fn migrate_project_value(v: &mut Value) {
@@ -592,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_stamps_to_v2_without_rewrite() {
+    fn v1_stamps_to_current_without_row_rewrite() {
         let v1 = r#"{
             "format_version": 1,
             "id": "p",
@@ -603,7 +896,110 @@ mod tests {
             "dbt_target": "v1"
         }"#;
         let p = Project::from_json(v1).unwrap();
-        assert_eq!(p.format_version, 2);
+        assert_eq!(p.format_version, PROJECT_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn v2_keymap_folds_to_multi_output_fields() {
+        let v2 = r#"{
+            "format_version": 2,
+            "id": "p",
+            "name": "v2",
+            "connections": [],
+            "sources": [],
+            "workspace": {
+                "queries": [{
+                    "id": "q1",
+                    "name": "q1",
+                    "steps": [{
+                        "type": "ApplyKeyMap",
+                        "payload": {
+                            "column": "sku",
+                            "columns": [],
+                            "output_column": "sku",
+                            "map_id": "map_sku",
+                            "entries": [{"from": "A", "to": "1"}]
+                        }
+                    }],
+                    "execution": "local"
+                }],
+                "focus_query_id": "q1",
+                "key_maps": [{
+                    "id": "map_sku",
+                    "name": "sku",
+                    "from_column": "from",
+                    "to_column": "to",
+                    "entries": [{"from": "A", "to": "1"}],
+                    "storage": {"kind": "seed"},
+                    "authoring_context": {
+                        "source_query_id": "src",
+                        "source_columns": ["sku"],
+                        "target_query_id": "tgt",
+                        "target_column": "product_id"
+                    }
+                }]
+            },
+            "dbt_target": "v1"
+        }"#;
+        let p = Project::from_json(v2).unwrap();
+        assert_eq!(p.format_version, 3);
+        let map = &p.workspace.key_maps[0];
+        assert_eq!(map.output_columns_eff(), vec!["to".to_string()]);
+        assert!(map.to_column.is_empty());
+        assert_eq!(map.entries[0].output_values_eff(), vec!["1".to_string()]);
+        assert!(map.entries[0].to.is_empty());
+        let ctx = map.authoring_context.as_ref().unwrap();
+        assert_eq!(ctx.target_columns_eff(), vec!["product_id".to_string()]);
+        assert!(ctx.target_column.is_empty());
+        match &p.workspace.queries[0].steps[0] {
+            TransformationStep::ApplyKeyMap {
+                output_bindings,
+                output_column,
+                entries,
+                ..
+            } => {
+                assert!(output_column.is_none());
+                assert_eq!(output_bindings.len(), 1);
+                assert_eq!(output_bindings[0].map_column, "to");
+                assert_eq!(output_bindings[0].destination_column, "sku");
+                assert_eq!(entries[0].output_values_eff(), vec!["1".to_string()]);
+            }
+            other => panic!("expected ApplyKeyMap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_apply_missing_map_refuses() {
+        let v2 = r#"{
+            "format_version": 2,
+            "id": "p",
+            "name": "bad",
+            "connections": [],
+            "sources": [],
+            "workspace": {
+                "queries": [{
+                    "id": "q1",
+                    "name": "q1",
+                    "steps": [{
+                        "type": "ApplyKeyMap",
+                        "payload": {
+                            "column": "sku",
+                            "map_id": "missing_map",
+                            "entries": []
+                        }
+                    }],
+                    "execution": "local"
+                }],
+                "focus_query_id": "q1",
+                "key_maps": []
+            },
+            "dbt_target": "v1"
+        }"#;
+        let err = Project::from_json(v2).unwrap_err();
+        assert!(
+            err.contains("not found") || err.contains("cannot invent"),
+            "{err}"
+        );
     }
 
     #[test]

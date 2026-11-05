@@ -1,7 +1,7 @@
 use crate::connection::ConnectionDef;
 use crate::dialect::WarehouseDialect;
 use crate::emit::{
-    emit_transform_step_ex, key_map_seed_csv_cols, substitute_query_placeholders, EmitSchemaOpts,
+    emit_transform_step_ex, key_map_seed_csv_outputs, substitute_query_placeholders, EmitSchemaOpts,
 };
 use crate::graph::{cte_name, topo_queries_from};
 use crate::model::{KeyMapDef, KeyMapStorage, TransformationStep, Workspace};
@@ -181,7 +181,7 @@ fn preview_key_map_opts(
 ) -> Result<
     (
         HashMap<String, String>,
-        HashMap<String, (Vec<String>, String)>,
+        HashMap<String, (Vec<String>, Vec<String>)>,
         HashMap<String, String>,
         HashMap<String, (String, String)>,
         HashMap<String, String>,
@@ -196,12 +196,8 @@ fn preview_key_map_opts(
     let mut query_maps = HashMap::new();
     for km in &workspace.key_maps {
         let froms = km.from_columns_eff();
-        let to = if km.to_column.trim().is_empty() {
-            "to".into()
-        } else {
-            km.to_column.clone()
-        };
-        columns.insert(km.id.clone(), (froms.clone(), to.clone()));
+        let outs = km.output_columns_eff();
+        columns.insert(km.id.clone(), (froms.clone(), outs.clone()));
         if km.is_range_scd() {
             ranges.insert(
                 km.id.clone(),
@@ -238,7 +234,7 @@ fn preview_key_map_opts(
                 // KeyMapDef.entries via a temp CSV join — avoids VALUES bloat and the
                 // empty-entries no-op that left quality lab at 0% coverage.
                 if !km.entries.is_empty() {
-                    let path = materialize_seed_preview_csv(km, &froms, &to)?;
+                    let path = materialize_seed_preview_csv(km, &froms, &outs)?;
                     relations.insert(
                         km.id.clone(),
                         format!("read_csv_auto('{}', header=true)", escape_sql_string(&path)),
@@ -254,7 +250,7 @@ fn preview_key_map_opts(
 fn materialize_seed_preview_csv(
     km: &KeyMapDef,
     from_cols: &[String],
-    to_col: &str,
+    output_cols: &[String],
 ) -> Result<String, String> {
     let dir = std::env::temp_dir().join("dwhforge-keymap-preview");
     std::fs::create_dir_all(&dir).map_err(|e| format!("keymap preview dir: {e}"))?;
@@ -264,7 +260,7 @@ fn materialize_seed_preview_csv(
         km.entries.len(),
         std::process::id()
     ));
-    let body = key_map_seed_csv_cols(&km.entries, from_cols, to_col);
+    let body = key_map_seed_csv_outputs(&km.entries, from_cols, output_cols, &km.stewardship_columns());
     let mut file =
         std::fs::File::create(&path).map_err(|e| format!("keymap preview csv: {e}"))?;
     file.write_all(body.as_bytes())
@@ -278,7 +274,7 @@ fn compile_step(
     last_cte: &HashMap<String, String>,
     sources: &[SourceDef],
     key_map_relations: &HashMap<String, String>,
-    key_map_columns: &HashMap<String, (Vec<String>, String)>,
+    key_map_columns: &HashMap<String, (Vec<String>, Vec<String>)>,
     key_map_ref_models: &HashMap<String, String>,
     key_map_range: &HashMap<String, (String, String)>,
     key_map_query_ids: &HashMap<String, String>,
@@ -414,6 +410,7 @@ mod tests {
         };
         km.from_column = "alias".into();
         km.to_column = "canon".into();
+        km.output_columns = vec!["canon".into()];
         let ws = Workspace {
             queries: vec![
                 QueryDef {
@@ -435,6 +432,7 @@ mod tests {
                             column: "alias".into(),
                             columns: vec![],
                             output_column: None,
+            output_bindings: vec![],
                             as_of_column: None,
                             map_id: "map_q".into(),
                             entries: vec![],
@@ -476,6 +474,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: "map_ref".into(),
                         entries: km.entries.clone(),
@@ -508,6 +507,7 @@ mod tests {
         };
         km.from_column = "alias".into();
         km.to_column = "canon".into();
+        km.output_columns = vec!["canon".into()];
         // Large cache must not appear as VALUES when source relation is used.
         km.entries = (0..100)
             .map(|i| KeyMapEntry::pair(format!("a{i}"), format!("b{i}")))
@@ -524,6 +524,7 @@ mod tests {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: "map_x".into(),
                         entries: vec![],

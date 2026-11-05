@@ -7,6 +7,7 @@ export {
   mapForProjectAst,
   mapEditorFillSnapshot,
   mergeFromValuesIntoMap,
+  mergeLensOutputCells,
   planMapFillFromLens,
   isKeyMapBindingChanged,
   keyMapBindingFingerprint,

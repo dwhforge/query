@@ -21,10 +21,51 @@ export function fromColumnsEff(map: KeyMapDef): string[] {
   return [one];
 }
 
+/** Effective output column names on the map relation (ADR-0037). */
+export function outputColumnsEff(map: KeyMapDef): string[] {
+  if (map.output_columns?.length) return map.output_columns;
+  const one = (map.to_column ?? "to").trim() || "to";
+  return [one];
+}
+
 /** Effective From parts on an entry (ADR-0024). */
 export function fromPartsEff(e: KeyMapEntry): string[] {
   if (e.from_parts?.length) return e.from_parts;
   return e.from?.trim() ? [e.from] : [];
+}
+
+/** Effective output values on an entry (ADR-0037). */
+export function outputValuesEff(e: KeyMapEntry): string[] {
+  if (e.output_values?.length) return e.output_values;
+  if (e.to != null && e.to !== "") return [e.to];
+  return [];
+}
+
+/** First output value (legacy single-To). */
+export function primaryTo(e: KeyMapEntry): string {
+  return outputValuesEff(e)[0] ?? "";
+}
+
+export type ApplyKeyMapOutputBinding = {
+  map_column: string;
+  destination_column: string;
+};
+
+/** Effective Apply output bindings (ADR-0037). */
+export function applyKeymapOutputBindings(args: {
+  output_column?: string;
+  output_bindings?: ApplyKeyMapOutputBinding[];
+  factCols: string[];
+  mapColumnHint?: string;
+}): ApplyKeyMapOutputBinding[] {
+  if (args.output_bindings?.length) return args.output_bindings;
+  const dest =
+    args.output_column?.trim() ||
+    args.factCols[0] ||
+    "";
+  if (!dest) return [];
+  const mapCol = (args.mapColumnHint ?? "to").trim() || "to";
+  return [{ map_column: mapCol, destination_column: dest }];
 }
 
 /** Stable key for dirty-buffer / uniqueness (JSON tuple). */
@@ -123,6 +164,7 @@ export function emptyKeyMap(name = "Key map"): KeyMapDef {
     from_column: "from",
     from_columns: ["from"],
     to_column: "to",
+    output_columns: ["to"],
   };
 }
 
@@ -141,6 +183,8 @@ export type ValidateKeyMapOpts = {
   timeMode?: "none" | "range_scd";
   validFromColumn?: string;
   validToColumn?: string;
+  /** ADR-0037: required length of output_values (default 1). */
+  outputArity?: number;
 };
 
 export { parseScdBound, parseScdBoundDetailed } from "./scdBound";
@@ -153,6 +197,7 @@ export function validateKeyMapEntries(
   opts?: ValidateKeyMapOpts,
 ): { ok: true; entries: KeyMapEntry[] } | { ok: false; error: string } {
   const n = Math.max(1, arity);
+  const outN = Math.max(1, opts?.outputArity ?? 1);
   const range = opts?.timeMode === "range_scd";
   const vfCol = opts?.validFromColumn?.trim() || "valid_from";
   const vtCol = opts?.validToColumn?.trim() || "valid_to";
@@ -178,10 +223,15 @@ export function validateKeyMapEntries(
     if (parts.some((p) => !p)) {
       return { ok: false, error: "Empty From part is not allowed" };
     }
-    if (!e.to) {
+    let outs = outputValuesEff(e);
+    if (outs.length < outN) {
+      while (outs.length < outN) outs.push("");
+    }
+    if (outs.length > outN) outs = outs.slice(0, outN);
+    if (outs.some((v) => !v)) {
       return {
         ok: false,
-        error: `Empty To for From ${JSON.stringify(parts)}`,
+        error: `Empty output for From ${JSON.stringify(parts)}`,
       };
     }
     const key = tupleKey(parts);
@@ -245,7 +295,8 @@ export function validateKeyMapEntries(
     cleaned.push({
       from: parts[0]!,
       from_parts: parts,
-      to: e.to,
+      to: outs[0]!,
+      output_values: outs,
       ...(e.attrs && Object.keys(e.attrs).length ? { attrs: e.attrs } : {}),
       ...(rowId ? { __dwhRowId: rowId } : {}),
     } as KeyMapEntry);
@@ -256,8 +307,10 @@ export function validateKeyMapEntries(
 export function parseFromToPaste(
   text: string,
   arity = 1,
+  outputArity = 1,
 ): KeyMapEntry[] {
   const n = Math.max(1, arity);
+  const outN = Math.max(1, outputArity);
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -274,16 +327,32 @@ export function parseFromToPaste(
     const fromParts = parts
       .slice(0, n)
       .map((p) => p.trim().replace(/^"|"$/g, ""));
-    const to = parts
-      .slice(n)
-      .join(line.includes(",") ? "," : "\t")
-      .trim()
-      .replace(/^"|"$/g, "");
+    const clean = (p: string) => p.trim().replace(/^"|"$/g, "");
+    // Last output absorbs extra delimiters (legacy single-To behavior at outN=1).
+    const tail = parts.slice(n);
+    const outputs =
+      outN === 1
+        ? [
+            tail
+              .join(line.includes(",") ? "," : "\t")
+              .trim()
+              .replace(/^"|"$/g, ""),
+          ]
+        : Array.from({ length: outN }, (_, i) =>
+            i < outN - 1
+              ? clean(tail[i] ?? "")
+              : clean(
+                  tail
+                    .slice(i)
+                    .join(line.includes(",") ? "," : "\t"),
+                ),
+          );
     if (fromParts.every(Boolean)) {
       out.push({
         from: fromParts[0]!,
         from_parts: fromParts,
-        to,
+        to: outputs[0] ?? "",
+        output_values: outputs,
       });
     }
   }
@@ -607,12 +676,62 @@ export function mergeKeyMapProposals(
           : [];
     if (!parts.length) continue;
     const key = tupleKey(parts);
-    if (merged.get(key)?.to.trim()) continue;
+    const cur = merged.get(key);
+    if (cur && outputValuesEff(cur).some((v) => v.trim())) continue;
     merged.set(key, {
       from: parts[0]!,
       from_parts: parts,
       to: proposal.to_key,
+      output_values: [proposal.to_key],
     });
   }
   return [...merged.values()];
+}
+
+/** One named output cell from a lens / query result (ADR-0037). */
+export type LensOutputCell = { column: string; value: string };
+
+/**
+ * Merge named cells into `output_values` by column name. Unnamed columns are
+ * unchanged; a filled cell that differs is reported and never overwritten.
+ */
+export function mergeLensOutputCells(
+  entry: KeyMapEntry,
+  outputColumns: string[],
+  cells: LensOutputCell[],
+):
+  | { ok: true; entry: KeyMapEntry }
+  | { ok: false; error: string; conflicts: LensOutputCell[] } {
+  const cols = outputColumns.length ? outputColumns : ["to"];
+  const index = new Map(cols.map((c, i) => [c.trim().toLowerCase(), i] as const));
+  const outs = outputValuesEff(entry).slice(0, cols.length);
+  while (outs.length < cols.length) outs.push("");
+  const conflicts: LensOutputCell[] = [];
+  for (const cell of cells) {
+    const i = index.get(cell.column.trim().toLowerCase());
+    if (i === undefined) {
+      return {
+        ok: false,
+        error: `Unknown output column “${cell.column}”`,
+        conflicts: [],
+      };
+    }
+    const cur = outs[i] ?? "";
+    if (cur.trim() && cur !== cell.value) {
+      conflicts.push(cell);
+      continue;
+    }
+    if (!cur.trim()) outs[i] = cell.value;
+  }
+  if (conflicts.length) {
+    return {
+      ok: false,
+      error: `Output conflict on ${conflicts.map((c) => `“${c.column}”`).join(", ")}`,
+      conflicts,
+    };
+  }
+  return {
+    ok: true,
+    entry: { ...entry, to: outs[0] ?? "", output_values: outs },
+  };
 }

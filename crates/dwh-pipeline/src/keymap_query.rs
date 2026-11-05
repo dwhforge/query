@@ -36,9 +36,9 @@ pub fn validate_query_map_binding(
         ));
     }
     let from_cols = map.from_columns_eff();
-    let to = map.to_column.trim();
-    if to.is_empty() {
-        return Err(format!("KeyMap '{}': To column is empty", map.id));
+    let out_cols = map.output_columns_eff();
+    if out_cols.is_empty() || out_cols.iter().any(|c| c.trim().is_empty()) {
+        return Err(format!("KeyMap '{}': output_columns must be non-empty", map.id));
     }
     let available: HashMap<String, String> = schema_columns
         .iter()
@@ -69,38 +69,47 @@ pub fn validate_query_map_binding(
     for c in &from_cols {
         resolve(c)?;
     }
-    resolve(to)?;
-    let mut from_folded = HashSet::new();
-    for c in &from_cols {
-        if !from_folded.insert(c.to_ascii_lowercase()) {
+    for c in &out_cols {
+        resolve(c)?;
+    }
+    let mut used = HashSet::new();
+    for c in from_cols.iter().chain(out_cols.iter()) {
+        if !used.insert(c.to_ascii_lowercase()) {
             return Err(format!(
-                "KeyMap '{}': duplicate From column '{c}'",
+                "KeyMap '{}': duplicate map column '{c}' (From/outputs)",
                 map.id
             ));
         }
     }
-    if from_folded.contains(&to.to_ascii_lowercase()) {
-        return Err(format!(
-            "KeyMap '{}': To column '{to}' intersects From columns",
-            map.id
-        ));
-    }
     Ok(())
 }
 
-/// Full-set row validation (ADR-0036). No trim/case normalization of values.
-/// `rows` are parallel to `from_cols` then `to` (last cell).
+/// Full-set row validation (ADR-0036 / ADR-0037). No trim/case normalization of values.
+/// `rows` are parallel to `from_cols` then each output column.
 pub fn validate_query_map_rows(
     map_id: &str,
     from_arity: usize,
     rows: &[Vec<Option<String>>],
 ) -> Result<(), String> {
+    validate_query_map_rows_ex(map_id, from_arity, 1, rows)
+}
+
+/// Like [`validate_query_map_rows`] with explicit output arity ([ADR-0037]).
+pub fn validate_query_map_rows_ex(
+    map_id: &str,
+    from_arity: usize,
+    output_arity: usize,
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
     if from_arity < 1 {
         return Err(format!("KeyMap '{map_id}': From arity must be ≥ 1"));
     }
+    if output_arity < 1 {
+        return Err(format!("KeyMap '{map_id}': output arity must be ≥ 1"));
+    }
     let mut seen: HashSet<Vec<String>> = HashSet::new();
     for (i, row) in rows.iter().enumerate() {
-        let expect = from_arity + 1;
+        let expect = from_arity + output_arity;
         if row.len() != expect {
             return Err(format!(
                 "KeyMap '{map_id}': row {i} has {} cells, expected {expect}",
@@ -123,14 +132,20 @@ pub fn validate_query_map_rows(
                 Some(s) => from_parts.push(s.clone()),
             }
         }
-        match &row[from_arity] {
-            None => {
-                return Err(format!("KeyMap '{map_id}': NULL in To at row {i}"));
+        for (o, cell) in row.iter().skip(from_arity).enumerate() {
+            match cell {
+                None => {
+                    return Err(format!(
+                        "KeyMap '{map_id}': NULL in output {o} at row {i}"
+                    ));
+                }
+                Some(s) if s.is_empty() => {
+                    return Err(format!(
+                        "KeyMap '{map_id}': empty output {o} at row {i}"
+                    ));
+                }
+                Some(_) => {}
             }
-            Some(s) if s.is_empty() => {
-                return Err(format!("KeyMap '{map_id}': empty To at row {i}"));
-            }
-            Some(_) => {}
         }
         if !seen.insert(from_parts.clone()) {
             return Err(format!(
@@ -218,6 +233,7 @@ mod tests {
         };
         map.from_columns = vec!["a".into()];
         map.to_column = "b".into();
+        map.output_columns = vec!["b".into()];
         let q = QueryDef {
             id: "q_map".into(),
             name: "map".into(),
@@ -269,6 +285,7 @@ mod tests {
                     column: "a".into(),
                     columns: vec![],
                     output_column: None,
+            output_bindings: vec![],
                     as_of_column: None,
                     map_id: "m1".into(),
                     entries: vec![],

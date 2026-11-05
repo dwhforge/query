@@ -31,6 +31,7 @@ function emptyDraft(locals: { id: string }[]): MappingCreateDraft {
     sourceColumns: [],
     targetQueryId: locals[1]?.id ?? locals[0]?.id ?? "",
     targetColumn: "",
+    targetColumns: [],
     restoreColumnsByQuery: {},
   };
 }
@@ -40,6 +41,7 @@ function draftLooksFilled(d: MappingCreateDraft): boolean {
     d.name.trim() ||
       d.sourceColumns.length ||
       d.targetColumn.trim() ||
+      (d.targetColumns?.length ?? 0) > 0 ||
       Object.values(d.restoreColumnsByQuery).some((c) => c?.length),
   );
 }
@@ -237,13 +239,23 @@ export function MappingCreateWizard({
 
   function goReview() {
     setError(null);
-    if (!draft.sourceColumns.length || !draft.targetColumn.trim()) {
-      setError("Pick source key(s) and target column.");
+    const targets =
+      draft.targetColumns?.length
+        ? draft.targetColumns
+        : draft.targetColumn.trim()
+          ? [draft.targetColumn]
+          : [];
+    if (!draft.sourceColumns.length || !targets.length) {
+      setError("Pick source key(s) and at least one target column.");
       return;
     }
     const built = buildMappingCreatePlan({
       project,
-      draft,
+      draft: {
+        ...draft,
+        targetColumns: targets,
+        targetColumn: targets[0] ?? "",
+      },
       schemas,
     });
     if (!built.ok) {
@@ -495,6 +507,10 @@ export function MappingCreateWizard({
                       ),
                       targetColumn:
                         d.targetQueryId === nextSource ? "" : d.targetColumn,
+                      targetColumns:
+                        d.targetQueryId === nextSource
+                          ? []
+                          : d.targetColumns,
                     }));
                   }}
                 >
@@ -524,6 +540,7 @@ export function MappingCreateWizard({
                       ...d,
                       targetQueryId: nextTarget,
                       targetColumn: "",
+                      targetColumns: [],
                       restoreColumnsByQuery: restoresForPair(
                         d.restoreColumnsByQuery,
                         d.sourceQueryId,
@@ -574,28 +591,55 @@ export function MappingCreateWizard({
               </div>
               <div>
                 <p className="mb-1 text-[11px] uppercase text-slate-500">
-                  Target value
+                  Target value(s)
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {selectableOutputColumns(
                     targetEv,
                     draft.restoreColumnsByQuery[draft.targetQueryId],
-                  ).map((c) => (
-                    <button
-                      key={`tgt:${c}`}
-                      type="button"
-                      onClick={() =>
-                        setDraft((d) => ({ ...d, targetColumn: c }))
-                      }
-                      className={
-                        draft.targetColumn === c
-                          ? "rounded border border-teal-600 bg-teal-900/40 px-2 py-0.5 text-teal-100"
-                          : "rounded border border-slate-700 px-2 py-0.5 text-slate-400"
-                      }
-                    >
-                      {c}
-                    </button>
-                  ))}
+                  ).map((c) => {
+                    const selected =
+                      draft.targetColumns?.some(
+                        (x) => x.toLowerCase() === c.toLowerCase(),
+                      ) ||
+                      (!draft.targetColumns?.length &&
+                        draft.targetColumn.toLowerCase() === c.toLowerCase());
+                    return (
+                      <button
+                        key={`tgt:${c}`}
+                        type="button"
+                        onClick={() =>
+                          setDraft((d) => {
+                            const cur =
+                              d.targetColumns?.length
+                                ? [...d.targetColumns]
+                                : d.targetColumn.trim()
+                                  ? [d.targetColumn]
+                                  : [];
+                            const i = cur.findIndex(
+                              (x) => x.toLowerCase() === c.toLowerCase(),
+                            );
+                            const next =
+                              i >= 0
+                                ? cur.filter((_, j) => j !== i)
+                                : [...cur, c];
+                            return {
+                              ...d,
+                              targetColumns: next,
+                              targetColumn: next[0] ?? "",
+                            };
+                          })
+                        }
+                        className={
+                          selected
+                            ? "rounded border border-teal-600 bg-teal-900/40 px-2 py-0.5 text-teal-100"
+                            : "rounded border border-slate-700 px-2 py-0.5 text-slate-400"
+                        }
+                      >
+                        {c}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
               {renderExcluded(
@@ -626,9 +670,11 @@ export function MappingCreateWizard({
                     " · ",
                   )}
                 </span>{" "}
-                → To{" "}
+                → outputs{" "}
                 <span className="font-mono text-teal-200/90">
-                  {plan.map.to_column ?? "to"}
+                  {(
+                    plan.map.output_columns ?? [plan.map.to_column ?? "to"]
+                  ).join(" · ")}
                 </span>
               </p>
               <p className="text-[12px] text-slate-500">
@@ -638,7 +684,11 @@ export function MappingCreateWizard({
                 </span>{" "}
                 → target{" "}
                 <span className="font-mono">
-                  {plan.authoringContext.target_column}
+                  {(
+                    plan.authoringContext.target_columns?.length
+                      ? plan.authoringContext.target_columns
+                      : [plan.authoringContext.target_column]
+                  ).join(" · ")}
                 </span>
               </p>
               {plan.patches.length === 0 ? (

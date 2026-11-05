@@ -7,6 +7,7 @@ import {
   mapForProjectAst,
   mergeFromValuesIntoMap,
   mergeKeyMapTabSession,
+  mergeLensOutputCells,
   normalizeKeyMapForEditor,
   planMapFillFromLens,
   resolveJoinStepFromCtx,
@@ -15,7 +16,7 @@ import {
   upsertKeyMapIntoProject,
 } from "./service";
 import type { KeyMapJoinCtx, KeyMapTabSession } from "./types";
-import type { Project } from "../../types/pipeline";
+import type { KeyMapDef, Project } from "../../types/pipeline";
 import { findApplyKeyMapIdForJoin } from "../../lib/keyMap";
 
 function assert(cond: boolean, msg: string) {
@@ -94,6 +95,28 @@ const norm = normalizeKeyMapForEditor({
   entries: [],
 } as never);
 assert(norm.from_column === "from" && norm.to_column === "to", "defaults");
+
+{
+  const m: KeyMapDef = {
+    id: "m",
+    name: "m",
+    entries: [{ from: "k", from_parts: ["k"], to: "x", output_values: ["x", ""] }],
+    output_columns: ["a", "b"],
+    to_column: "a",
+  };
+  const r = mergeLensOutputCells(m.entries[0]!, ["a", "b"], [
+    { column: "b", value: "y" },
+  ]);
+  if (!r.ok || r.entry.output_values?.join() !== "x,y") {
+    throw new Error("mergeLensOutputCells fills empty named cell");
+  }
+  const c = mergeLensOutputCells(m.entries[0]!, ["a", "b"], [
+    { column: "a", value: "z" },
+  ]);
+  if (c.ok || c.conflicts.length !== 1) {
+    throw new Error("mergeLensOutputCells reports conflict");
+  }
+}
 
 const merged = mergeFromValuesIntoMap({
   map: map as never,

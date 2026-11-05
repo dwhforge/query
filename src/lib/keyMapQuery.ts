@@ -3,7 +3,7 @@
  * Binding / full-set row checks mirror Rust `keymap_query`.
  */
 import type { KeyMapDef, QueryDef, Workspace } from "../types/pipeline";
-import { fromColumnsEff } from "./keyMap";
+import { fromColumnsEff, outputColumnsEff } from "./keyMap";
 
 export function isQueryBackedMap(map: KeyMapDef | null | undefined): boolean {
   return map?.storage?.kind === "query";
@@ -29,9 +29,14 @@ export function validateQueryMapBinding(
     };
   }
   const fromCols = fromColumnsEff(map);
-  const to = (map.to_column ?? "to").trim();
-  if (!fromCols.length || fromCols.some((c) => !c.trim()) || !to) {
-    return { ok: false, error: "From/To columns must be non-empty" };
+  const outCols = outputColumnsEff(map);
+  if (
+    !fromCols.length ||
+    fromCols.some((c) => !c.trim()) ||
+    !outCols.length ||
+    outCols.some((c) => !c.trim())
+  ) {
+    return { ok: false, error: "From/output columns must be non-empty" };
   }
   const folded = new Map<string, string>();
   for (const c of schemaColumns) {
@@ -53,15 +58,21 @@ export function validateQueryMapBinding(
       };
     }
   }
-  if (!resolve(to)) {
-    return { ok: false, error: `To column “${to}” not found on query “${qid}”` };
+  for (const c of outCols) {
+    if (!resolve(c)) {
+      return {
+        ok: false,
+        error: `Output column “${c}” not found on query “${qid}”`,
+      };
+    }
   }
-  const fromSet = new Set(fromCols.map((c) => c.toLowerCase()));
-  if (fromSet.size !== fromCols.length) {
-    return { ok: false, error: "Duplicate From column" };
-  }
-  if (fromSet.has(to.toLowerCase())) {
-    return { ok: false, error: "To intersects From columns" };
+  const used = new Set<string>();
+  for (const c of [...fromCols, ...outCols]) {
+    const k = c.toLowerCase();
+    if (used.has(k)) {
+      return { ok: false, error: `Duplicate map column “${c}”` };
+    }
+    used.add(k);
   }
   return { ok: true };
 }
@@ -71,17 +82,22 @@ export function validateQueryMapRows(
   mapId: string,
   fromArity: number,
   rows: (string | null)[][],
+  outputArity = 1,
 ): { ok: true } | { ok: false; error: string } {
   if (fromArity < 1) {
     return { ok: false, error: `KeyMap “${mapId}”: From arity must be ≥ 1` };
   }
+  if (outputArity < 1) {
+    return { ok: false, error: `KeyMap “${mapId}”: output arity must be ≥ 1` };
+  }
+  const width = fromArity + outputArity;
   const seen = new Set<string>();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
-    if (row.length !== fromArity + 1) {
+    if (row.length !== width) {
       return {
         ok: false,
-        error: `KeyMap “${mapId}”: row ${i} has ${row.length} cells, expected ${fromArity + 1}`,
+        error: `KeyMap “${mapId}”: row ${i} has ${row.length} cells, expected ${width}`,
       };
     }
     const fromParts: string[] = [];
@@ -101,12 +117,21 @@ export function validateQueryMapRows(
       }
       fromParts.push(cell);
     }
-    const to = row[fromArity];
-    if (to == null) {
-      return { ok: false, error: `KeyMap “${mapId}”: NULL in To at row ${i}` };
-    }
-    if (to === "") {
-      return { ok: false, error: `KeyMap “${mapId}”: empty To at row ${i}` };
+    for (let o = 0; o < outputArity; o++) {
+      const out = row[fromArity + o];
+      const label = outputArity > 1 ? `output ${o}` : "To";
+      if (out == null) {
+        return {
+          ok: false,
+          error: `KeyMap “${mapId}”: NULL in ${label} at row ${i}`,
+        };
+      }
+      if (out === "") {
+        return {
+          ok: false,
+          error: `KeyMap “${mapId}”: empty ${label} at row ${i}`,
+        };
+      }
     }
     const key = JSON.stringify(fromParts);
     if (seen.has(key)) {
@@ -124,11 +149,12 @@ export function validateQueryMapRows(
 export function queryMapPreviewSql(
   queryId: string,
   fromCols: string[],
-  toCol: string,
+  toCols: string | string[],
   limit: number,
 ): string {
   const q = (name: string) => `"${name.replace(/"/g, '""')}"`;
-  const cols = [...fromCols, toCol].map(q).join(", ");
+  const outs = Array.isArray(toCols) ? toCols : [toCols];
+  const cols = [...fromCols, ...outs].map(q).join(", ");
   const n = Math.max(1, Math.min(limit, 500));
   return `SELECT ${cols} FROM {{query:${queryId}}} LIMIT ${n}`;
 }
@@ -140,7 +166,7 @@ export function queryMapPreviewQuery(
   const qid = queryBackedQueryId(map);
   if (!qid) return null;
   const fromCols = fromColumnsEff(map);
-  const to = (map.to_column ?? "to").trim() || "to";
+  const outs = outputColumnsEff(map);
   return {
     id: "__keymap_query_preview__",
     name: "keymap_query_preview",
@@ -148,7 +174,7 @@ export function queryMapPreviewQuery(
       {
         type: "SqlModel",
         payload: {
-          raw_sql: queryMapPreviewSql(qid, fromCols, to, limit),
+          raw_sql: queryMapPreviewSql(qid, fromCols, outs, limit),
         },
       },
     ],

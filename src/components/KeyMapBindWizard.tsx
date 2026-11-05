@@ -6,6 +6,7 @@ import {
   type PostgresColumn,
   type PostgresObject,
 } from "../lib/bridge";
+import { outputColumnsEff } from "../lib/keyMap";
 
 export type KeyMapBindResult = {
   storage: Extract<KeyMapStorage, { kind: "source" }>;
@@ -444,6 +445,11 @@ export function applyKeyMapBind(
       ? bind.from_columns
       : [bind.from_column],
     to_column: bind.to_column,
+    // ADR-0037: wizard edits the primary output; keep any extra outputs.
+    output_columns: [
+      bind.to_column,
+      ...outputColumnsEff(map).slice(1),
+    ],
     editable_columns: bind.editable_columns,
     entries: [],
   };

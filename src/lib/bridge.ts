@@ -674,7 +674,10 @@ export type KeyMapDirtyBaseline = {
   fromParts: string[];
   /** false = row must be absent (insert). */
   existed: boolean;
+  /** First output value (legacy single-To; ADR-0037 keeps for back-compat). */
   to: string;
+  /** Output column name → value at baseline (ADR-0037). */
+  outputs?: Record<string, string>;
   /**
    * Editable attrs at baseline. `null` ≡ SQL NULL; `""` ≡ empty string.
    * All editable columns should be present when known.

@@ -264,8 +264,9 @@ pub enum TransformationStep {
         columns: Vec<String>,
         ops: Vec<NormalizeOp>,
     },
-    /// Remap join-key values via a KeyMap (`from` → `to`, or From tuple → to).
-    /// Soft-migrate: legacy `column` → `columns: [column]` ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
+    /// Remap join-key values via a KeyMap (`from` → outputs, or From tuple → outputs).
+    /// Soft-migrate: legacy `column` → `columns: [column]` ([ADR-0024](../../../docs/adr/0024-keymap-composite.md));
+    /// legacy `output_column` → `output_bindings` ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
     ApplyKeyMap {
         /// Legacy single fact column (arity 1). Prefer `columns` when set.
         #[serde(default)]
@@ -273,9 +274,12 @@ pub enum TransformationStep {
         /// Fact columns matching KeyMap `from_columns` (ordered).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         columns: Vec<String>,
-        /// Where COALESCE(map.to, …) is written (default: first of columns).
+        /// Legacy single destination. Prefer `output_bindings`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_column: Option<String>,
+        /// Map output column → fact destination ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        output_bindings: Vec<ApplyKeyMapOutputBinding>,
         /// Fact event-time column for range SCD maps ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_column: Option<String>,
@@ -283,6 +287,13 @@ pub enum TransformationStep {
         #[serde(default)]
         entries: Vec<KeyMapEntry>,
     },
+}
+
+/// One ApplyKeyMap write: map relation column → fact column ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, TS)]
+pub struct ApplyKeyMapOutputBinding {
+    pub map_column: String,
+    pub destination_column: String,
 }
 
 /// Optional effectivity mode for a KeyMap ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
@@ -295,7 +306,7 @@ pub enum KeyMapTimeMode {
     RangeScd,
 }
 
-/// One From→To alias row. Unique by trimmed From **tuple** within a [`KeyMapDef`].
+/// One From→outputs alias row. Unique by trimmed From **tuple** within a [`KeyMapDef`].
 /// Optional `attrs` hold whitelisted extra columns for Postgres source maps ([ADR-0022](../../../docs/adr/0022-keymap-postgres-live-bind.md)).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct KeyMapEntry {
@@ -305,7 +316,12 @@ pub struct KeyMapEntry {
     /// From tuple aligned to [`KeyMapDef::from_columns_eff`] ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from_parts: Vec<String>,
+    /// Legacy single To. Prefer `output_values` ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub to: String,
+    /// Output values aligned to [`KeyMapDef::output_columns_eff`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_values: Vec<String>,
     /// Extra editable column values (keys ⊆ `KeyMapDef.editable_columns`). Ignored by ApplyKeyMap join.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub attrs: std::collections::BTreeMap<String, String>,
@@ -314,20 +330,36 @@ pub struct KeyMapEntry {
 impl KeyMapEntry {
     pub fn pair(from: impl Into<String>, to: impl Into<String>) -> Self {
         let from = from.into();
+        let to = to.into();
         Self {
             from: from.clone(),
             from_parts: vec![from],
-            to: to.into(),
+            to: to.clone(),
+            output_values: vec![to],
             attrs: std::collections::BTreeMap::new(),
         }
     }
 
     pub fn parts(from_parts: Vec<String>, to: impl Into<String>) -> Self {
         let from = from_parts.first().cloned().unwrap_or_default();
+        let to = to.into();
         Self {
             from,
             from_parts,
-            to: to.into(),
+            to: to.clone(),
+            output_values: vec![to],
+            attrs: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn parts_multi(from_parts: Vec<String>, output_values: Vec<String>) -> Self {
+        let from = from_parts.first().cloned().unwrap_or_default();
+        let to = output_values.first().cloned().unwrap_or_default();
+        Self {
+            from,
+            from_parts,
+            to,
+            output_values,
             attrs: std::collections::BTreeMap::new(),
         }
     }
@@ -342,6 +374,25 @@ impl KeyMapEntry {
             vec![]
         }
     }
+
+    /// Effective output values (soft-migrate legacy `to`).
+    pub fn output_values_eff(&self) -> Vec<String> {
+        if !self.output_values.is_empty() {
+            self.output_values.clone()
+        } else if !self.to.is_empty() {
+            vec![self.to.clone()]
+        } else {
+            vec![]
+        }
+    }
+
+    /// First output value (legacy single-To callers).
+    pub fn primary_to(&self) -> String {
+        self.output_values_eff()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
 }
 
 /// Effective ApplyKeyMap fact columns (soft-migrate legacy `column`).
@@ -353,6 +404,40 @@ pub fn apply_keymap_columns(column: &str, columns: &[String]) -> Vec<String> {
     } else {
         vec![]
     }
+}
+
+/// Effective ApplyKeyMap output bindings ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+/// Legacy `output_column` → one binding; `map_column_hint` is the map's primary output name.
+pub fn apply_keymap_output_bindings(
+    output_column: Option<&str>,
+    output_bindings: &[ApplyKeyMapOutputBinding],
+    fact_cols: &[String],
+    map_column_hint: &str,
+) -> Vec<ApplyKeyMapOutputBinding> {
+    if !output_bindings.is_empty() {
+        return output_bindings.to_vec();
+    }
+    let dest = output_column
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| fact_cols.first().cloned())
+        .unwrap_or_default();
+    if dest.is_empty() {
+        return vec![];
+    }
+    let map_col = {
+        let t = map_column_hint.trim();
+        if t.is_empty() {
+            "to".to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    vec![ApplyKeyMapOutputBinding {
+        map_column: map_col,
+        destination_column: dest,
+    }]
 }
 
 /// Where the From→To table lives (ADR-0020 / ADR-0036). Default = generated dbt seed.
@@ -401,7 +486,24 @@ pub struct KeyMapAuthoringContext {
     /// Ordered From columns on the source query (composite arity ≥ 1).
     pub source_columns: Vec<String>,
     pub target_query_id: String,
+    /// Legacy single target field. Prefer `target_columns` ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target_column: String,
+    /// Ordered target-query fields chosen at create (intent, not Apply SoT).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_columns: Vec<String>,
+}
+
+impl KeyMapAuthoringContext {
+    pub fn target_columns_eff(&self) -> Vec<String> {
+        if !self.target_columns.is_empty() {
+            self.target_columns.clone()
+        } else if !self.target_column.trim().is_empty() {
+            vec![self.target_column.clone()]
+        } else {
+            vec![]
+        }
+    }
 }
 
 /// Named join-key alias table (project resource).
@@ -422,11 +524,14 @@ pub struct KeyMapDef {
     /// From columns on the map relation (ordered). Soft-migrate: empty → `[from_column]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from_columns: Vec<String>,
-    /// Column on the map relation used as To (default `to`).
-    #[serde(default = "default_to_col")]
+    /// Legacy single To column on the map relation. Prefer `output_columns`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub to_column: String,
-    /// Extra columns editable in the KeyMap UI (not From/To). Empty = from/to only.
-    /// Seed export includes these after `to` ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
+    /// Ordered output columns on the map relation ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_columns: Vec<String>,
+    /// Extra columns editable in the KeyMap UI (not From/outputs). Empty = from/outputs only.
+    /// Seed export includes these after outputs ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub editable_columns: Vec<String>,
     /// Effectivity mode (default none = classic unique From).
@@ -458,6 +563,7 @@ impl KeyMapDef {
             from_column: default_from_col(),
             from_columns: vec![],
             to_column: default_to_col(),
+            output_columns: vec![default_to_col()],
             editable_columns: vec![],
             time_mode: KeyMapTimeMode::None,
             valid_from_column: None,
@@ -519,11 +625,34 @@ impl KeyMapDef {
         }
     }
 
+    /// Effective output column names ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+    pub fn output_columns_eff(&self) -> Vec<String> {
+        if !self.output_columns.is_empty() {
+            self.output_columns.clone()
+        } else if !self.to_column.trim().is_empty() {
+            vec![self.to_column.clone()]
+        } else {
+            vec![default_to_col()]
+        }
+    }
+
+    /// Primary (first) output column — legacy single-To callers.
+    pub fn primary_to_column(&self) -> String {
+        self.output_columns_eff()
+            .into_iter()
+            .next()
+            .unwrap_or_else(default_to_col)
+    }
+
     pub fn arity(&self) -> usize {
         self.from_columns_eff().len().max(1)
     }
 
-    /// Reject empty / duplicate From **tuples** and empty `to` for seed-backed maps.
+    pub fn output_arity(&self) -> usize {
+        self.output_columns_eff().len().max(1)
+    }
+
+    /// Reject empty / duplicate From **tuples** and empty outputs for seed-backed maps.
     /// Query-backed maps validate binding here; row NULL/dupes need a full result scan
     /// (`keymap_query::validate_query_map_rows`).
     pub fn validate(&self) -> Result<(), String> {
@@ -561,32 +690,54 @@ impl KeyMapDef {
             KeyMapStorage::Seed => {}
         }
         let from_cols = self.from_columns_eff();
-        if from_cols.iter().any(|c| c.trim().is_empty()) || self.to_column.trim().is_empty() {
+        let out_cols = self.output_columns_eff();
+        if from_cols.iter().any(|c| c.trim().is_empty())
+            || out_cols.is_empty()
+            || out_cols.iter().any(|c| c.trim().is_empty())
+        {
             return Err(format!(
-                "KeyMap '{}': from_columns/to_column must be non-empty",
+                "KeyMap '{}': from_columns/output_columns must be non-empty",
                 self.id
             ));
         }
         {
             let mut seen_names = std::collections::HashSet::new();
-            for c in &from_cols {
+            for c in from_cols.iter().chain(out_cols.iter()) {
                 let key = c.to_ascii_lowercase();
                 if !seen_names.insert(key) {
                     return Err(format!(
-                        "KeyMap '{}': duplicate From column name '{c}'",
+                        "KeyMap '{}': duplicate map column name '{c}' (From/outputs must be unique)",
                         self.id
                     ));
                 }
             }
-            let to_key = self.to_column.to_ascii_lowercase();
-            if seen_names.contains(&to_key) {
-                return Err(format!(
-                    "KeyMap '{}': To column '{}' collides with a From column (seed CSV header must be unique)",
-                    self.id, self.to_column
-                ));
+            for c in &self.editable_columns {
+                let t = c.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                let key = t.to_ascii_lowercase();
+                if !seen_names.insert(key) {
+                    return Err(format!(
+                        "KeyMap '{}': editable column '{t}' collides with From/output name",
+                        self.id
+                    ));
+                }
+            }
+            if self.is_range_scd() {
+                for c in [self.valid_from_col_eff(), self.valid_to_col_eff()] {
+                    let key = c.to_ascii_lowercase();
+                    if !seen_names.insert(key) {
+                        return Err(format!(
+                            "KeyMap '{}': range column '{c}' collides with From/output/editable name",
+                            self.id
+                        ));
+                    }
+                }
             }
         }
         let n = from_cols.len();
+        let out_n = out_cols.len();
         let range = self.is_range_scd();
         let vf_col = self.valid_from_col_eff();
         let vt_col = self.valid_to_col_eff();
@@ -605,13 +756,21 @@ impl KeyMapDef {
                         parts.len()
                     ));
                 }
+                let outs = e.output_values_eff();
+                if outs.len() != out_n {
+                    return Err(format!(
+                        "KeyMap '{}': entry output_values len {} != output arity {out_n}",
+                        self.id,
+                        outs.len()
+                    ));
+                }
                 let key: Vec<String> = parts.iter().map(|p| p.trim().to_string()).collect();
                 if key.iter().any(|p| p.is_empty()) {
                     return Err(format!("KeyMap '{}': empty from part", self.id));
                 }
-                if e.to.is_empty() {
+                if outs.iter().any(|v| v.is_empty()) {
                     return Err(format!(
-                        "KeyMap '{}': empty to for from {:?}",
+                        "KeyMap '{}': empty output for from {:?}",
                         self.id, key
                     ));
                 }
@@ -1023,7 +1182,8 @@ mod authoring_context_tests {
             source_query_id: "supplier_products".into(),
             source_columns: vec!["supplier_id".into(), "product_code".into()],
             target_query_id: "catalog_products".into(),
-            target_column: "product_id".into(),
+            target_column: String::new(),
+            target_columns: vec!["product_id".into()],
         });
         let json = serde_json::to_string_pretty(&map).unwrap();
         assert!(json.contains("authoring_context"));
@@ -1055,13 +1215,15 @@ mod authoring_context_tests {
         map.from_column = "to".into();
         map.from_columns = vec!["to".into()];
         map.to_column = "to".into();
+        map.output_columns = vec!["to".into()];
         let err = map.validate().unwrap_err();
-        assert!(err.contains("collides"), "{err}");
+        assert!(err.contains("duplicate"), "{err}");
 
         map.from_columns = vec!["sku".into(), "TO".into()];
         map.from_column = "sku".into();
         map.to_column = "to".into();
+        map.output_columns = vec!["to".into()];
         let err2 = map.validate().unwrap_err();
-        assert!(err2.contains("collides"), "{err2}");
+        assert!(err2.contains("duplicate"), "{err2}");
     }
 }

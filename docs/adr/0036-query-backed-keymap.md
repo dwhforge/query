@@ -26,6 +26,7 @@
 - Amend ADR-0020 bind list: seed | ref | source | **query**.
 - `keyMapRevision` / MappingCheck fingerprints for query maps use query definition (+ upstream), not `entries`.
 - Batch remap / write-back / fuzzy accept into rows: out of scope (read-only SoT).
+- Multi-output on a query map is [ADR-0037](0037-keymap-multi-output.md). Attrs and range SCD stay forbidden.
 - OpenSpec change must merge into `openspec/specs/query-backed-keymap/` when done.
 
 ## References

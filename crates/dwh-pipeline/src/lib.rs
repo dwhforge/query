@@ -44,8 +44,8 @@ pub use dialect::{
 };
 pub use emit::{
     ascii_fold_name, emit_transform_step, emit_transform_step_ex, key_map_seed_csv,
-    key_map_seed_csv_cols, key_map_seed_csv_full, key_map_seed_csv_named, key_map_seed_name,
-    normalize_column_expr, normalize_key_column_expr, parse_key_map_seed_csv,
+    key_map_seed_csv_cols, key_map_seed_csv_full, key_map_seed_csv_named, key_map_seed_csv_outputs,
+    key_map_seed_name, normalize_column_expr, normalize_key_column_expr, parse_key_map_seed_csv,
     parse_key_map_seed_csv_cols, parse_key_map_seed_csv_full, parse_key_map_seed_csv_mode,
     rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
@@ -57,7 +57,7 @@ pub use key_map_sync::{
 };
 pub use keymap_query::{
     assert_no_query_map_cycle, direct_deps_with_maps, query_backed_query_id,
-    validate_query_map_binding, validate_query_map_rows,
+    validate_query_map_binding, validate_query_map_rows, validate_query_map_rows_ex,
 };
 pub use schema::{
     apply_step_schema, infer_workspace_schemas, infer_workspace_schemas_ex, StepSchema,
@@ -75,10 +75,9 @@ pub use export_manifest::{
 };
 pub use export_tree::{list_export_tree, ExportResult};
 pub use model::{
-    apply_keymap_columns, JoinType, KeyMapAuthoringContext, KeyMapDef, KeyMapEntry, KeyMapStorage,
-    KeyMapTimeMode,
-    NormalizeOp, ObjectKind,
-    ObjectTarget, QueryDef, TransformationStep, Workspace,
+    apply_keymap_columns, apply_keymap_output_bindings, ApplyKeyMapOutputBinding, JoinType,
+    KeyMapAuthoringContext, KeyMapDef, KeyMapEntry, KeyMapStorage, KeyMapTimeMode, NormalizeOp,
+    ObjectKind, ObjectTarget, QueryDef, TransformationStep, Workspace,
 };
 pub use project::{ConnectionBinding, ProjectReference};
 pub use references::{

@@ -11,6 +11,8 @@ export type MappingCreateDraft = {
   sourceColumns: string[];
   targetQueryId: string;
   targetColumn: string;
+  /** ADR-0037: ordered target fields; when set, wins over `targetColumn`. */
+  targetColumns?: string[];
   /** Columns chosen for last-Fields restore, keyed by query id. */
   restoreColumnsByQuery: Record<string, string[]>;
 };

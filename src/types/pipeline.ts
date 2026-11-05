@@ -1,3 +1,7 @@
+import type { ApplyKeyMapOutputBinding } from "./generated/ApplyKeyMapOutputBinding";
+import type { KeyMapAuthoringContext } from "./generated/KeyMapAuthoringContext";
+export type { ApplyKeyMapOutputBinding, KeyMapAuthoringContext };
+
 export type ColumnType = "INTEGER" | "VARCHAR" | "FLOAT" | "TIMESTAMP" | "BOOLEAN";
 
 export interface ColumnMetadata {
@@ -112,7 +116,10 @@ export type TransformationStep =
       payload: {
         column?: string;
         columns?: string[];
+        /** Legacy single destination. Prefer `output_bindings` (ADR-0037). */
         output_column?: string;
+        /** Map output → fact destination (ADR-0037). */
+        output_bindings?: ApplyKeyMapOutputBinding[];
         /** Fact event-time column when KeyMap is range SCD (ADR-0028). */
         as_of_column?: string;
         map_id: ObjectTarget;
@@ -182,7 +189,10 @@ export interface KeyMapEntry {
   from: string;
   /** Composite From tuple ([ADR-0024]); soft-migrate: omit → [from]. */
   from_parts?: string[];
-  to: string;
+  /** Legacy single To. Prefer `output_values` (ADR-0037). */
+  to?: string;
+  /** Values aligned to KeyMapDef.output_columns (ADR-0037). */
+  output_values?: string[];
   /** Extra editable WH columns (ADR-0022); keys ⊆ KeyMapDef.editable_columns. */
   attrs?: Record<string, string>;
 }
@@ -209,11 +219,7 @@ export type KeyMapStorage =
 /** Effectivity mode ([ADR-0028](../../docs/adr/0028-keymap-stewardship-shapes.md)). */
 export type KeyMapTimeMode = "none" | "range_scd";
 
-/** Creation intent from query-based mapping wizard ([ADR-0034]) — generated from Rust. */
-import type { KeyMapAuthoringContext } from "./generated/KeyMapAuthoringContext";
-export type { KeyMapAuthoringContext };
-
-/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034). */
+/** Named From→outputs join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034 / ADR-0037). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -223,8 +229,11 @@ export interface KeyMapDef {
   from_column?: string;
   /** Composite From columns on the map relation; soft-migrate: omit → [from_column]. */
   from_columns?: string[];
+  /** Legacy single To. Prefer `output_columns` (ADR-0037). */
   to_column?: string;
-  /** Extra columns editable in the UI (not From/To); seed export includes them. */
+  /** Ordered output columns on the map relation (ADR-0037). */
+  output_columns?: string[];
+  /** Extra columns editable in the UI (not From/outputs); seed export includes them. */
   editable_columns?: string[];
   /** Default `none` — classic unique From. */
   time_mode?: KeyMapTimeMode;

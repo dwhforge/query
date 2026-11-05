@@ -29,7 +29,12 @@ import {
   type QualityCell,
 } from "./mappingQuality";
 import type { PreviewResult } from "../types/pipeline";
-import { fromColumnsEff, fromPartsEff } from "./keyMap";
+import {
+  fromColumnsEff,
+  fromPartsEff,
+  outputColumnsEff,
+  outputValuesEff,
+} from "./keyMap";
 
 export type {
   CheckAggregateCell,
@@ -61,9 +66,25 @@ export function keyMapRevision(
   workspace?: Workspace | null,
 ): string {
   if (!map) return "missing_map";
+  // ADR-0037: Apply output_bindings change remap semantics without map rows.
+  // Single-output / legacy wiring is omitted so existing revisions stay stable.
+  const consumers = (workspace?.queries ?? [])
+    .flatMap((q) =>
+      q.steps.flatMap((step) =>
+        step.type === "ApplyKeyMap" &&
+        targetKey(step.payload.map_id) === map.id &&
+        step.payload.output_bindings?.length
+          ? [{ q: q.id, output_bindings: step.payload.output_bindings }]
+          : [],
+      ),
+    )
+    .sort((a, b) => a.q.localeCompare(b.q));
+  const outCols = outputColumnsEff(map);
   const schema = JSON.stringify({
     from_columns: fromColumnsEff(map),
     to_column: map.to_column ?? "to",
+    ...(outCols.length > 1 ? { output_columns: outCols } : {}),
+    ...(consumers.length ? { consumers } : {}),
     editable_columns: map.editable_columns ?? [],
     time_mode: map.time_mode ?? "none",
     valid_from_column: map.valid_from_column ?? null,
@@ -90,7 +111,10 @@ export function keyMapRevision(
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([k, v]) => `${k}=${v}`)
         .join(";");
-      return `${from}\t${e.to.trim()}\t${attrs}`;
+      const outs = outputValuesEff(e)
+        .map((v) => v.trim())
+        .join("\0");
+      return `${from}\t${outs}\t${attrs}`;
     })
     .sort();
   return `map:${map.id}:n=${rows.length}:h=${fnv1a(rows.join("\n") + "|" + schema)}`;

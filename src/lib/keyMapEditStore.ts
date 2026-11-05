@@ -1,6 +1,6 @@
 import type { KeyMapEntry } from "../types/pipeline";
 import type { KeyMapDirtyBaseline, KeyMapDirtyDelta } from "./bridge";
-import { fromPartsEff, tupleKey } from "./keyMap";
+import { fromPartsEff, outputValuesEff, tupleKey } from "./keyMap";
 
 export type RowId = string;
 
@@ -9,9 +9,23 @@ export type AttrMap = Record<string, string>;
 
 export type RowSnapshot = {
   fromParts: string[];
+  /** First output (legacy single-To); always mirrors `outputs[0]`. */
   to: string;
+  /** Values aligned to the map's output columns (ADR-0037); length ≥ 1. */
+  outputs: string[];
   attrs: AttrMap;
 };
+
+function normOutputs(outputs: string[] | undefined, arity: number): string[] {
+  const n = Math.max(1, arity);
+  const out = (outputs ?? []).slice(0, n);
+  while (out.length < n) out.push("");
+  return out;
+}
+
+function outputsFilled(outputs: string[]): boolean {
+  return outputs.length > 0 && outputs.every((v) => !!v);
+}
 
 export type RowEdit = {
   /** `null` = row did not exist in the warehouse (INSERT). */
@@ -49,6 +63,7 @@ function cloneSnap(s: RowSnapshot): RowSnapshot {
   return {
     fromParts: [...s.fromParts],
     to: s.to,
+    outputs: [...s.outputs],
     attrs: { ...s.attrs },
   };
 }
@@ -63,9 +78,12 @@ function cloneEdit(e: RowEdit): RowEdit {
 
 export function snapshotFromEntry(entry: KeyMapEntry): RowSnapshot {
   const fromParts = fromPartsEff(entry).map((p) => p.trim());
+  const eff = outputValuesEff(entry);
+  const outputs = eff.length ? [...eff] : [""];
   return {
     fromParts,
-    to: entry.to ?? "",
+    to: outputs[0] ?? "",
+    outputs,
     attrs: entry.attrs ? { ...entry.attrs } : {},
   };
 }
@@ -77,7 +95,8 @@ export function entryFromSnapshot(
   return {
     from: snap.fromParts[0] ?? "",
     from_parts: [...snap.fromParts],
-    to: snap.to,
+    to: snap.outputs[0] ?? snap.to,
+    output_values: [...snap.outputs],
     ...(Object.keys(snap.attrs).length ? { attrs: { ...snap.attrs } } : {}),
     __dwhRowId: rowId,
   };
@@ -89,17 +108,25 @@ function validKey(parts: string[]): boolean {
 
 function snapEqual(a: RowSnapshot, b: RowSnapshot, editable: string[]): boolean {
   if (tupleKey(a.fromParts) !== tupleKey(b.fromParts)) return false;
-  if (a.to !== b.to) return false;
+  const n = Math.max(a.outputs.length, b.outputs.length);
+  for (let i = 0; i < n; i++) {
+    if ((a.outputs[i] ?? "") !== (b.outputs[i] ?? "")) return false;
+  }
   for (const c of editable) {
     if ((a.attrs[c] ?? null) !== (b.attrs[c] ?? null)) return false;
   }
   return true;
 }
 
-function emptyDraft(arity: number, editable: string[]): RowSnapshot {
+function emptyDraft(
+  arity: number,
+  editable: string[],
+  outputArity = 1,
+): RowSnapshot {
   return {
     fromParts: Array.from({ length: Math.max(1, arity) }, () => ""),
     to: "",
+    outputs: normOutputs([], outputArity),
     attrs: Object.fromEntries(editable.map((c) => [c, ""])),
   };
 }
@@ -108,19 +135,24 @@ function baselineFromOriginal(
   original: RowSnapshot | null,
   fromPartsForInsert: string[],
   editable: string[],
+  outputColumns: string[] = [],
 ): KeyMapDirtyBaseline {
+  const outputsMap = (values: string[]): Record<string, string> =>
+    Object.fromEntries(outputColumns.map((c, i) => [c, values[i] ?? ""]));
   if (!original) {
     return {
       fromParts: [...fromPartsForInsert],
       existed: false,
       to: "",
+      ...(outputColumns.length ? { outputs: outputsMap([]) } : {}),
       attrs: Object.fromEntries(editable.map((c) => [c, null])),
     };
   }
   return {
     fromParts: [...original.fromParts],
     existed: true,
-    to: original.to,
+    to: original.outputs[0] ?? original.to,
+    ...(outputColumns.length ? { outputs: outputsMap(original.outputs) } : {}),
     attrs: Object.fromEntries(
       editable.map((c) => [c, original.attrs[c] ?? null]),
     ),
@@ -139,12 +171,25 @@ export class KeyMapEditStore {
   private byOriginFrom = new Map<string, RowId>();
   private editable: string[] = [];
   private arity = 1;
+  private outputColumns: string[] = ["to"];
   private captureToken = 0;
   private lastCapture: SaveCapture | null = null;
 
-  setSchema(opts: { arity: number; editable: string[] }) {
+  setSchema(opts: {
+    arity: number;
+    editable: string[];
+    /** Output column names (ADR-0037); default `["to"]`. */
+    outputColumns?: string[];
+  }) {
     this.arity = Math.max(1, opts.arity);
     this.editable = [...opts.editable];
+    const cols = opts.outputColumns?.length ? opts.outputColumns : ["to"];
+    this.outputColumns = [...cols];
+  }
+
+  /** Current output arity (≥ 1). */
+  get outputArity(): number {
+    return this.outputColumns.length;
   }
 
   clear() {
@@ -203,7 +248,7 @@ export class KeyMapEditStore {
       }
     }
     return entries.map((e) => {
-      const loaded = snapshotFromEntry(e);
+      const loaded = this.normSnap(snapshotFromEntry(e));
       const prefer =
         (validKey(loaded.fromParts)
           ? prevByFrom.get(tupleKey(loaded.fromParts))
@@ -236,6 +281,11 @@ export class KeyMapEditStore {
     return out;
   }
 
+  private normSnap(s: RowSnapshot): RowSnapshot {
+    const outputs = normOutputs(s.outputs, this.outputArity);
+    return { ...s, outputs, to: outputs[0] ?? "" };
+  }
+
   private ensureEdit(id: RowId, fallback?: RowSnapshot | null): RowEdit {
     let edit = this.rows.get(id);
     if (edit) return edit;
@@ -244,7 +294,7 @@ export class KeyMapEditStore {
       original: original ? cloneSnap(original) : null,
       draft: original
         ? cloneSnap(original)
-        : emptyDraft(this.arity, this.editable),
+        : emptyDraft(this.arity, this.editable, this.outputArity),
       deleted: false,
     };
     this.rows.set(id, edit);
@@ -291,7 +341,10 @@ export class KeyMapEditStore {
     id: RowId,
     patch: {
       fromParts?: string[];
+      /** Sets the first output (legacy). */
       to?: string;
+      /** Full output vector aligned to output columns (ADR-0037). */
+      outputs?: string[];
       attrs?: AttrMap;
     },
     fallback?: RowSnapshot | null,
@@ -301,7 +354,11 @@ export class KeyMapEditStore {
     if (patch.fromParts) {
       edit.draft.fromParts = patch.fromParts.map((p) => p.trim());
     }
-    if (patch.to !== undefined) edit.draft.to = patch.to;
+    if (patch.outputs) {
+      edit.draft.outputs = normOutputs(patch.outputs, this.outputArity);
+    }
+    if (patch.to !== undefined) edit.draft.outputs[0] = patch.to;
+    edit.draft.to = edit.draft.outputs[0] ?? "";
     if (patch.attrs) edit.draft.attrs = { ...edit.draft.attrs, ...patch.attrs };
     this.pruneIfPristine(id);
   }
@@ -309,9 +366,11 @@ export class KeyMapEditStore {
   /** Brand-new row (INSERT). Returns RowId. */
   addRow(init?: Partial<RowSnapshot>): RowId {
     const id = newRowId();
-    const draft = emptyDraft(this.arity, this.editable);
+    const draft = emptyDraft(this.arity, this.editable, this.outputArity);
     if (init?.fromParts) draft.fromParts = init.fromParts.map((p) => p.trim());
-    if (init?.to !== undefined) draft.to = init.to;
+    if (init?.outputs) draft.outputs = normOutputs(init.outputs, this.outputArity);
+    if (init?.to !== undefined) draft.outputs[0] = init.to;
+    draft.to = draft.outputs[0] ?? "";
     if (init?.attrs) draft.attrs = { ...draft.attrs, ...init.attrs };
     this.rows.set(id, { original: null, draft, deleted: false });
     return id;
@@ -345,7 +404,7 @@ export class KeyMapEditStore {
    * Matches by origin/draft From; creates INSERTs for unknown keys.
    */
   applyProposals(
-    proposals: { fromParts: string[]; to: string }[],
+    proposals: { fromParts: string[]; to: string; outputs?: string[] }[],
     page: PageSlot[],
   ): { newIds: RowId[] } {
     const pageByFrom = new Map<string, RowId>();
@@ -378,12 +437,19 @@ export class KeyMapEditStore {
           page.find((s) => s.id === id)?.loaded ?? this.origins.get(id) ?? null;
         const edit = this.ensureEdit(id, fallback);
         if (edit.deleted) continue;
-        if (edit.draft.to.trim()) continue; // leave filled mappings
-        if (p.to) edit.draft.to = p.to;
+        const eff = normOutputs(p.outputs ?? [p.to], this.outputArity);
+        if (edit.draft.outputs.some((v) => v.trim())) continue; // leave filled mappings
+        if (eff.some((v) => v)) {
+          edit.draft.outputs = eff;
+          edit.draft.to = eff[0] ?? "";
+        }
         dirtyByFrom.set(key, id);
         this.pruneIfPristine(id);
       } else {
-        const nid = this.addRow({ fromParts: parts, to: p.to });
+        const nid = this.addRow({
+          fromParts: parts,
+          outputs: p.outputs ?? [p.to],
+        });
         newIds.push(nid);
         dirtyByFrom.set(key, nid);
       }
@@ -405,7 +471,7 @@ export class KeyMapEditStore {
       return edit.original !== null && validKey(edit.original.fromParts);
     }
     const draftParts = edit.draft.fromParts.map((p) => p.trim());
-    if (!validKey(draftParts) || !edit.draft.to) return false;
+    if (!validKey(draftParts) || !outputsFilled(edit.draft.outputs)) return false;
     if (!edit.original) return true;
     if (tupleKey(edit.original.fromParts) !== tupleKey(draftParts)) return true;
     return !snapEqual(edit.original, edit.draft, this.editable);
@@ -432,17 +498,18 @@ export class KeyMapEditStore {
       if (edit.deleted) {
         if (!edit.original) continue;
         deletedFromParts.push([...edit.original.fromParts]);
-        pushBaseline(baselineFromOriginal(edit.original, [], this.editable));
+        pushBaseline(baselineFromOriginal(edit.original, [], this.editable, this.outputColumns));
         continue;
       }
 
       const draftParts = edit.draft.fromParts.map((p) => p.trim());
-      if (!validKey(draftParts) || !edit.draft.to) continue;
+      if (!validKey(draftParts) || !outputsFilled(edit.draft.outputs)) continue;
 
       const draftEntry: KeyMapEntry = {
         from: draftParts[0]!,
         from_parts: draftParts,
-        to: edit.draft.to,
+        to: edit.draft.outputs[0]!,
+        output_values: [...edit.draft.outputs],
         ...(Object.keys(edit.draft.attrs).length
           ? { attrs: { ...edit.draft.attrs } }
           : {}),
@@ -451,7 +518,7 @@ export class KeyMapEditStore {
       if (!edit.original) {
         upserts.push(draftEntry);
         pushBaseline(
-          baselineFromOriginal(null, draftParts, this.editable),
+          baselineFromOriginal(null, draftParts, this.editable, this.outputColumns),
         );
         continue;
       }
@@ -461,17 +528,17 @@ export class KeyMapEditStore {
 
       if (origKey !== draftKey) {
         deletedFromParts.push([...edit.original.fromParts]);
-        pushBaseline(baselineFromOriginal(edit.original, [], this.editable));
+        pushBaseline(baselineFromOriginal(edit.original, [], this.editable, this.outputColumns));
         upserts.push(draftEntry);
         pushBaseline(
-          baselineFromOriginal(null, draftParts, this.editable),
+          baselineFromOriginal(null, draftParts, this.editable, this.outputColumns),
         );
         continue;
       }
 
       if (!snapEqual(edit.original, edit.draft, this.editable)) {
         upserts.push(draftEntry);
-        pushBaseline(baselineFromOriginal(edit.original, [], this.editable));
+        pushBaseline(baselineFromOriginal(edit.original, [], this.editable, this.outputColumns));
       }
     }
 

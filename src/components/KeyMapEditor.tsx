@@ -30,6 +30,9 @@ import {
   fromColumnsEff,
   fromPartsEff,
   keyMapSeedName,
+  mergeLensOutputCells,
+  outputColumnsEff,
+  outputValuesEff,
   parseFromToPaste,
   tupleKey,
   validateKeyMapEntries,
@@ -204,7 +207,10 @@ export function KeyMapEditor({
   ];
   const fromCols = fromColumnsEff(map);
   const arity = fromCols.length;
+  const outCols = outputColumnsEff(map);
+  const outArity = outCols.length;
   const validateOpts = {
+    outputArity: outArity,
     timeMode: map.time_mode === "range_scd" ? ("range_scd" as const) : ("none" as const),
     validFromColumn: map.valid_from_column ?? "valid_from",
     validToColumn: map.valid_to_column ?? "valid_to",
@@ -213,10 +219,75 @@ export function KeyMapEditor({
     return validateKeyMapEntries(entries, arity, validateOpts);
   }
   const saving = saveInFlight || storeRef.current.isSaveInFlight();
+  const duplicateMapColumn = (() => {
+    const seen = new Set<string>();
+    for (const c of [...fromCols, ...outCols]) {
+      const k = c.trim().toLowerCase();
+      if (!k) continue;
+      if (seen.has(k)) return c;
+      seen.add(k);
+    }
+    return null;
+  })();
+
+  /**
+   * ADR-0037: change the ordered output set. Entries' `output_values` stay
+   * aligned by position (rename keeps values; add pads; remove drops that slot).
+   * Source maps with dirty rows need explicit discard; Cancel keeps the prior
+   * binding (no `onChange`).
+   */
+  function commitOutputColumns(
+    next: string[],
+    kind: "add" | "rename" | "remove",
+    removedIdx?: number,
+  ) {
+    if (!next.length) return;
+    if (isSource) {
+      if (saving) {
+        setError("Wait for Save to finish before changing output columns.");
+        return;
+      }
+      const dirty = storeRef.current.dirtyCount();
+      if (dirty > 0) {
+        const ok = window.confirm(
+          `Changing output columns discards ${dirty} unsaved row(s) and reloads from the warehouse. Continue?`,
+        );
+        if (!ok) return; // Cancel: prior binding stays
+      }
+      storeRef.current.clear();
+      pageRef.current = [];
+      newIdsRef.current = [];
+      loadedTableKey.current = "";
+      bumpDirty();
+    }
+    const pad = (values: string[]): string[] => {
+      let out = [...values];
+      if (kind === "remove" && removedIdx !== undefined) {
+        out = out.filter((_, j) => j !== removedIdx);
+      }
+      out = out.slice(0, next.length);
+      while (out.length < next.length) out.push("");
+      return out;
+    };
+    setError(null);
+    onChange({
+      ...map,
+      output_columns: next,
+      to_column: next[0],
+      entries: (isSource ? [] : map.entries).map((e) => {
+        const outputs = pad(outputValuesEff(e));
+        return { ...e, to: outputs[0] ?? "", output_values: outputs };
+      }),
+    });
+  }
 
   useEffect(() => {
-    storeRef.current.setSchema({ arity, editable: editableCols });
-  }, [arity, editableCols]);
+    storeRef.current.setSchema({
+      arity,
+      editable: editableCols,
+      outputColumns: outCols,
+    });
+  }, [arity, editableCols, outCols]);
 
   // ADR-0036: describe map query columns + refresh read-only preview rows.
   useEffect(() => {
@@ -251,22 +322,26 @@ export function KeyMapEditor({
         const result = await previewWorkspace(ws, connections, []);
         if (seq !== queryPreviewSeq.current) return;
         const fromN = fromColumnsEff(map).length;
-        const toIdx = fromN;
+        const outN = outputColumnsEff(map).length;
         const rows = result.rows.map((r) =>
-          Array.from({ length: fromN + 1 }, (_, i) => {
+          Array.from({ length: fromN + outN }, (_, i) => {
             const v = r[i];
             return v == null ? null : String(v);
           }),
         );
-        const checked = validateQueryMapRows(map.id, fromN, rows);
+        const checked = validateQueryMapRows(map.id, fromN, rows, outN);
         const entries = result.rows.map((r) => {
           const parts = Array.from({ length: fromN }, (_, i) =>
             String(r[i] ?? ""),
           );
+          const outputs = Array.from({ length: outN }, (_, o) =>
+            String(r[fromN + o] ?? ""),
+          );
           return {
             from: parts[0] ?? "",
             from_parts: parts,
-            to: String(r[toIdx] ?? ""),
+            to: outputs[0] ?? "",
+            output_values: outputs,
           } satisfies KeyMapEntry;
         });
         // Do not persist preview rows into the project map (ADR-0036).
@@ -290,6 +365,7 @@ export function KeyMapEditor({
     (map.from_columns ?? []).join(","),
     map.from_column,
     map.to_column,
+    (map.output_columns ?? []).join(","),
     queryReloadNonce,
   ]);
 
@@ -428,6 +504,7 @@ export function KeyMapEditor({
       map.from_column ?? "from",
       (map.from_columns ?? []).join(","),
       map.to_column ?? "to",
+      outCols.join(","),
       (map.editable_columns ?? []).join(","),
       pageOffset,
       serverFilter,
@@ -495,6 +572,7 @@ export function KeyMapEditor({
     map.from_column,
     map.from_columns,
     map.to_column,
+    map.output_columns,
     map.editable_columns,
     activeConnectionId,
     postgresConnections,
@@ -541,7 +619,7 @@ export function KeyMapEditor({
         const parts = fromPartsEff(e);
         return (
           parts.some((p) => p.toLowerCase().includes(q)) ||
-          e.to.toLowerCase().includes(q)
+          outputValuesEff(e).some((v) => v.toLowerCase().includes(q))
         );
       });
   }, [map.entries, filter, isSource, rowsReadOnly, queryPreviewEntries]);
@@ -564,6 +642,20 @@ export function KeyMapEditor({
     }
     setError(null);
     onChange({ ...map, entries: v.entries });
+  }
+
+  function padOutputs(values: string[]): string[] {
+    const out = values.slice(0, outArity);
+    while (out.length < outArity) out.push("");
+    return out;
+  }
+
+  function setOutput(index: number, oi: number, value: string) {
+    const prev = map.entries[index];
+    if (!prev) return;
+    const outs = padOutputs(outputValuesEff(prev));
+    outs[oi] = value;
+    updateRow(index, { to: outs[0] ?? "", output_values: outs });
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
@@ -590,7 +682,7 @@ export function KeyMapEditor({
         rowId,
         {
           fromParts: fromPartsEff(merged),
-          to: merged.to,
+          outputs: padOutputs(outputValuesEff(merged)),
           attrs: merged.attrs ?? {},
         },
         slot?.loaded ?? null,
@@ -642,7 +734,7 @@ export function KeyMapEditor({
     if (isSource) {
       const id = storeRef.current.addRow({
         fromParts: parts,
-        to,
+        outputs: padOutputs([to]),
         attrs: Object.fromEntries(editableCols.map((c) => [c, ""])),
       });
       newIdsRef.current = [...newIdsRef.current, id];
@@ -660,6 +752,7 @@ export function KeyMapEditor({
       from: parts[0] ?? "",
       from_parts: parts,
       to,
+      output_values: padOutputs([to]),
     };
     if (editableCols.length) {
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
@@ -720,12 +813,13 @@ export function KeyMapEditor({
       from: p.fromParts[0]!,
       from_parts: p.fromParts,
       to: "",
+      output_values: padOutputs([]),
     }));
     setEntries([...map.entries, ...extra]);
   }
 
   function applyPaste() {
-    const parsed = parseFromToPaste(pasteText, arity);
+    const parsed = parseFromToPaste(pasteText, arity, outArity);
     if (!parsed.length) {
       setError("Paste TSV/CSV with from,to columns");
       return;
@@ -746,13 +840,17 @@ export function KeyMapEditor({
         if (existingId) {
           storeRef.current.updateDraft(
             existingId,
-            { fromParts: parts, to: e.to, attrs: e.attrs ?? {} },
+            {
+              fromParts: parts,
+              outputs: padOutputs(outputValuesEff(e)),
+              attrs: e.attrs ?? {},
+            },
             pageHit?.loaded ?? null,
           );
         } else {
           const id = storeRef.current.addRow({
             fromParts: parts,
-            to: e.to,
+            outputs: padOutputs(outputValuesEff(e)),
             attrs: e.attrs ?? {},
           });
           newIdsRef.current.push(id);
@@ -792,10 +890,12 @@ export function KeyMapEditor({
     e: KeyboardEvent<HTMLInputElement>,
     rowIndex: number,
     col: "from" | "to",
+    outIdx = 0,
   ) {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (rowIndex === map.entries.length - 1 && col === "to") {
+      const lastOut = col === "to" && outIdx >= outArity - 1;
+      if (rowIndex === map.entries.length - 1 && lastOut) {
         addRow();
         return;
       }
@@ -804,6 +904,14 @@ export function KeyMapEditor({
           e.currentTarget
             .closest("tr")
             ?.querySelector<HTMLInputElement>('input[data-col="to"]') ?? null
+        )?.focus();
+      } else if (!lastOut) {
+        (
+          e.currentTarget
+            .closest("tr")
+            ?.querySelector<HTMLInputElement>(
+              `input[data-col="to-${outIdx + 1}"]`,
+            ) ?? null
         )?.focus();
       } else {
         const next = e.currentTarget
@@ -945,6 +1053,7 @@ export function KeyMapEditor({
                   from_columns: [],
                   from_column: "from",
                   to_column: "to",
+                  output_columns: ["to"],
                   entries: [],
                 })
               }
@@ -1241,19 +1350,66 @@ export function KeyMapEditor({
             </div>
           </label>
         ))}
-        <label className={labelClass}>
-          Target value column
-          <input
-            list={
-              queryColOptions.length
-                ? `keymap-query-cols-${map.id}`
-                : undefined
-            }
-            value={map.to_column ?? "to"}
-            onChange={(e) => onChange({ ...map, to_column: e.target.value })}
-            className={`${fieldClass} font-mono`}
-          />
-        </label>
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <span className={labelClass}>Output columns</span>
+          <button
+            type="button"
+            onClick={() => {
+              const used = new Set(
+                [...fromCols, ...outCols].map((c) => c.toLowerCase()),
+              );
+              let n = outCols.length + 1;
+              while (used.has(`to_${n}`)) n += 1;
+              commitOutputColumns([...outCols, `to_${n}`], "add");
+            }}
+            className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
+          >
+            + Output
+          </button>
+        </div>
+        {outCols.map((col, i) => (
+          <label key={`out-col-${i}`} className={labelClass}>
+            Output[{i + 1}]
+            <div className="mt-1 flex gap-1">
+              <input
+                list={
+                  queryColOptions.length
+                    ? `keymap-query-cols-${map.id}`
+                    : undefined
+                }
+                value={col}
+                onChange={(e) => {
+                  const next = [...outCols];
+                  next[i] = e.target.value;
+                  commitOutputColumns(next, "rename");
+                }}
+                className={`${fieldClass} mt-0 font-mono`}
+              />
+              {outCols.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    commitOutputColumns(
+                      outCols.filter((_, j) => j !== i),
+                      "remove",
+                      i,
+                    )
+                  }
+                  className="rounded border border-slate-700 px-2 text-slate-500 hover:text-rose-300"
+                  aria-label="Remove output column"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </label>
+        ))}
+        {duplicateMapColumn && (
+          <p className="text-[11px] text-amber-300/90">
+            Duplicate map column “{duplicateMapColumn}” — names must be unique
+            across match and output columns.
+          </p>
+        )}
       </div>
       {!rowsReadOnly && (
       <div className="space-y-2 border-t border-slate-800/80 pt-3">
@@ -1401,7 +1557,7 @@ export function KeyMapEditor({
         <span className="font-mono text-slate-400">
           {[
             ...fromCols,
-            map.to_column ?? "to",
+            ...outCols,
             ...(map.time_mode === "range_scd"
               ? [
                   map.valid_from_column ?? "valid_from",
@@ -1559,9 +1715,14 @@ export function KeyMapEditor({
                 {col || `match_${fi + 1}`}
               </th>
             ))}
-            <th className="px-3 py-2 font-semibold font-mono normal-case text-slate-300">
-              {map.to_column?.trim() || "to"}
-            </th>
+            {outCols.map((col, oi) => (
+              <th
+                key={`oh-${oi}`}
+                className="px-3 py-2 font-semibold font-mono normal-case text-slate-300"
+              >
+                {col.trim() || `output_${oi + 1}`}
+              </th>
+            ))}
             {editableCols.map((c) => (
               <th key={c} className="px-3 py-2 font-semibold font-mono normal-case">
                 {c}
@@ -1571,7 +1732,7 @@ export function KeyMapEditor({
           </tr>
         </thead>
         <tbody>
-          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
+          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={2 + fromCols.length + outArity + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
           {virtualRows.map((v) => { const {e,i}=rows[v.index]!; return (
             <tr
               key={i}
@@ -1607,20 +1768,22 @@ export function KeyMapEditor({
                   </td>
                 );
               })}
-              <td className="px-2 py-1">
-                <input
-                  data-col="to"
-                  list={
-                    pickToOptions.length > 0
-                      ? `keymap-to-${map.id}`
-                      : undefined
-                  }
-                  value={e.to}
-                  onChange={(ev) => updateRow(i, { to: ev.target.value })}
-                  onKeyDown={(ev) => onCellKeyDown(ev, i, "to")}
-                  className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-teal-200/90 focus:border-slate-600 focus:bg-slate-950"
-                />
-              </td>
+              {outCols.map((_, oi) => (
+                <td key={`oc-${oi}`} className="px-2 py-1">
+                  <input
+                    data-col={oi === 0 ? "to" : `to-${oi}`}
+                    list={
+                      oi === 0 && pickToOptions.length > 0
+                        ? `keymap-to-${map.id}`
+                        : undefined
+                    }
+                    value={outputValuesEff(e)[oi] ?? ""}
+                    onChange={(ev) => setOutput(i, oi, ev.target.value)}
+                    onKeyDown={(ev) => onCellKeyDown(ev, i, "to", oi)}
+                    className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-teal-200/90 focus:border-slate-600 focus:bg-slate-950"
+                  />
+                </td>
+              ))}
               {editableCols.map((c) => (
                 <td key={c} className="px-2 py-1">
                   <input
@@ -1642,7 +1805,7 @@ export function KeyMapEditor({
               </td>
             </tr>
           ); })}
-          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
+          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={2 + fromCols.length + outArity + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
         </tbody>
       </table>
       {pickToOptions.length > 0 && (
@@ -1777,12 +1940,26 @@ export function KeyMapEditor({
                   if (!parts.length || !s.to_key.trim()) continue;
                   const key = tupleKey(parts);
                   const i = byFrom.get(key);
-                  if (i !== undefined && merged[i]!.to.trim()) continue;
-                  const entry = {
-                    from: parts[0]!,
-                    from_parts: parts,
-                    to: s.to_key,
-                  };
+                  if (
+                    i !== undefined &&
+                    outputValuesEff(merged[i]!).some((v) => v.trim())
+                  ) {
+                    continue;
+                  }
+                  // Fuzzy To proposals fill the primary output only (ADR-0037).
+                  const base: KeyMapEntry = i !== undefined
+                    ? merged[i]!
+                    : {
+                        from: parts[0]!,
+                        from_parts: parts,
+                        to: "",
+                        output_values: padOutputs([]),
+                      };
+                  const m = mergeLensOutputCells(base, outCols, [
+                    { column: outCols[0]!, value: s.to_key },
+                  ]);
+                  if (!m.ok) continue;
+                  const entry = m.entry;
                   if (i === undefined) {
                     byFrom.set(key, merged.length);
                     merged.push(entry);
@@ -1828,8 +2005,8 @@ export function KeyMapEditor({
                 onChange={(e) => setPasteText(e.target.value)}
                 rows={compact ? 3 : 6}
                 placeholder={
-                  arity > 1
-                    ? `${fromCols.join(",")},${map.to_column ?? "to"}\nid,2024-06-01,sk1`
+                  arity > 1 || outArity > 1
+                    ? `${[...fromCols, ...outCols].join(",")}\nid,2024-06-01,sk1`
                     : "from,to\nwww,web\nshop,store"
                 }
                 className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 font-mono text-[12px] text-slate-200"

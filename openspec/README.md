@@ -20,6 +20,7 @@ openspec/
 
 Active changes:
 
+- ~~[`changes/keymap-multi-output/`](changes/keymap-multi-output/)~~ — **merged** → [`specs/keymap-multi-output-*`](specs/) ([ADR-0037](../docs/adr/0037-keymap-multi-output.md))
 - [`changes/query-based-mapping-create/`](changes/query-based-mapping-create/) — query-based KeyMap create v0.3.1 ([ADR-0034](../docs/adr/0034-keymap-authoring-context.md))
 - ~~[`changes/query-backed-keymap/`](changes/query-backed-keymap/)~~ — **merged** → [`specs/query-backed-keymap/`](specs/query-backed-keymap/) ([ADR-0036](../docs/adr/0036-query-backed-keymap.md))
 - ~~[`changes/typed-wire-contract/`](changes/typed-wire-contract/)~~ — **merged** → [`specs/typed-wire-contract/`](specs/typed-wire-contract/) ([ADR-0029](../docs/adr/0029-typed-wire-contract.md))

@@ -330,10 +330,12 @@ mod tests {
         map.from_column = "system_code".into();
         map.from_columns = vec!["system_code".into(), "product_code".into()];
         map.to_column = "canonical_id".into();
+        map.output_columns = vec!["canonical_id".into()];
         map.entries = vec![
             KeyMapEntry::parts(vec!["SYS".into(), "P1".into()], "CAN-1"),
             KeyMapEntry::parts(vec!["SYS".into(), "P2".into()], "CAN-2"),
         ];
+        map.canonicalize_outputs();
         let mut owner = Project {
             format_version: dwh_pipeline::PROJECT_FORMAT_VERSION,
             id: "proj_owner".into(),
@@ -573,7 +575,11 @@ mod tests {
             eprintln!("skip dbt build: dbt not installed");
         }
 
-        owner.workspace.key_maps[0].entries[0].to = "CAN-9".into();
+        {
+            let e = &mut owner.workspace.key_maps[0].entries[0];
+            e.to = "CAN-9".into();
+            e.output_values = vec!["CAN-9".into()];
+        }
         fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
         let stale = resolve(&consumer.references, &consumer.workspace);
         let err = stale.expect_err("owner change must require refresh");

@@ -27,7 +27,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
 import type { Workspace } from "../types/pipeline";
 import {
-  applyReviewBindingsForSide,
   buildApplyReviewState,
   confirmApplyReview,
   formatJoinOn,
@@ -101,11 +100,14 @@ export type KeyMapEditorProps = {
    * Multi-output maps with a Join context open an inline review first
    * (ADR-0037); opts carry the confirmed destinations / Join rewrite.
    */
+  /**
+   * ADR-0038: pass side + optional confirmed ApplyUserChoice fields.
+   * App resolves ApplyPlan — does not invent bindings here.
+   */
   onApply?: (
     side: ApplySide,
-    opts?: {
-      outputBindingsLeft?: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
-      outputBindingsRight?: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
+    choice?: {
+      bindings: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
       joinRewrite?: { leftOn: string[]; rightOn: string[] };
     },
   ) => void;
@@ -2098,7 +2100,7 @@ export function KeyMapEditor({
           setApplyReview(null);
           setApplyReviewError(null);
           onApply(review.side, {
-            ...applyReviewBindingsForSide(review.side, conf.bindings),
+            bindings: conf.bindings,
             joinRewrite: withJoin ? conf.joinRewrite : undefined,
           });
         };

@@ -8,7 +8,7 @@
 //! with an LLM. Case/trim-only differences are excluded (that is NormalizeKey).
 
 use crate::arrow_json::{array_value_to_json, map_arrow_type};
-use crate::compile::compile_ctes_from;
+use crate::compile::compile_ctes_for_execution;
 use crate::key_match::{
     match_keys, CandidateSearch, FuzzyPair, KeyMatchOptions, MatchPolicy, MatchRecord,
 };
@@ -175,7 +175,7 @@ pub fn join_key_fuzzy_suggest_on(
     }
     let left_cte = cte_name(host_query_id, join_step_index - 1);
     let right_cte = cte_name(right_query_id, rq.steps.len() - 1);
-    let compiled = compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
+    let compiled = compile_ctes_for_execution(db, &resolved, connections, sources, host_query_id)?;
     let left_query_name = host.name.clone();
     let right_query_name = rq.name.clone();
     let right_query_id = right_query_id.to_string();

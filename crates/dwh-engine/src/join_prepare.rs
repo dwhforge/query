@@ -10,7 +10,7 @@
 //! shortcuts do not change result schema or key semantics.
 
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
-use crate::compile::{compile_ctes_from, graph_compiler, workspace_schemas};
+use crate::compile::{compile_ctes_for_execution, graph_compiler, workspace_schemas};
 use crate::preview::{ColumnMetadata, PreviewResult};
 use crate::session::DbSession;
 use dwh_pipeline::{
@@ -522,7 +522,7 @@ fn prepare_join_inputs_ex(
     };
 
     let compiled =
-        compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
+        compile_ctes_for_execution(db, &resolved, connections, sources, host_query_id)?;
 
     let left_sql = compiled.wrap_select(&format!("SELECT * FROM {left_cte}"));
     let right_sql = compiled.wrap_select(&format!("SELECT * FROM {right_cte}"));
@@ -871,7 +871,7 @@ pub fn prepared_join_with(
     // Mixed: compile only the live side's subgraph, bind the other to TEMP.
     if h.left_materialized && !h.right_materialized {
         let right_compiled =
-            compile_ctes_from(db, workspace, connections, sources, &h.right_query_id).ok()?;
+            compile_ctes_for_execution(db, workspace, connections, sources, &h.right_query_id).ok()?;
         let rq = workspace.query(&h.right_query_id)?;
         let right_cte = cte_name(&h.right_query_id, rq.steps.len().saturating_sub(1));
         let overlay = prep_join_defs(&h, PREP_LEFT, &right_cte).ok()?;
@@ -1228,7 +1228,7 @@ mod tests {
         let db = DbSession::new().unwrap();
         // Baseline: full graph compile (schema-aware).
         let resolved = db.prepare_workspace(&ws, &[]).unwrap();
-        let compiled = compile_ctes_from(&db, &resolved, &[], &[], "host").unwrap();
+        let compiled = compile_ctes_for_execution(&db, &resolved, &[], &[], "host").unwrap();
         let join_cte = cte_name("host", 1);
         let baseline_sql = compiled.wrap_select(&format!("SELECT * FROM {join_cte}"));
         let baseline = db

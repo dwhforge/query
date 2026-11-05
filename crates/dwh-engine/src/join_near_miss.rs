@@ -3,7 +3,7 @@
 //! Try deterministic normalizations; return only hypotheses that strictly increase
 //! distinct key overlap. Apply inserts [`NormalizeKey`] before Join — never auto-ON.
 
-use crate::compile::compile_ctes_from;
+use crate::compile::compile_ctes_for_execution;
 use crate::session::DbSession;
 use dwh_pipeline::{
     cte_name, normalize_key_column_expr, quote_ident, ConnectionDef, NormalizeOp,
@@ -118,7 +118,7 @@ pub fn join_key_near_miss(
             )
         } else {
             let compiled =
-                compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
+                compile_ctes_for_execution(db, &resolved, connections, sources, host_query_id)?;
             (
                 left_cte_full,
                 right_cte_full,

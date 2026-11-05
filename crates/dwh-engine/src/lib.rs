@@ -1,3 +1,4 @@
+mod apply_multi_output_exec;
 mod arrow_json;
 mod compile;
 mod export_e2e;
@@ -61,7 +62,11 @@ pub use key_map_write::{
     write_key_map_to_postgres, write_key_map_with_delta, write_key_map_with_expected,
     KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
 };
-pub use compile::{collect_sql_model_schemas, prepare_workspace, PreparedWorkspace};
+pub use compile::{
+    collect_sql_model_schemas, compile_ctes_for_execution, compile_ctes_from,
+    compile_focus_sql, compile_focus_sql_for_execution, prepare_operation, prepare_workspace,
+    validate_prepared, PreparedWorkspace,
+};
 pub use load_seeds::{collect_load_seeds, LoadSeedDiagnostic, LoadSeedsResult};
 pub use postgres_catalog::{
     describe_postgres_object, list_postgres_objects, test_postgres_connection,

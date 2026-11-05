@@ -393,6 +393,21 @@ impl KeyMapEntry {
             .next()
             .unwrap_or_default()
     }
+
+    /// Align `output_values` / From parts after decode (ADR-0038).
+    /// Does not re-populate cleared legacy `to` (migrate omits it on write).
+    pub fn canonicalize_outputs(&mut self) {
+        let outs = self.output_values_eff();
+        self.output_values = outs.clone();
+        if !self.to.is_empty() {
+            self.to = outs.first().cloned().unwrap_or_default();
+        }
+        let parts = self.from_parts_eff();
+        self.from_parts = parts.clone();
+        if !self.from.is_empty() {
+            self.from = parts.first().cloned().unwrap_or_default();
+        }
+    }
 }
 
 /// Effective ApplyKeyMap fact columns (soft-migrate legacy `column`).
@@ -626,13 +641,36 @@ impl KeyMapDef {
     }
 
     /// Effective output column names ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+    ///
+    /// Prefer `output_columns` when it is a real authoring list. A stale
+    /// `KeyMapDef::new` default of `["to"]` after only `to_column` was set must
+    /// not win over `to_column` (seed headers and Apply emit must agree).
     pub fn output_columns_eff(&self) -> Vec<String> {
         if !self.output_columns.is_empty() {
+            let only_default_to = self.output_columns.len() == 1
+                && self.output_columns[0].eq_ignore_ascii_case("to");
+            let to = self.to_column.trim();
+            if only_default_to && !to.is_empty() && !to.eq_ignore_ascii_case("to") {
+                return vec![to.to_string()];
+            }
             self.output_columns.clone()
         } else if !self.to_column.trim().is_empty() {
             vec![self.to_column.clone()]
         } else {
             vec![default_to_col()]
+        }
+    }
+
+    /// Align `output_columns` after decode (ADR-0038). Does not re-populate a
+    /// cleared legacy `to_column` (migrate omits it on write).
+    pub fn canonicalize_outputs(&mut self) {
+        let outs = self.output_columns_eff();
+        self.output_columns = outs.clone();
+        if !self.to_column.trim().is_empty() {
+            self.to_column = outs
+                .first()
+                .cloned()
+                .unwrap_or_else(default_to_col);
         }
     }
 

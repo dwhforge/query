@@ -1,5 +1,7 @@
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
-use crate::compile::{compile_focus_sql, graph_compiler, prepare_workspace};
+use crate::compile::{
+    compile_focus_sql_for_execution, graph_compiler, prepare_workspace,
+};
 use crate::session::DbSession;
 use dwh_pipeline::{ConnectionDef, SourceDef, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
@@ -50,7 +52,8 @@ pub fn preview_workspace(
     sources: &[SourceDef],
 ) -> Result<PreviewResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let sql = compile_focus_sql(db, &resolved, connections, sources, true)?;
+    // ADR-0038: prepare + validate + compile (explicit), not hidden inside compile_*.
+    let sql = compile_focus_sql_for_execution(db, &resolved, connections, sources, true)?;
     run_sql(db, sql)
 }
 
@@ -61,7 +64,7 @@ pub fn preview_pipeline(
 ) -> Result<PreviewResult, String> {
     let ws = Workspace::from_linear_steps(steps.to_vec());
     let resolved = db.prepare_workspace(&ws, connections)?;
-    let sql = compile_focus_sql(db, &resolved, connections, &[], true)?;
+    let sql = compile_focus_sql_for_execution(db, &resolved, connections, &[], true)?;
     run_sql(db, sql)
 }
 

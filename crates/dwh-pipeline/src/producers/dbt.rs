@@ -483,20 +483,19 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
 
     for (map_id, entries) in &key_maps {
         let seed = key_map_seed_name(map_id);
-        let (from_cols, to_col, extras) = workspace
+        let (from_cols, out_cols, extras) = workspace
             .key_map(map_id)
             .map(|m| {
-                let to = if m.to_column.trim().is_empty() {
-                    "to".to_string()
-                } else {
-                    m.to_column.clone()
-                };
-                (m.from_columns_eff(), to, m.stewardship_columns())
+                (
+                    m.from_columns_eff(),
+                    m.output_columns_eff(),
+                    m.stewardship_columns(),
+                )
             })
-            .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
+            .unwrap_or_else(|| (vec!["from".into()], vec!["to".into()], vec![]));
         plan.insert(
             format!("seeds/{seed}.csv"),
-            crate::emit::key_map_seed_csv_full(entries, &from_cols, &to_col, &extras),
+            crate::emit::key_map_seed_csv_outputs(entries, &from_cols, &out_cols, &extras),
         );
     }
 

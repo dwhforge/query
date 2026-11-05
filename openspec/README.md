@@ -20,6 +20,7 @@ openspec/
 
 Active changes:
 
+- ~~[`changes/keymap-apply-operation/`](changes/keymap-apply-operation/)~~ — **merged** → [`specs/keymap-apply-*`](specs/) ([ADR-0038](../docs/adr/0038-keymap-apply-operation.md))
 - ~~[`changes/keymap-multi-output/`](changes/keymap-multi-output/)~~ — **merged** → [`specs/keymap-multi-output-*`](specs/) ([ADR-0037](../docs/adr/0037-keymap-multi-output.md))
 - [`changes/query-based-mapping-create/`](changes/query-based-mapping-create/) — query-based KeyMap create v0.3.1 ([ADR-0034](../docs/adr/0034-keymap-authoring-context.md))
 - ~~[`changes/query-backed-keymap/`](changes/query-backed-keymap/)~~ — **merged** → [`specs/query-backed-keymap/`](specs/query-backed-keymap/) ([ADR-0036](../docs/adr/0036-query-backed-keymap.md))

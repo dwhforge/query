@@ -50,7 +50,8 @@ pub use emit::{
     parse_key_map_seed_csv_outputs, parse_key_map_seed_csv_outputs_ex,
     rename_select_list, resolve_source_column, select_list_aligned,
     sql_union_all_aligned, substitute_query_placeholders, union_column_names,
-    validate_unambiguous_ascii_names, EmitSchemaOpts, KeyMapCsvMode, SeedCsvHeaderPolicy,
+    validate_unambiguous_ascii_names, ApplyEmitSpec, EmitSchemaOpts, KeyMapCsvMode,
+    SeedCsvHeaderPolicy,
 };
 pub use key_map_sync::{
     push_key_map_to_export, remove_key_map_from_export, sync_key_maps_from_export,

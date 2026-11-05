@@ -165,6 +165,8 @@ import {
   sourceSaveSkipped,
   sourceSaveSynced,
   upsertKeyMapIntoProject,
+  intentFromApplyPlan,
+  resolveApplyPlan,
   type KeyMapApplyIntent,
   type KeyMapApplyResult,
   type KeyMapTabSession,
@@ -176,12 +178,10 @@ import {
   nextRequestGen,
 } from "./lib/requestGen";
 import {
-  applyKeymapOutputBindings,
   applyNormalizeToWorkspace,
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
   findApplyKeyMapIdForJoin,
-  outputColumnsEff,
   resolveKeyMapConnection,
   type ApplySide,
 } from "./lib/keyMap";
@@ -5707,7 +5707,7 @@ function App() {
                   }
                   onApply={
                     keyMapEditor.joinCtx
-                      ? (side, opts) => {
+                      ? (side, choice) => {
                           const ctx = keyMapEditor.joinCtx!;
                           const map = keyMapEditor.map;
                           void saveKeyMapToProject(map).then((result) => {
@@ -5721,7 +5721,6 @@ function App() {
                               );
                               return;
                             }
-                            // Duplicate / rejected Save is not this Apply's success.
                             if (
                               result.external === "skipped" &&
                               /already in progress/i.test(result.message)
@@ -5731,99 +5730,26 @@ function App() {
                               );
                               return;
                             }
-                            const leftCols =
-                              ctx.applyLeftOn?.length
-                                ? ctx.applyLeftOn
-                                : map.from_columns &&
-                                    map.from_columns.length > 1 &&
-                                    ctx.leftOn.length >= map.from_columns.length
-                                  ? ctx.leftOn.slice(
-                                      0,
-                                      map.from_columns.length,
-                                    )
-                                  : [ctx.leftOn[0] ?? "key"];
-                            const rightCols =
-                              ctx.applyRightOn?.length
-                                ? ctx.applyRightOn
-                                : map.from_columns &&
-                                    map.from_columns.length > 1 &&
-                                    ctx.rightOn.length >=
-                                      map.from_columns.length
-                                  ? ctx.rightOn.slice(
-                                      0,
-                                      map.from_columns.length,
-                                    )
-                                  : [ctx.rightOn[0] ?? "key"];
-                            const outputColumnLeft =
-                              ctx.outputColumnLeft?.trim() || leftCols[0]!;
-                            const outLeftIdx = leftCols.findIndex(
-                              (c) =>
-                                c.toLowerCase() ===
-                                outputColumnLeft.toLowerCase(),
+                            // ADR-0038: one resolve → ApplyPlan; App does not invent bindings.
+                            const plan = resolveApplyPlan(
+                              map,
+                              ctx,
+                              side,
+                              choice
+                                ? {
+                                    side,
+                                    bindings: choice.bindings,
+                                    joinRewrite: choice.joinRewrite,
+                                  }
+                                : undefined,
                             );
-                            const outputColumnRight =
-                              ctx.outputColumnRight?.trim() ||
-                              rightCols[outLeftIdx >= 0 ? outLeftIdx : 0] ||
-                              rightCols[0]!;
-                            const outs = outputColumnsEff(map);
-                            const outputBindingsLeft =
-                              opts?.outputBindingsLeft?.length
-                                ? opts.outputBindingsLeft
-                                : ctx.outputBindingsLeft?.length
-                                ? ctx.outputBindingsLeft
-                                : outs.length > 1
-                                  ? outs.map((map_column, i) => ({
-                                      map_column,
-                                      destination_column:
-                                        i === 0
-                                          ? outputColumnLeft
-                                          : map_column,
-                                    }))
-                                  : applyKeymapOutputBindings({
-                                      output_column: outputColumnLeft,
-                                      factCols: leftCols,
-                                      mapColumnHint: outs[0] ?? "to",
-                                    });
-                            const outputBindingsRight =
-                              opts?.outputBindingsRight?.length
-                                ? opts.outputBindingsRight
-                                : ctx.outputBindingsRight?.length
-                                  ? ctx.outputBindingsRight
-                                  : outs.length > 1
-                                    ? outs.map((map_column, i) => ({
-                                        map_column,
-                                        destination_column:
-                                          i === 0
-                                            ? outputColumnRight
-                                            : map_column,
-                                      }))
-                                    : applyKeymapOutputBindings({
-                                        output_column: outputColumnRight,
-                                        factCols: rightCols,
-                                        mapColumnHint: outs[0] ?? "to",
-                                      });
-                            // Commit Apply via reducer — outcome lives in
-                            // keyMapApplyResult and is handled after commit.
+                            if ("error" in plan) {
+                              setError(plan.error);
+                              return;
+                            }
                             dispatchProject({
                               type: "apply_keymap",
-                              intent: {
-                                map,
-                                ctx: opts
-                                  ? { ...ctx, joinRewrite: opts.joinRewrite }
-                                  : ctx,
-                                side,
-                                leftCols,
-                                rightCols,
-                                outputColumnLeft,
-                                outputColumnRight,
-                                outputBindingsLeft,
-                                outputBindingsRight,
-                                // Prefer review opts; "Apply map only" must not
-                                // inherit a ctx rewrite (service falls back on undefined).
-                                joinRewrite: opts
-                                  ? opts.joinRewrite
-                                  : ctx.joinRewrite,
-                              },
+                              intent: intentFromApplyPlan(plan),
                             });
                           });
                         }

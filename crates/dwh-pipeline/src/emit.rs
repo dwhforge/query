@@ -347,20 +347,22 @@ pub fn emit_transform_step_ex(
             }
             emit_apply_key_map(
                 dialect,
-                prev,
-                &fact_cols,
-                &bindings,
-                entries,
-                seed_rel,
-                &from_cols,
-                &output_cols,
-                map_key,
-                opts.prev_columns,
-                as_of_column
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty()),
-                range,
+                &ApplyEmitSpec {
+                    prev,
+                    fact_cols: &fact_cols,
+                    from_cols: &from_cols,
+                    output_cols: &output_cols,
+                    bindings: &bindings,
+                    entries,
+                    map_id: map_key,
+                    seed_relation: seed_rel,
+                    prev_columns: opts.prev_columns,
+                    as_of_column: as_of_column
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty()),
+                    range_cols: range,
+                },
             )
         }
         TransformationStep::LoadCsv { .. }
@@ -613,20 +615,41 @@ fn alloc_apply_aliases(
     })
 }
 
+/// Dialect-neutral Apply input for SQL emission ([ADR-0038]).
+/// Built by the compiler from the step + schema opts; emit does not invent bindings.
+#[derive(Debug, Clone)]
+pub struct ApplyEmitSpec<'a> {
+    pub prev: &'a str,
+    pub fact_cols: &'a [String],
+    pub from_cols: &'a [String],
+    pub output_cols: &'a [String],
+    pub bindings: &'a [ApplyKeyMapOutputBinding],
+    pub entries: &'a [KeyMapEntry],
+    pub map_id: &'a str,
+    pub seed_relation: Option<&'a str>,
+    pub prev_columns: Option<&'a [String]>,
+    pub as_of_column: Option<&'a str>,
+    pub range_cols: Option<(&'a str, &'a str)>,
+}
+
 fn emit_apply_key_map(
     dialect: WarehouseDialect,
-    prev: &str,
-    fact_cols: &[String],
-    bindings: &[ApplyKeyMapOutputBinding],
-    entries: &[KeyMapEntry],
-    seed_relation: Option<&str>,
-    from_cols: &[String],
-    output_cols: &[String],
-    map_id: &str,
-    prev_columns: Option<&[String]>,
-    as_of_column: Option<&str>,
-    range_cols: Option<(&str, &str)>,
+    spec: &ApplyEmitSpec<'_>,
 ) -> Result<String, String> {
+    let prev = spec.prev;
+    let fact_cols = spec.fact_cols;
+    let from_cols = spec.from_cols;
+    let output_cols = spec.output_cols;
+    let bindings = spec.bindings;
+    let entries = spec.entries;
+    let map_id = spec.map_id;
+    let seed_relation = spec.seed_relation;
+    let prev_columns = spec.prev_columns;
+    let as_of_column = spec.as_of_column;
+    let range_cols = spec.range_cols;
+    if bindings.is_empty() {
+        return Err("ApplyKeyMap: ApplyEmitSpec.bindings must be non-empty".into());
+    }
     let n = fact_cols.len();
     let out_n = output_cols.len();
     debug_assert_eq!(n, from_cols.len());

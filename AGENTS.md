@@ -31,7 +31,7 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
-- `openspec/changes/keymap-multi-output/` — ADR-0037 multi-output KeyMap (review before code)
+- `openspec/specs/keymap-apply-*` — ADR-0038 ApplyPlan / prepare-validate-execute (merged)
 - `openspec/specs/query-backed-keymap/` — ADR-0036 query-backed KeyMap SoT (merged)
 - `openspec/specs/keymap-multi-output-*` — ADR-0037 multi-output KeyMap (merged)
 - `openspec/changes/query-based-mapping-create/` — ADR-0034 query-based KeyMap create (v0.3.1)

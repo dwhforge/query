@@ -168,6 +168,13 @@ impl Project {
         for check in &mut p.mapping_checks {
             check.projection = check.projection.clone().normalize_attrs();
         }
+        // ADR-0038: legacy to/to_column → canonical output_* at decode edge only.
+        for map in &mut p.workspace.key_maps {
+            map.canonicalize_outputs();
+            for e in &mut map.entries {
+                e.canonicalize_outputs();
+            }
+        }
         Ok(p)
     }
 

@@ -164,7 +164,37 @@ pub fn graph_compiler<'a>(
         .with_schemas(schemas)
 }
 
+/// Schema + seed preparation for an operation (ADR-0038). No data validation.
+pub fn prepare_operation(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+) -> Result<PreparedWorkspace, String> {
+    prepare_workspace(db, workspace, connections, sources)
+}
+
+/// Full-set query-map validation against an already prepared workspace (ADR-0036/0038).
+pub fn validate_prepared(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+    prepared: &PreparedWorkspace,
+    root_id: &str,
+) -> Result<(), String> {
+    crate::query_map_validate::validate_query_backed_maps_for_root(
+        db,
+        workspace,
+        connections,
+        sources,
+        prepared,
+        root_id,
+    )
+}
+
 /// Compile `root_id` + deps with schema-aware ApplyKeyMap emit.
+/// SQL generation only — does **not** run full-set map validation (ADR-0038).
 pub fn compile_ctes_from(
     db: &DbSession,
     workspace: &Workspace,
@@ -172,19 +202,24 @@ pub fn compile_ctes_from(
     sources: &[SourceDef],
     root_id: &str,
 ) -> Result<CompiledCtes, String> {
-    let prepared = prepare_workspace(db, workspace, connections, sources)?;
-    crate::query_map_validate::validate_query_backed_maps_for_root(
-        db,
-        workspace,
-        connections,
-        sources,
-        &prepared,
-        root_id,
-    )?;
+    let prepared = prepare_operation(db, workspace, connections, sources)?;
     graph_compiler(workspace, connections, sources, &prepared.schemas).compile_ctes_from(root_id)
 }
 
-/// Preview/export SQL for the focus query (schema-aware).
+/// Prepare + validate + compile for paths that will **execute** SQL (Join Lens, preview deps).
+pub fn compile_ctes_for_execution(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+    root_id: &str,
+) -> Result<CompiledCtes, String> {
+    let prepared = prepare_operation(db, workspace, connections, sources)?;
+    validate_prepared(db, workspace, connections, sources, &prepared, root_id)?;
+    graph_compiler(workspace, connections, sources, &prepared.schemas).compile_ctes_from(root_id)
+}
+
+/// Focus SQL only (no full-set validation). Preview must call [`validate_prepared`] first.
 pub fn compile_focus_sql(
     db: &DbSession,
     workspace: &Workspace,
@@ -192,8 +227,20 @@ pub fn compile_focus_sql(
     sources: &[SourceDef],
     is_preview: bool,
 ) -> Result<String, String> {
-    let prepared = prepare_workspace(db, workspace, connections, sources)?;
-    crate::query_map_validate::validate_query_backed_maps_for_root(
+    let prepared = prepare_operation(db, workspace, connections, sources)?;
+    graph_compiler(workspace, connections, sources, &prepared.schemas).to_sql(is_preview)
+}
+
+/// Prepare → validate → compile focus SQL for preview/execute.
+pub fn compile_focus_sql_for_execution(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+    is_preview: bool,
+) -> Result<String, String> {
+    let prepared = prepare_operation(db, workspace, connections, sources)?;
+    validate_prepared(
         db,
         workspace,
         connections,

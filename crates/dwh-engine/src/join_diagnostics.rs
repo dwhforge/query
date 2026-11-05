@@ -4,7 +4,7 @@
 //! (default 50) and labeled separately — a clean sample is not full-input proof.
 
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
-use crate::compile::compile_ctes_from;
+use crate::compile::compile_ctes_for_execution;
 use crate::preview::{ColumnMetadata, PreviewResult};
 use crate::session::DbSession;
 use dwh_pipeline::{cte_name, quote_ident, ConnectionDef, TransformationStep, Workspace};
@@ -153,7 +153,7 @@ pub fn join_diagnostics_with_limit(
         )
     } else {
         let compiled =
-            compile_ctes_from(db, &resolved, connections, sources, host_query_id)?;
+            compile_ctes_for_execution(db, &resolved, connections, sources, host_query_id)?;
         (
             left_cte_full,
             right_cte_full,

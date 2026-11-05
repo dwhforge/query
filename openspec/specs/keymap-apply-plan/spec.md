@@ -24,3 +24,7 @@ When an `ApplyUserChoice` is present, empty or invalid bindings SHALL fail resol
 #### Scenario: Value change at same row count
 - **WHEN** a seed map's output values change after plan prepare without changing entry count
 - **THEN** commit refuses as stale and the newer map remains in the Project
+
+#### Scenario: Nested Apply KeyMap binding change
+- **WHEN** an outer query-backed map's query Applies an inner query-backed map, and only the inner map's From binding changes
+- **THEN** the outer map revision changes and a previously prepared ApplyPlan commits as stale

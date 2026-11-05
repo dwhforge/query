@@ -2,7 +2,11 @@
  * Query-based KeyMap creation (v0.3.1 / ADR-0034).
  * Pure plan / validate / commit — React applies via projectBag fold.
  */
-import { emptyKeyMap } from "../../lib/keyMap";
+import {
+  emptyKeyMap,
+  fromColumnsEff,
+  outputColumnsEff,
+} from "../../lib/keyMap";
 import { slugify, targetKey } from "../../types/pipeline";
 import type {
   KeyMapDef,
@@ -92,20 +96,69 @@ export function directUpstreamQueryIds(
 }
 
 /**
- * Fingerprints for `rootQueryId` and its transitive known upstreams.
+ * Mapping definition for dependency basis (ADR-0038 nested Apply).
+ * - seed: schema + entry content (affects upstream Apply computation)
+ * - query/source/ref: schema/binding only — not warehouse content
+ */
+export function fingerprintKeyMapForBasis(map: KeyMapDef): string {
+  const kind = map.storage?.kind ?? "seed";
+  const schema = {
+    from_columns: fromColumnsEff(map),
+    output_columns: outputColumnsEff(map),
+    editable_columns: map.editable_columns ?? [],
+    time_mode: map.time_mode ?? "none",
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
+  };
+  if (kind !== "seed") {
+    return JSON.stringify({ schema });
+  }
+  const rows = [...(map.entries ?? [])]
+    .map((e) =>
+      JSON.stringify({
+        from_parts: e.from_parts?.length
+          ? e.from_parts
+          : e.from != null && e.from !== ""
+            ? [e.from]
+            : [],
+        output_values: e.output_values?.length
+          ? e.output_values
+          : e.to != null && e.to !== ""
+            ? [e.to]
+            : [],
+        attrs: Object.fromEntries(
+          Object.entries(e.attrs ?? {}).sort(([a], [b]) =>
+            a.localeCompare(b),
+          ),
+        ),
+      }),
+    )
+    .sort();
+  return JSON.stringify({ schema, rows });
+}
+
+/**
+ * Fingerprints for `rootQueryId` and its transitive known upstreams,
+ * plus definitions of KeyMaps Applied along that walk (ADR-0038).
  * Missing upstream ids → refuse (conservative outside supported graph).
  */
 export function basisQueryFingerprints(
   workspace: Workspace,
   rootQueryId: string,
-): { ok: true; defs: Record<string, string> } | { ok: false; error: string } {
+):
+  | { ok: true; defs: Record<string, string>; maps: Record<string, string> }
+  | { ok: false; error: string } {
   const byId = new Map(workspace.queries.map((q) => [q.id, q]));
   if (!byId.has(rootQueryId)) {
     return { ok: false, error: `Query “${rootQueryId}” is missing.` };
   }
+  const keyMaps = workspace.key_maps ?? [];
   const defs: Record<string, string> = {};
+  const maps: Record<string, string> = {};
   const stack = [rootQueryId];
   const seen = new Set<string>();
+  const seenMaps = new Set<string>();
   while (stack.length) {
     const id = stack.pop()!;
     if (seen.has(id)) continue;
@@ -124,11 +177,25 @@ export function basisQueryFingerprints(
       };
     }
     defs[id] = fingerprintSteps(q.steps);
-    for (const up of directUpstreamQueryIds(q, workspace.key_maps)) {
+    for (const s of q.steps) {
+      if (s.type !== "ApplyKeyMap") continue;
+      const mid = targetKey(s.payload.map_id);
+      if (!mid || seenMaps.has(mid)) continue;
+      const km = keyMaps.find((m) => m.id === mid);
+      if (!km) {
+        return {
+          ok: false,
+          error: `Applied KeyMap “${mid}” is missing — cannot confirm basis.`,
+        };
+      }
+      seenMaps.add(mid);
+      maps[mid] = fingerprintKeyMapForBasis(km);
+    }
+    for (const up of directUpstreamQueryIds(q, keyMaps)) {
       stack.push(up);
     }
   }
-  return { ok: true, defs };
+  return { ok: true, defs, maps };
 }
 
 /**

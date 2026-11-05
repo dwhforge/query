@@ -44,8 +44,8 @@ export type ResolveApplyPlanError = { error: string };
 /**
  * Apply-operation revision (ADR-0038).
  * - seed: definition + entry values (exact strings — no undocumented trim)
- * - query: binding + transitive known query defs via `basisQueryFingerprints`
- *   (FromQuery/Join/Append/SqlModel + ApplyKeyMap→query maps; cycle-safe)
+ * - query: binding + transitive known query defs and nested KeyMap definitions
+ *   via `basisQueryFingerprints` (cycle-safe; ApplyKeyMap→map def + query)
  * - source/ref: definition/binding only — not a claim about warehouse content
  */
 export function keyMapRevisionFingerprint(
@@ -78,10 +78,13 @@ export function keyMapRevisionFingerprint(
       if (!basis.ok) {
         basisPart = `err:${basis.error}`;
       } else {
-        basisPart = Object.keys(basis.defs)
+        const qPart = Object.keys(basis.defs)
           .sort()
-          .map((id) => `${id}=${basis.defs[id]}`)
-          .join("|");
+          .map((id) => `q:${id}=${basis.defs[id]}`);
+        const mPart = Object.keys(basis.maps)
+          .sort()
+          .map((id) => `m:${id}=${basis.maps[id]}`);
+        basisPart = [...qPart, ...mPart].join("|");
       }
     }
     const qFinger = JSON.stringify({

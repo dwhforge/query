@@ -379,4 +379,138 @@ const project = {
   assert(fold.project === moved, "upstream stale leaves project untouched");
 }
 
+{
+  // Nested query-backed map: only inner From binding changes → outer plan stale.
+  // Outer map → q_outer → Apply inner_map → q_dictionary
+  const innerMap = {
+    id: "inner_map",
+    name: "Inner",
+    entries: [],
+    storage: { kind: "query" as const, query_id: "q_dictionary" },
+    from_column: "alias_a",
+    from_columns: ["alias_a"],
+    output_columns: ["canonical_id"],
+    to_column: "canonical_id",
+  };
+  const outerMap = {
+    id: "outer_map",
+    name: "Outer",
+    entries: [],
+    storage: { kind: "query" as const, query_id: "q_outer" },
+    from_column: "sku",
+    output_columns: ["product_id"],
+    to_column: "product_id",
+  };
+  const wsNested = {
+    queries: [
+      {
+        id: "q_dictionary",
+        name: "dict",
+        steps: [
+          {
+            type: "SqlModel",
+            payload: {
+              raw_sql:
+                "select 'A' as alias_a, 'A' as alias_b, 'P1' as canonical_id",
+            },
+          },
+        ],
+      },
+      {
+        id: "q_outer",
+        name: "outer",
+        steps: [
+          {
+            type: "SqlModel",
+            payload: { raw_sql: "select 'A' as sku" },
+          },
+          {
+            type: "ApplyKeyMap",
+            payload: {
+              map_id: "inner_map",
+              column: "sku",
+              columns: ["sku"],
+              output_bindings: [
+                {
+                  map_column: "canonical_id",
+                  destination_column: "product_id",
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: "fact",
+        name: "fact",
+        steps: [
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              join_type: "left",
+              left_on: ["sku"],
+              right_on: ["sku"],
+            },
+          },
+        ],
+      },
+      { id: "dim", name: "dim", steps: [] },
+    ],
+    focus_query_id: "fact",
+    key_maps: [outerMap, innerMap],
+  };
+  const nestedProject = {
+    ...project,
+    workspace: wsNested,
+  } as Project;
+  const plan = resolveApplyPlan(
+    outerMap as never,
+    {
+      hostQueryId: "fact",
+      joinStepIndex: 0,
+      rightQueryId: "dim",
+      leftOn: ["sku"],
+      rightOn: ["sku"],
+      joinType: "left",
+    },
+    "left",
+    {
+      side: "left",
+      bindings: [
+        { map_column: "product_id", destination_column: "product_id" },
+      ],
+    },
+    nestedProject.workspace,
+  );
+  assert(!("error" in plan), "nested outer plan ok");
+  if ("error" in plan) throw new Error(plan.error);
+
+  const innerRebound = {
+    ...innerMap,
+    from_column: "alias_b",
+    from_columns: ["alias_b"],
+  };
+  const wsRebound = {
+    ...wsNested,
+    key_maps: [outerMap, innerRebound],
+  };
+  assert(
+    keyMapRevisionFingerprint(outerMap as never, wsRebound as never) !==
+      plan.mapRevision,
+    "nested inner From binding must change outer fingerprint",
+  );
+  const moved = { ...nestedProject, workspace: wsRebound } as Project;
+  const fold = applyKeyMapOntoProject(moved, intentFromApplyPlan(plan));
+  assert(fold.result.status === "stale", "nested map binding change is stale");
+  assert(fold.project === moved, "nested stale leaves project untouched");
+  const stillInner = fold.project.workspace.key_maps?.find(
+    (m) => m.id === "inner_map",
+  );
+  assert(
+    stillInner?.from_columns?.[0] === "alias_b",
+    "inner R2 binding preserved",
+  );
+}
+
 console.log("applyPlan.test.ts: ok");

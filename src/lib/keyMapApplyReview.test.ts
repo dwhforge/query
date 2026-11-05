@@ -78,11 +78,23 @@ eq(
     rightOnCols: ["sku"],
   });
   assert(built.outputs.length === 3, "3 outputs");
+  assert(built.outputs[0]!.destination === "external_sku", "left anchors first dest");
   assert(built.outputs[0]!.includeJoin, "first in Join by default");
   assert(!built.outputs[1]!.includeJoin, "second not forced into Join when ON arity=1");
   assert(!built.outputs[2]!.includeJoin, "extra output not forced into Join");
   assert(built.keepEqualities.length === 1, "keep old ON row");
   assert(!built.keepEqualities[0]!.keep, "old ON opt-in (not duplicated by default)");
+
+  const rightBuilt = buildApplyReviewState({
+    side: "right",
+    outCols: ["product_id", "variant_code"],
+    leftOnCols: ["external_sku"],
+    rightOnCols: ["item_code"],
+  });
+  assert(
+    rightBuilt.outputs[0]!.destination === "item_code",
+    `right Apply defaults from right ON, got ${rightBuilt.outputs[0]!.destination}`,
+  );
 
   // Apply all three; Join only product+variant; also keep day=day.
   const review: ApplyReviewState = {

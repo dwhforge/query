@@ -173,6 +173,14 @@ pub fn compile_ctes_from(
     root_id: &str,
 ) -> Result<CompiledCtes, String> {
     let prepared = prepare_workspace(db, workspace, connections, sources)?;
+    crate::query_map_validate::validate_query_backed_maps_for_root(
+        db,
+        workspace,
+        connections,
+        sources,
+        &prepared,
+        root_id,
+    )?;
     graph_compiler(workspace, connections, sources, &prepared.schemas).compile_ctes_from(root_id)
 }
 
@@ -185,6 +193,14 @@ pub fn compile_focus_sql(
     is_preview: bool,
 ) -> Result<String, String> {
     let prepared = prepare_workspace(db, workspace, connections, sources)?;
+    crate::query_map_validate::validate_query_backed_maps_for_root(
+        db,
+        workspace,
+        connections,
+        sources,
+        &prepared,
+        &workspace.focus_query_id,
+    )?;
     graph_compiler(workspace, connections, sources, &prepared.schemas).to_sql(is_preview)
 }
 
@@ -208,7 +224,7 @@ fn workspace_sql_model_prefix(workspace: &Workspace, qid: &str) -> Result<Worksp
     Ok(ws)
 }
 
-fn describe_compiled_cte(
+pub(crate) fn describe_compiled_cte(
     db: &DbSession,
     compiled: &CompiledCtes,
     cte: &str,

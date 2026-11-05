@@ -29,9 +29,15 @@
 ## 5–6. Checks / merge
 - [x] MappingCheck fingerprint; specs merged into `openspec/specs/keymap-multi-output-*`
 
+## 7. Query full-set validation (ADR-0036 / ADR-0037 §9)
+- [x] 7.1 Engine full-set scan of query map relation on preview/compile (NULL From/outputs, duplicate From) — not only matched-row Apply guard
+- [x] 7.2 Fixtures: unused-key NULL output; unused duplicate From; valid unused keys still preview
+- [x] 7.3 Review defaults destinations from the Apply side (`right` → right ON)
+
 ## Verified
 ```
 cargo test -p dwh-pipeline --lib
+cargo test -p dwh-engine --lib
 npx tsc --noEmit
 npm run test:unit
 ```

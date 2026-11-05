@@ -132,10 +132,14 @@ export function buildApplyReviewState(args: {
   leftOnCols: string[];
   rightOnCols: string[];
 }): ApplyReviewState {
-  const dests = defaultReviewDestinations(
-    args.outCols,
-    args.leftOnCols[0] ?? "",
-  );
+  // Anchor destination for the first output on the side being Applied.
+  // `both` confirms one destination set for both sides (same bindings) —
+  // default from the host (left) ON; user can edit before confirm.
+  const anchorCol =
+    args.side === "right"
+      ? args.rightOnCols[0] ?? ""
+      : args.leftOnCols[0] ?? "";
+  const dests = defaultReviewDestinations(args.outCols, anchorCol);
   const rights = defaultReviewRightCols(dests, args.rightOnCols);
   // Default Join participation: one equality per current ON slot (extra
   // outputs like category_id stay Apply-only). Existing ON is opt-in keep

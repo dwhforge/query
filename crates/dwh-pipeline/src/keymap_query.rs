@@ -2,6 +2,7 @@
 
 use crate::graph::{direct_deps_ex, reachable_from};
 use crate::model::{KeyMapDef, KeyMapStorage, TransformationStep, Workspace};
+use crate::sql_escape::quote_ident;
 use std::collections::{HashMap, HashSet};
 
 /// Local query id when `storage = query`.
@@ -82,6 +83,91 @@ pub fn validate_query_map_binding(
         }
     }
     Ok(())
+}
+
+/// Query-backed maps referenced by `ApplyKeyMap` inside the subgraph of `root_id`.
+/// Full-set validation must cover these relations (ADR-0036), not only matched Apply rows.
+pub fn query_maps_applied_from<'a>(
+    workspace: &'a Workspace,
+    root_id: &str,
+) -> Result<Vec<&'a KeyMapDef>, String> {
+    let need = reachable_from(workspace, root_id)?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for qid in &need {
+        let q = workspace
+            .query(qid)
+            .ok_or_else(|| format!("missing query {qid}"))?;
+        for step in &q.steps {
+            let TransformationStep::ApplyKeyMap { map_id, .. } = step else {
+                continue;
+            };
+            // External Apply map_ids are validated elsewhere; full-set scan needs a local query.
+            let Ok(key) = map_id.compiler_id() else {
+                continue;
+            };
+            if key.is_empty() || !seen.insert(key.to_string()) {
+                continue;
+            }
+            let Some(map) = workspace.key_maps.iter().find(|m| m.id == key) else {
+                continue;
+            };
+            if query_backed_query_id(map).is_some() {
+                out.push(map);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// SQL body (no WITH) that returns up to a few diagnostic rows for full-set
+/// validation of a map relation CTE. Empty result ⇒ valid.
+///
+/// Columns: `kind` (`null_from` | `null_output` | `duplicate_from`), `detail`.
+/// Does not trim or case-fold values (ADR-0036).
+pub fn query_map_full_set_check_sql(
+    map_cte: &str,
+    from_cols: &[String],
+    output_cols: &[String],
+) -> Result<String, String> {
+    if from_cols.is_empty() || output_cols.is_empty() {
+        return Err("query_map_full_set_check_sql: from/output columns required".into());
+    }
+    let from_q: Vec<String> = from_cols.iter().map(|c| quote_ident(c)).collect();
+    let out_q: Vec<String> = output_cols.iter().map(|c| quote_ident(c)).collect();
+    let mut arms = Vec::new();
+    for (i, col) in from_q.iter().enumerate() {
+        arms.push(format!(
+            "(SELECT 'null_from' AS kind, 'From part {i} ({})' AS detail \
+             FROM {map_cte} WHERE {col} IS NULL OR CAST({col} AS VARCHAR) = '' LIMIT 1)",
+            from_cols[i]
+        ));
+    }
+    for (i, col) in out_q.iter().enumerate() {
+        arms.push(format!(
+            "(SELECT 'null_output' AS kind, 'output {i} ({})' AS detail \
+             FROM {map_cte} WHERE {col} IS NULL OR CAST({col} AS VARCHAR) = '' LIMIT 1)",
+            output_cols[i]
+        ));
+    }
+    let group = from_q.join(", ");
+    let detail = if from_q.len() == 1 {
+        format!("CAST({} AS VARCHAR)", from_q[0])
+    } else {
+        let parts: Vec<String> = from_q
+            .iter()
+            .map(|c| format!("CAST({c} AS VARCHAR)"))
+            .collect();
+        format!("concat_ws(',', {})", parts.join(", "))
+    };
+    arms.push(format!(
+        "(SELECT 'duplicate_from' AS kind, {detail} AS detail \
+         FROM {map_cte} GROUP BY {group} HAVING COUNT(*) > 1 LIMIT 1)"
+    ));
+    Ok(format!(
+        "SELECT kind, detail FROM (\n  {}\n) _dwh_qmap_check LIMIT 8",
+        arms.join("\n  UNION ALL\n  ")
+    ))
 }
 
 /// Full-set row validation (ADR-0036 / ADR-0037). No trim/case normalization of values.
@@ -266,6 +352,74 @@ mod tests {
             ]
         )
         .is_err());
+    }
+
+    #[test]
+    fn full_set_check_sql_covers_from_outputs_and_dupes() {
+        let sql = query_map_full_set_check_sql(
+            "q_map_s0",
+            &["alias".into()],
+            &["product_id".into(), "variant_code".into()],
+        )
+        .unwrap();
+        assert!(sql.contains("null_from") && sql.contains("null_output"), "{sql}");
+        assert!(sql.contains("duplicate_from"), "{sql}");
+        assert!(sql.contains("\"variant_code\""), "{sql}");
+        assert!(!sql.to_lowercase().contains("trim("), "{sql}");
+    }
+
+    #[test]
+    fn applied_maps_from_focus_lists_query_storage_only() {
+        let mut qmap = KeyMapDef::new("qm", "Q");
+        qmap.storage = KeyMapStorage::Query {
+            query_id: "q_map".into(),
+        };
+        let mut seed = KeyMapDef::new("sm", "S");
+        seed.storage = KeyMapStorage::Seed;
+        let ws = ws_with(
+            vec![
+                QueryDef {
+                    id: "q_map".into(),
+                    name: "map".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "m.csv".into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "q_fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: "f.csv".into(),
+                        },
+                        TransformationStep::ApplyKeyMap {
+                            column: "a".into(),
+                            columns: vec![],
+                            output_column: None,
+                            output_bindings: vec![],
+                            as_of_column: None,
+                            map_id: "qm".into(),
+                            entries: vec![],
+                        },
+                        TransformationStep::ApplyKeyMap {
+                            column: "b".into(),
+                            columns: vec![],
+                            output_column: None,
+                            output_bindings: vec![],
+                            as_of_column: None,
+                            map_id: "sm".into(),
+                            entries: vec![],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            vec![qmap, seed],
+        );
+        let maps = query_maps_applied_from(&ws, "q_fact").unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].id, "qm");
     }
 
     #[test]

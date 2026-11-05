@@ -16,6 +16,7 @@ mod key_match_bench;
 mod load_seeds;
 mod postgres_catalog;
 mod preview;
+mod query_map_validate;
 mod secrets;
 mod session;
 mod session_limits;

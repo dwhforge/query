@@ -58,7 +58,8 @@ pub use key_map_sync::{
 };
 pub use keymap_query::{
     assert_no_query_map_cycle, direct_deps_with_maps, query_backed_query_id,
-    validate_query_map_binding, validate_query_map_rows, validate_query_map_rows_ex,
+    query_map_full_set_check_sql, query_maps_applied_from, validate_query_map_binding,
+    validate_query_map_rows, validate_query_map_rows_ex,
 };
 pub use schema::{
     apply_step_schema, infer_workspace_schemas, infer_workspace_schemas_ex, StepSchema,

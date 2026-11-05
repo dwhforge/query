@@ -355,7 +355,7 @@ pub fn apply_keymap_columns(column: &str, columns: &[String]) -> Vec<String> {
     }
 }
 
-/// Where the From→To table lives (ADR-0020). Default = generated dbt seed.
+/// Where the From→To table lives (ADR-0020 / ADR-0036). Default = generated dbt seed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KeyMapStorage {
@@ -376,6 +376,11 @@ pub enum KeyMapStorage {
         /// Database schema when `source` is only the dbt source name (external projects).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         db_schema: Option<String>,
+    },
+    /// Local workspace query result is the correspondence SoT ([ADR-0036](../../../docs/adr/0036-query-backed-keymap.md)).
+    /// `entries` stay empty; Apply joins the live query (preview CTE / export `ref`).
+    Query {
+        query_id: String,
     },
 }
 
@@ -519,6 +524,8 @@ impl KeyMapDef {
     }
 
     /// Reject empty / duplicate From **tuples** and empty `to` for seed-backed maps.
+    /// Query-backed maps validate binding here; row NULL/dupes need a full result scan
+    /// (`keymap_query::validate_query_map_rows`).
     pub fn validate(&self) -> Result<(), String> {
         match &self.storage {
             KeyMapStorage::Ref { model } => {
@@ -530,6 +537,23 @@ impl KeyMapDef {
                 if source.trim().is_empty() || table.trim().is_empty() {
                     return Err(format!(
                         "KeyMap '{}': source name and table are required",
+                        self.id
+                    ));
+                }
+            }
+            KeyMapStorage::Query { query_id } => {
+                if query_id.trim().is_empty() {
+                    return Err(format!("KeyMap '{}': query_id is empty", self.id));
+                }
+                if self.is_range_scd() {
+                    return Err(format!(
+                        "KeyMap '{}': query-backed maps do not support range SCD (ADR-0036)",
+                        self.id
+                    ));
+                }
+                if !self.editable_columns.is_empty() {
+                    return Err(format!(
+                        "KeyMap '{}': query-backed maps do not support attrs/editable_columns yet",
                         self.id
                     ));
                 }
@@ -566,7 +590,7 @@ impl KeyMapDef {
         let range = self.is_range_scd();
         let vf_col = self.valid_from_col_eff();
         let vt_col = self.valid_to_col_eff();
-        // External relations may have empty local entries (SoT is the table).
+        // External / query relations may have empty local entries (SoT is elsewhere).
         if matches!(self.storage, KeyMapStorage::Seed) || !self.entries.is_empty() {
             let mut seen = std::collections::HashSet::new();
             // from_key → list of (valid_from_epoch, valid_to_epoch_opt) for overlap checks

@@ -9,6 +9,7 @@ pub mod export_manifest;
 pub mod export_tree;
 pub mod graph;
 pub mod key_map_sync;
+pub mod keymap_query;
 pub mod mapping_check;
 pub mod model;
 pub mod parquet_scan;
@@ -53,6 +54,10 @@ pub use emit::{
 pub use key_map_sync::{
     push_key_map_to_export, remove_key_map_from_export, sync_key_maps_from_export,
     KeyMapSyncResult, KEYMAP_CONFLICT_DIR,
+};
+pub use keymap_query::{
+    assert_no_query_map_cycle, direct_deps_with_maps, query_backed_query_id,
+    validate_query_map_binding, validate_query_map_rows,
 };
 pub use schema::{
     apply_step_schema, infer_workspace_schemas, infer_workspace_schemas_ex, StepSchema,

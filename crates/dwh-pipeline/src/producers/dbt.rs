@@ -57,8 +57,11 @@ fn collect_seed_key_maps(workspace: &Workspace) -> BTreeMap<String, Vec<KeyMapEn
     out
 }
 
-/// map_id → SQL relation for ApplyKeyMap emit (`ref` / `source` / seed ref).
-fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
+/// map_id → SQL relation for ApplyKeyMap emit (`ref` / `source` / seed / query model).
+fn key_map_relations(
+    workspace: &Workspace,
+    models: &HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for km in &workspace.key_maps {
         let rel = match &km.storage {
@@ -69,6 +72,17 @@ fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
             KeyMapStorage::Ref { model } => format!("{{{{ ref('{model}') }}}}"),
             KeyMapStorage::Source { source, table, .. } => {
                 format!("{{{{ source('{source}', '{table}') }}}}")
+            }
+            KeyMapStorage::Query { query_id } => {
+                let q = query_id.trim();
+                let model = models
+                    .get(q)
+                    .cloned()
+                    .or_else(|| {
+                        workspace.query(q).map(|query| dbt_model_name(workspace, query, &[]))
+                    })
+                    .unwrap_or_else(|| sanitize_id(q));
+                format!("{{{{ ref('{model}') }}}}")
             }
         };
         out.insert(km.id.clone(), rel);
@@ -631,7 +645,57 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
     };
     plan.insert("models/sources.yml".into(), sources_yml);
 
+    // ADR-0036: not_null + uniqueness tests on query-backed map models.
+    if let Some(yml) = query_backed_keymap_schema_yml(workspace, &model_name_by_query) {
+        plan.insert("models/schema_keymap_query.yml".into(), yml);
+    }
+
     Ok(plan)
+}
+
+/// dbt data tests for query-backed KeyMaps (ADR-0036).
+fn query_backed_keymap_schema_yml(
+    workspace: &Workspace,
+    models: &HashMap<String, String>,
+) -> Option<String> {
+    let mut models_block = String::new();
+    for km in &workspace.key_maps {
+        let KeyMapStorage::Query { query_id } = &km.storage else {
+            continue;
+        };
+        let q = query_id.trim();
+        let model = models.get(q)?;
+        let froms = km.from_columns_eff();
+        let to = if km.to_column.trim().is_empty() {
+            "to".to_string()
+        } else {
+            km.to_column.clone()
+        };
+        models_block.push_str(&format!("  - name: {model}\n    columns:\n"));
+        for (i, fc) in froms.iter().enumerate() {
+            models_block.push_str(&format!("      - name: {fc}\n        data_tests:\n          - not_null\n"));
+            if froms.len() == 1 && i == 0 {
+                models_block.push_str("          - unique\n");
+            }
+        }
+        models_block.push_str(&format!(
+            "      - name: {to}\n        data_tests:\n          - not_null\n"
+        ));
+        if froms.len() > 1 {
+            let cols = froms
+                .iter()
+                .map(|c| format!("          - {c}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            models_block.push_str(&format!(
+                "    data_tests:\n      - unique_combination_of_columns:\n          combination_of_columns:\n{cols}\n"
+            ));
+        }
+    }
+    if models_block.is_empty() {
+        return None;
+    }
+    Some(format!("version: 2\nmodels:\n{models_block}"))
 }
 
 fn is_source_only_query(query: &crate::model::QueryDef) -> bool {
@@ -928,7 +992,7 @@ fn compile_query_as_dbt_model(
                 substitute_query_placeholders(raw_sql, &relations)
             }
             other => {
-                let key_map_relations = key_map_relations(workspace);
+                let key_map_relations = key_map_relations(workspace, models);
                 let key_map_columns = key_map_columns(workspace);
                 let key_map_range = key_map_range(workspace);
                 let sql = emit_transform_step_ex(

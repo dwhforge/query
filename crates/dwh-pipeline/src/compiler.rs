@@ -84,7 +84,7 @@ impl<'a> GraphCompiler<'a> {
             return Err("Workspace is empty".into());
         }
 
-        let (km_rels, km_cols, km_ref_models, km_range) =
+        let (km_rels, km_cols, km_ref_models, km_range, km_query_ids) =
             preview_key_map_opts(self.workspace, self.connections)?;
         let order = topo_queries_from(self.workspace, root_id)?;
         let mut last_cte: HashMap<String, String> = HashMap::new();
@@ -124,6 +124,7 @@ impl<'a> GraphCompiler<'a> {
                     &km_cols,
                     &km_ref_models,
                     &km_range,
+                    &km_query_ids,
                     prev_columns,
                 )?;
                 parts.push(format!("  {name} AS ({body})"));
@@ -171,9 +172,9 @@ impl<'a> PipelineCompiler<'a> {
 }
 
 /// Preview ApplyKeyMap: source → ATTACH; seed → CSV relation (or VALUES on the step);
-/// ref → blocked (see below).
-/// Returns `(relations, columns, ref_models)` where `ref_models` is map_id → dbt model name
-/// for `storage=ref` (DuckDB cannot resolve `{{ ref }}`).
+/// query → resolved later from compiled CTE ([ADR-0036]); ref → blocked (see below).
+/// Returns `(relations, columns, ref_models, ranges, query_map_ids)` where
+/// `query_map_ids` is map_id → workspace query_id for `storage=query`.
 fn preview_key_map_opts(
     workspace: &Workspace,
     connections: &[ConnectionDef],
@@ -183,6 +184,7 @@ fn preview_key_map_opts(
         HashMap<String, (Vec<String>, String)>,
         HashMap<String, String>,
         HashMap<String, (String, String)>,
+        HashMap<String, String>,
     ),
     String,
 > {
@@ -191,6 +193,7 @@ fn preview_key_map_opts(
     let mut columns = HashMap::new();
     let mut ref_models = HashMap::new();
     let mut ranges = HashMap::new();
+    let mut query_maps = HashMap::new();
     for km in &workspace.key_maps {
         let froms = km.from_columns_eff();
         let to = if km.to_column.trim().is_empty() {
@@ -217,6 +220,19 @@ fn preview_key_map_opts(
             KeyMapStorage::Ref { model } => {
                 ref_models.insert(km.id.clone(), model.clone());
             }
+            KeyMapStorage::Query { query_id } => {
+                let q = query_id.trim();
+                if q.is_empty() {
+                    return Err(format!("KeyMap '{}': query_id is empty", km.id));
+                }
+                if workspace.query(q).is_none() {
+                    return Err(format!(
+                        "KeyMap '{}': query '{q}' not found in workspace",
+                        km.id
+                    ));
+                }
+                query_maps.insert(km.id.clone(), q.to_string());
+            }
             KeyMapStorage::Seed => {
                 // Step snapshots may be empty (large labs / IPC). Prefer workspace
                 // KeyMapDef.entries via a temp CSV join — avoids VALUES bloat and the
@@ -231,7 +247,7 @@ fn preview_key_map_opts(
             }
         }
     }
-    Ok((relations, columns, ref_models, ranges))
+    Ok((relations, columns, ref_models, ranges, query_maps))
 }
 
 /// Spill seed KeyMap rows for DuckDB preview join (ApplyKeyMap with empty step entries).
@@ -265,6 +281,7 @@ fn compile_step(
     key_map_columns: &HashMap<String, (Vec<String>, String)>,
     key_map_ref_models: &HashMap<String, String>,
     key_map_range: &HashMap<String, (String, String)>,
+    key_map_query_ids: &HashMap<String, String>,
     prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
     match step {
@@ -334,16 +351,33 @@ fn compile_step(
                     "ApplyKeyMap '{map_key}': storage=ref cannot be previewed in DuckDB \
                      (export joins {{{{ ref('{m}') }}}}). Local KeyMap cache is not the model — \
                      editing it does not change preview or the dbt relation. \
-                     Use storage=seed or source for a previewable remap."
+                     Use storage=seed, source, or query for a previewable remap."
                 ));
             }
+            // ADR-0036: join the compiled CTE of the map query (full set, not entries).
+            let owned_rels;
+            let relations: &HashMap<String, String> =
+                if let Some(qid) = key_map_query_ids.get(map_key) {
+                    let cte = last_cte.get(qid).ok_or_else(|| {
+                        format!(
+                            "ApplyKeyMap '{map_key}': query-backed map query '{qid}' not compiled yet \
+                         (cycle or missing dep)"
+                        )
+                    })?;
+                    let mut m = key_map_relations.clone();
+                    m.insert(map_key.to_string(), cte.clone());
+                    owned_rels = m;
+                    &owned_rels
+                } else {
+                    key_map_relations
+                };
             emit_transform_step_ex(
                 step,
                 prev_step,
                 last_cte,
                 WarehouseDialect::Duckdb,
                 EmitSchemaOpts {
-                    key_map_relations: Some(key_map_relations),
+                    key_map_relations: Some(relations),
                     key_map_columns: Some(key_map_columns),
                     key_map_range: Some(key_map_range),
                     prev_columns,
@@ -371,6 +405,57 @@ mod tests {
     use crate::model::{
         JoinType, KeyMapDef, KeyMapEntry, KeyMapStorage, QueryDef, TransformationStep,
     };
+
+    #[test]
+    fn apply_key_map_query_joins_map_query_cte() {
+        let mut km = KeyMapDef::new("map_q", "Q");
+        km.storage = KeyMapStorage::Query {
+            query_id: "q_map".into(),
+        };
+        km.from_column = "alias".into();
+        km.to_column = "canon".into();
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "q_map".into(),
+                    name: "map".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "/tmp/map.csv".into(),
+                    }],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "q_fact".into(),
+                    name: "fact".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: "/tmp/fact.csv".into(),
+                        },
+                        TransformationStep::ApplyKeyMap {
+                            column: "alias".into(),
+                            columns: vec![],
+                            output_column: None,
+                            as_of_column: None,
+                            map_id: "map_q".into(),
+                            entries: vec![],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "q_fact".into(),
+            key_maps: vec![km],
+        };
+        let sql = GraphCompiler::new(&ws).to_sql(true).unwrap();
+        assert!(
+            sql.contains("q_q_map_s0") || sql.contains("q_map"),
+            "must reference map query CTE: {sql}"
+        );
+        assert!(
+            !sql.to_lowercase().contains("values"),
+            "must not materialize VALUES for query map: {sql}"
+        );
+    }
 
     #[test]
     fn apply_key_map_ref_refuses_local_values_in_preview() {

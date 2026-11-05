@@ -187,7 +187,7 @@ export interface KeyMapEntry {
   attrs?: Record<string, string>;
 }
 
-/** Where the From→To table lives (ADR-0020). */
+/** Where the From→To table lives (ADR-0020 / ADR-0036). */
 export type KeyMapStorage =
   | { kind: "seed" }
   | { kind: "ref"; model: string }
@@ -197,6 +197,13 @@ export type KeyMapStorage =
       table: string;
       /** Postgres connection for read / write-back. */
       connection_id?: string;
+      /** DB schema when `source` is only the dbt source name. */
+      db_schema?: string;
+    }
+  | {
+      /** Local workspace query result is the correspondence SoT (ADR-0036). */
+      kind: "query";
+      query_id: string;
     };
 
 /** Effectivity mode ([ADR-0028](../../docs/adr/0028-keymap-stewardship-shapes.md)). */
@@ -318,7 +325,7 @@ export interface CanvasLayout {
  * Engine ≠ destination (four routes).
  */
 /** On-disk project document version (ADR-0030). Missing ⇒ 0 at load. */
-export const PROJECT_FORMAT_VERSION = 1 as const;
+export const PROJECT_FORMAT_VERSION = 2 as const;
 
 export interface Project {
   /** Document schema version (ADR-0030). */

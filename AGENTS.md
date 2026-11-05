@@ -31,6 +31,7 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/specs/query-backed-keymap/` — ADR-0036 query-backed KeyMap SoT (merged)
 - `openspec/changes/query-based-mapping-create/` — ADR-0034 query-based KeyMap create (v0.3.1)
 - `openspec/changes/return-and-edit-foundation/` — ADR-0018 foundation
 - `openspec/changes/join-key-mapping/` — ADR-0020 KeyMap / near-miss

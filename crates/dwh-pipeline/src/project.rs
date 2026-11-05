@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// On-disk project document version (ADR-0030). Independent of IPC protocol version.
-pub const PROJECT_FORMAT_VERSION: u32 = 1;
+pub const PROJECT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -219,6 +219,8 @@ pub fn migrate_project_document(v: &mut Value) -> Result<(), String> {
     while ver < PROJECT_FORMAT_VERSION {
         match ver {
             0 => migrate_v0_to_v1(obj),
+            // ADR-0036: query-backed KeyMap storage — stamp only, no row rewrite.
+            1 => migrate_v1_to_v2(obj),
             other => {
                 return Err(format!(
                     "missing migration from format_version {other} → {}",
@@ -237,32 +239,31 @@ pub fn migrate_project_document(v: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
-/// ADR-0033 — `storage.kind=source` must not keep dictionary rows in project JSON.
+/// ADR-0033 / ADR-0036 — source + query maps must not keep dictionary rows in project JSON.
 fn strip_source_keymap_entries(obj: &mut serde_json::Map<String, Value>) {
     let Some(ws) = obj.get_mut("workspace").and_then(|w| w.as_object_mut()) else {
         return;
     };
-    let mut source_ids = std::collections::HashSet::new();
+    let mut strip_ids = std::collections::HashSet::new();
     if let Some(maps) = ws.get_mut("key_maps").and_then(|m| m.as_array_mut()) {
         for map in maps {
             let Some(m) = map.as_object_mut() else {
                 continue;
             };
-            let is_source = m
+            let kind = m
                 .get("storage")
                 .and_then(|s| s.as_object())
                 .and_then(|s| s.get("kind"))
-                .and_then(|k| k.as_str())
-                == Some("source");
-            if is_source {
+                .and_then(|k| k.as_str());
+            if matches!(kind, Some("source") | Some("query")) {
                 if let Some(id) = m.get("id").and_then(|x| x.as_str()) {
-                    source_ids.insert(id.to_string());
+                    strip_ids.insert(id.to_string());
                 }
                 m.insert("entries".into(), Value::Array(vec![]));
             }
         }
     }
-    // Also clear embedded ApplyKeyMap snapshots for source maps.
+    // Also clear embedded ApplyKeyMap snapshots for source/query maps.
     let Some(queries) = ws.get_mut("queries").and_then(|q| q.as_array_mut()) else {
         return;
     };
@@ -293,7 +294,7 @@ fn strip_source_keymap_entries(obj: &mut serde_json::Map<String, Value>) {
                         .map(|s| s.to_string())
                 });
             let Some(mid) = map_id else { continue };
-            if !source_ids.contains(&mid) {
+            if !strip_ids.contains(&mid) {
                 continue;
             }
             if let Some(payload) = s.get_mut("payload").and_then(|p| p.as_object_mut()) {
@@ -304,6 +305,9 @@ fn strip_source_keymap_entries(obj: &mut serde_json::Map<String, Value>) {
         }
     }
 }
+
+/// ADR-0036 — query-backed KeyMap: document gate only (no IR rewrite).
+fn migrate_v1_to_v2(_obj: &mut serde_json::Map<String, Value>) {}
 
 /// Soft-migrate legacy fields (engine/destination). Prefer [`migrate_project_document`].
 pub fn migrate_project_value(v: &mut Value) {
@@ -581,7 +585,25 @@ mod tests {
         }"#;
         let p = Project::from_json(legacy).unwrap();
         assert_eq!(p.format_version, PROJECT_FORMAT_VERSION);
-        assert!(p.to_json_pretty().unwrap().contains("\"format_version\": 1"));
+        assert!(p
+            .to_json_pretty()
+            .unwrap()
+            .contains(&format!("\"format_version\": {PROJECT_FORMAT_VERSION}")));
+    }
+
+    #[test]
+    fn v1_stamps_to_v2_without_rewrite() {
+        let v1 = r#"{
+            "format_version": 1,
+            "id": "p",
+            "name": "v1",
+            "connections": [],
+            "sources": [],
+            "workspace": { "queries": [], "focus_query_id": "", "key_maps": [] },
+            "dbt_target": "v1"
+        }"#;
+        let p = Project::from_json(v1).unwrap();
+        assert_eq!(p.format_version, 2);
     }
 
     #[test]

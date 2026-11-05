@@ -13,7 +13,7 @@ This is **independent** of IPC / host protocol version ([ADR-0029](0029-typed-wi
 ## Decision
 
 1. Every saved project document includes `format_version: u32`.
-2. **Current** version is `1`. Missing field means **0** (pre-versioned legacy).
+2. **Current** version is `2` ([ADR-0036](0036-query-backed-keymap.md) query-backed KeyMap storage). Missing field means **0** (pre-versioned legacy). Version `1` remains readable via stamp migration.
 3. Load path: if `format_version > CURRENT` → refuse with a clear error. If `< CURRENT` → run ordered migrations in memory, then set `format_version = CURRENT`.
 4. Save path: if replacing an on-disk file whose version is older (or missing), write `<path>.bak` (overwrite previous `.bak`) **before** writing the new document.
 5. Migrations are pure JSON transforms before typed deserialize; Rust remains the validator.
@@ -21,9 +21,9 @@ This is **independent** of IPC / host protocol version ([ADR-0029](0029-typed-wi
 
 ## Consequences
 
-- New projects always write `format_version: 1`.
+- New projects always write `format_version: 2` (query-backed KeyMap storage).
 - UI surfaces "unsupported newer project" vs "migrated from legacy".
-- Bumping to v2 requires a named `migrate_v1_to_v2` and fixture.
+- `migrate_v1_to_v2` is a stamp-only gate ([ADR-0036](0036-query-backed-keymap.md)); further bumps need a named migrate + fixture.
 
 ## References
 

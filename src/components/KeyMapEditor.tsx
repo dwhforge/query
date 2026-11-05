@@ -11,7 +11,18 @@ import type {
   KeyMapEntry,
   KeyMapStorage,
 } from "../types/pipeline";
-import { listPostgresObjects, readKeyMap, type KeyMapDirtyDelta } from "../lib/bridge";
+import {
+  describeWorkspace,
+  listPostgresObjects,
+  previewWorkspace,
+  readKeyMap,
+  type KeyMapDirtyDelta,
+} from "../lib/bridge";
+import {
+  isQueryBackedMap,
+  queryMapPreviewQuery,
+  validateQueryMapRows,
+} from "../lib/keyMapQuery";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
 import type { Workspace } from "../types/pipeline";
@@ -110,7 +121,9 @@ export type KeyMapEditorProps = {
   title?: string;
 };
 
-function storageKind(s: KeyMapStorage | undefined): "seed" | "ref" | "source" {
+function storageKind(
+  s: KeyMapStorage | undefined,
+): "seed" | "ref" | "source" | "query" {
   return s?.kind ?? "seed";
 }
 
@@ -166,6 +179,15 @@ export function KeyMapEditor({
   const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
+  const rowsReadOnly = isQueryBackedMap(map);
+  const [queryPreviewNote, setQueryPreviewNote] = useState<string | null>(null);
+  const [queryPreviewBusy, setQueryPreviewBusy] = useState(false);
+  const [queryColOptions, setQueryColOptions] = useState<string[]>([]);
+  const [queryPreviewEntries, setQueryPreviewEntries] = useState<KeyMapEntry[]>(
+    [],
+  );
+  const [queryReloadNonce, setQueryReloadNonce] = useState(0);
+  const queryPreviewSeq = useRef(0);
   const rangeCols =
     map.time_mode === "range_scd"
       ? [
@@ -195,6 +217,81 @@ export function KeyMapEditor({
   useEffect(() => {
     storeRef.current.setSchema({ arity, editable: editableCols });
   }, [arity, editableCols]);
+
+  // ADR-0036: describe map query columns + refresh read-only preview rows.
+  useEffect(() => {
+    if (!rowsReadOnly || !workspace || map.storage?.kind !== "query") {
+      setQueryColOptions([]);
+      return;
+    }
+    const qid = map.storage.query_id.trim();
+    if (!qid) return;
+    const seq = ++queryPreviewSeq.current;
+    setQueryPreviewBusy(true);
+    setQueryPreviewNote(null);
+    void (async () => {
+      try {
+        const focused = {
+          ...workspace,
+          focus_query_id: qid,
+        };
+        const desc = await describeWorkspace(focused, connections, []);
+        if (seq !== queryPreviewSeq.current) return;
+        setQueryColOptions(desc.columns.map((c) => c.name));
+        const previewQ = queryMapPreviewQuery(map, 50);
+        if (!previewQ) return;
+        const ws = {
+          ...workspace,
+          focus_query_id: previewQ.id,
+          queries: [
+            ...workspace.queries.filter((q) => q.id !== previewQ.id),
+            previewQ,
+          ],
+        };
+        const result = await previewWorkspace(ws, connections, []);
+        if (seq !== queryPreviewSeq.current) return;
+        const fromN = fromColumnsEff(map).length;
+        const toIdx = fromN;
+        const rows = result.rows.map((r) =>
+          Array.from({ length: fromN + 1 }, (_, i) => {
+            const v = r[i];
+            return v == null ? null : String(v);
+          }),
+        );
+        const checked = validateQueryMapRows(map.id, fromN, rows);
+        const entries = result.rows.map((r) => {
+          const parts = Array.from({ length: fromN }, (_, i) =>
+            String(r[i] ?? ""),
+          );
+          return {
+            from: parts[0] ?? "",
+            from_parts: parts,
+            to: String(r[toIdx] ?? ""),
+          } satisfies KeyMapEntry;
+        });
+        // Do not persist preview rows into the project map (ADR-0036).
+        setQueryPreviewEntries(entries);
+        setQueryPreviewNote(
+          checked.ok
+            ? `Preview ${entries.length} row(s) · full Apply uses entire query`
+            : `Preview loaded — validation: ${checked.error}`,
+        );
+      } catch (e) {
+        if (seq !== queryPreviewSeq.current) return;
+        setQueryPreviewNote(typeof e === "string" ? e : String(e));
+      } finally {
+        if (seq === queryPreviewSeq.current) setQueryPreviewBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh on binding identity
+  }, [
+    rowsReadOnly,
+    map.storage?.kind === "query" ? map.storage.query_id : "",
+    (map.from_columns ?? []).join(","),
+    map.from_column,
+    map.to_column,
+    queryReloadNonce,
+  ]);
 
   function publishView() {
     if (!isSource) return;
@@ -431,13 +528,14 @@ export function KeyMapEditor({
   }, [tableOptions, selectedSchema]);
 
   const rows = useMemo(() => {
+    const sourceEntries = rowsReadOnly ? queryPreviewEntries : map.entries;
     if (isSource) {
       // Server-side fromPrefix already applied.
       return map.entries.map((e, i) => ({ e, i }));
     }
     const q = filter.trim().toLowerCase();
-    if (!q) return map.entries.map((e, i) => ({ e, i }));
-    return map.entries
+    if (!q) return sourceEntries.map((e, i) => ({ e, i }));
+    return sourceEntries
       .map((e, i) => ({ e, i }))
       .filter(({ e }) => {
         const parts = fromPartsEff(e);
@@ -446,7 +544,7 @@ export function KeyMapEditor({
           e.to.toLowerCase().includes(q)
         );
       });
-  }, [map.entries, filter, isSource]);
+  }, [map.entries, filter, isSource, rowsReadOnly, queryPreviewEntries]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -726,6 +824,8 @@ export function KeyMapEditor({
   const sourceStorage =
     map.storage?.kind === "source" ? map.storage : null;
   const refStorage = map.storage?.kind === "ref" ? map.storage : null;
+  const queryStorage =
+    map.storage?.kind === "query" ? map.storage : null;
   const kind = storageKind(map.storage);
   const sotLine = (() => {
     if (kind === "source") {
@@ -744,6 +844,19 @@ export function KeyMapEditor({
         detail: refStorage?.model?.trim()
           ? `{{ ref('${refStorage.model}') }} · DuckDB preview cannot resolve this model; local rows are a draft cache, not the relation`
           : "set model name · local cache is not the dbt model",
+      };
+    }
+    if (kind === "query") {
+      const q = workspace?.queries.find(
+        (x) => x.id === queryStorage?.query_id,
+      );
+      return {
+        label: "SoT · workspace query",
+        detail: q
+          ? `${q.name} (${q.id}) · read-only · Apply joins live result (ADR-0036)`
+          : queryStorage?.query_id
+            ? `missing query ${queryStorage.query_id}`
+            : "pick a local query",
       };
     }
     if (exportPath) {
@@ -781,19 +894,30 @@ export function KeyMapEditor({
           value={storageKind(map.storage)}
           onChange={(e) => {
             if (saving) return;
-            const kind = e.target.value as "seed" | "ref" | "source";
+            const next = e.target.value as "seed" | "ref" | "source" | "query";
             const storage: KeyMapStorage =
-              kind === "seed"
+              next === "seed"
                 ? { kind: "seed" }
-                : kind === "ref"
+                : next === "ref"
                   ? { kind: "ref", model: "" }
-                  : {
-                      kind: "source",
-                      source: "",
-                      table: "",
-                    };
-            onChange({ ...map, storage });
-            if (kind === "source") setRebindOpen(true);
+                  : next === "query"
+                    ? {
+                        kind: "query",
+                        query_id: workspace?.queries[0]?.id ?? "",
+                      }
+                    : {
+                        kind: "source",
+                        source: "",
+                        table: "",
+                      };
+            onChange({
+              ...map,
+              storage,
+              entries: next === "query" ? [] : map.entries,
+              editable_columns: next === "query" ? [] : map.editable_columns,
+              time_mode: next === "query" ? "none" : map.time_mode,
+            });
+            if (next === "source") setRebindOpen(true);
           }}
           disabled={saving}
           className={fieldClass}
@@ -801,8 +925,41 @@ export function KeyMapEditor({
           <option value="seed">dbt seed (seeds/map_*.csv)</option>
           <option value="ref">Existing dbt ref(model)</option>
           <option value="source">Warehouse source table</option>
+          <option value="query">Workspace query (ADR-0036)</option>
         </select>
       </label>
+      {queryStorage && (
+        <div className="space-y-3">
+          <p className="rounded border border-teal-900/50 bg-teal-950/25 px-2 py-1.5 text-[10px] leading-snug text-teal-100/90">
+            Correspondences come from the selected query. Rows are read-only;
+            Save stores the binding only — not query results (ADR-0036).
+          </p>
+          <label className={labelClass}>
+            Query
+            <select
+              value={queryStorage.query_id}
+              onChange={(e) =>
+                onChange({
+                  ...map,
+                  storage: { kind: "query", query_id: e.target.value },
+                  from_columns: [],
+                  from_column: "from",
+                  to_column: "to",
+                  entries: [],
+                })
+              }
+              className={fieldClass}
+            >
+              <option value="">Select query…</option>
+              {(workspace?.queries ?? []).map((q) => (
+                <option key={q.id} value={q.id}>
+                  {q.name} ({q.id})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       {refStorage && (
         <>
           <p className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[10px] leading-snug text-amber-100/90">
@@ -1027,11 +1184,23 @@ export function KeyMapEditor({
             + Column
           </button>
         </div>
+        {queryColOptions.length > 0 && (
+          <datalist id={`keymap-query-cols-${map.id}`}>
+            {queryColOptions.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        )}
         {fromCols.map((col, i) => (
           <label key={`from-col-${i}`} className={labelClass}>
             Match[{i + 1}]
             <div className="mt-1 flex gap-1">
               <input
+                list={
+                  queryColOptions.length
+                    ? `keymap-query-cols-${map.id}`
+                    : undefined
+                }
                 value={col}
                 onChange={(e) => {
                   const next = [...fromCols];
@@ -1075,12 +1244,18 @@ export function KeyMapEditor({
         <label className={labelClass}>
           Target value column
           <input
+            list={
+              queryColOptions.length
+                ? `keymap-query-cols-${map.id}`
+                : undefined
+            }
             value={map.to_column ?? "to"}
             onChange={(e) => onChange({ ...map, to_column: e.target.value })}
             className={`${fieldClass} font-mono`}
           />
         </label>
       </div>
+      {!rowsReadOnly && (
       <div className="space-y-2 border-t border-slate-800/80 pt-3">
         <div className="flex items-center justify-between gap-2">
           <span className={labelClass}>Attribute columns</span>
@@ -1217,6 +1392,7 @@ export function KeyMapEditor({
           </div>
         )}
       </div>
+      )}
       <p className="text-[11px] leading-snug text-slate-500">
         Mapping relation column names. Arity {arity}: uniqueness is the match{" "}
         <span className="font-mono text-slate-400">key</span>
@@ -1254,6 +1430,7 @@ export function KeyMapEditor({
           compact ? "w-28 py-0.5 text-[11px]" : "w-48"
         }`}
       />
+      {!rowsReadOnly && (
       <button
         type="button"
         onClick={() => addRow()}
@@ -1261,6 +1438,17 @@ export function KeyMapEditor({
       >
         Add row
       </button>
+      )}
+      {rowsReadOnly && (
+        <button
+          type="button"
+          disabled={queryPreviewBusy}
+          onClick={() => setQueryReloadNonce((n) => n + 1)}
+          className="rounded-md border border-teal-800/50 px-2.5 py-1.5 text-[12px] text-teal-200 hover:bg-teal-500/10 disabled:opacity-40"
+        >
+          {queryPreviewBusy ? "Refreshing…" : "Refresh"}
+        </button>
+      )}
       {map.storage?.kind === "source" &&
         map.storage.source &&
         map.storage.table && (
@@ -1294,6 +1482,7 @@ export function KeyMapEditor({
           )
         </button>
       )}
+      {!rowsReadOnly && (
       <button
         type="button"
         onClick={() => setPasteOpen((v) => !v)}
@@ -1301,6 +1490,12 @@ export function KeyMapEditor({
       >
         Paste CSV
       </button>
+      )}
+      {queryPreviewNote && (
+        <span className="max-w-md truncate text-[11px] text-slate-500" title={queryPreviewNote}>
+          {queryPreviewNote}
+        </span>
+      )}
       <span className="text-[11px] text-slate-500">
         {isSource
           ? `${map.entries.length} on page`
@@ -1561,7 +1756,7 @@ export function KeyMapEditor({
         {settingsPanel}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {toolbar}
-          {!compact && workspace && <KeyMapFuzzyPanel
+          {!compact && workspace && !rowsReadOnly && <KeyMapFuzzyPanel
             key={map.id}
             workspace={workspace}
             connections={connections}

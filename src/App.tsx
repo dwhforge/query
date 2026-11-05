@@ -3667,7 +3667,10 @@ function App() {
     }
     const projectIdAtStart = projectAtStart.id;
     const bindingAtStart = keyMapBindingFingerprint(mapAtStart);
-    const revisionAtStart = keyMapRevision(mapAtStart);
+    const revisionAtStart = keyMapRevision(
+      mapAtStart,
+      projectAtStart.workspace,
+    );
 
     confirmRemapInFlightRef.current = true;
     setConfirmRemapBusy(true);
@@ -3744,12 +3747,13 @@ function App() {
         bindingAtStart,
         liveMap,
         bindingOf: keyMapBindingFingerprint,
+        workspace: liveProject.workspace,
       });
       if (stale) {
         setError(stale);
         return;
       }
-      if (keyMapRevision(liveMap!) !== revisionAtStart) {
+      if (keyMapRevision(liveMap!, liveProject.workspace) !== revisionAtStart) {
         setError(
           "KeyMap changed while reading baselines — refresh the remap preview.",
         );

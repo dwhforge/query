@@ -55,9 +55,34 @@ export function newCheckRunId(): string {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Semantic map fingerprint — links, attrs, SCD bounds, schema, storage (ADR-0027/0028). */
-export function keyMapRevision(map: KeyMapDef | undefined | null): string {
+/** Semantic map fingerprint — links, attrs, SCD bounds, schema, storage (ADR-0027/0028/0036). */
+export function keyMapRevision(
+  map: KeyMapDef | undefined | null,
+  workspace?: Workspace | null,
+): string {
   if (!map) return "missing_map";
+  const schema = JSON.stringify({
+    from_columns: fromColumnsEff(map),
+    to_column: map.to_column ?? "to",
+    editable_columns: map.editable_columns ?? [],
+    time_mode: map.time_mode ?? "none",
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
+  });
+  // ADR-0036: query-backed SoT is the query definition, not entries.
+  if (map.storage?.kind === "query") {
+    const qid = map.storage.query_id.trim();
+    const q = workspace?.queries.find((x) => x.id === qid);
+    const qFinger = q
+      ? JSON.stringify({
+          id: q.id,
+          steps: q.steps,
+          execution: q.execution ?? "local",
+        })
+      : `missing:${qid}`;
+    return `map:${map.id}:query:h=${fnv1a(qFinger + "|" + schema)}`;
+  }
   const rows = [...map.entries]
     .map((e) => {
       const from = (e.from_parts?.length ? e.from_parts.join("\0") : e.from).trim();
@@ -68,15 +93,6 @@ export function keyMapRevision(map: KeyMapDef | undefined | null): string {
       return `${from}\t${e.to.trim()}\t${attrs}`;
     })
     .sort();
-  const schema = JSON.stringify({
-    from_columns: fromColumnsEff(map),
-    to_column: map.to_column ?? "to",
-    editable_columns: map.editable_columns ?? [],
-    time_mode: map.time_mode ?? "none",
-    valid_from_column: map.valid_from_column ?? null,
-    valid_to_column: map.valid_to_column ?? null,
-    storage: map.storage ?? { kind: "seed" },
-  });
   return `map:${map.id}:n=${rows.length}:h=${fnv1a(rows.join("\n") + "|" + schema)}`;
 }
 
@@ -266,7 +282,7 @@ export function assertRemapConfirmable(
   if (!map || map.id !== freeze.map_id) {
     throw new Error("KeyMap missing or mismatched — refresh the remap preview.");
   }
-  const current = keyMapRevision(map);
+  const current = keyMapRevision(map, workspace);
   if (current !== freeze.expected_map_revision) {
     throw new Error(
       "KeyMap changed since preview — run a new preview before confirming.",
@@ -402,7 +418,7 @@ export function buildCheckRun(args: {
     id: newCheckRunId(),
     check_id: args.check.id,
     ran_at: new Date().toISOString(),
-    map_revision: keyMapRevision(args.map),
+    map_revision: keyMapRevision(args.map, args.workspace),
     input_revisions,
     check_definition_revision: checkDefinitionRevision(args.check),
     total_positions: args.totalPositions,

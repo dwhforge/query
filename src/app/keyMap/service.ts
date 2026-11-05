@@ -52,6 +52,7 @@ export function keyMapEntryIdentity(
 function storageBindingKey(storage: KeyMapStorage | undefined): string {
   if (!storage || storage.kind === "seed") return "seed";
   if (storage.kind === "ref") return `ref:${storage.model}`;
+  if (storage.kind === "query") return `query:${storage.query_id}`;
   return `source:${storage.connection_id ?? ""}:${storage.source}:${storage.table}`;
 }
 

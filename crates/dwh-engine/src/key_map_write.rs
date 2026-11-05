@@ -1067,6 +1067,10 @@ pub fn write_key_map_with_delta(
             "ref-backed KeyMap: warehouse write-back is not supported (dbt run owns the model). Use seed or source storage."
                 .into(),
         ),
+        KeyMapStorage::Query { .. } => Err(
+            "query-backed KeyMap: write-back is not supported (ADR-0036). Edit the map query, not warehouse rows."
+                .into(),
+        ),
     }
 }
 

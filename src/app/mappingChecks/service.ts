@@ -605,7 +605,7 @@ export function planCheckInspect(args: {
     ? {
         check_id: check.id,
         map_id: map.id,
-        expected_map_revision: keyMapRevision(map),
+        expected_map_revision: keyMapRevision(map, project.workspace),
         expected_input_revisions: collectInputRevisions(
           project.workspace,
           checkWithPred,
@@ -702,7 +702,7 @@ export function applyConfirmRemapOntoProject(
       },
     };
   }
-  if (keyMapRevision(live) !== intent.expectedMapRevision) {
+  if (keyMapRevision(live, project.workspace) !== intent.expectedMapRevision) {
     return {
       project,
       result: {
@@ -836,6 +836,8 @@ export function confirmContextStillValid(args: {
   bindingAtStart: string;
   liveMap: KeyMapDef | undefined;
   bindingOf: (map: KeyMapDef) => string;
+  /** Needed for query-backed map revisions (ADR-0036). */
+  workspace?: Workspace;
 }): string | null {
   if (args.liveProjectId !== args.projectIdAtStart) {
     return "Project changed while reading baselines — Confirm cancelled.";
@@ -856,7 +858,8 @@ export function confirmContextStillValid(args: {
     return "KeyMap binding changed while reading baselines — Confirm cancelled.";
   }
   if (
-    keyMapRevision(args.liveMap) !== args.frozenAtStart.expected_map_revision
+    keyMapRevision(args.liveMap, args.workspace) !==
+    args.frozenAtStart.expected_map_revision
   ) {
     return "KeyMap changed while reading baselines — refresh the remap preview.";
   }

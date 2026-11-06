@@ -12,6 +12,7 @@ import {
   ReactFlowProvider,
   getBezierPath,
   useEdgesState,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
   type Connection,
@@ -273,6 +274,10 @@ function queryDepths(queries: QueryDef[]): Map<string, number> {
     let d = 0;
     if (q) {
       for (const step of q.steps) {
+        // Left → right on a wide, short canvas: sources, then FromQuery, then Join.
+        if (step.type === "FromQuery") {
+          d = Math.max(d, depth(targetKey(step.payload.query_id), stack) + 1);
+        }
         if (step.type === "Join") {
           d = Math.max(d, depth(targetKey(step.payload.right_query_id), stack) + 1);
         }
@@ -312,16 +317,50 @@ function buildGraph(
   }
 
   const localIds = new Set(queries.map((q) => q.id));
-  const nodes: QueryNodeType[] = queries.map((q) => {
+  // Wide, short pane: ranks go left → right, each column sits on a shared midline.
+  const colW = 280;
+  const rowH = 112;
+  const margin = 64;
+  const auto = new Map<string, { x: number; y: number }>();
+  for (const q of queries) {
+    if (prevPositions.has(q.id)) continue;
     const d = depths.get(q.id) ?? 0;
     const bucket = rankBuckets.get(d) ?? [];
-    const row = bucket.indexOf(q.id);
-    const saved = prevPositions.get(q.id);
+    const row = Math.max(0, bucket.indexOf(q.id));
+    const pitch = expandedIds.has(q.id) ? 200 : rowH;
+    auto.set(q.id, {
+      x: d * colW,
+      y: (row - (bucket.length - 1) / 2) * pitch,
+    });
+  }
+  const externals = externalBoundaries.filter((b) => !localIds.has(b.key));
+  externals.forEach((b, i) => {
+    if (prevPositions.has(b.key)) return;
+    auto.set(b.key, {
+      x: -colW,
+      y: (i - (externals.length - 1) / 2) * rowH,
+    });
+  });
+  let minX = Infinity;
+  let minY = Infinity;
+  for (const p of auto.values()) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+  }
+  const shiftX = Number.isFinite(minX) ? margin - minX : margin;
+  const shiftY = Number.isFinite(minY) ? margin - minY : margin;
+  const place = (id: string) => {
+    const saved = prevPositions.get(id);
+    if (saved) return saved;
+    const p = auto.get(id) ?? { x: 0, y: 0 };
+    return { x: p.x + shiftX, y: p.y + shiftY };
+  };
+  const nodes: QueryNodeType[] = queries.map((q) => {
     const expanded = expandedIds.has(q.id);
     return {
       id: q.id,
       type: "query",
-      position: saved ?? { x: 48 + d * 260, y: 48 + row * (expanded ? 200 : 130) },
+      position: place(q.id),
       data: {
         label: q.name,
         sourceKind: sourceKind(q),
@@ -442,13 +481,11 @@ function buildGraph(
     }
   }
 
-  externalBoundaries.forEach((b, i) => {
-    if (localIds.has(b.key)) return;
-    const saved = prevPositions.get(b.key);
+  externals.forEach((b) => {
     nodes.push({
       id: b.key,
       type: "query",
-      position: saved ?? { x: 48, y: 48 + i * 110 },
+      position: place(b.key),
       data: {
         label: b.objectId,
         sourceKind: "External",
@@ -614,7 +651,8 @@ const QueryNode = memo(function QueryNode({
 });
 
 const nodeTypes = { query: QueryNode };
-const fitViewOptions = { padding: 0.2 };
+/** Wide short pane: center the graph and let a small one grow enough to read. */
+const fitViewOptions = { padding: 0.16, maxZoom: 1.75, minZoom: 0.35, duration: 180 };
 const proOptions = { hideAttribution: true };
 
 function edgeInfoFromEdge(edge: Edge): GraphEdgeInfo | null {
@@ -647,10 +685,13 @@ function GraphCanvasInner({
   onDeriveExternal,
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
   const fitViewRef = useRef(fitView);
   fitViewRef.current = fitView;
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const fittedKey = useRef<string>("");
+  /** Bumped after nodes land, so fitView runs on the next commit (not the same frame). */
+  const [fitNonce, setFitNonce] = useState(0);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeInfo | null>(null);
@@ -797,9 +838,7 @@ function GraphCanvasInner({
       .join("|");
     if (key && key !== fittedKey.current) {
       fittedKey.current = key;
-      requestAnimationFrame(() => {
-        void fitViewRef.current({ padding: 0.2, duration: 200 });
-      });
+      setFitNonce((n) => n + 1);
     }
   }, [
     queries,
@@ -812,6 +851,12 @@ function GraphCanvasInner({
     setNodes,
     setEdges,
   ]);
+
+  useEffect(() => {
+    // fitView before measurement locks the camera on an empty box at the origin.
+    if (!fitNonce || !nodesInitialized || nodes.length === 0) return;
+    void fitViewRef.current(fitViewOptions);
+  }, [fitNonce, nodesInitialized, nodes.length]);
 
   const persistPositions = useCallback(() => {
     if (!onPositionsChange) return;
@@ -917,9 +962,10 @@ function GraphCanvasInner({
         onNodeDragStop={persistPositions}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        fitView
         fitViewOptions={fitViewOptions}
         minZoom={0.35}
-        maxZoom={1.6}
+        maxZoom={1.75}
         nodesConnectable={Boolean(onConnectJoin)}
         edgesFocusable
         edgesReconnectable={false}

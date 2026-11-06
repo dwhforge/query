@@ -4,6 +4,7 @@
  * - Heavy ApplyKeyMap focuses: cache result + postload once; do not re-ship the
  *   dictionary on every graph click (avoids SUPER traffic while keeping full data).
  */
+import { directUpstreamQueryIds } from "../app/mappingCreate/service";
 import type {
   KeyMapDef,
   PreviewResult,
@@ -12,7 +13,12 @@ import type {
 } from "../types/pipeline";
 import { targetKey } from "../types/pipeline";
 
-/** Maps whose ApplyKeyMap appears in the focus query's dependency closure. */
+/**
+ * Maps Applied anywhere in the focus closure.
+ * Query-backed maps pull their `storage.query_id` (and that query's maps).
+ * SQL `{{query:id}}` uses the same placeholder grammar as the rest of the app
+ * (hyphens allowed). Seed rows are stripped only for maps outside this set.
+ */
 export function keyMapIdsNeededForFocus(
   workspace: Workspace,
   focusId: string | null | undefined,
@@ -20,33 +26,21 @@ export function keyMapIdsNeededForFocus(
   const needed = new Set<string>();
   if (!focusId) return needed;
   const byId = new Map(workspace.queries.map((q) => [q.id, q]));
+  const maps = workspace.key_maps ?? [];
   const visiting = new Set<string>();
 
   const walk = (id: string) => {
-    if (visiting.has(id)) return;
+    if (visiting.has(id) || id.startsWith("xref:")) return;
     const q = byId.get(id);
     if (!q) return;
     visiting.add(id);
     for (const step of q.steps) {
-      if (step.type === "ApplyKeyMap") {
-        needed.add(targetKey(step.payload.map_id));
-      } else if (step.type === "FromQuery") {
-        const dep = targetKey(step.payload.query_id);
-        if (!dep.startsWith("xref:")) walk(dep);
-      } else if (step.type === "Join") {
-        const dep = targetKey(step.payload.right_query_id);
-        if (!dep.startsWith("xref:")) walk(dep);
-      } else if (step.type === "Append") {
-        for (const oid of step.payload.other_query_ids ?? []) {
-          const dep = targetKey(oid);
-          if (!dep.startsWith("xref:")) walk(dep);
-        }
-      } else if (step.type === "SqlModel" || step.type === "CustomSql") {
-        const sql = step.payload.raw_sql ?? "";
-        for (const m of sql.matchAll(/\{\{\s*query:([a-zA-Z0-9_]+)\s*\}\}/g)) {
-          walk(m[1]!);
-        }
-      }
+      if (step.type !== "ApplyKeyMap") continue;
+      const mid = targetKey(step.payload.map_id);
+      if (mid) needed.add(mid);
+    }
+    for (const dep of directUpstreamQueryIds(q, maps)) {
+      walk(dep);
     }
   };
 

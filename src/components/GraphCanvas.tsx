@@ -33,6 +33,13 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { graphEdgesVisuallySame } from "../lib/graphEdges";
+import {
+  GRAPH_EXPANDED_PITCH,
+  GRAPH_ROW_H,
+  placeWithoutOverlap,
+  rankGridPosition,
+} from "../lib/graphLayout";
 import { formatJoinKeyLabel } from "../lib/joinKeys";
 import { isQualityInspectionQuery } from "../lib/mappingQuality";
 import type { ExternalBoundary } from "../lib/projectRefs";
@@ -317,50 +324,44 @@ function buildGraph(
   }
 
   const localIds = new Set(queries.map((q) => q.id));
-  // Wide, short pane: ranks go left → right, each column sits on a shared midline.
-  const colW = 280;
-  const rowH = 112;
-  const margin = 64;
-  const auto = new Map<string, { x: number; y: number }>();
-  for (const q of queries) {
-    if (prevPositions.has(q.id)) continue;
-    const d = depths.get(q.id) ?? 0;
-    const bucket = rankBuckets.get(d) ?? [];
-    const row = Math.max(0, bucket.indexOf(q.id));
-    const pitch = expandedIds.has(q.id) ? 200 : rowH;
-    auto.set(q.id, {
-      x: d * colW,
-      y: (row - (bucket.length - 1) / 2) * pitch,
-    });
-  }
   const externals = externalBoundaries.filter((b) => !localIds.has(b.key));
-  externals.forEach((b, i) => {
-    if (prevPositions.has(b.key)) return;
-    auto.set(b.key, {
-      x: -colW,
-      y: (i - (externals.length - 1) / 2) * rowH,
-    });
-  });
-  let minX = Infinity;
-  let minY = Infinity;
-  for (const p of auto.values()) {
-    minX = Math.min(minX, p.x);
-    minY = Math.min(minY, p.y);
-  }
-  const shiftX = Number.isFinite(minX) ? margin - minX : margin;
-  const shiftY = Number.isFinite(minY) ? margin - minY : margin;
-  const place = (id: string) => {
+  // Occupied boxes start as saved nodes. New nodes share the same rank origin
+  // and only step down when that cell is already taken.
+  const occupied: { x: number; y: number }[] = [...prevPositions.values()];
+  const placeNew = (
+    depth: number,
+    row: number,
+    bucketLength: number,
+    expanded: boolean,
+  ) => {
+    const pitch = expanded ? GRAPH_EXPANDED_PITCH : GRAPH_ROW_H;
+    const pos = placeWithoutOverlap(
+      rankGridPosition(depth, row, bucketLength, expanded),
+      occupied,
+      pitch,
+    );
+    occupied.push(pos);
+    return pos;
+  };
+  const placeQuery = (id: string) => {
     const saved = prevPositions.get(id);
     if (saved) return saved;
-    const p = auto.get(id) ?? { x: 0, y: 0 };
-    return { x: p.x + shiftX, y: p.y + shiftY };
+    const d = depths.get(id) ?? 0;
+    const bucket = rankBuckets.get(d) ?? [];
+    const row = Math.max(0, bucket.indexOf(id));
+    return placeNew(d, row, bucket.length, expandedIds.has(id));
+  };
+  const placeExternal = (id: string, row: number) => {
+    const saved = prevPositions.get(id);
+    if (saved) return saved;
+    return placeNew(-1, row, externals.length, false);
   };
   const nodes: QueryNodeType[] = queries.map((q) => {
     const expanded = expandedIds.has(q.id);
     return {
       id: q.id,
       type: "query",
-      position: place(q.id),
+      position: placeQuery(q.id),
       data: {
         label: q.name,
         sourceKind: sourceKind(q),
@@ -481,11 +482,11 @@ function buildGraph(
     }
   }
 
-  externals.forEach((b) => {
+  externals.forEach((b, i) => {
     nodes.push({
       id: b.key,
       type: "query",
-      position: place(b.key),
+      position: placeExternal(b.key, i),
       data: {
         label: b.objectId,
         sourceKind: "External",
@@ -808,27 +809,9 @@ function GraphCanvasInner({
       if (!changed) return current;
       return next;
     });
-    setEdges((current) => {
-      if (
-        current.length === built.edges.length &&
-        current.every((edge, i) => edge.id === built.edges[i]?.id)
-      ) {
-        const same = current.every((edge, i) => {
-          const n = built.edges[i];
-          if (!n) return false;
-          const a = edge.data as { labelText?: string } | undefined;
-          const b = n.data as { labelText?: string } | undefined;
-          return (
-            edge.source === n.source &&
-            edge.target === n.target &&
-            a?.labelText === b?.labelText &&
-            edge.animated === n.animated
-          );
-        });
-        if (same) return current;
-      }
-      return built.edges;
-    });
+    setEdges((current) =>
+      graphEdgesVisuallySame(current, built.edges) ? current : built.edges,
+    );
 
     const key = [
       ...queries.map((q) => q.id),
@@ -962,8 +945,6 @@ function GraphCanvasInner({
         onNodeDragStop={persistPositions}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitView
-        fitViewOptions={fitViewOptions}
         minZoom={0.35}
         maxZoom={1.75}
         nodesConnectable={Boolean(onConnectJoin)}

@@ -103,7 +103,6 @@ import { MappingQualityOverview } from "./components/mapping-quality/MappingQual
 import { MappingCheckSetupDialog } from "./components/MappingCheckSetupDialog";
 import {
   QUALITY_INSPECTION,
-  QUALITY_JOIN,
   QUALITY_TAB,
   isFullQualityJoin,
   isMappingQualityLab,
@@ -119,6 +118,10 @@ import {
   resolveInspectJoinLensTarget,
   type FrozenRemapPreview,
 } from "./lib/mappingCheck";
+import {
+  isHeavyPreviewFocus,
+  workspaceForPreviewTransport,
+} from "./lib/previewTransport";
 import type {
   MappingCheck,
   MappingCheckProjection,
@@ -1006,7 +1009,15 @@ function App() {
       const reqId = nextRequestGen(previewReqGenRef.current);
       setLoading(true);
       try {
-        const result = await previewWorkspace(ws, conns, srcs, projectRef);
+        // Drop unused seed KeyMap rows from IPC (95k lab map on a CSV click).
+        // Needed maps keep full entries — we do not permanently shrink lab data.
+        const transport = workspaceForPreviewTransport(ws);
+        const result = await previewWorkspace(
+          transport,
+          conns,
+          srcs,
+          projectRef,
+        );
         if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
         setPreview(result);
         setError(null);
@@ -1067,11 +1078,12 @@ function App() {
     ) {
       return;
     }
-    // Full 100K lab Join serializes ~95k map rows into IPC — never auto-preview on tab switch.
-    // Use Mapping quality tab or Inspect a cell (bounded sample query) instead.
     const previewFocus =
       dataWorkspace.focus_query_id || activeQueryId || focusQueryId;
-    if (isFullQualityJoin(previewFocus)) {
+    // Heavy ApplyKeyMap (lab Join / 95k seed): do not auto-preview on click.
+    // Shipping the map stalls the graph. Light nodes still preview, with unused
+    // maps stripped so a CSV click does not serialize the dictionary.
+    if (previewFocus && isHeavyPreviewFocus(project.workspace, previewFocus)) {
       setLoading(false);
       return;
     }
@@ -1085,6 +1097,7 @@ function App() {
     centerTab,
     activeQueryId,
     focusQueryId,
+    project.workspace,
   ]);
 
   // Free the preview lane when the quality overview takes over.
@@ -1144,15 +1157,15 @@ function App() {
     const hostId = activeQueryId;
     // Skip full lab Join — describe/prepare would ship the 95k-row map on every tab switch.
     if (isFullQualityJoin(hostId)) {
-      setJoinLeftColumns([]);
-      setJoinRightColumns([]);
-      setJoinColsLoading(false);
+      setJoinLeftColumns((c) => (c.length === 0 ? c : []));
+      setJoinRightColumns((c) => (c.length === 0 ? c : []));
+      setJoinColsLoading((v) => (v ? false : v));
       return;
     }
     const rightId = joinRightId || targetKey(step.payload.right_query_id);
     if (!hostId || !rightId) {
-      setJoinLeftColumns([]);
-      setJoinRightColumns([]);
+      setJoinLeftColumns((c) => (c.length === 0 ? c : []));
+      setJoinRightColumns((c) => (c.length === 0 ? c : []));
       return;
     }
     let cancelled = false;
@@ -1396,8 +1409,13 @@ function App() {
       return;
     }
     let cancelled = false;
+    // Same IPC slim as data preview — emit does not need inline seed rows.
+    const modelWs = workspaceForPreviewTransport({
+      ...project.workspace,
+      focus_query_id: id,
+    });
     void previewDbtModel(
-      project.workspace,
+      modelWs,
       id,
       projectDialect(project),
       connections,
@@ -2002,7 +2020,12 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectBag.mappingCreateResult]);
 
+  const selectedStepIndexRef = useRef(selectedStepIndex);
+  selectedStepIndexRef.current = selectedStepIndex;
+
   // Keep forms in sync when steps change; clamp selected step index.
+  // Do not call other setStates inside the setSelectedStepIndex updater —
+  // that re-enters React and can hit "Maximum update depth" on graph clicks.
   useEffect(() => {
     if (!activeQueryId) {
       setSelectedStepIndex(null);
@@ -2014,12 +2037,11 @@ function App() {
       setSelectedStepIndex(null);
       return;
     }
-    setSelectedStepIndex((prev) => {
-      const next =
-        prev === null || prev >= q.steps.length ? q.steps.length - 1 : prev;
-      loadStepIntoEditor(q.steps[next]);
-      return next;
-    });
+    const prev = selectedStepIndexRef.current;
+    const next =
+      prev === null || prev >= q.steps.length ? q.steps.length - 1 : prev;
+    if (next !== prev) setSelectedStepIndex(next);
+    loadStepIntoEditor(q.steps[next]);
   }, [activeQueryId, queries, syncInspectorFromQuery, loadStepIntoEditor]);
 
   async function loadPostgresSchema(source: SourceDef) {
@@ -5494,11 +5516,12 @@ function App() {
               </div>
             )}
 
-            {(isMappingQualityLab(project.workspace) ||
-              (project.mapping_checks?.length ?? 0) > 0) && (
-              <div className={centerTab === QUALITY_TAB ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={centerTab !== QUALITY_TAB}>
+            {centerTab === QUALITY_TAB &&
+              (isMappingQualityLab(project.workspace) ||
+                (project.mapping_checks?.length ?? 0) > 0) && (
+              <div className="flex min-h-0 flex-1 flex-col">
                 <MappingQualityOverview
-                  active={centerTab === QUALITY_TAB}
+                  active
                   projection={
                     activeMappingCheck?.projection ?? LAB_V1_PROJECTION
                   }
@@ -6108,16 +6131,18 @@ function App() {
                         columns={preview.columns}
                         rows={preview.rows}
                       />
-                    ) : isFullQualityJoin(activeQueryId) ? (
+                    ) : isHeavyPreviewFocus(
+                        project.workspace,
+                        activeQueryId,
+                      ) ? (
                       <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-slate-500">
                         <p>
-                          Full lab Join ({QUALITY_JOIN}) skips auto-preview —
-                          shipping the 95k-row map on every tab switch freezes
-                          the UI.
+                          {activeQueryId ?? "This node"} uses the full map, so
+                          the graph does not auto-preview it.
                         </p>
                         <p className="text-[12px] text-slate-600">
-                          Use the Mapping quality tab for aggregates, or Inspect
-                          a cell for a bounded sample in Join Lens.
+                          Mapping quality tab for aggregates; Inspect a cell for
+                          a bounded Join Lens sample.
                         </p>
                       </div>
                     ) : (

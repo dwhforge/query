@@ -614,6 +614,8 @@ const QueryNode = memo(function QueryNode({
 });
 
 const nodeTypes = { query: QueryNode };
+const fitViewOptions = { padding: 0.2 };
+const proOptions = { hideAttribution: true };
 
 function edgeInfoFromEdge(edge: Edge): GraphEdgeInfo | null {
   const d = edge.data as EdgeData | undefined;
@@ -645,34 +647,13 @@ function GraphCanvasInner({
   onDeriveExternal,
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow();
+  const fitViewRef = useRef(fitView);
+  fitViewRef.current = fitView;
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const fittedKey = useRef<string>("");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeInfo | null>(null);
-  // Canvas stays mounted under `hidden` while Mapping quality / KeyMap tabs are
-  // open — React Flow then measures 0×0 and paints Background/MiniMap as NaN.
-  const flowHostRef = useRef<HTMLDivElement>(null);
-  const [flowReady, setFlowReady] = useState(false);
-  useEffect(() => {
-    const el = flowHostRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const sync = () => {
-      const ready = el.clientWidth > 1 && el.clientHeight > 1;
-      setFlowReady((prev) => (prev === ready ? prev : ready));
-    };
-    sync();
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  useEffect(() => {
-    if (!flowReady) return;
-    const id = window.requestAnimationFrame(() => {
-      fitView({ padding: 0.2 });
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [flowReady, fitView]);
 
   // Seed from persisted project positions once / when project changes.
   useEffect(() => {
@@ -743,9 +724,37 @@ function GraphCanvasInner({
         positionsRef.current.set(n.id, n.position);
       }
       const prevById = new Map(current.map((n) => [n.id, n]));
-      return built.nodes.map((node) => {
+      let changed = current.length !== built.nodes.length;
+      const next = built.nodes.map((node) => {
         const prev = prevById.get(node.id);
-        if (!prev) return node;
+        if (!prev) {
+          changed = true;
+          return node;
+        }
+        const d0 = prev.data;
+        const d1 = node.data;
+        const dataSame =
+          d0.label === d1.label &&
+          d0.sourceKind === d1.sourceKind &&
+          d0.stepCount === d1.stepCount &&
+          d0.stepSummary === d1.stepSummary &&
+          d0.expanded === d1.expanded &&
+          d0.isFocus === d1.isFocus &&
+          d0.isActive === d1.isActive &&
+          d0.isEphemeral === d1.isEphemeral &&
+          d0.isExternal === d1.isExternal &&
+          d0.externalAlias === d1.externalAlias &&
+          d0.steps.length === d1.steps.length &&
+          d0.steps.every((s, i) => s.label === d1.steps[i]?.label);
+        if (
+          dataSame &&
+          prev.type === node.type &&
+          prev.position.x === node.position.x &&
+          prev.position.y === node.position.y
+        ) {
+          return prev;
+        }
+        changed = true;
         return {
           ...prev,
           type: node.type,
@@ -753,8 +762,32 @@ function GraphCanvasInner({
           data: node.data,
         };
       });
+      // Keep the previous array when nothing visual changed — a fresh array
+      // retriggers React Flow and can hit "Maximum update depth".
+      if (!changed) return current;
+      return next;
     });
-    setEdges(built.edges);
+    setEdges((current) => {
+      if (
+        current.length === built.edges.length &&
+        current.every((edge, i) => edge.id === built.edges[i]?.id)
+      ) {
+        const same = current.every((edge, i) => {
+          const n = built.edges[i];
+          if (!n) return false;
+          const a = edge.data as { labelText?: string } | undefined;
+          const b = n.data as { labelText?: string } | undefined;
+          return (
+            edge.source === n.source &&
+            edge.target === n.target &&
+            a?.labelText === b?.labelText &&
+            edge.animated === n.animated
+          );
+        });
+        if (same) return current;
+      }
+      return built.edges;
+    });
 
     const key = [
       ...queries.map((q) => q.id),
@@ -765,7 +798,7 @@ function GraphCanvasInner({
     if (key && key !== fittedKey.current) {
       fittedKey.current = key;
       requestAnimationFrame(() => {
-        void fitView({ padding: 0.2, duration: 200 });
+        void fitViewRef.current({ padding: 0.2, duration: 200 });
       });
     }
   }, [
@@ -778,7 +811,6 @@ function GraphCanvasInner({
     selectedExternalKey,
     setNodes,
     setEdges,
-    fitView,
   ]);
 
   const persistPositions = useCallback(() => {
@@ -885,7 +917,7 @@ function GraphCanvasInner({
         onNodeDragStop={persistPositions}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitViewOptions={{ padding: 0.2 }}
+        fitViewOptions={fitViewOptions}
         minZoom={0.35}
         maxZoom={1.6}
         nodesConnectable={Boolean(onConnectJoin)}
@@ -894,7 +926,7 @@ function GraphCanvasInner({
         elementsSelectable={false}
         nodesDraggable
         deleteKeyCode={null}
-        proOptions={{ hideAttribution: true }}
+        proOptions={proOptions}
         className="dwh-flow"
       >
         <Background
@@ -960,11 +992,30 @@ function GraphCanvasInner({
 }
 
 function GraphCanvasImpl(props: GraphCanvasProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [flowReady, setFlowReady] = useState(false);
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const sync = () => {
+      const ready = el.clientWidth > 1 && el.clientHeight > 1;
+      setFlowReady((prev) => (prev === ready ? prev : ready));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   return (
-    <div className="relative h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]">
-      <ReactFlowProvider>
-        <GraphCanvasInner {...props} />
-      </ReactFlowProvider>
+    <div
+      ref={hostRef}
+      className="relative h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]"
+    >
+      {flowReady ? (
+        <ReactFlowProvider>
+          <GraphCanvasInner {...props} />
+        </ReactFlowProvider>
+      ) : null}
       <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-slate-600">
         Drag · zoom · dblclick=focus · ref↳=FromQuery/dbt ref · ▸ steps ·
         Del=delete

@@ -128,29 +128,47 @@ export function qualityProjectionCacheKey(
       deps,
     };
   };
-  const mapFingerprints = (workspace.key_maps ?? []).map((map) => ({
-    id: map.id,
-    time_mode: map.time_mode ?? "none",
-    from_columns: map.from_columns ?? map.from_column ?? null,
-    to_column: map.to_column ?? "to",
-    editable_columns: map.editable_columns ?? [],
-    valid_from_column: map.valid_from_column ?? null,
-    valid_to_column: map.valid_to_column ?? null,
-    storage: map.storage ?? { kind: "seed" },
-    rows: [...map.entries]
-      .map((e) => {
-        const from = (
-          e.from_parts?.length ? e.from_parts.join("\0") : e.from
-        ).trim();
-        const attrs = Object.entries(e.attrs ?? {})
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([k, v]) => `${k}=${v}`)
-          .join(";");
-        return `${from}\t${e.to}\t${attrs}`;
-      })
-      .sort()
-      .join("\n"),
-  }));
+  // Do not sort/join 95k lab rows on every overview render — that stalls canvas
+  // clicks while the quality tab stays mounted (hidden). Large maps: count + ends.
+  const mapFingerprints = (workspace.key_maps ?? []).map((map) => {
+    const n = map.entries.length;
+    let rows: string;
+    if (n <= 64) {
+      rows = [...map.entries]
+        .map((e) => {
+          const from = (
+            e.from_parts?.length ? e.from_parts.join("\0") : e.from
+          ).trim();
+          const attrs = Object.entries(e.attrs ?? {})
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, v]) => `${k}=${v}`)
+            .join(";");
+          return `${from}\t${e.to}\t${attrs}`;
+        })
+        .sort()
+        .join("\n");
+    } else {
+      const head = map.entries[0];
+      const mid = map.entries[Math.floor(n / 2)];
+      const tail = map.entries[n - 1];
+      const label = (e: (typeof map.entries)[0] | undefined) =>
+        e
+          ? `${(e.from_parts?.length ? e.from_parts.join("\0") : e.from).trim()}\t${e.to}`
+          : "";
+      rows = `n=${n}|${label(head)}|${label(mid)}|${label(tail)}`;
+    }
+    return {
+      id: map.id,
+      time_mode: map.time_mode ?? "none",
+      from_columns: map.from_columns ?? map.from_column ?? null,
+      to_column: map.to_column ?? "to",
+      editable_columns: map.editable_columns ?? [],
+      valid_from_column: map.valid_from_column ?? null,
+      valid_to_column: map.valid_to_column ?? null,
+      storage: map.storage ?? { kind: "seed" },
+      rows,
+    };
+  });
   const host = opts?.hostQueryId ?? opts?.projection?.host_query_id;
   return JSON.stringify({
     commercial: slimDeep("quality_commercial"),

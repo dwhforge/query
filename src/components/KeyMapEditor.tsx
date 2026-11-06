@@ -148,16 +148,22 @@ function storageKind(
   return s?.kind ?? "seed";
 }
 
+/** Stable defaults. `= []` in the signature is a new array every render and retriggers effects. */
+const NO_CONNECTIONS: ConnectionDef[] = [];
+const NO_STRINGS: string[] = [];
+const NO_STRING_TUPLES: string[][] = [];
+const NO_SOURCE_OPTIONS: KeyMapSourceOption[] = [];
+
 export function KeyMapEditor({
   map,
   workspace,
-  connections = [],
-  pickToOptions = [],
-  suggestedFrom = [],
-  suggestedFromParts = [],
-  sourceOptions = [],
-  postgresConnections = [],
-  refOptions = [],
+  connections = NO_CONNECTIONS,
+  pickToOptions = NO_STRINGS,
+  suggestedFrom = NO_STRINGS,
+  suggestedFromParts = NO_STRING_TUPLES,
+  sourceOptions = NO_SOURCE_OPTIONS,
+  postgresConnections = NO_CONNECTIONS,
+  refOptions = NO_STRINGS,
   onChange,
   onWarehouseRead,
   onDirtyChange,
@@ -313,7 +319,7 @@ export function KeyMapEditor({
   // ADR-0036: describe map query columns + refresh read-only preview rows.
   useEffect(() => {
     if (!rowsReadOnly || !workspace || map.storage?.kind !== "query") {
-      setQueryColOptions([]);
+      setQueryColOptions((cur) => (cur.length === 0 ? cur : []));
       return;
     }
     const qid = map.storage.query_id.trim();
@@ -454,8 +460,8 @@ export function KeyMapEditor({
 
   useEffect(() => {
     if (map.storage?.kind !== "source") {
-      setPgTableOptions([]);
-      setPgCatalogStatus(null);
+      setPgTableOptions((cur) => (cur.length === 0 ? cur : []));
+      setPgCatalogStatus((cur) => (cur == null ? cur : null));
       return;
     }
     const conn = postgresConnections.find((c) => c.id === activeConnectionId);

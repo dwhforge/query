@@ -42,10 +42,13 @@ Local preview always federates through DuckDB (+ ATTACH). That is the UI engine,
 
 ---
 
-## Labs in Help → Load demo
+## Labs in Help → Help Lab
+
+Catalog: [`fixtures/labs/catalog.json`](../fixtures/labs/catalog.json) ([ADR-0039](adr/0039-help-lab-catalog.md)). Featured offline recon: **Shipments ↔ sales** (`recon_ship_sales`).
 
 | Demo | Route | Storage | Topology | Needs PG? |
 |------|-------|---------|----------|-----------|
+| Shipments ↔ sales | R3 lab CSV | seed | B2-ish recon | no |
 | Key mapping (F&B) | R3-like CSV | seed | B1 hub | no |
 | Crosswalk POS↔WMS | files | seed | B2 | no |
 | Dual maps parties | files | seed ×2 | B3 | no |

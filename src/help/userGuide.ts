@@ -151,14 +151,13 @@ export const HELP_SECTIONS: HelpSection[] = [
   },
   {
     id: "demos",
-    title: "Demos (Help → Load demo)",
+    title: "Help Lab (Help → Help Lab…)",
     bullets: [
-      "Mapping quality — 100,000 commercial positions, 2,400 production products and 95,000 seed links. Opens an overview prototype: family/grade flows, declared decision basis, concentration and actual sample-key drill-down into Join Lens. Offline; generated in the app demo cache. Scores are synthetic annotations, not a live LLM result.",
-      "Sales — medallion, join, rollups, top-N",
-      "Union — Append of same-grain feeds",
-      "SQL hybrid — SqlModel + CustomSql window",
-      "Key mapping — F&B company aliases · daily PnL → monthly (EmptyHero + canvas)",
-      "Postgres is not in offline demos — use Connect Postgres in the UI.",
+      "Help Lab is the curated catalog: each card says what it shows and what you keep after export (KeyMap seeds, recon queries, dbt).",
+      "Featured: Shipments ↔ sales — plant SKUs vs commercial codes, partial map, monthly qty gaps.",
+      "Featured: Mapping quality — 100K positions overview (family/grade, concentration, Inspect into Join Lens). Offline local cache.",
+      "Also: F&B key mapping, medallion sales, crosswalks, composite From, and Postgres labs under Advanced.",
+      "Catalog lives in fixtures/labs/catalog.json — not a flat Help menu list.",
     ],
   },
   {

@@ -59,6 +59,7 @@ pub fn load(cache: &Path) -> Result<Workspace, String> {
                         column: "canonical_key".into(),
                         columns: vec![],
                         output_column: None,
+                        output_bindings: vec![],
                         as_of_column: None,
                         map_id: MAP_ID.into(),
                         entries: vec![],

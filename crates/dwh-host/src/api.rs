@@ -794,6 +794,7 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         return crate::demo_mapping_quality::load(&cache);
     }
     let fixtures = find_fixtures_dir()?;
+    use crate::demo_help_labs as help_labs;
     use crate::demo_keymap_labs as labs;
     match name.trim().to_ascii_lowercase().as_str() {
         "sales" | "sample" | "" => demo_sales(&fixtures),
@@ -801,6 +802,9 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
         "right" | "right_joins" | "coverage" => demo_right_joins(&fixtures),
         "keymap" | "key_map" | "mapping" | "aliases" => demo_keymap(&fixtures),
+        "recon_ship_sales" | "recon" | "ship_sales" => {
+            help_labs::demo_recon_ship_sales(&fixtures)
+        }
         "keymap_crosswalk" | "crosswalk" => labs::demo_keymap_crosswalk(&fixtures),
         "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
         "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
@@ -815,11 +819,9 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "keymap_mixed" | "mixed" => labs::demo_keymap_mixed(&fixtures),
         "keymap_parquet" | "parquet" => labs::demo_keymap_parquet(&fixtures),
         other => Err(format!(
-            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap | \
-             keymap_crosswalk | keymap_dual | keymap_codes | keymap_hop | \
-             keymap_pg | keymap_pg_dual | keymap_pg_seed | keymap_ref | \
-             keymap_mixed | keymap_parquet"
-        ).into()),
+            "Unknown demo '{other}'. Open Help Lab for the catalog, or use: sales | union | sql | \
+             right | keymap | recon_ship_sales | keymap_crosswalk | …"
+        )),
     }
 }
 
@@ -2500,6 +2502,12 @@ impl HostState {
             "load_sample_workspace" => {
                 drop(db);
                 let out = load_demo_workspace("sales")?;
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
+            }
+            "list_help_labs" => {
+                drop(db);
+                let fixtures = find_fixtures_dir()?;
+                let out = crate::demo_help_labs::load_help_lab_catalog(&fixtures)?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             other => Err(format!("unknown command '{other}'").into()),

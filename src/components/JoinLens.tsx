@@ -710,8 +710,9 @@ function JoinLensImpl({
   useEffect(() => {
     if (!enabled) return;
     refreshPrepareStatus();
+    // joinParentsKey — not workspace object identity (App re-renders must not re-poll).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, hostQueryId, joinStepIndex, workspace, sources]);
+  }, [enabled, joinParentsKey, sources, connections]);
 
   const resultKeysFetchedRef = useRef("");
   const resultKeysStamp = useMemo(() => {
@@ -761,14 +762,9 @@ function JoinLensImpl({
     );
     if (!preparedReady && !autoOk) return;
     const id = joinParentsKey;
-    if (autoSamplesAttemptedRef.current === id) {
-      // Stale gate with nothing in flight: free and retry once.
-      if (activeSamplesGenRef.current === 0) {
-        autoSamplesAttemptedRef.current = "";
-      } else {
-        return;
-      }
-    }
+    // Do not clear-and-retry in the same effect: that re-fires forever when a
+    // load aborts and leaves gen=0 with the attempt gate still set.
+    if (autoSamplesAttemptedRef.current === id) return;
     autoSamplesAttemptedRef.current = id;
     void loadLinkedSamples({
       forcePrepared: preparedReady,
@@ -779,8 +775,8 @@ function JoinLensImpl({
     enabled,
     sideMode,
     joinParentsKey,
-    workspace,
-    prepareStatus,
+    prepareStatus?.prepared,
+    prepareStatus?.stale,
     samplesLoaded,
     samplesLoading,
     samplesError,

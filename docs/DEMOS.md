@@ -1,8 +1,8 @@
 # Demo workspaces — dbt practice coverage
 
-Canon: visual IR → DuckDB preview → dbt export. Classic demos use CSV under `fixtures/`. KeyMap labs also use `fixtures/examples/` ([scripts/examples/](../scripts/examples/)); PG labs need `dwh_tests` + `load_postgres.py` and connection `conn_postgres`.
+Canon: visual IR → DuckDB preview → dbt export. **Discovery:** Help → **Help Lab** ([ADR-0039](adr/0039-help-lab-catalog.md)) — catalog SoT `fixtures/labs/catalog.json`. Classic demos use CSV under `fixtures/`. KeyMap labs also use `fixtures/examples/` ([scripts/examples/](../scripts/examples/)); PG labs need `dwh_tests` + `load_postgres.py` and connection `conn_postgres`.
 
-Related: [ADR-0001](adr/0001-product-positioning.md), [SPEC.md](SPEC.md), [keymap-workflows.md](keymap-workflows.md).
+Related: [ADR-0001](adr/0001-product-positioning.md), [ADR-0039](adr/0039-help-lab-catalog.md), [SPEC.md](SPEC.md), [keymap-workflows.md](keymap-workflows.md).
 
 ---
 
@@ -51,6 +51,7 @@ Prefixes are applied by the exporter (`Load*`-only → `stg_`, focus query → `
 | A25 | KeyMap storage=source (PG) | live map table | keymap_pg / keymap_pg_dual |
 | A26 | Mixed Parquet + Postgres | R2 route | keymap_mixed |
 | A27 | Parquet + seed (R3) | LoadParquet | keymap_parquet |
+| A28 | Shipments ↔ sales recon | KeyMap + FULL OUTER gap | recon_ship_sales (Help Lab featured) |
 
 ### B — Partial
 
@@ -71,7 +72,7 @@ Incremental / snapshot / SCD2, full tests & docs as first-class, macros/packages
 
 ## Workspaces
 
-Load via EmptyHero **Load demo**, or later **Help → Load demo**. Command: `load_demo_workspace(name)`. Not on the canvas chrome.
+Load via **Help → Help Lab…**, EmptyHero **Open Help Lab**, or quick-load items in Help. Command: `load_demo_workspace(name)`; catalog: `list_help_labs`.
 
 ### 1. `sales` — Medallion + fan-out
 
@@ -127,7 +128,20 @@ How to read it:
 
 Categories: A1, A3, A14.
 
-### 5. `keymap` — F&B company aliases (ADR-0020)
+### 5. `recon_ship_sales` — Plant shipments ↔ commercial sales (ADR-0039)
+
+Committed under `fixtures/labs/recon_ship_sales/`. Commercial codes (`COM-UREA`, …) ≠ plant `product_id`. Partial KeyMap (`COM-UREA`, `COM-NPK16`); leave `COM-AMM` / `NEW-BLEND` for Join Lens.
+
+| Query (UI) | Role |
+|------------|------|
+| `shipments`, `sales`, `dim_product` | sources |
+| `dirty_recon` ★focus | sales ⋈ dim **without** map |
+| `sales_mapped` | ApplyKeyMap → join dim |
+| `recon_by_month` | ship ⋈ sales on product+month → `qty_gap_t` |
+
+Categories: A1, A3, A8, A15, A28.
+
+### 6. `keymap` — F&B company aliases (ADR-0020)
 
 Food & beverage brands: POS/sales vs cost feed spell names differently. Fixtures: 15 companies × 60 days (~900 rows/fact). Walkthrough: [keymap-workflows.md](keymap-workflows.md).
 
@@ -148,7 +162,7 @@ Food & beverage brands: POS/sales vs cost feed spell names differently. Fixtures
 
 Categories: A1, A3, A5, A8, A15–A19.
 
-### 6. KeyMap labs (`fixtures/examples/`)
+### 7. KeyMap labs (`fixtures/examples/`)
 
 Full pattern matrix: [keymap-workflows.md](keymap-workflows.md). Regenerate: `python scripts/examples/generate_all.py`. PG: `python scripts/examples/load_postgres.py` → schema `keymap_demo`.
 

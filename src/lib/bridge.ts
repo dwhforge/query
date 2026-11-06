@@ -872,12 +872,19 @@ export type DemoWorkspaceName =
   | "keymap_pg_seed"
   | "keymap_ref"
   | "keymap_mixed"
-  | "keymap_parquet";
+  | "keymap_parquet"
+  | "recon_ship_sales";
 
 export function loadDemoWorkspace(
   name: DemoWorkspaceName | string,
 ): Promise<Workspace> {
   return invoke<Workspace>("load_demo_workspace", { name });
+}
+
+export function listHelpLabs(): Promise<
+  import("../help/labCatalog").HelpLabCard[]
+> {
+  return invoke("list_help_labs", {});
 }
 
 export function loadSampleWorkspace(): Promise<Workspace> {

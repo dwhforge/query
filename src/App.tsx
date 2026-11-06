@@ -74,6 +74,8 @@ import { ConnectionEditor } from "./components/ConnectionEditor";
 import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
+import { HelpLab } from "./components/HelpLab";
+import { HELP_LAB_TAB } from "./help/labCatalog";
 import { OptionsDialog } from "./components/OptionsDialog";
 import { DbtSetupDialog } from "./components/DbtSetupDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
@@ -671,6 +673,21 @@ function App() {
     project.mapping_checks,
   );
 
+  const attrsJoinForActiveCheck = useMemo(() => {
+    if (!activeMappingCheck) return null;
+    const b = resolveAttrsJoinBinding(
+      project.workspace.queries,
+      activeMappingCheck,
+    );
+    if (!b) return null;
+    return {
+      joinStepIndex: b.joinStepIndex,
+      rightQueryId: b.rightQueryId,
+      leftOn: b.leftOn,
+      rightOn: b.rightOn,
+    };
+  }, [activeMappingCheck, project.workspace.queries]);
+
   const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
   const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(
     null,
@@ -794,6 +811,7 @@ function App() {
     if (!el || typeof ResizeObserver === "undefined") return;
     const clampToStack = () => {
       const stackH = el.clientHeight;
+      if (stackH <= 0) return;
       setBottomDockHeight((h) => {
         const next = clampBottomDockHeight(h, stackH);
         if (next === h) return h;
@@ -1017,7 +1035,12 @@ function App() {
     () =>
       debounce((ws: Workspace, conns: ConnectionDef[], srcs: SourceDef[]) => {
         // Pending debounce can fire after switching to the quality overview tab.
-        if (centerTabRef.current === QUALITY_TAB) return;
+        if (
+          centerTabRef.current === QUALITY_TAB ||
+          centerTabRef.current === HELP_LAB_TAB
+        ) {
+          return;
+        }
         void runPreview(ws, conns, srcs);
       }, 150),
     [runPreview],
@@ -1036,7 +1059,14 @@ function App() {
   useEffect(() => {
     // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
     // Mapping quality overview owns preview while its tab is open (same preemptible lane).
-    if (overlayOpen || centerTab === QUALITY_TAB || !dataWorkspace) return;
+    if (
+      overlayOpen ||
+      centerTab === QUALITY_TAB ||
+      centerTab === HELP_LAB_TAB ||
+      !dataWorkspace
+    ) {
+      return;
+    }
     // Full 100K lab Join serializes ~95k map rows into IPC — never auto-preview on tab switch.
     // Use Mapping quality tab or Inspect a cell (bounded sample query) instead.
     const previewFocus =
@@ -1097,7 +1127,13 @@ function App() {
 
   // Schema-aware Join: column lists from truncated preview (left before Join, full right).
   useEffect(() => {
-    if (overlayOpen || centerTab === QUALITY_TAB) return;
+    if (
+      overlayOpen ||
+      centerTab === QUALITY_TAB ||
+      centerTab === HELP_LAB_TAB
+    ) {
+      return;
+    }
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -1543,7 +1579,7 @@ function App() {
     const file = project.root_path;
     const refs = project.references ?? [];
     if (!file || refs.length === 0) {
-      setRefStatuses([]);
+      setRefStatuses((cur) => (cur.length === 0 ? cur : []));
       return;
     }
     let cancelled = false;
@@ -1552,7 +1588,7 @@ function App() {
         if (!cancelled) setRefStatuses(list);
       })
       .catch(() => {
-        if (!cancelled) setRefStatuses([]);
+        if (!cancelled) setRefStatuses((cur) => (cur.length === 0 ? cur : []));
       });
     return () => {
       cancelled = true;
@@ -1563,7 +1599,9 @@ function App() {
     const file = project.root_path;
     const refs = project.references ?? [];
     if (!file || refs.length === 0) {
-      setRefCatalogs({});
+      setRefCatalogs((cur) =>
+        Object.keys(cur).length === 0 ? cur : {},
+      );
       return;
     }
     let cancelled = false;
@@ -2532,7 +2570,7 @@ function App() {
     });
   }
 
-  async function handleLoadDemo(id: DemoId) {
+  async function handleLoadDemo(id: DemoId | string) {
     try {
       const ws = await loadDemoWorkspace(id);
       const projectName = `demo_${id}`;
@@ -4312,7 +4350,10 @@ function App() {
       if (e.key === "Escape" && centerTab !== "canvas") {
         e.preventDefault();
         if (centerTab === QUALITY_TAB) openMappingQualityCanvas();
-        else closeKeyMapTab(centerTab);
+        else if (centerTab === HELP_LAB_TAB) {
+          setCenterTab("canvas");
+          setSelectedKeyMapId(null);
+        } else closeKeyMapTab(centerTab);
         return;
       }
       const tag = (e.target as HTMLElement)?.tagName;
@@ -4378,7 +4419,9 @@ function App() {
 
   // Join Lens needs Join payload. Inspect attrs embed Join; lab SqlModel wraps
   // QUALITY_JOIN — resolve via resolveInspectJoinLensTarget (not findIndex alone).
-  const joinLensTarget = (() => {
+  // Memoize so leftOn/rightOn array identities stay stable across App re-renders
+  // (JoinLens effects key off those arrays — new identities → update-depth loops).
+  const joinLensTarget = useMemo(() => {
     if (!activeQueryId || !activeQuery || selectedStepIndex === null) {
       return null;
     }
@@ -4386,18 +4429,19 @@ function App() {
       return resolveInspectJoinLensTarget(project.workspace, activeQuery);
     }
     if (isFullQualityJoin(activeQueryId)) return null;
-    if (selectedStep?.type !== "Join" || selectedStep.payload.left_on.length === 0) {
+    const step = activeQuery.steps[selectedStepIndex];
+    if (step?.type !== "Join" || step.payload.left_on.length === 0) {
       return null;
     }
     return {
       hostQueryId: activeQueryId,
       joinStepIndex: selectedStepIndex,
-      rightQueryId: targetKey(selectedStep.payload.right_query_id),
-      leftOn: selectedStep.payload.left_on,
-      rightOn: selectedStep.payload.right_on,
-      joinType: selectedStep.payload.join_type,
+      rightQueryId: targetKey(step.payload.right_query_id),
+      leftOn: step.payload.left_on,
+      rightOn: step.payload.right_on,
+      joinType: step.payload.join_type,
     };
-  })();
+  }, [activeQueryId, activeQuery, selectedStepIndex, project.workspace]);
 
   /** Columns to pick from — prefer live preview of the active/focus query. */
   // When editing SelectColumns, load columns from the query truncated *before* that step
@@ -4408,7 +4452,7 @@ function App() {
       selectedStepIndex === null ||
       selectedStep?.type !== "SelectColumns"
     ) {
-      setUpstreamColumnNames([]);
+      setUpstreamColumnNames((cur) => (cur.length === 0 ? cur : []));
       return;
     }
     let cancelled = false;
@@ -4417,7 +4461,7 @@ function App() {
     const upstreamSteps =
       activeQuery?.steps.slice(0, upto) ?? [];
     if (upstreamSteps.length === 0) {
-      setUpstreamColumnNames([]);
+      setUpstreamColumnNames((cur) => (cur.length === 0 ? cur : []));
       return;
     }
     const leftWs: Workspace = {
@@ -4740,6 +4784,10 @@ function App() {
           handleSetTargetDialect(d)
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
+        onOpenHelpLab={() => {
+          setCenterTab(HELP_LAB_TAB);
+          setSelectedKeyMapId(null);
+        }}
         onOpenHelp={() => setHelpOpen(true)}
         onZoomIn={() => void windowAction("zoom-in")}
         onZoomOut={() => void windowAction("zoom-out")}
@@ -5172,8 +5220,12 @@ function App() {
         }}
       />
 
-      {empty ? (
+      {empty && centerTab !== HELP_LAB_TAB ? (
         <EmptyHero
+          onOpenHelpLab={() => {
+            setCenterTab(HELP_LAB_TAB);
+            setSelectedKeyMapId(null);
+          }}
           onLoadDemo={(id) => void handleLoadDemo(id)}
           onAddCsv={() => void addCsvQuery()}
           onAddParquet={() => void addParquetQuery()}
@@ -5181,6 +5233,33 @@ function App() {
           onAddPostgres={() => openPgPicker("query")}
           onAddSqlModel={() => addSqlModelQuery()}
         />
+      ) : empty && centerTab === HELP_LAB_TAB ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div
+            role="tablist"
+            aria-label="Workspace"
+            className="flex shrink-0 items-stretch gap-0 overflow-x-auto border-b border-[var(--line)] bg-[#060d14]"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={false}
+              onClick={() => setCenterTab("canvas")}
+              className="shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 hover:bg-slate-900/50 hover:text-slate-300"
+            >
+              Pipeline canvas
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected
+              className="shrink-0 border-r border-[var(--line)] bg-[#0a1520] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-teal-200"
+            >
+              Help Lab
+            </button>
+          </div>
+          <HelpLab onOpenLab={(id) => void handleLoadDemo(id)} />
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* Explorer — fully collapsible like a VS Code side bar */}
@@ -5314,6 +5393,22 @@ function App() {
               >
                 Pipeline canvas
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={centerTab === HELP_LAB_TAB}
+                onClick={() => {
+                  setCenterTab(HELP_LAB_TAB);
+                  setSelectedKeyMapId(null);
+                }}
+                className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] transition ${
+                  centerTab === HELP_LAB_TAB
+                    ? "bg-[#0a1520] text-teal-200"
+                    : "text-slate-500 hover:bg-slate-900/50 hover:text-slate-300"
+                }`}
+              >
+                Help Lab
+              </button>
               {(isMappingQualityLab(project.workspace) ||
                 (project.mapping_checks?.length ?? 0) > 0) && (
                 <button type="button" role="tab" aria-selected={centerTab === QUALITY_TAB}
@@ -5393,6 +5488,12 @@ function App() {
               </div>
             )}
 
+            {centerTab === HELP_LAB_TAB && (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <HelpLab onOpenLab={(id) => void handleLoadDemo(id)} />
+              </div>
+            )}
+
             {(isMappingQualityLab(project.workspace) ||
               (project.mapping_checks?.length ?? 0) > 0) && (
               <div className={centerTab === QUALITY_TAB ? "flex min-h-0 flex-1 flex-col" : "hidden"} aria-hidden={centerTab !== QUALITY_TAB}>
@@ -5401,24 +5502,7 @@ function App() {
                   projection={
                     activeMappingCheck?.projection ?? LAB_V1_PROJECTION
                   }
-                  attrsJoin={
-                    activeMappingCheck
-                      ? (() => {
-                          const b = resolveAttrsJoinBinding(
-                            queries,
-                            activeMappingCheck,
-                          );
-                          return b
-                            ? {
-                                joinStepIndex: b.joinStepIndex,
-                                rightQueryId: b.rightQueryId,
-                                leftOn: b.leftOn,
-                                rightOn: b.rightOn,
-                              }
-                            : null;
-                        })()
-                      : null
-                  }
+                  attrsJoin={attrsJoinForActiveCheck}
                   onChangeAttrs={
                     activeMappingCheck?.projection.kind === "attrs"
                       ? () =>

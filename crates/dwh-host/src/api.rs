@@ -2317,6 +2317,10 @@ impl HostState {
                     run_list_postgres_objects(&db, &a.connection_string)?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
+            "pg_import_fingerprint" => commands::pg_import::pg_import_fingerprint(args),
+            "scan_postgres_import" => commands::pg_import::scan_pg_import(&db, args),
+            "diagnose_postgres_mapping" => commands::pg_import::diagnose_pg_import(&db, args),
+            "commit_pg_import" => commands::pg_import::commit_pg_import_cmd(&db, args),
             "describe_postgres_object" => {
                 let a: DescribeArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out: Vec<PostgresColumn> = run_describe_postgres_object(

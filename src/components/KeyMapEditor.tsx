@@ -140,6 +140,8 @@ export type KeyMapEditorProps = {
   /** Compact for Hero playground. */
   compact?: boolean;
   title?: string;
+  /** Import binding problem or refused write-back (ADR-0040). */
+  importNotice?: string | null;
 };
 
 function storageKind(
@@ -182,6 +184,7 @@ export function KeyMapEditor({
   onChooseOtherMap,
   compact = false,
   title,
+  importNotice = null,
 }: KeyMapEditorProps) {
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -511,7 +514,14 @@ export function KeyMapEditor({
     return () => window.clearTimeout(t);
   }, [filter, isSource]);
 
+  const activeDsn =
+    postgresConnections.find((c) => c.id === activeConnectionId)?.postgres
+      ?.connection_string?.trim() ?? "";
+
   // Paged WH read when schema+table are chosen (ADR-0022).
+  // Depend on the DSN string. A fresh connections array on every parent render
+  // (Join Lens preview ticks) must not cancel the in-flight page and then skip
+  // the retry because the table key is unchanged.
   useEffect(() => {
     if (map.storage?.kind !== "source") {
       loadedTableKey.current = "";
@@ -520,10 +530,8 @@ export function KeyMapEditor({
       return;
     }
     const { source, table } = map.storage;
-    if (!source.trim() || !table.trim() || !activeConnectionId) return;
-    const conn = postgresConnections.find((c) => c.id === activeConnectionId);
-    const dsn = conn?.postgres?.connection_string?.trim();
-    if (!dsn) return;
+    if (!source.trim() || !table.trim() || !activeConnectionId || !activeDsn) return;
+    const dsn = activeDsn;
     const key = [
       activeConnectionId,
       source,
@@ -602,7 +610,7 @@ export function KeyMapEditor({
     map.output_columns,
     map.editable_columns,
     activeConnectionId,
-    postgresConnections,
+    activeDsn,
     reloadNonce,
     pageOffset,
     serverFilter,
@@ -1902,6 +1910,12 @@ export function KeyMapEditor({
           </button>
         )}
       </div>
+
+      {importNotice && (
+        <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-[12px] text-amber-100">
+          {importNotice}
+        </div>
+      )}
 
       {!compact && joinApplyHint && onApply && (
         <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-[12px] leading-snug text-amber-100/90">

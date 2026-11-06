@@ -325,6 +325,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let (disk, secrets) = project_for_disk(&p);
         assert!(disk.root_path.is_none());
@@ -394,6 +395,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let (disk, _) = project_for_disk(&p);
         assert!(disk.workspace.key_maps[0].entries.is_empty());

@@ -31,6 +31,7 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/specs/postgres-schema-import/` — ADR-0040 Postgres schema import (merged)
 - `openspec/specs/help-lab/` — ADR-0039 Help Lab catalog + recon flagship (merged)
 - `openspec/specs/keymap-apply-*` — ADR-0038 ApplyPlan / prepare-validate-execute (merged)
 - `openspec/specs/query-backed-keymap/` — ADR-0036 query-backed KeyMap SoT (merged)

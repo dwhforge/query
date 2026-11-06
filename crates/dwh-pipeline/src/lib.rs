@@ -13,6 +13,7 @@ pub mod keymap_query;
 pub mod mapping_check;
 pub mod model;
 pub mod parquet_scan;
+pub mod pg_import;
 pub mod postgres_attach;
 pub mod producers;
 pub mod project;
@@ -98,6 +99,13 @@ pub use producers::{
 pub use mapping_check::{
     CheckAggregateCell, CheckComparability, CheckDeltaAttribution, CheckInputRevision, CheckRun,
     MappingAllowDecision, MappingCheck, MappingCheckProjection,
+};
+pub use pg_import::{
+    commit_pg_import, import_fingerprint, metadata_matches, assert_read_only_catalog_sql,
+    columns_catalog_sql, constraints_catalog_sql, diagnose_mapping_sql, foreign_keys_catalog_sql,
+    relations_catalog_sql, viewdef_catalog_sql, ConfirmedBinding, ImportColumn, MappingDecision,
+    MappingKeyDiagnosis,
+    PgImportOutcome, PgImportPlan, PgImportRegistry, PgRelationSnapshot, PlannedRelation,
 };
 pub use project::{
     migrate_project_document, parquet_hive_partitioning, peek_format_version, CanvasLayout,

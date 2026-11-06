@@ -369,6 +369,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let owner_path = owner_dir.join("lib.dwhproj.json");
         fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
@@ -400,6 +401,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         fs::write(&consumer_path, consumer.to_json_pretty().unwrap()).unwrap();
         let reference =

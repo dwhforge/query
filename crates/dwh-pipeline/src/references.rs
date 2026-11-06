@@ -628,6 +628,7 @@ impl<'a> Resolver<'a> {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         // Keep the caller's published list off the owner-facing fingerprint.
         let _ = &mut project;
@@ -1850,6 +1851,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         }
     }
 

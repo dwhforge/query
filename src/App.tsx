@@ -209,6 +209,7 @@ import {
   PostgresPicker,
   type PostgresSelection,
 } from "./components/PostgresPicker";
+import { PgImportWizard } from "./components/PgImportWizard";
 import { PreviewTable } from "./components/PreviewTable";
 import { S3SourceDialog } from "./components/S3SourceDialog";
 import { SelectColumnsEditor } from "./components/SelectColumnsEditor";
@@ -884,6 +885,10 @@ function App() {
     null,
   );
   const [showPgPicker, setShowPgPicker] = useState(false);
+  const [showPgImport, setShowPgImport] = useState(false);
+  const [pgImportConnectionId, setPgImportConnectionId] = useState<string | null>(
+    null,
+  );
   const [showS3Dialog, setShowS3Dialog] = useState(false);
   const [showHiveDialog, setShowHiveDialog] = useState(false);
   /** Dialog outcome: catalog-only source vs source+query. */
@@ -1062,6 +1067,7 @@ function App() {
     helpOpen ||
     optionsOpen ||
     showPgPicker ||
+    showPgImport ||
     showS3Dialog ||
     showHiveDialog ||
     Boolean(mapPickPending) ||
@@ -5198,6 +5204,61 @@ function App() {
         }}
         onSave={upsertConnection}
       />
+      <PgImportWizard
+        open={showPgImport}
+        project={project}
+        connectionId={pgImportConnectionId}
+        dirtyMapIds={keyMapTabs
+          .filter(
+            (t) =>
+              Boolean(t.localDraft) ||
+              dirtyDeltaHasChanges(t.dirtyDelta ?? null),
+          )
+          .map((t) => t.map.id)}
+        saveInFlightMapIds={keyMapTabs
+          .filter((t) => t.saveInFlight)
+          .map((t) => t.map.id)}
+        onClose={() => setShowPgImport(false)}
+        onRequestNewConnection={() => openNewConnection("postgres")}
+        onCommitted={(outcome) => {
+          setProject(outcome.project);
+          setShowPgImport(false);
+          const focus = outcome.focus_query_id;
+          if (focus) {
+            setCenterTab("canvas");
+            setActiveQueryId(focus);
+            const query = outcome.project.workspace.queries.find(
+              (q) => q.id === focus,
+            );
+            const idx = outcome.focus_step_index ?? 0;
+            const step = query?.steps[idx];
+            if (step) {
+              setSelectedStepIndex(idx);
+              loadStepIntoEditor(step);
+            }
+            if (outcome.open_join_lens) {
+              setJoinLensOn(true);
+              setBottomTab("data");
+            }
+          }
+          setKeyMapTabs((tabs) =>
+            tabs.map((t) => {
+              if (!outcome.touched_map_ids.includes(t.map.id)) return t;
+              const fresh = (outcome.project.workspace.key_maps ?? []).find(
+                (m) => m.id === t.map.id,
+              );
+              if (!fresh) return t;
+              return {
+                ...t,
+                map: fresh,
+                dirtyResetSeq: (t.dirtyResetSeq ?? 0) + 1,
+                localDraft: false,
+                dirtyDelta: null,
+              };
+            }),
+          );
+        }}
+      />
       <PostgresPicker
         open={showPgPicker}
         connections={project.connections}
@@ -5318,6 +5379,14 @@ function App() {
                 onRemoveReference={(r) => void handleRemoveReference(r)}
                 onUseReferencedQuery={useReferencedQuery}
                 onAddConnection={() => openNewConnection("postgres")}
+                onImportPostgres={(connectionId) => {
+                  if (!connectionId) {
+                    openNewConnection("postgres");
+                    return;
+                  }
+                  setPgImportConnectionId(connectionId);
+                  setShowPgImport(true);
+                }}
                 onAddSourceCsv={() => void addSourceOnlyCsv()}
                 onAddSourceParquet={() => void addSourceOnlyParquet()}
                 onAddSourceHiveParquet={() => openHiveDialog("source")}
@@ -5784,8 +5853,29 @@ function App() {
                     })
                   }
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
+                  importNotice={(() => {
+                    const rel = project.pg_import?.relations.find(
+                      (r) => r.keymap_id === keyMapEditor.map.id,
+                    );
+                    if (!rel) return null;
+                    if (rel.binding_status === "broken") {
+                      return (
+                        rel.binding_issues?.join("; ") ||
+                        "Binding карты сломан"
+                      );
+                    }
+                    if (rel.quality_notes && rel.quality_notes.length > 0) {
+                      return rel.quality_notes.join("; ");
+                    }
+                    if (!rel.write_back) return "Запись в эту relation не разрешена";
+                    return null;
+                  })()}
                   onSave={
-                    keyMapEditor.joinCtx
+                    keyMapEditor.joinCtx ||
+                    project.pg_import?.relations.some(
+                      (r) =>
+                        r.keymap_id === keyMapEditor.map.id && !r.write_back,
+                    )
                       ? undefined
                       : () => {
                           void saveKeyMapToProject(keyMapEditor.map);

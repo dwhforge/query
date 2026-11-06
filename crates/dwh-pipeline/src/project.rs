@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// On-disk project document version (ADR-0030). Independent of IPC protocol version.
-pub const PROJECT_FORMAT_VERSION: u32 = 3;
+pub const PROJECT_FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +152,10 @@ pub struct Project {
     /// CheckRun results ([ADR-0027](../../../docs/adr/0027-mapping-quality-checks.md)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mapping_check_runs: Vec<CheckRun>,
+    /// Postgres relation import provenance ([ADR-0040](../../../docs/adr/0040-postgres-schema-import.md)).
+    /// No row bodies and no credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pg_import: Option<crate::pg_import::PgImportRegistry>,
 }
 
 impl Project {
@@ -230,6 +234,8 @@ pub fn migrate_project_document(v: &mut Value) -> Result<(), String> {
             1 => migrate_v1_to_v2(obj),
             // ADR-0037: multi-output KeyMap fields.
             2 => migrate_v2_to_v3(obj)?,
+            // ADR-0040: import provenance is optional. Stamp so older apps refuse the file.
+            3 => migrate_v3_to_v4(obj),
             other => {
                 return Err(format!(
                     "missing migration from format_version {other} → {}",
@@ -317,6 +323,9 @@ fn strip_source_keymap_entries(obj: &mut serde_json::Map<String, Value>) {
 
 /// ADR-0036 — query-backed KeyMap: document gate only (no IR rewrite).
 fn migrate_v1_to_v2(_obj: &mut serde_json::Map<String, Value>) {}
+
+/// ADR-0040 — Postgres import registry is additive. Older apps must refuse v4.
+fn migrate_v3_to_v4(_obj: &mut serde_json::Map<String, Value>) {}
 
 /// ADR-0037 — KeyMap multi-output: fold scalar To into output lists; rewrite Apply bindings.
 fn migrate_v2_to_v3(obj: &mut serde_json::Map<String, Value>) -> Result<(), String> {
@@ -800,6 +809,7 @@ mod tests {
             }),
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let json = p.to_json_pretty().unwrap();
         let back = Project::from_json(&json).unwrap();
@@ -899,6 +909,7 @@ mod tests {
                 covered_positions: None,
                 unmapped_positions: None,
             }],
+            pg_import: None,
         };
         let json = p.to_json_pretty().unwrap();
         assert!(json.contains("\"kind\": \"lab_v1\""));
@@ -1058,7 +1069,7 @@ mod tests {
             "dbt_target": "v1"
         }"#;
         let p = Project::from_json(v2).unwrap();
-        assert_eq!(p.format_version, 3);
+        assert_eq!(p.format_version, PROJECT_FORMAT_VERSION);
         let map = &p.workspace.key_maps[0];
         assert_eq!(map.output_columns_eff(), vec!["to".to_string()]);
         assert!(map.to_column.is_empty());

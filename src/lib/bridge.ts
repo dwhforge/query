@@ -932,6 +932,39 @@ export function testPostgresConnection(
   return invoke<void>("test_postgres_connection", { connectionString });
 }
 
+export function pgImportFingerprint(project: Project): Promise<{ fingerprint: string }> {
+  return invoke("pg_import_fingerprint", { project });
+}
+
+export function scanPostgresImport(args: {
+  connectionString: string;
+  relations: { schema: string; name: string }[];
+  prefixes: string[];
+  ruleSchemas: string[];
+}): Promise<import("./pgImport").PgScanHit[]> {
+  return invoke("scan_postgres_import", args);
+}
+
+export function diagnosePostgresMapping(args: {
+  connectionString: string;
+  schema: string;
+  table: string;
+  fromColumns: string[];
+  outputColumns: string[];
+  validFrom?: string;
+  validTo?: string;
+}): Promise<import("./pgImport").MappingKeyDiagnosis> {
+  return invoke("diagnose_postgres_mapping", args);
+}
+
+export function commitPgImport(args: {
+  project: Project;
+  plan: import("./pgImport").PgImportPlan;
+  connectionString: string;
+}): Promise<import("./pgImport").PgImportOutcome<Project>> {
+  return invoke("commit_pg_import", args);
+}
+
 export function saveProject(path: string, project: Project): Promise<Project> {
   const args = { path, project } satisfies SaveProjectArgs;
   return invoke<Project>("save_project", args as Record<string, unknown>);

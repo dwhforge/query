@@ -69,8 +69,8 @@ pub use compile::{
 };
 pub use load_seeds::{collect_load_seeds, LoadSeedDiagnostic, LoadSeedsResult};
 pub use postgres_catalog::{
-    describe_postgres_object, list_postgres_objects, test_postgres_connection,
-    PostgresColumn, PostgresObject,
+    describe_postgres_object, diagnose_mapping_relation, list_postgres_objects,
+    scan_postgres_import, test_postgres_connection, PostgresColumn, PostgresObject,
 };
 pub use preview::{
     describe_workspace, preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult,

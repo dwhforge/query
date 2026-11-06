@@ -334,7 +334,7 @@ export interface CanvasLayout {
  * Engine ≠ destination (four routes).
  */
 /** On-disk project document version (ADR-0030). Missing ⇒ 0 at load. */
-export const PROJECT_FORMAT_VERSION = 2 as const;
+export const PROJECT_FORMAT_VERSION = 4 as const;
 
 export interface Project {
   /** Document schema version (ADR-0030). */
@@ -368,6 +368,8 @@ export interface Project {
   mapping_checks?: import("./mappingCheck").MappingCheck[];
   /** Immutable check execution results (ADR-0027). */
   mapping_check_runs?: import("./mappingCheck").CheckRun[];
+  /** Postgres import provenance (ADR-0040). No rows, no credentials. */
+  pg_import?: import("../lib/pgImport").PgImportRegistry;
 }
 
 export interface PreviewResult {

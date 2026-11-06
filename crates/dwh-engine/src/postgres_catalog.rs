@@ -379,6 +379,8 @@ pub fn diagnose_mapping_relation(
     let null_from = cell(&row, 0).parse().unwrap_or(0);
     let duplicate_from_groups = cell(&row, 1).parse().unwrap_or(0);
     let null_outputs = cell(&row, 2).parse().unwrap_or(0);
+    let invalid_bounds = cell(&row, 3).parse().unwrap_or(0);
+    let temporal = valid_from.is_some() && valid_to.is_some();
     let overlapping_pairs = if let Some(overlap_sql) = parts.next() {
         let overlap_rows = catalog_rows(db, connection_string, overlap_sql)?;
         Some(
@@ -390,21 +392,14 @@ pub fn diagnose_mapping_relation(
     } else {
         None
     };
-    let mut notes = Vec::new();
-    if null_from > 0 {
-        notes.push(format!("NULL From: {null_from}"));
-    }
-    if duplicate_from_groups > 0 {
-        notes.push(format!("duplicate From groups: {duplicate_from_groups}"));
-    }
-    if null_outputs > 0 {
-        notes.push(format!("NULL outputs: {null_outputs}"));
-    }
-    if let Some(n) = overlapping_pairs {
-        if n > 0 {
-            notes.push(format!("overlapping intervals: {n}"));
-        }
-    }
+    let notes = dwh_pipeline::diagnosis_notes(
+        temporal,
+        null_from,
+        duplicate_from_groups,
+        null_outputs,
+        invalid_bounds,
+        overlapping_pairs,
+    );
     Ok(dwh_pipeline::pg_import::MappingKeyDiagnosis {
         null_from,
         duplicate_from_groups,
@@ -712,6 +707,15 @@ mod pg_schema_import_integration {
         .unwrap();
         assert_eq!(cell(still.first().unwrap(), 0), "p2");
 
+        psql(
+            &dsn,
+            "ALTER TABLE dwh_import_e2e._map_supplier_products DROP CONSTRAINT \
+             _map_supplier_products_supplier_id_external_sku_key",
+        );
+        let after_unique = scan_postgres_import(&db, &dsn, &pairs).unwrap();
+        let unique_err = metadata_matches(&plan, &after_unique).expect_err("dropped unique");
+        assert!(unique_err.contains("unique constraints"), "{unique_err}");
+
         psql(&dsn, "ALTER TABLE dwh_import_e2e.notes RENAME COLUMN body TO comment");
         let fresh = scan_postgres_import(&db, &dsn, &pairs).unwrap();
         let mismatch = metadata_matches(&plan, &fresh).expect_err("renamed column");
@@ -736,6 +740,64 @@ mod pg_schema_import_integration {
         .unwrap();
         let flag_after = cell(populated_after.first().unwrap(), 0);
         assert!(flag_after == "f" || flag_after.eq_ignore_ascii_case("false"));
+    }
+
+    #[test]
+    fn nonoverlapping_scd_versions_are_not_duplicate_froms() {
+        let Some(dsn) = dsn() else {
+            eprintln!("SKIP scd diagnosis: DWH_PG_DSN unset");
+            return;
+        };
+        psql(
+            &dsn,
+            "CREATE SCHEMA IF NOT EXISTS dwh_import_scd; \
+             DROP TABLE IF EXISTS dwh_import_scd.map_hist; \
+             CREATE TABLE dwh_import_scd.map_hist ( \
+               supplier_id text, product_id text, valid_from date, valid_to date \
+             ); \
+             INSERT INTO dwh_import_scd.map_hist VALUES \
+               ('s1','p1','2020-01-01','2021-01-01'), \
+               ('s1','p2','2021-01-01', NULL);",
+        );
+        let db = DbSession::new().expect("duckdb");
+        let diag = diagnose_mapping_relation(
+            &db,
+            &dsn,
+            "dwh_import_scd",
+            "map_hist",
+            &["supplier_id".into()],
+            &["product_id".into()],
+            Some("valid_from"),
+            Some("valid_to"),
+        )
+        .expect("diagnose");
+        assert!(
+            diag.notes.iter().all(|n| !n.contains("duplicate From")),
+            "{:?}",
+            diag.notes
+        );
+        assert_eq!(diag.duplicate_from_groups, 0);
+        psql(
+            &dsn,
+            "INSERT INTO dwh_import_scd.map_hist VALUES ('s1','p3','2020-06-01','2020-09-01')",
+        );
+        let overlap = diagnose_mapping_relation(
+            &db,
+            &dsn,
+            "dwh_import_scd",
+            "map_hist",
+            &["supplier_id".into()],
+            &["product_id".into()],
+            Some("valid_from"),
+            Some("valid_to"),
+        )
+        .unwrap();
+        assert!(
+            overlap.notes.iter().any(|n| n.contains("overlapping intervals")),
+            "{:?}",
+            overlap.notes
+        );
+        assert!(overlap.notes.iter().all(|n| !n.contains("duplicate From groups")));
     }
 }
 

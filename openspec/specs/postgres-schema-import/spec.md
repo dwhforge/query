@@ -57,3 +57,31 @@ The wizard SHALL keep a session draft until commit. Commit SHALL refuse a stale 
 
 - **WHEN** a confirmed column disappears
 - **THEN** the map and query remain, the binding is broken, and no similar column name replaces it
+
+#### Scenario: A new wizard session is a new commit
+
+- **WHEN** the user finishes one import, closes the wizard, and imports a different relation
+- **THEN** the second commit uses a new token and adds that relation
+
+#### Scenario: Unique constraint lost after review
+
+- **WHEN** the composite UNIQUE used for write-back disappears before commit
+- **THEN** commit refuses and asks for review again
+
+### Requirement: Imported write policy binds every warehouse write
+
+Save and Apply SHALL use one write command. That command SHALL refuse when the import record for the map has `write_back` false or a broken binding, before any row is written. The editor SHALL not accept row edits in those cases. Apply of the map SHALL continue without writing the relation.
+
+#### Scenario: Privileged user still cannot write a read-only import
+
+- **WHEN** the PostgreSQL role can UPDATE the table and the import record has write-back off
+- **THEN** Save and Apply do not change the table
+
+### Requirement: Range SCD diagnosis allows several versions
+
+Diagnosis SHALL count duplicate static From groups, not extra rows. In range SCD it SHALL treat From + `valid_from` as the identity, SHALL report invalid bounds and overlapping intervals, and SHALL NOT report another non-overlapping version of the same From as a duplicate.
+
+#### Scenario: Two closed periods of one From
+
+- **WHEN** one From has two non-overlapping `valid_from` values
+- **THEN** the diagnosis has no duplicate-From note

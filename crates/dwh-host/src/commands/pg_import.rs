@@ -3,7 +3,8 @@
 use crate::error::RpcError;
 use dwh_engine::{diagnose_mapping_relation, scan_postgres_import, DbSession};
 use dwh_pipeline::pg_import::{
-    default_prefixes, metadata_matches, rule_matches, MappingKeyDiagnosis, PgImportOutcome,
+    adopt_fresh_write_metadata, default_prefixes, metadata_matches, rule_matches,
+    MappingKeyDiagnosis, PgImportOutcome,
     PgImportPlan, PgRelationSnapshot,
 };
 use dwh_pipeline::{commit_pg_import, import_fingerprint, Project};
@@ -137,6 +138,10 @@ pub fn commit_pg_import_cmd(db: &DbSession, args: Value) -> Result<Value, RpcErr
             })?;
         let fresh = scan_postgres_import(db, dsn, &present)?;
         metadata_matches(&a.plan, &fresh)?;
+        let mut plan = a.plan;
+        adopt_fresh_write_metadata(&mut plan, &fresh);
+        let out: PgImportOutcome = commit_pg_import(&a.project, &plan)?;
+        return serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()));
     }
     let out: PgImportOutcome = commit_pg_import(&a.project, &a.plan)?;
     serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))

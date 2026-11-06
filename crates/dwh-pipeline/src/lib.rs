@@ -101,7 +101,8 @@ pub use mapping_check::{
     MappingAllowDecision, MappingCheck, MappingCheckProjection,
 };
 pub use pg_import::{
-    commit_pg_import, import_fingerprint, metadata_matches, assert_read_only_catalog_sql,
+    adopt_fresh_write_metadata, commit_pg_import, diagnosis_notes, import_fingerprint,
+    import_write_refusal, metadata_matches, assert_read_only_catalog_sql,
     columns_catalog_sql, constraints_catalog_sql, diagnose_mapping_sql, foreign_keys_catalog_sql,
     relations_catalog_sql, viewdef_catalog_sql, ConfirmedBinding, ImportColumn, MappingDecision,
     MappingKeyDiagnosis,

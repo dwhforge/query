@@ -142,6 +142,8 @@ export type KeyMapEditorProps = {
   title?: string;
   /** Import binding problem or refused write-back (ADR-0040). */
   importNotice?: string | null;
+  /** Read-only or broken import: rows stay visible, edits and deletes do not. */
+  importRowsLocked?: boolean;
 };
 
 function storageKind(
@@ -185,6 +187,7 @@ export function KeyMapEditor({
   compact = false,
   title,
   importNotice = null,
+  importRowsLocked = false,
 }: KeyMapEditorProps) {
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -1621,7 +1624,7 @@ export function KeyMapEditor({
           compact ? "w-28 py-0.5 text-[11px]" : "w-48"
         }`}
       />
-      {!rowsReadOnly && (
+      {!rowsReadOnly && !importRowsLocked && (
       <button
         type="button"
         onClick={() => addRow()}
@@ -1660,7 +1663,7 @@ export function KeyMapEditor({
             Reload
           </button>
         )}
-      {(suggestedFromParts.length > 0 || suggestedFrom.length > 0) && (
+      {!importRowsLocked && (suggestedFromParts.length > 0 || suggestedFrom.length > 0) && (
         <button
           type="button"
           onClick={addSuggested}
@@ -1673,7 +1676,7 @@ export function KeyMapEditor({
           )
         </button>
       )}
-      {!rowsReadOnly && (
+      {!rowsReadOnly && !importRowsLocked && (
       <button
         type="button"
         onClick={() => setPasteOpen((v) => !v)}
@@ -1783,8 +1786,10 @@ export function KeyMapEditor({
                   <td key={`fc-${fi}`} className="px-2 py-1">
                     <input
                       data-col={fi === 0 ? "from" : `from-${fi}`}
+                      readOnly={importRowsLocked}
                       value={parts[fi] ?? ""}
                       onChange={(ev) => {
+                        if (importRowsLocked) return;
                         const nextParts = [...fromPartsEff(e)];
                         while (nextParts.length < arity) nextParts.push("");
                         nextParts[fi] = ev.target.value;
@@ -1807,13 +1812,17 @@ export function KeyMapEditor({
                 <td key={`oc-${oi}`} className="px-2 py-1">
                   <input
                     data-col={oi === 0 ? "to" : `to-${oi}`}
+                    readOnly={importRowsLocked}
                     list={
                       oi === 0 && pickToOptions.length > 0
                         ? `keymap-to-${map.id}`
                         : undefined
                     }
                     value={outputValuesEff(e)[oi] ?? ""}
-                    onChange={(ev) => setOutput(i, oi, ev.target.value)}
+                    onChange={(ev) => {
+                      if (importRowsLocked) return;
+                      setOutput(i, oi, ev.target.value);
+                    }}
                     onKeyDown={(ev) => onCellKeyDown(ev, i, "to", oi)}
                     className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-teal-200/90 focus:border-slate-600 focus:bg-slate-950"
                   />
@@ -1822,13 +1831,18 @@ export function KeyMapEditor({
               {editableCols.map((c) => (
                 <td key={c} className="px-2 py-1">
                   <input
+                    readOnly={importRowsLocked}
                     value={e.attrs?.[c] ?? ""}
-                    onChange={(ev) => updateAttr(i, c, ev.target.value)}
+                    onChange={(ev) => {
+                      if (importRowsLocked) return;
+                      updateAttr(i, c, ev.target.value);
+                    }}
                     className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-slate-300 focus:border-slate-600 focus:bg-slate-950"
                   />
                 </td>
               ))}
               <td className="px-2 text-center">
+                {!importRowsLocked && (
                 <button
                   type="button"
                   onClick={() => deleteRow(i)}
@@ -1837,6 +1851,7 @@ export function KeyMapEditor({
                 >
                   ×
                 </button>
+                )}
               </td>
             </tr>
           ); })}

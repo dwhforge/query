@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   commitPgImport,
   diagnosePostgresMapping,
@@ -37,7 +37,7 @@ interface Props {
   saveInFlightMapIds: string[];
   onClose: () => void;
   onRequestNewConnection: () => void;
-  onCommitted: (outcome: PgImportOutcome<Project>) => void;
+  onCommitted: (outcome: PgImportOutcome<Project>, submitted: Project) => void;
 }
 
 function splitList(raw: string): string[] {
@@ -82,8 +82,17 @@ export function PgImportWizard({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [commitToken] = useState(() => crypto.randomUUID());
-  const [workingToken] = useState(() => crypto.randomUUID());
+  const [commitToken, setCommitToken] = useState(() => crypto.randomUUID());
+  const [workingToken, setWorkingToken] = useState(() => crypto.randomUUID());
+  const [quality, setQuality] = useState<Record<string, string[]>>({});
+  const epoch = useRef(0);
+  const sessionOpen = useRef(false);
+
+  function dismiss() {
+    epoch.current += 1;
+    sessionOpen.current = false;
+    onClose();
+  }
   const [makeWorking, setMakeWorking] = useState(false);
   const [workLeft, setWorkLeft] = useState("");
   const [workMap, setWorkMap] = useState("");
@@ -99,11 +108,39 @@ export function PgImportWizard({
   const registry = project.pg_import;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      if (sessionOpen.current) epoch.current += 1;
+      sessionOpen.current = false;
+      return;
+    }
+    if (sessionOpen.current) return;
+    sessionOpen.current = true;
+    epoch.current += 1;
     const fallback = project.connections.find((c) => c.kind === "postgres")?.id ?? "";
     setConnId(connectionId || fallback);
+    setCommitToken(crypto.randomUUID());
+    setWorkingToken(crypto.randomUUID());
     setStep("objects");
+    setObjects([]);
+    setHits({});
+    setSelected({});
+    setDrafts({});
+    setPrefixesText("map_, _map_");
+    setRuleSchemas([]);
+    setSchemaFilter("");
     setError(null);
+    setStatus(null);
+    setQuality({});
+    setMakeWorking(false);
+    setWorkLeft("");
+    setWorkMap("");
+    setWorkRight("");
+    setWorkInputs("");
+    setWorkOutputs("");
+    setWorkLeftOn("");
+    setWorkRightOn("");
+    setWorkJoin("left");
+    setWorkExtra("");
   }, [open, connectionId, project.connections]);
 
   const prefixes = useMemo(() => splitList(prefixesText), [prefixesText]);
@@ -405,8 +442,6 @@ export function PgImportWizard({
     }
   }
 
-  const [quality, setQuality] = useState<Record<string, string[]>>({});
-
   function workingQuery(): PlannedWorkingQuery | null {
     if (!makeWorking || !workMap) return null;
     const [schema, name] = splitKey(workMap);
@@ -457,10 +492,12 @@ export function PgImportWizard({
     }
     setBusy(true);
     setError(null);
+    const ticket = epoch.current;
+    const submitted = project;
     try {
-      const { fingerprint } = await pgImportFingerprint(project);
+      const { fingerprint } = await pgImportFingerprint(submitted);
       const outcome = await commitPgImport({
-        project,
+        project: submitted,
         connectionString: conn.postgres.connection_string,
         plan: {
           commit_token: commitToken,
@@ -475,7 +512,8 @@ export function PgImportWizard({
           discard_confirmed: discard,
         },
       });
-      onCommitted(outcome);
+      if (ticket !== epoch.current) return;
+      onCommitted(outcome, submitted);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
@@ -492,7 +530,7 @@ export function PgImportWizard({
       aria-modal="true"
       data-testid="pg-import-wizard"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget) dismiss();
       }}
     >
       <div className="flex max-h-[min(820px,92vh)] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[#0a121c] shadow-2xl">
@@ -508,7 +546,7 @@ export function PgImportWizard({
           <button
             type="button"
             data-testid="pg-import-cancel"
-            onClick={onClose}
+            onClick={dismiss}
             className="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
           >
             Отмена

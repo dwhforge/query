@@ -15,4 +15,8 @@ delta?: import("../../lib/bridge").KeyMapDirtyDelta, limit?: number, offset?: nu
 /**
  * Exact From-tuple equality lookup (Confirm baselines). Not a prefix page.
  */
-fromExact?: Array<Array<string>>, };
+fromExact?: Array<Array<string>>, 
+/**
+ * Import registry from the current project. Write refuses when this map is read-only or broken.
+ */
+importRegistry?: import("../../lib/pgImport").PgImportRegistry, };

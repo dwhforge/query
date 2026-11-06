@@ -152,6 +152,7 @@ import {
   type MappingCreatePlan,
 } from "./app/mappingCreate";
 import { MappingCreateWizard } from "./components/MappingCreateWizard";
+import { importWriteRefusal } from "./lib/pgImport";
 import {
   applyKeyMapOntoProject,
   dirtyDeltaHasChanges,
@@ -3467,6 +3468,14 @@ function App() {
       dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
     },
   ): Promise<KeyMapSaveResult> {
+    if ((map.storage?.kind ?? "seed") === "source") {
+      const refusal = importWriteRefusal(project.pg_import, map.id);
+      if (refusal) {
+        const result = sourceSaveSkipped(refusal);
+        setExportMsg(result.message);
+        return result;
+      }
+    }
     // Persist to project AST first (local). External sync reports separately.
     setProject((p) => upsertKeyMapIntoProject(p, map));
     setSelectedKeyMapId(map.id);
@@ -3560,7 +3569,13 @@ function App() {
       }
       patchKeyMapTab(map.id, (s) => ({ ...s, saveInFlight: true }));
       try {
-        const r = await writeKeyMap(map, resolved.dsn, expectedHash, delta);
+        const r = await writeKeyMap(
+          map,
+          resolved.dsn,
+          expectedHash,
+          delta,
+          project.pg_import,
+        );
         // Late ack must not settle a rebound tab (different WH relation).
         const settle = { kind: "drop" as "apply" | "drop" };
         patchKeyMapTab(map.id, (s) => {
@@ -5220,7 +5235,14 @@ function App() {
           .map((t) => t.map.id)}
         onClose={() => setShowPgImport(false)}
         onRequestNewConnection={() => openNewConnection("postgres")}
-        onCommitted={(outcome) => {
+        onCommitted={(outcome, submitted) => {
+          if (submitted !== projectRef.current) {
+            setShowPgImport(false);
+            setError(
+              "Проект изменился во время импорта. Результат не применён — повторите проверку.",
+            );
+            return;
+          }
           setProject(outcome.project);
           setShowPgImport(false);
           const focus = outcome.focus_query_id;
@@ -5870,12 +5892,12 @@ function App() {
                     if (!rel.write_back) return "Запись в эту relation не разрешена";
                     return null;
                   })()}
+                  importRowsLocked={
+                    importWriteRefusal(project.pg_import, keyMapEditor.map.id) != null
+                  }
                   onSave={
                     keyMapEditor.joinCtx ||
-                    project.pg_import?.relations.some(
-                      (r) =>
-                        r.keymap_id === keyMapEditor.map.id && !r.write_back,
-                    )
+                    importWriteRefusal(project.pg_import, keyMapEditor.map.id) != null
                       ? undefined
                       : () => {
                           void saveKeyMapToProject(keyMapEditor.map);

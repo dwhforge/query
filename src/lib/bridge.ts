@@ -714,6 +714,7 @@ export function writeKeyMap(
   connectionString: string,
   expectedContentHash?: string | null,
   delta?: KeyMapDirtyDelta | null,
+  importRegistry?: import("./pgImport").PgImportRegistry | null,
 ): Promise<KeyMapWriteResult> {
   const args = {
     keyMap,
@@ -727,6 +728,7 @@ export function writeKeyMap(
           baselines: delta.baselines ?? [],
         }
       : undefined,
+    importRegistry: importRegistry ?? undefined,
   } satisfies KeyMapWhArgs;
   return invoke("write_key_map", args as Record<string, unknown>);
 }

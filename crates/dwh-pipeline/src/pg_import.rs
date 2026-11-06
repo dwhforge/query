@@ -510,11 +510,38 @@ pub fn diagnose_mapping_sql(
         .map(|c| format!("{} IS NULL", quote_ident(c)))
         .collect::<Vec<_>>()
         .join(" OR ");
+    // Group count, not extra-row count. Range SCD groups by From + valid_from so
+    // several non-overlapping versions of one From are not duplicates.
+    let (dup_group, bounds) = if let (Some(vf), Some(vt)) = (valid_from, valid_to) {
+        (
+            format!(
+                "(SELECT COUNT(*) FROM ( \
+SELECT 1 FROM {rel} GROUP BY {distinct}, {vf} HAVING COUNT(*) > 1 \
+) dwh_dup_groups)",
+                vf = quote_ident(vf)
+            ),
+            format!(
+                "COUNT(*) FILTER (WHERE {vf} IS NULL OR ({vt} IS NOT NULL AND {vf}::timestamp >= {vt}::timestamp))",
+                vf = quote_ident(vf),
+                vt = quote_ident(vt)
+            ),
+        )
+    } else {
+        (
+            format!(
+                "(SELECT COUNT(*) FROM ( \
+SELECT 1 FROM {rel} GROUP BY {distinct} HAVING COUNT(*) > 1 \
+) dwh_dup_groups)"
+            ),
+            "0".to_string(),
+        )
+    };
     let head = format!(
         "SELECT \
 COUNT(*) FILTER (WHERE {null_from})::text, \
-(COUNT(*) - COUNT(DISTINCT ({distinct})))::text, \
-COUNT(*) FILTER (WHERE {null_out})::text \
+{dup_group}::text, \
+COUNT(*) FILTER (WHERE {null_out})::text, \
+({bounds})::text \
 FROM {rel}"
     );
     if let (Some(vf), Some(vt)) = (valid_from, valid_to) {
@@ -555,6 +582,89 @@ pub struct MappingKeyDiagnosis {
     pub notes: Vec<String>,
 }
 
+/// Notes for a diagnosis. Range SCD does not treat another version of the same From as a duplicate.
+pub fn diagnosis_notes(
+    temporal: bool,
+    null_from: i64,
+    duplicate_groups: i64,
+    null_outputs: i64,
+    invalid_bounds: i64,
+    overlapping_pairs: Option<i64>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if null_from > 0 {
+        notes.push(format!("NULL From: {null_from}"));
+    }
+    if duplicate_groups > 0 {
+        if temporal {
+            notes.push(format!("duplicate From+valid_from: {duplicate_groups}"));
+        } else {
+            notes.push(format!("duplicate From groups: {duplicate_groups}"));
+        }
+    }
+    if null_outputs > 0 {
+        notes.push(format!("NULL outputs: {null_outputs}"));
+    }
+    if temporal && invalid_bounds > 0 {
+        notes.push(format!("invalid SCD bounds: {invalid_bounds}"));
+    }
+    if let Some(n) = overlapping_pairs {
+        if n > 0 {
+            notes.push(format!("overlapping intervals: {n}"));
+        }
+    }
+    notes
+}
+
+/// Warehouse write gate for an imported relation. `None` means this map is not import-governed.
+pub fn import_write_refusal(registry: Option<&PgImportRegistry>, map_id: &str) -> Option<String> {
+    let reg = registry?;
+    let rec = reg
+        .relations
+        .iter()
+        .find(|r| r.keymap_id.as_deref() == Some(map_id))?;
+    if rec.binding_status == BindingStatus::Broken {
+        return Some("broken import binding — warehouse write refused".into());
+    }
+    if !rec.write_back {
+        return Some("import write-back is not allowed for this relation".into());
+    }
+    None
+}
+
+fn canon_unique_sets(sets: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = sets
+        .iter()
+        .map(|set| {
+            let mut cols: Vec<String> = set.iter().map(|c| c.to_ascii_lowercase()).collect();
+            cols.sort();
+            cols
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Copy uniqueness and privileges from the fresh catalog onto the plan before the fold.
+pub fn adopt_fresh_write_metadata(plan: &mut PgImportPlan, fresh: &[PgRelationSnapshot]) {
+    for rel in &mut plan.relations {
+        if !rel.present {
+            continue;
+        }
+        let Some(snap) = fresh
+            .iter()
+            .find(|s| s.schema == rel.schema && s.name == rel.name)
+        else {
+            continue;
+        };
+        rel.unique_sets = snap.unique_sets.clone();
+        rel.select_ok = snap.select_ok;
+        rel.insert_ok = snap.insert_ok;
+        rel.update_ok = snap.update_ok;
+        rel.delete_ok = snap.delete_ok;
+    }
+}
+
 pub fn metadata_matches(plan: &PgImportPlan, fresh: &[PgRelationSnapshot]) -> Result<(), String> {
     for rel in &plan.relations {
         let found = fresh
@@ -592,6 +702,22 @@ pub fn metadata_matches(plan: &PgImportPlan, fresh: &[PgRelationSnapshot]) -> Re
         {
             return Err(format!(
                 "metadata changed — {}.{} view definition differs; review again",
+                rel.schema, rel.name
+            ));
+        }
+        if canon_unique_sets(&snap.unique_sets) != canon_unique_sets(&rel.unique_sets) {
+            return Err(format!(
+                "metadata changed — {}.{} unique constraints differ; review again",
+                rel.schema, rel.name
+            ));
+        }
+        if snap.select_ok != rel.select_ok
+            || snap.insert_ok != rel.insert_ok
+            || snap.update_ok != rel.update_ok
+            || snap.delete_ok != rel.delete_ok
+        {
+            return Err(format!(
+                "metadata changed — {}.{} privileges differ; review again",
                 rel.schema, rel.name
             ));
         }
@@ -1999,6 +2125,62 @@ mod tests {
         fresh.columns[0].data_type = "integer".into();
         let err = metadata_matches(&plan, &[fresh]).unwrap_err();
         assert!(err.contains("review again"));
+    }
+
+    #[test]
+    fn dropped_unique_and_privilege_change_need_review() {
+        let p = project();
+        let plan = plan_for(
+            &p,
+            vec![planned_map(MappingDecision::Force, Some(binding(true)))],
+            None,
+        );
+        let mut fresh = PgRelationSnapshot {
+            schema: "integration".into(),
+            name: "_map_supplier_products".into(),
+            kind: "table".into(),
+            catalog_oid: Some("101".into()),
+            columns: map_cols(),
+            unique_sets: vec![vec!["external_sku".into(), "supplier_id".into()]],
+            select_ok: true,
+            insert_ok: true,
+            update_ok: true,
+            delete_ok: true,
+            view_definition: None,
+            view_definition_available: None,
+            foreign_keys: vec![],
+        };
+        metadata_matches(&plan, &[fresh.clone()]).expect("same unique set, any column order");
+        fresh.unique_sets.clear();
+        let err = metadata_matches(&plan, &[fresh.clone()]).unwrap_err();
+        assert!(err.contains("unique constraints"), "{err}");
+        fresh.unique_sets = vec![vec!["supplier_id".into(), "external_sku".into()]];
+        fresh.update_ok = false;
+        let err = metadata_matches(&plan, &[fresh]).unwrap_err();
+        assert!(err.contains("privileges"), "{err}");
+    }
+
+    #[test]
+    fn range_versions_are_not_duplicate_from_groups() {
+        let notes = diagnosis_notes(true, 0, 0, 0, 0, Some(0));
+        assert!(notes.is_empty(), "{notes:?}");
+        let overlap = diagnosis_notes(true, 0, 0, 0, 0, Some(2));
+        assert!(overlap.iter().any(|n| n.contains("overlapping intervals")));
+        assert!(overlap.iter().all(|n| !n.contains("duplicate From groups")));
+        let static_dup = diagnosis_notes(false, 0, 1, 0, 0, None);
+        assert_eq!(static_dup, vec!["duplicate From groups: 1".to_string()]);
+        let sql = diagnose_mapping_sql(
+            "integration",
+            "map_scd",
+            &["supplier_id".into()],
+            &["product_id".into()],
+            Some("valid_from"),
+            Some("valid_to"),
+        )
+        .unwrap();
+        assert!(sql.contains("GROUP BY \"supplier_id\", \"valid_from\""));
+        assert!(!sql.contains("COUNT(*) - COUNT(DISTINCT"));
+        assert_read_only_catalog_sql(sql.split("\n--SPLIT--\n").next().unwrap()).unwrap();
     }
 
     #[test]

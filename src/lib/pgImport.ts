@@ -140,6 +140,20 @@ export interface PgImportOutcome<P> {
   touched_map_ids: string[];
 }
 
+/** Shared Save / Apply gate. Null when this map is not an imported relation. */
+export function importWriteRefusal(
+  registry: PgImportRegistry | null | undefined,
+  mapId: string,
+): string | null {
+  const rel = registry?.relations.find((r) => r.keymap_id === mapId);
+  if (!rel) return null;
+  if (rel.binding_status === "broken") {
+    return "Сломанный binding — запись в relation запрещена";
+  }
+  if (!rel.write_back) return "Запись в эту relation не разрешена";
+  return null;
+}
+
 export function relKey(schema: string, name: string): string {
   return `${schema}.${name}`;
 }

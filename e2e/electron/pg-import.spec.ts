@@ -127,4 +127,57 @@ test.describe("postgres schema import", () => {
       await closeIsolatedSession(session);
     }
   });
+
+  test("two imports in one session use different commit tokens", async () => {
+    setupDatabase();
+    const session = await launchIsolatedSession();
+    const { page } = session;
+    try {
+      await page.evaluate((connectionString) => {
+        window.__dwhE2ePatchProject?.((p) => ({
+          ...p,
+          connections: [
+            ...(p.connections ?? []),
+            {
+              id: "conn_pg_import",
+              name: "Import PG",
+              kind: "postgres",
+              postgres: { connection_string: connectionString },
+            },
+          ],
+        }));
+      }, dsn);
+
+      const importOrdinary = async (name: string) => {
+        await page.getByTestId("pg-import-open-conn_pg_import").click();
+        const wizard = page.getByTestId("pg-import-wizard");
+        await expect(wizard).toBeVisible();
+        await wizard.getByTestId("pg-import-browse").click();
+        await expect(
+          wizard.getByTestId("pg-import-schema").locator("option", { hasText: "dwh_import_e2e" }),
+        ).toBeAttached({ timeout: 60_000 });
+        await wizard.getByTestId("pg-import-schema").selectOption("dwh_import_e2e");
+        await wizard.getByTestId(`pg-object-dwh_import_e2e.${name}`).check();
+        await wizard.getByTestId("pg-import-next").click();
+        await expect(wizard.getByTestId(`pg-binding-dwh_import_e2e.${name}`)).toBeVisible({
+          timeout: 60_000,
+        });
+        await wizard.getByTestId("pg-import-next").click();
+        await wizard.getByTestId("pg-import-next").click();
+        await wizard.getByTestId("pg-import-commit").click();
+        await expect(wizard).toBeHidden({ timeout: 60_000 });
+      };
+
+      await importOrdinary("notes");
+      await importOrdinary("products");
+      const names = await page.evaluate(() => {
+        const project = window.__dwhE2eGetProject?.();
+        return (project?.workspace.queries ?? []).map((q) => q.name);
+      });
+      expect(names).toContain("dwh_import_e2e.notes");
+      expect(names).toContain("dwh_import_e2e.products");
+    } finally {
+      await closeIsolatedSession(session);
+    }
+  });
 });

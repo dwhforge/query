@@ -820,14 +820,14 @@ export function ExplorerTree({
                     )}
                     {!isRenaming && (
                       <IconBtn
-                        title="Delete KeyMap (ApplyKeyMap steps + seed CSV if exported)"
+                        title="Delete Mapping (Apply Mapping steps + seed CSV if exported)"
                         onClick={() => {
                           const seedCsv =
                             project.last_dbt_export_path &&
                             (!m.storage || m.storage.kind === "seed");
                           if (
                             window.confirm(
-                              `Delete KeyMap “${m.name}”? ApplyKeyMap steps that use it will be removed.${
+                              `Delete Mapping “${m.name}”? Apply Mapping steps that use it will be removed.${
                                 seedCsv
                                   ? " The export seed CSV will be deleted too."
                                   : ""

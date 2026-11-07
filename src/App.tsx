@@ -398,8 +398,8 @@ function App() {
     explorer_width_px: 240,
     inspector_width_px: 300,
     llm: {
-      base_url: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
+      base_url: "",
+      model: "",
       api_key: "",
     },
   });
@@ -518,13 +518,13 @@ function App() {
         : null) ??
       keyMaps[0];
     if (!map) {
-      setError("Add a KeyMap before creating a mapping check.");
+      setError("Add a Mapping before creating a mapping check.");
       return;
     }
     const hosts = findJoinHostsForMap(queries, map.id);
     if (!hosts.length) {
       setError(
-        `No Join query ApplyKeyMap-wires “${map.name}”. Apply the map on a Join host first, then create the check.`,
+        `No Join query applies Mapping “${map.name}”. Apply the map on a Join host first, then create the check.`,
       );
       return;
     }
@@ -815,11 +815,17 @@ function App() {
   const pendingMappingCreateOpIdRef = useRef<string | null>(null);
   /** Center workspace tab: canvas or open KeyMap id. */
   const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
+  /** True while the graph↔dock splitter is dragged — skip RO clamp (avoids RO loop). */
+  const dockDraggingRef = useRef(false);
+  const dockHeightRafRef = useRef(0);
+  const stackClampRafRef = useRef(0);
+
   useEffect(() => {
     if (centerTab !== "canvas") return;
     const el = canvasDockStackRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const clampToStack = () => {
+      if (dockDraggingRef.current) return;
       const stackH = el.clientHeight;
       if (stackH <= 0) return;
       setBottomDockHeight((h) => {
@@ -830,9 +836,23 @@ function App() {
       });
     };
     clampToStack();
-    const ro = new ResizeObserver(clampToStack);
+    // Defer: sync setState inside RO → "ResizeObserver loop completed…".
+    const ro = new ResizeObserver(() => {
+      if (dockDraggingRef.current) return;
+      if (stackClampRafRef.current) return;
+      stackClampRafRef.current = requestAnimationFrame(() => {
+        stackClampRafRef.current = 0;
+        clampToStack();
+      });
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (stackClampRafRef.current) {
+        cancelAnimationFrame(stackClampRafRef.current);
+        stackClampRafRef.current = 0;
+      }
+    };
   }, [centerTab]);
   /** FromQuery parent id (child / derived query root). */
   const [fromQueryId, setFromQueryId] = useState("");
@@ -992,8 +1012,8 @@ function App() {
     }));
   }, []);
 
-  const connections = project.connections;
-  const sources = project.sources;
+  const connections = project.connections ?? [];
+  const sources = project.sources ?? [];
 
   const onQualityProgress = useCallback(
     (state: { phase: string; percent: number } | null) => {
@@ -1254,11 +1274,11 @@ function App() {
     return `${activeQueryId}#${selectedStepIndex}:${step.payload.left_on.join(",")}|${step.payload.right_on.join(",")}`;
   })();
   useEffect(() => {
-    setJoinDiag(null);
-    setJoinDiagError(null);
-    setJoinDiagLoading(false);
-    setDiagView(null);
-    setJoinPrepareLabel(null);
+    setJoinDiag((cur) => (cur == null ? cur : null));
+    setJoinDiagError((cur) => (cur == null ? cur : null));
+    setJoinDiagLoading((cur) => (cur ? false : cur));
+    setDiagView((cur) => (cur == null ? cur : null));
+    setJoinPrepareLabel((cur) => (cur == null ? cur : null));
   }, [joinDiagIdentity]);
 
   useEffect(() => {
@@ -2003,7 +2023,7 @@ function App() {
     if (result.status === "stale") {
       setError(
         result.reason?.trim() ||
-          "KeyMap changed since Apply was prepared — re-open the map and Apply again.",
+          "Mapping changed since Apply was prepared — re-open the map and Apply again.",
       );
       return;
     }
@@ -2066,15 +2086,24 @@ function App() {
   // Keep forms in sync when steps change; clamp selected step index.
   // Do not call other setStates inside the setSelectedStepIndex updater —
   // that re-enters React and can hit "Maximum update depth" on graph clicks.
+  // Fingerprint the active query steps so a new `queries` array identity with
+  // identical IR does not re-seed Join key drafts every App render.
+  const inspectorSyncKey = useMemo(() => {
+    if (!activeQueryId) return "";
+    const q = queries.find((x) => x.id === activeQueryId);
+    if (!q) return `${activeQueryId}:missing`;
+    return `${activeQueryId}:${q.steps.length}:${JSON.stringify(q.steps)}`;
+  }, [activeQueryId, queries]);
+
   useEffect(() => {
     if (!activeQueryId) {
-      setSelectedStepIndex(null);
+      setSelectedStepIndex((cur) => (cur == null ? cur : null));
       return;
     }
     const q = queries.find((x) => x.id === activeQueryId);
     syncInspectorFromQuery(q);
     if (!q || q.steps.length === 0) {
-      setSelectedStepIndex(null);
+      setSelectedStepIndex((cur) => (cur == null ? cur : null));
       return;
     }
     const prev = selectedStepIndexRef.current;
@@ -2082,7 +2111,8 @@ function App() {
       prev === null || prev >= q.steps.length ? q.steps.length - 1 : prev;
     if (next !== prev) setSelectedStepIndex(next);
     loadStepIntoEditor(q.steps[next]);
-  }, [activeQueryId, queries, syncInspectorFromQuery, loadStepIntoEditor]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- inspectorSyncKey
+  }, [inspectorSyncKey, syncInspectorFromQuery, loadStepIntoEditor]);
 
   async function loadPostgresSchema(source: SourceDef) {
     if (source.kind !== "postgres") {
@@ -3486,6 +3516,7 @@ function App() {
     const withConnections: Project = migrateProject({
       ...loaded,
       connections: loaded.connections ?? [],
+      sources: loaded.sources ?? [],
       root_path: loaded.root_path ?? pathHint,
     });
     setProject(withConnections);
@@ -3628,12 +3659,12 @@ function App() {
         setError(
           result.external === "conflict"
             ? msg
-            : `KeyMap saved in project, but seed sync failed: ${msg}`,
+            : `Mapping saved in project, but seed sync failed: ${msg}`,
         );
         setExportMsg(
           result.external === "conflict"
-            ? "KeyMap saved in project · seed CONFLICT"
-            : "KeyMap saved in project · seed sync FAILED",
+            ? "Mapping saved in project · seed CONFLICT"
+            : "Mapping saved in project · seed sync FAILED",
         );
         return result;
       }
@@ -3655,7 +3686,7 @@ function App() {
       if (!resolved.ok) {
         const result = sourceSaveSkipped(resolved.error);
         setError(resolved.error);
-        setExportMsg("KeyMap saved in project · warehouse write skipped");
+        setExportMsg("Mapping saved in project · warehouse write skipped");
         return result;
       }
       const tab = keyMapTabs.find((t) => t.map.id === map.id);
@@ -3663,7 +3694,7 @@ function App() {
       const bindingAtStart = keyMapBindingFingerprint(map);
       // One in-flight WH Save per mapping.
       if (tab?.saveInFlight || tab?.saveApi?.isSaving()) {
-        const result = sourceSaveSkipped("KeyMap save already in progress");
+        const result = sourceSaveSkipped("Mapping save already in progress");
         setExportMsg(result.message);
         return result;
       }
@@ -3671,7 +3702,7 @@ function App() {
       const captured =
         forcedDelta !== undefined ? null : (tab?.saveApi?.captureSave() ?? null);
       if (forcedDelta === undefined && tab?.saveApi && !captured) {
-        const result = sourceSaveSkipped("KeyMap save already in progress");
+        const result = sourceSaveSkipped("Mapping save already in progress");
         setExportMsg(result.message);
         return result;
       }
@@ -3684,7 +3715,7 @@ function App() {
         if (saveToken != null) tab?.saveApi?.abortSave(saveToken);
         // ADR-0022: never full-sync from a paged/empty local cache (would wipe WH).
         const result = sourceSaveSkipped(
-          "KeyMap saved in project · no dirty rows — warehouse unchanged",
+          "Mapping saved in project · no dirty rows — warehouse unchanged",
         );
         setExportMsg(result.message);
         setError(null);
@@ -3746,12 +3777,12 @@ function App() {
         setError(
           result.external === "conflict"
             ? msg
-            : `KeyMap saved in project, but warehouse write-back failed: ${msg}`,
+            : `Mapping saved in project, but warehouse write-back failed: ${msg}`,
         );
         setExportMsg(
           result.external === "conflict"
-            ? "KeyMap saved in project · warehouse CONFLICT"
-            : "KeyMap saved in project · warehouse write FAILED",
+            ? "Mapping saved in project · warehouse CONFLICT"
+            : "Mapping saved in project · warehouse write FAILED",
         );
         return result;
       }
@@ -3811,13 +3842,13 @@ function App() {
       void removeKeyMapFromExport(exportPath, mapId)
         .then((r) => {
           if (r.path) {
-            setExportMsg(`Deleted KeyMap · removed ${r.path}`);
+            setExportMsg(`Deleted Mapping · removed ${r.path}`);
             void refreshExportTree(exportPath);
           }
         })
         .catch((e) => {
           setError(
-            `KeyMap removed from project, but seed file could not be deleted: ${
+            `Mapping removed from project, but seed file could not be deleted: ${
               e instanceof Error ? e.message : String(e)
             }`,
           );
@@ -3878,7 +3909,7 @@ function App() {
       (m) => m.id === frozenAtStart.map_id,
     );
     if (!mapAtStart) {
-      setError("KeyMap missing — refresh the remap preview.");
+      setError("Mapping missing — refresh the remap preview.");
       return;
     }
     const projectIdAtStart = projectAtStart.id;
@@ -3971,7 +4002,7 @@ function App() {
       }
       if (keyMapRevision(liveMap!, liveProject.workspace) !== revisionAtStart) {
         setError(
-          "KeyMap changed while reading baselines — refresh the remap preview.",
+          "Mapping changed while reading baselines — refresh the remap preview.",
         );
         return;
       }
@@ -4021,7 +4052,7 @@ function App() {
 
   /**
    * ADR-0042: Apply accepted from Join Lens Auto — merge into KeyMap + ApplyKeyMap
-   * without opening the KeyMap tab (confirm stays in Lens).
+   * without opening the Mapping tab (confirm stays in Lens).
    */
   function handleApplyAcceptedFromLens(
     fromValues: string[],
@@ -4175,7 +4206,7 @@ function App() {
     } else if (fold.result.status === "stale") {
       setError(
         fold.result.reason ||
-          "KeyMap changed while applying — review Auto and Apply accepted again.",
+          "Mapping changed while applying — review Auto and Apply accepted again.",
       );
     } else {
       setError(
@@ -4461,8 +4492,8 @@ function App() {
         explorer_width_px: 240,
         inspector_width_px: 300,
         llm: {
-          base_url: "https://api.openai.com/v1",
-          model: "gpt-4o-mini",
+          base_url: "",
+          model: "",
           api_key: "",
         },
       };
@@ -4792,6 +4823,19 @@ function App() {
     };
   }, [activeQueryId, activeQuery, selectedStepIndex, project.workspace]);
 
+  /** Stable ProjectRef for JoinLens memo — fresh object every render breaks memo. */
+  const joinLensProjectRef = useMemo(
+    () => projectRefContext(project),
+    [
+      project.root_path,
+      project.project_uid,
+      project.references,
+      project.connection_bindings,
+      project.execution_engine,
+      project.target_dialect,
+    ],
+  );
+
   /** Columns to pick from — prefer live preview of the active/focus query. */
   // When editing SelectColumns, load columns from the query truncated *before* that step
   // so the picker still lists fields that the step currently drops.
@@ -5023,7 +5067,7 @@ function App() {
       }
       case "ApplyKeyMap": {
         if (activeQuery.steps.length === 0) {
-          setError("ApplyKeyMap needs a prior step");
+          setError("Apply Mapping needs a prior step");
           return;
         }
         const col = columnChoices[0] ?? "channel";
@@ -5059,7 +5103,7 @@ function App() {
     { id: "RenameColumn", label: "Rename" },
     { id: "DeriveColumn", label: "Derived/Calculated" },
     { id: "NormalizeKey", label: "NormalizeKey" },
-    { id: "ApplyKeyMap", label: "ApplyKeyMap" },
+    { id: "ApplyKeyMap", label: "Apply Mapping" },
     { id: "CustomSql", label: "Custom SQL" },
   ];
 
@@ -5074,7 +5118,7 @@ function App() {
       case "NormalizeKey":
         return "NormalizeKey";
       case "ApplyKeyMap":
-        return "ApplyKeyMap";
+        return "Apply Mapping";
       default:
         return step.type;
     }
@@ -5331,7 +5375,7 @@ function App() {
             <p className="mt-1.5 text-[13px] leading-snug text-slate-400">
               This value did not find a join partner. Pick a From→To table below,
               then <span className="text-slate-300">OK</span> opens a{" "}
-              <span className="text-slate-300">KeyMap tab</span> (next to
+              <span className="text-slate-300">Mapping tab</span> (next to
               Pipeline canvas) — fill <span className="text-slate-300">To</span>{" "}
               there and press{" "}
               <span className="text-slate-300">Apply left</span> (inserts the
@@ -6215,7 +6259,7 @@ function App() {
                       : () => {
                           if (
                             window.confirm(
-                              `Delete KeyMap “${keyMapEditor.map.name}”? ApplyKeyMap steps that use it will be removed.${
+                              `Delete Mapping “${keyMapEditor.map.name}”? Apply Mapping steps that use it will be removed.${
                                 project.last_dbt_export_path &&
                                 (!keyMapEditor.map.storage ||
                                   keyMapEditor.map.storage.kind === "seed")
@@ -6249,7 +6293,7 @@ function App() {
                             ) {
                               setError(
                                 result.message ||
-                                  "KeyMap save failed — Apply cancelled. Fix the save, then Apply again.",
+                                  "Mapping save failed — Apply cancelled. Fix the save, then Apply again.",
                               );
                               return;
                             }
@@ -6258,7 +6302,7 @@ function App() {
                               /already in progress/i.test(result.message)
                             ) {
                               setError(
-                                "KeyMap save already in progress — wait for it to finish, then Apply again. Mapping drafts are unchanged.",
+                                "Mapping save already in progress — wait for it to finish, then Apply again. Mapping drafts are unchanged.",
                               );
                               return;
                             }
@@ -6292,7 +6336,7 @@ function App() {
               </div>
             ))}
 
-            {/* Keep mounted while a KeyMap tab is active so Join Lens (mode, scroll,
+            {/* Keep mounted while a Mapping tab is active so Join Lens (mode, scroll,
                 selection, chat) survives open/close of the map editor. */}
             <div
               ref={canvasDockStackRef}
@@ -6327,16 +6371,24 @@ function App() {
               orientation="horizontal"
               aria-label="Resize data panel"
               title="Drag to resize · double-click to maximize Join Lens / Data (collapse graph)"
-              onDelta={(dy) =>
-                setBottomDockHeight((h) => {
-                  const stackH =
-                    canvasDockStackRef.current?.clientHeight ?? 0;
-                  const next = clampBottomDockHeight(h - dy, stackH);
-                  bottomDockHeightRef.current = next;
-                  bottomDockRestoreRef.current = null;
-                  return next;
-                })
-              }
+              onDelta={(dy) => {
+                dockDraggingRef.current = true;
+                const stackH =
+                  canvasDockStackRef.current?.clientHeight ?? 0;
+                const next = clampBottomDockHeight(
+                  bottomDockHeightRef.current - dy,
+                  stackH,
+                );
+                bottomDockHeightRef.current = next;
+                bottomDockRestoreRef.current = null;
+                // One React commit per frame — continuous setState storms
+                // React Flow ResizeObservers ("loop completed…").
+                if (dockHeightRafRef.current) return;
+                dockHeightRafRef.current = requestAnimationFrame(() => {
+                  dockHeightRafRef.current = 0;
+                  setBottomDockHeight(bottomDockHeightRef.current);
+                });
+              }}
               onDoubleClick={() => {
                 const stackH =
                   canvasDockStackRef.current?.clientHeight ?? 0;
@@ -6365,6 +6417,12 @@ function App() {
                 });
               }}
               onDragEnd={() => {
+                dockDraggingRef.current = false;
+                if (dockHeightRafRef.current) {
+                  cancelAnimationFrame(dockHeightRafRef.current);
+                  dockHeightRafRef.current = 0;
+                }
+                setBottomDockHeight(bottomDockHeightRef.current);
                 try {
                   localStorage.setItem(
                     BOTTOM_DOCK_HEIGHT_KEY,
@@ -6597,7 +6655,7 @@ function App() {
                         rightOn={joinLensTarget.rightOn}
                         connections={connections}
                         sources={sources}
-                        projectRef={projectRefContext(project)}
+                        projectRef={joinLensProjectRef}
                         columns={preview.columns}
                         rows={preview.rows}
                         joinDiag={joinDiag}

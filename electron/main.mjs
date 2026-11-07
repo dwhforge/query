@@ -338,9 +338,16 @@ function createWindow() {
     console.error("[dwh] render-process-gone", details);
   });
   mainWindow.webContents.on("console-message", (_e, level, message, line, sourceId) => {
-    if (level >= 2) {
-      console.error(`[renderer] ${message} (${sourceId}:${line})`);
+    if (level < 2) return;
+    // Benign browser quirk when layout updates inside a ResizeObserver
+    // (React Flow + dock splitter). Not an app failure.
+    if (
+      typeof message === "string" &&
+      message.includes("ResizeObserver loop")
+    ) {
+      return;
     }
+    console.error(`[renderer] ${message} (${sourceId}:${line})`);
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;

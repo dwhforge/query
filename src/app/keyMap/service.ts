@@ -124,7 +124,7 @@ export function applyKeyMapTabMapChange(
     return {
       ok: false,
       reason:
-        "KeyMap warehouse save still in progress — wait or abort before changing storage binding.",
+        "Mapping warehouse save still in progress — wait or abort before changing storage binding.",
     };
   }
   return {
@@ -183,7 +183,7 @@ export function applyKeyMapOntoProject(
       result: {
         status: "stale",
         mapId: intent.map.id,
-        reason: `KeyMap '${intent.map.id}' is missing from the project — re-open Apply.`,
+        reason: `Mapping '${intent.map.id}' is missing from the project — re-open Apply.`,
       },
     };
   }
@@ -195,7 +195,7 @@ export function applyKeyMapOntoProject(
         status: "stale",
         mapId: intent.map.id,
         reason:
-          "KeyMap changed since Apply was prepared — re-open the map and Apply again.",
+          "Mapping changed since Apply was prepared — re-open the map and Apply again.",
       },
     };
   }
@@ -498,14 +498,14 @@ export function seedSaveResult(args: {
     return {
       local: "saved",
       external: "skipped",
-      message: "KeyMap saved in project (not exported yet — no seed CSV)",
+      message: "Mapping saved in project (not exported yet — no seed CSV)",
     };
   }
   if (!args.syncError) {
     return {
       local: "saved",
       external: "synced",
-      message: "KeyMap saved in project · synced → seeds (export tree)",
+      message: "Mapping saved in project · synced → seeds (export tree)",
     };
   }
   const isConflict = isSyncConflictMessage(args.syncError);
@@ -529,7 +529,7 @@ export function sourceSaveSynced(args: {
   return {
     local: "saved",
     external: "synced",
-    message: `KeyMap saved in project · upsert → ${args.schema}.${args.table} (${args.rowsWritten} dirty rows)`,
+    message: `Mapping saved in project · upsert → ${args.schema}.${args.table} (${args.rowsWritten} dirty rows)`,
     contentHash: args.contentHash,
   };
 }
@@ -547,7 +547,7 @@ export function refSaveResult(): KeyMapSaveResult {
   return {
     local: "saved",
     external: "none",
-    message: "KeyMap saved in project (ref storage — no warehouse write-back)",
+    message: "Mapping saved in project (ref storage — no warehouse write-back)",
   };
 }
 

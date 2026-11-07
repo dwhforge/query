@@ -1024,14 +1024,26 @@ function GraphCanvasImpl(props: GraphCanvasProps) {
   useEffect(() => {
     const el = hostRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
+    let raf = 0;
     const sync = () => {
       const ready = el.clientWidth > 1 && el.clientHeight > 1;
       setFlowReady((prev) => (prev === ready ? prev : ready));
     };
     sync();
-    const ro = new ResizeObserver(sync);
+    // rAF: avoid "ResizeObserver loop completed…" when the dock splitter
+    // resizes this host in the same frame as the observer callback.
+    const ro = new ResizeObserver(() => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        sync();
+      });
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, []);
   return (
     <div

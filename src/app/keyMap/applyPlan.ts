@@ -190,23 +190,23 @@ function validateMapBasics(map: KeyMapDef): ResolveApplyPlanError | null {
   const from = fromColumnsEff(map);
   const outs = outputColumnsEff(map);
   if (!from.length || from.some((c) => !c.trim())) {
-    return { error: `KeyMap '${map.id}': from columns are required.` };
+    return { error: `Mapping '${map.id}': from columns are required.` };
   }
   if (!outs.length || outs.some((c) => !c.trim())) {
-    return { error: `KeyMap '${map.id}': output columns are required.` };
+    return { error: `Mapping '${map.id}': output columns are required.` };
   }
   const names = new Set<string>();
   for (const c of [...from, ...outs]) {
     const k = c.toLowerCase();
     if (names.has(k)) {
       return {
-        error: `KeyMap '${map.id}': duplicate map column name '${c}'.`,
+        error: `Mapping '${map.id}': duplicate map column name '${c}'.`,
       };
     }
     names.add(k);
   }
   if (map.storage?.kind === "query" && !map.storage.query_id?.trim()) {
-    return { error: `KeyMap '${map.id}': query_id is empty.` };
+    return { error: `Mapping '${map.id}': query_id is empty.` };
   }
   return null;
 }

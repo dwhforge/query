@@ -304,12 +304,12 @@ export function assertRemapConfirmable(
   check?: MappingCheck,
 ): void {
   if (!map || map.id !== freeze.map_id) {
-    throw new Error("KeyMap missing or mismatched — refresh the remap preview.");
+    throw new Error("Mapping missing or mismatched — refresh the remap preview.");
   }
   const current = keyMapRevision(map, workspace);
   if (current !== freeze.expected_map_revision) {
     throw new Error(
-      "KeyMap changed since preview — run a new preview before confirming.",
+      "Mapping changed since preview — run a new preview before confirming.",
     );
   }
   if (workspace && check && freeze.expected_input_revisions?.length) {
@@ -353,7 +353,7 @@ export function applyFrozenRemapToMap(
   const isSource = map.storage?.kind === "source";
   if (isSource && priorEntries === undefined) {
     throw new Error(
-      "Source KeyMap Confirm requires warehouse baselines for the remapped From keys.",
+      "Source Mapping Confirm requires warehouse baselines for the remapped From keys.",
     );
   }
   const base = isSource ? priorEntries! : map.entries;

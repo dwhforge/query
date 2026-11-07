@@ -1114,7 +1114,7 @@ export function KeyMapEditor({
             <span className="font-mono">
               {`{{ ref('${refStorage.model?.trim() || "…"}') }}`}
             </span>
-            . Preview will refuse ApplyKeyMap for this map — local rows below are
+            . Preview will refuse Apply Mapping for this map — local rows below are
             a draft cache only (not write-back, not live preview).
           </p>
           <label className={labelClass}>
@@ -1910,7 +1910,7 @@ export function KeyMapEditor({
             type="button"
             onClick={onMappingCheck}
             className="rounded-md border border-teal-800/50 bg-teal-500/10 px-2.5 py-1 text-[12px] font-medium text-teal-200 hover:bg-teal-500/20"
-            title="Open mapping quality overview for a Join that ApplyKeyMap-wires this map"
+            title="Open mapping quality overview for a Join that applies this Mapping"
           >
             Mapping check…
           </button>
@@ -2395,7 +2395,7 @@ export function KeyMapEditor({
               ) : onApply ? (
                 <>
                   <span className="mr-1 text-[11px] text-slate-500">
-                    Insert ApplyKeyMap:
+                    Insert Apply Mapping:
                   </span>
                   {otherSides.map((side) => (
                     <button
@@ -2473,7 +2473,7 @@ export function KeyMapEditor({
                     Apply to {primarySide}
                   </span>
                   {" → inserts "}
-                  <span className="font-mono text-slate-400">ApplyKeyMap</span>
+                  <span className="font-mono text-slate-400">Apply Mapping</span>
                   {" on "}
                   <span className="font-mono text-slate-300">{primaryTarget}</span>
                   {primarySide === "left" ? " before Join" : ""}.{" "}
@@ -2495,7 +2495,7 @@ export function KeyMapEditor({
                   Join Lens context only
                 </span>
                 {" — inserts "}
-                <span className="font-mono text-slate-400">ApplyKeyMap</span>
+                <span className="font-mono text-slate-400">Apply Mapping</span>
                 {" for this Join; map stays unbound."}
                 {joinApplyHint ? ` ${joinApplyHint}` : ""}
               </p>

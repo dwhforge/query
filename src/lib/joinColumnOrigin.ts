@@ -18,6 +18,8 @@ export type SidePinIndexResult = {
   pinned: boolean;
 };
 
+const EMPTY_PIN_INDICES: number[] = [];
+
 function fold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
@@ -225,7 +227,7 @@ export function pinSideIndicesToResult(args: {
 }): SidePinIndexResult {
   const { sideRows } = args;
   if (sideRows.length === 0) {
-    return { indices: [], keyMatchCount: 0, pinned: false };
+    return { indices: EMPTY_PIN_INDICES, keyMatchCount: 0, pinned: false };
   }
 
   // First restrict to join-key matches (same as SideCard "linked by key").
@@ -260,10 +262,10 @@ export function pinSideIndicesToResult(args: {
   }
   // No key columns on result → nothing to link.
   if (keyPairs.length === 0) {
-    return { indices: [], keyMatchCount: 0, pinned: false };
+    return { indices: EMPTY_PIN_INDICES, keyMatchCount: 0, pinned: false };
   }
   if (keyMatchIdx.length === 0) {
-    return { indices: [], keyMatchCount: 0, pinned: false };
+    return { indices: EMPTY_PIN_INDICES, keyMatchCount: 0, pinned: false };
   }
   if (keyMatchIdx.length === 1) {
     return {

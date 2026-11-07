@@ -855,7 +855,7 @@ export function MappingQualityOverview({
               <p className="quality-sample-note">
                 {!selection && !target
                   ? "Select a matrix cell or concentrated target first. Inspect opens the check cohort in Join Lens (predicate, not join ON)."
-                  : "Cohort = check predicate (samples illustrate it). Ephemeral query is TEMP — not saved. Accept links only via KeyMap; Allow records a check decision."}
+                  : "Cohort = check predicate (samples illustrate it). Ephemeral query is TEMP — not saved. Accept links only via Mapping; Allow records a check decision."}
               </p>
               <details>
                 <summary>Sample keys</summary>

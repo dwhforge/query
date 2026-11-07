@@ -47,11 +47,11 @@ export const FALLBACK_LAB_CATALOG: HelpLabCard[] = [
       "Plant SKUs vs commercial codes — map, then explain qty and revenue gaps by month.",
     teaches: [
       "Why a plain Join fails when two systems name the same product differently",
-      "Partial KeyMap + Join Lens on unmatched commercial SKUs",
-      "Monthly reconciliation after ApplyKeyMap",
+      "Partial Mapping + Join Lens on unmatched commercial SKUs",
+      "Monthly reconciliation after Apply Mapping",
     ],
     youKeep: [
-      "KeyMap seed map_sku (exportable dbt seed)",
+      "Mapping seed map_sku (exportable dbt seed)",
       "dirty_recon, sales_mapped, recon_by_month queries",
       "A checked calculation you can re-export as SQL/dbt",
     ],
@@ -66,7 +66,7 @@ export const FALLBACK_LAB_CATALOG: HelpLabCard[] = [
       "POS and cost feeds spell brands differently — one map to company_id, daily then monthly PnL.",
     teaches: [
       "Unmatched names → Add to map from Join Lens",
-      "Reuse one KeyMap on two feeds",
+      "Reuse one Mapping on two feeds",
       "Derive net and roll up by month",
     ],
     youKeep: [

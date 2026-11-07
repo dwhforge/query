@@ -21,11 +21,11 @@ export function validateQueryMapBinding(
   schemaColumns: string[],
 ): { ok: true } | { ok: false; error: string } {
   const qid = queryBackedQueryId(map);
-  if (!qid) return { ok: false, error: `KeyMap “${map.id}”: not query-backed` };
+  if (!qid) return { ok: false, error: `Mapping “${map.id}”: not query-backed` };
   if (!workspace.queries.some((q) => q.id === qid)) {
     return {
       ok: false,
-      error: `KeyMap “${map.id}”: query “${qid}” not found`,
+      error: `Mapping “${map.id}”: query “${qid}” not found`,
     };
   }
   const fromCols = fromColumnsEff(map);
@@ -85,10 +85,10 @@ export function validateQueryMapRows(
   outputArity = 1,
 ): { ok: true } | { ok: false; error: string } {
   if (fromArity < 1) {
-    return { ok: false, error: `KeyMap “${mapId}”: From arity must be ≥ 1` };
+    return { ok: false, error: `Mapping “${mapId}”: From arity must be ≥ 1` };
   }
   if (outputArity < 1) {
-    return { ok: false, error: `KeyMap “${mapId}”: output arity must be ≥ 1` };
+    return { ok: false, error: `Mapping “${mapId}”: output arity must be ≥ 1` };
   }
   const width = fromArity + outputArity;
   const seen = new Set<string>();
@@ -97,7 +97,7 @@ export function validateQueryMapRows(
     if (row.length !== width) {
       return {
         ok: false,
-        error: `KeyMap “${mapId}”: row ${i} has ${row.length} cells, expected ${width}`,
+        error: `Mapping “${mapId}”: row ${i} has ${row.length} cells, expected ${width}`,
       };
     }
     const fromParts: string[] = [];
@@ -106,13 +106,13 @@ export function validateQueryMapRows(
       if (cell == null) {
         return {
           ok: false,
-          error: `KeyMap “${mapId}”: NULL in From part ${p} at row ${i}`,
+          error: `Mapping “${mapId}”: NULL in From part ${p} at row ${i}`,
         };
       }
       if (cell === "") {
         return {
           ok: false,
-          error: `KeyMap “${mapId}”: empty From part ${p} at row ${i}`,
+          error: `Mapping “${mapId}”: empty From part ${p} at row ${i}`,
         };
       }
       fromParts.push(cell);
@@ -123,13 +123,13 @@ export function validateQueryMapRows(
       if (out == null) {
         return {
           ok: false,
-          error: `KeyMap “${mapId}”: NULL in ${label} at row ${i}`,
+          error: `Mapping “${mapId}”: NULL in ${label} at row ${i}`,
         };
       }
       if (out === "") {
         return {
           ok: false,
-          error: `KeyMap “${mapId}”: empty ${label} at row ${i}`,
+          error: `Mapping “${mapId}”: empty ${label} at row ${i}`,
         };
       }
     }
@@ -137,7 +137,7 @@ export function validateQueryMapRows(
     if (seen.has(key)) {
       return {
         ok: false,
-        error: `KeyMap “${mapId}”: duplicate From tuple ${JSON.stringify(fromParts)} at row ${i}`,
+        error: `Mapping “${mapId}”: duplicate From tuple ${JSON.stringify(fromParts)} at row ${i}`,
       };
     }
     seen.add(key);

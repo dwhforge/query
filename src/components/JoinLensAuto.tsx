@@ -152,8 +152,8 @@ export function JoinLensAuto({
   const [error, setError] = useState<string | null>(null);
   const [llm, setLlm] = useState<LlmConfig | null>(null);
   const [showConn, setShowConn] = useState(false);
-  const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
-  const [model, setModel] = useState("gpt-4o-mini");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [connMsg, setConnMsg] = useState<string | null>(null);
   const [chat, setChat] = useState<ChatMsg[]>([]);
@@ -193,6 +193,7 @@ export function JoinLensAuto({
   function openLlmLeftovers() {
     setChatOpen(true);
     setChatReveal(true);
+    if (!baseUrl.trim() || !model.trim()) setShowConn(true);
     if (chatRevealTimer.current) clearTimeout(chatRevealTimer.current);
     chatRevealTimer.current = setTimeout(() => setChatReveal(false), 1400);
     requestAnimationFrame(() => {
@@ -217,19 +218,39 @@ export function JoinLensAuto({
         setLlm(cfg);
         setBaseUrl(cfg.base_url);
         setModel(cfg.model);
+        // Empty endpoint → open Connect form; user must enter URL/model first.
+        if (!cfg.base_url.trim() || !cfg.model.trim()) {
+          setShowConn(true);
+        }
       })
       .catch(() => {
-        /* connection form still works */
+        if (!cancelled) setShowConn(true);
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
+  const workspaceRef = useRef(workspace);
+  const connectionsRef = useRef(connections);
+  const sourcesRef = useRef(sources);
+  const projectRefRef = useRef(projectRef);
+  workspaceRef.current = workspace;
+  connectionsRef.current = connections;
+  sourcesRef.current = sources;
+  projectRefRef.current = projectRef;
+
+  /** Stable join+mode key — avoid re-fetch loops when parent passes new object identities. */
+  const fuzzyFetchKey = `${hostQueryId}#${joinStepIndex}#${keyIndex ?? "all"}#${
+    compositeMode ? `c${compositeFuzzySlot}` : "s"
+  }`;
+
   useEffect(() => {
-    setKeyIndex(null);
-    setCompositeMode(false);
-    setCompositeFuzzySlot(0);
+    setKeyIndex((cur) => (cur == null ? cur : null));
+    setCompositeMode((cur) => (cur ? false : cur));
+    setCompositeFuzzySlot((cur) => (cur === 0 ? cur : 0));
+    setChatOpen((cur) => (cur ? false : cur));
+    setChatReveal((cur) => (cur ? false : cur));
   }, [hostQueryId, joinStepIndex]);
 
   useEffect(() => {
@@ -246,23 +267,23 @@ export function JoinLensAuto({
     async function run() {
       try {
         let result = await joinKeyFuzzySuggest(
-          workspace,
+          workspaceRef.current,
           hostQueryId,
           joinStepIndex,
-          connections,
-          sources,
+          connectionsRef.current,
+          sourcesRef.current,
           compositeMode ? null : keyIndex,
           null,
-          projectRef,
+          projectRefRef.current,
         );
         if (cancelled) return;
         if (compositeMode && result.left_on.length > 1) {
           result = await joinKeyFuzzySuggest(
-            workspace,
+            workspaceRef.current,
             hostQueryId,
             joinStepIndex,
-            connections,
-            sources,
+            connectionsRef.current,
+            sourcesRef.current,
             null,
             {
               indices: result.left_on.map((_, i) => i),
@@ -271,7 +292,7 @@ export function JoinLensAuto({
                 Math.max(0, result.left_on.length - 1),
               ),
             },
-            projectRef,
+            projectRefRef.current,
           );
         }
         if (cancelled) return;
@@ -281,8 +302,21 @@ export function JoinLensAuto({
           !result.disabled_reason &&
           result.suggestions.length === 0 &&
           (result.leftover_left.length > 0 || result.leftover_right.length > 0);
-        if (openChat) openLlmLeftovers();
-        else setChatOpen(false);
+        // Auto-open once for empty fuzzy (reveal outside the updater).
+        if (openChat) {
+          setChatOpen((was) => {
+            if (was) return true;
+            queueMicrotask(() => {
+              setChatReveal(true);
+              if (chatRevealTimer.current) clearTimeout(chatRevealTimer.current);
+              chatRevealTimer.current = setTimeout(
+                () => setChatReveal(false),
+                1400,
+              );
+            });
+            return true;
+          });
+        }
       } catch (e) {
         if (!cancelled) setError(typeof e === "string" ? e : String(e));
       } finally {
@@ -295,15 +329,9 @@ export function JoinLensAuto({
       cancelled = true;
       chatGen.current += 1;
     };
-  }, [
-    workspace,
-    hostQueryId,
-    joinStepIndex,
-    connections,
-    keyIndex,
-    compositeMode,
-    compositeFuzzySlot,
-  ]);
+    // fuzzyFetchKey encodes host/join/mode; live IR read via refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fuzzyFetchKey]);
 
   const accepted = useMemo(
     () => acceptedProposals(proposals),
@@ -326,17 +354,27 @@ export function JoinLensAuto({
 
   async function saveConn(clearKey = false) {
     setConnMsg(null);
+    const url = baseUrl.trim();
+    const mod = model.trim();
+    if (!clearKey && (!url || !mod)) {
+      setConnMsg("Enter base_url and model, then Save.");
+      setShowConn(true);
+      return;
+    }
     try {
       const cfg = await setLlmConfig({
-        baseUrl,
-        model,
+        baseUrl: url || baseUrl,
+        model: mod || model,
         apiKey: clearKey ? undefined : apiKey,
         clearApiKey: clearKey,
       });
       setLlm(cfg);
+      setBaseUrl(cfg.base_url);
+      setModel(cfg.model);
       setApiKey("");
       setConnMsg(cfg.api_key_set ? "Saved llm section" : "Saved. API key is empty");
-      setShowConn(false);
+      // Stay open until both fields are set.
+      setShowConn(!cfg.base_url.trim() || !cfg.model.trim());
     } catch (e) {
       setConnMsg(typeof e === "string" ? e : String(e));
     }
@@ -694,7 +732,7 @@ export function JoinLensAuto({
           disabled={!onAccept || accepted.length === 0}
           onClick={commitAccepted}
           className="rounded border-2 border-amber-500 bg-amber-500/35 px-3 py-2 text-[13px] font-bold text-amber-50 shadow-[0_0_0_1px_rgba(245,158,11,0.25)] disabled:opacity-40"
-          title="Writes Mapping (KeyMap) + Apply. LLM queue is not a write."
+          title="Writes Mapping + Apply. LLM queue is not a write."
         >
           Write Mapping · {accepted.length} pair
           {accepted.length === 1 ? "" : "s"}
@@ -757,7 +795,9 @@ export function JoinLensAuto({
               onClick={() => setShowConn((v) => !v)}
               className="shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
             >
-              {llm ? llm.model : "Connect LLM"}
+              {baseUrl.trim() && model.trim()
+                ? model.trim() || llm?.model || "LLM"
+                : "Connect LLM"}
             </button>
             <button
               type="button"
@@ -773,20 +813,34 @@ export function JoinLensAuto({
             </button>
           </div>
 
-          {showConn && (
+          {(showConn || !baseUrl.trim() || !model.trim()) && (
             <div className="shrink-0 space-y-1 border-b border-slate-800 bg-slate-950/80 px-2 py-2 text-[10px]">
               <div className="text-slate-500">
-                Writes <span className="font-mono">llm</span> in
-                ~/.dwhforge-query/settings.json (OpenAI-compatible{" "}
-                <span className="font-mono">/chat/completions</span>). API key
-                optional for local endpoints without auth.
+                {baseUrl.trim() && model.trim()
+                  ? <>
+                      Writes <span className="font-mono">llm</span> in
+                      ~/.dwhforge-query/settings.json (OpenAI-compatible{" "}
+                      <span className="font-mono">/chat/completions</span>).
+                      API key optional for local endpoints without auth.
+                    </>
+                  : <>
+                      Enter endpoint first — OpenAI-compatible{" "}
+                      <span className="font-mono">base_url</span> +{" "}
+                      <span className="font-mono">model</span>. Saved to{" "}
+                      <span className="font-mono">
+                        ~/.dwhforge-query/settings.json
+                      </span>
+                      .
+                    </>}
               </div>
               <label className="block text-slate-400">
                 base_url
                 <input
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
-                  className="mt-0.5 w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-slate-200 outline-none"
+                  placeholder="https://…/v1"
+                  autoFocus={!baseUrl.trim()}
+                  className="mt-0.5 w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-slate-200 outline-none placeholder:text-slate-600"
                 />
               </label>
               <label className="block text-slate-400">
@@ -794,7 +848,8 @@ export function JoinLensAuto({
                 <input
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
-                  className="mt-0.5 w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-slate-200 outline-none"
+                  placeholder="model id"
+                  className="mt-0.5 w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 font-mono text-slate-200 outline-none placeholder:text-slate-600"
                 />
               </label>
               <label className="block text-slate-400">

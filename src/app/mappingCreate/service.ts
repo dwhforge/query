@@ -185,7 +185,7 @@ export function basisQueryFingerprints(
       if (!km) {
         return {
           ok: false,
-          error: `Applied KeyMap “${mid}” is missing — cannot confirm basis.`,
+          error: `Applied Mapping “${mid}” is missing — cannot confirm basis.`,
         };
       }
       seenMaps.add(mid);
@@ -751,7 +751,7 @@ export function validateMappingCreatePlan(
     return { ok: false, error: "Project changed — re-run review." };
   }
   if ((project.workspace.key_maps ?? []).some((m) => m.id === plan.map.id)) {
-    return { ok: false, error: `KeyMap id “${plan.map.id}” already exists.` };
+    return { ok: false, error: `Mapping id “${plan.map.id}” already exists.` };
   }
   for (const [qid, fp] of Object.entries(plan.expectedQueryDefs)) {
     const q = project.workspace.queries.find((x) => x.id === qid);

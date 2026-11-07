@@ -337,7 +337,7 @@ export function createMappingCheck(input: NewCheckInput): NewCheckResult {
   if (!map) {
     return {
       ok: false,
-      error: `KeyMap “${input.mapId}” not found — pick a map that exists in the project.`,
+      error: `Mapping “${input.mapId}” not found — pick a map that exists in the project.`,
     };
   }
   const leftAttrs = (
@@ -369,7 +369,7 @@ export function createMappingCheck(input: NewCheckInput): NewCheckResult {
   if (!onHost.length) {
     return {
       ok: false,
-      error: `Query “${input.hostQueryId}” has no ApplyKeyMap for map “${map.name}”. Pick a Join host that uses this map.`,
+      error: `Query “${input.hostQueryId}” has no Apply Mapping for map “${map.name}”. Pick a Join host that uses this map.`,
     };
   }
   let hostHit = onHost[0]!;
@@ -690,7 +690,7 @@ export function applyConfirmRemapOntoProject(
       result: {
         status: "stale",
         opId: intent.opId,
-        reason: "KeyMap missing before Confirm could apply — refresh and retry.",
+        reason: "Mapping missing before Confirm could apply — refresh and retry.",
       },
     };
   }
@@ -701,7 +701,7 @@ export function applyConfirmRemapOntoProject(
         status: "stale",
         opId: intent.opId,
         reason:
-          "KeyMap binding changed before Confirm could apply — refresh and retry.",
+          "Mapping binding changed before Confirm could apply — refresh and retry.",
       },
     };
   }
@@ -712,7 +712,7 @@ export function applyConfirmRemapOntoProject(
         status: "stale",
         opId: intent.opId,
         reason:
-          "KeyMap changed before Confirm could apply — refresh the remap preview.",
+          "Mapping changed before Confirm could apply — refresh the remap preview.",
       },
     };
   }
@@ -750,7 +750,7 @@ export function dirtyDeltaFromFrozenRemap(
   const isSource = map.storage?.kind === "source";
   if (isSource && priorEntries === undefined) {
     throw new Error(
-      "Source KeyMap Confirm requires warehouse baselines for the remapped From keys.",
+      "Source Mapping Confirm requires warehouse baselines for the remapped From keys.",
     );
   }
   const editable = map.editable_columns ?? [];
@@ -860,16 +860,16 @@ export function confirmContextStillValid(args: {
     return "Remap preview changed while reading baselines — Confirm cancelled.";
   }
   if (!args.liveMap) {
-    return "KeyMap missing after baseline read — Confirm cancelled.";
+    return "Mapping missing after baseline read — Confirm cancelled.";
   }
   if (args.bindingOf(args.liveMap) !== args.bindingAtStart) {
-    return "KeyMap binding changed while reading baselines — Confirm cancelled.";
+    return "Mapping binding changed while reading baselines — Confirm cancelled.";
   }
   if (
     keyMapRevision(args.liveMap, args.workspace) !==
     args.frozenAtStart.expected_map_revision
   ) {
-    return "KeyMap changed while reading baselines — refresh the remap preview.";
+    return "Mapping changed while reading baselines — refresh the remap preview.";
   }
   return null;
 }
@@ -899,12 +899,12 @@ export function unrelatedDraftBlocksConfirm(args: {
     for (const f of draftFroms) {
       if (!f) continue;
       if (!frozen.has(f)) {
-        return `KeyMap has unsaved edits outside the check preview (e.g. “${f}”). Save or discard them before Confirm.`;
+        return `Mapping has unsaved edits outside the check preview (e.g. “${f}”). Save or discard them before Confirm.`;
       }
     }
   } else if (args.localDraft) {
     // Seed/ref draft without a dirty wire — cannot prove it is only frozen Froms.
-    return "Save or discard KeyMap editor drafts before confirming check remap.";
+    return "Save or discard Mapping editor drafts before confirming check remap.";
   }
   return null;
 }
@@ -955,7 +955,7 @@ export function confirmFrozenCheckRemap(args: {
       return {
         ok: false,
         error:
-          "Source KeyMap Confirm needs warehouse baselines for remapped keys — refresh and retry.",
+          "Source Mapping Confirm needs warehouse baselines for remapped keys — refresh and retry.",
       };
     }
     const nextMap = applyFrozenRemapToMap(
@@ -975,7 +975,7 @@ export function confirmFrozenCheckRemap(args: {
       ok: true,
       nextMap,
       dirtyDelta,
-      message: `Check remap confirmed · ${frozen.changes.length} link(s) via KeyMap`,
+      message: `Check remap confirmed · ${frozen.changes.length} link(s) via Mapping`,
     };
   } catch (reason) {
     return { ok: false, error: String(reason) };

@@ -247,7 +247,7 @@ export const SIGNALS: Record<
     label: "Attribute differences",
     color: "#f0c674",
     explanation:
-      "Chosen left/right attributes differ after ApplyKeyMap. Inspect whether the difference is expected.",
+      "Chosen left/right attributes differ after Apply Mapping. Inspect whether the difference is expected.",
   },
 };
 function records(result: PreviewResult): Record<string, unknown>[] {

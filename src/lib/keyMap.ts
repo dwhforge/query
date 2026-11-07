@@ -887,7 +887,7 @@ export function resolveKeyMapConnection(
   forWrite = false,
 ): KeyMapConnResolve {
   if (map.storage?.kind !== "source") {
-    return { ok: false, error: "KeyMap storage is not source" };
+    return { ok: false, error: "Mapping storage is not source" };
   }
   const { source, table, connection_id } = map.storage;
   const cid = connection_id?.trim() ?? "";
@@ -897,7 +897,7 @@ export function resolveKeyMapConnection(
     if (!conn) {
       return {
         ok: false,
-        error: `KeyMap connection_id “${cid}” not found — pick a Connection in the editor (no fallback).`,
+        error: `Mapping connection_id “${cid}” not found — pick a Connection in the editor (no fallback).`,
       };
     }
     const dsn = pgDsn(conn);
@@ -914,7 +914,7 @@ export function resolveKeyMapConnection(
     return {
       ok: false,
       error:
-        "KeyMap write requires an explicit Connection on the map (Storage → Connection). No silent fallback to target / other PG.",
+        "Mapping write requires an explicit Connection on the map (Storage → Connection). No silent fallback to target / other PG.",
     };
   }
 
@@ -942,7 +942,7 @@ export function resolveKeyMapConnection(
 
   return {
     ok: false,
-    error: `No connection for KeyMap source ${source}.${table} — set Storage → Connection.`,
+    error: `No connection for Mapping source ${source}.${table} — set Storage → Connection.`,
   };
 }
 

@@ -1,8 +1,9 @@
 /**
- * Preview IPC hygiene ([ADR-0033](../../docs/adr/0033-mapping-data-plane.md)):
+ * Preview IPC hygiene ([ADR-0033](../../docs/adr/0033-mapping-data-plane.md),
+ * [ADR-0041](../../docs/adr/0041-heavy-preview-sample.md)):
  * - Strip unused seed KeyMap rows on transport (lab has 95k — not every CSV click).
- * - Heavy ApplyKeyMap focuses: cache result + postload once; do not re-ship the
- *   dictionary on every graph click (avoids SUPER traffic while keeping full data).
+ * - Heavy = large needed seed map only (no lab query-id allowlist).
+ * - Auto-preview always samples; full is on demand + session-cached.
  */
 import { directUpstreamQueryIds } from "../app/mappingCreate/service";
 import type {
@@ -12,6 +13,9 @@ import type {
   Workspace,
 } from "../types/pipeline";
 import { targetKey } from "../types/pipeline";
+
+/** Structural preview sample LIMIT — matches host / compiler default. */
+export const PREVIEW_SAMPLE_LIMIT = 50;
 
 /**
  * Maps Applied anywhere in the focus closure.
@@ -72,21 +76,14 @@ export function workspaceForPreviewTransport(workspace: Workspace): Workspace {
   return { ...workspace, key_maps: nextMaps };
 }
 
-const HEAVY_ENTRY_FLOOR = 5_000;
+export const HEAVY_ENTRY_FLOOR = 5_000;
 
-/** True when this focus pulls a large seed map (or known lab projection nodes). */
+/** True when this focus pulls a large seed map (≥ {@link HEAVY_ENTRY_FLOOR} entries). */
 export function isHeavyPreviewFocus(
   workspace: Workspace,
   focusId: string | null | undefined,
 ): boolean {
   if (!focusId) return false;
-  if (
-    focusId === "quality_joined" ||
-    focusId === "quality_summary" ||
-    focusId === "quality_targets"
-  ) {
-    return true;
-  }
   const needed = keyMapIdsNeededForFocus(workspace, focusId);
   if (needed.size === 0) return false;
   const maps = workspace.key_maps ?? [];
@@ -96,9 +93,6 @@ export function isHeavyPreviewFocus(
   }
   return false;
 }
-
-/** @deprecated use {@link isHeavyPreviewFocus} — kept for call-site clarity during migrate */
-export const shouldSkipHeavyAutoPreview = isHeavyPreviewFocus;
 
 /** Cheap fingerprint — never sort 95k rows. */
 function mapLiteFingerprint(map: KeyMapDef): string {
@@ -115,6 +109,8 @@ function mapLiteFingerprint(map: KeyMapDef): string {
   return `${map.id}:${n}:${label(map.entries[0])}|${label(mid)}|${label(map.entries[n - 1])}`;
 }
 
+export type HeavyPreviewMode = "sample" | "full";
+
 /**
  * Session cache key for a heavy focus. Stable across clicks; changes when
  * map ends or query steps that touch the map change.
@@ -122,6 +118,7 @@ function mapLiteFingerprint(map: KeyMapDef): string {
 export function heavyPreviewCacheKey(
   workspace: Workspace,
   focusId: string,
+  mode: HeavyPreviewMode = "sample",
 ): string {
   const needed = [...keyMapIdsNeededForFocus(workspace, focusId)].sort();
   const maps = workspace.key_maps ?? [];
@@ -142,7 +139,7 @@ export function heavyPreviewCacheKey(
         })
         .join(">")
     : "";
-  return `${focusId}#${mapFp}#${stepFp}`;
+  return `${focusId}#${mode}#${mapFp}#${stepFp}`;
 }
 
 /** In-memory preview cache — one full IPC per heavy key per session fingerprint. */

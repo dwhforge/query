@@ -239,6 +239,24 @@ pub fn compile_focus_sql_for_execution(
     sources: &[SourceDef],
     is_preview: bool,
 ) -> Result<String, String> {
+    compile_focus_sql_for_execution_limited(
+        db,
+        workspace,
+        connections,
+        sources,
+        if is_preview { Some(50) } else { None },
+    )
+}
+
+/// Like [`compile_focus_sql_for_execution`], with an explicit output row LIMIT
+/// (`None` = unbounded). ADR-0041 full preview.
+pub fn compile_focus_sql_for_execution_limited(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+    row_limit: Option<u64>,
+) -> Result<String, String> {
     let prepared = prepare_operation(db, workspace, connections, sources)?;
     validate_prepared(
         db,
@@ -248,7 +266,8 @@ pub fn compile_focus_sql_for_execution(
         &prepared,
         &workspace.focus_query_id,
     )?;
-    graph_compiler(workspace, connections, sources, &prepared.schemas).to_sql(is_preview)
+    graph_compiler(workspace, connections, sources, &prepared.schemas)
+        .to_sql_with_limit(row_limit)
 }
 
 /// Clone workspace with `qid` truncated to its SqlModel (step 0) so we can compile/describe

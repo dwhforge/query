@@ -31,6 +31,8 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/changes/join-lens-in-place-confirm/` — ADR-0042 Join Lens in-place confirm (decision; not implemented)
+- `openspec/specs/heavy-preview-sample/` — ADR-0041 heavy preview sample + Load full (merged)
 - `openspec/specs/postgres-schema-import/` — ADR-0040 Postgres schema import (merged)
 - `openspec/specs/help-lab/` — ADR-0039 Help Lab catalog + recon flagship (merged)
 - `openspec/specs/keymap-apply-*` — ADR-0038 ApplyPlan / prepare-validate-execute (merged)

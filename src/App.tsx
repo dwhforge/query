@@ -119,8 +119,12 @@ import {
   type FrozenRemapPreview,
 } from "./lib/mappingCheck";
 import {
+  HeavyPreviewCache,
+  heavyPreviewCacheKey,
   isHeavyPreviewFocus,
+  PREVIEW_SAMPLE_LIMIT,
   workspaceForPreviewTransport,
+  type HeavyPreviewMode,
 } from "./lib/previewTransport";
 import type {
   MappingCheck,
@@ -847,6 +851,9 @@ function App() {
   const [customSql, setCustomSql] = useState("select * from {{prev_step}}");
   const [sqlCopied, setSqlCopied] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
+  /** Sample (LIMIT 50) vs explicit full preview for heavy focuses (ADR-0041). */
+  const [previewMode, setPreviewMode] = useState<HeavyPreviewMode>("sample");
+  const heavyPreviewCacheRef = useRef(new HeavyPreviewCache());
   const [modelPreview, setModelPreview] = useState<PreviewDbtModel | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1010,8 +1017,23 @@ function App() {
       conns: ConnectionDef[],
       srcs: SourceDef[] = [],
       projectRef = projectRefContext(project),
+      mode: HeavyPreviewMode = "sample",
     ) => {
       // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
+      const focus = ws.focus_query_id;
+      const heavy = Boolean(focus && isHeavyPreviewFocus(ws, focus));
+      if (heavy && focus) {
+        const cached = heavyPreviewCacheRef.current.get(
+          heavyPreviewCacheKey(ws, focus, mode),
+        );
+        if (cached) {
+          setPreview(cached);
+          setPreviewMode(mode);
+          setError(null);
+          setLoading(false);
+          return;
+        }
+      }
       const reqId = nextRequestGen(previewReqGenRef.current);
       setLoading(true);
       try {
@@ -1023,9 +1045,19 @@ function App() {
           conns,
           srcs,
           projectRef,
+          mode === "full"
+            ? { fullPreview: true }
+            : { rowLimit: PREVIEW_SAMPLE_LIMIT },
         );
         if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
+        if (heavy && focus) {
+          heavyPreviewCacheRef.current.set(
+            heavyPreviewCacheKey(ws, focus, mode),
+            result,
+          );
+        }
         setPreview(result);
+        setPreviewMode(mode);
         setError(null);
       } catch (e) {
         if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
@@ -1058,7 +1090,14 @@ function App() {
         ) {
           return;
         }
-        void runPreview(ws, conns, srcs);
+        // Auto path is always the sample LIMIT (ADR-0041).
+        void runPreview(
+          ws,
+          conns,
+          srcs,
+          projectRefContext(projectRef.current),
+          "sample",
+        );
       }, 150),
     [runPreview],
   );
@@ -1085,15 +1124,8 @@ function App() {
     ) {
       return;
     }
-    const previewFocus =
-      dataWorkspace.focus_query_id || activeQueryId || focusQueryId;
-    // Heavy ApplyKeyMap (lab Join / 95k seed): do not auto-preview on click.
-    // Shipping the map stalls the graph. Light nodes still preview, with unused
-    // maps stripped so a CSV click does not serialize the dictionary.
-    if (previewFocus && isHeavyPreviewFocus(project.workspace, previewFocus)) {
-      setLoading(false);
-      return;
-    }
+    // Heavy focuses still auto-sample (LIMIT 50). Full is on demand (ADR-0041).
+    // Unused seed maps are stripped in workspaceForPreviewTransport.
     debouncedPreview(dataWorkspace, connections, sources);
   }, [
     dataWorkspace,
@@ -6128,6 +6160,70 @@ function App() {
                       Join Lens
                     </button>
                   )}
+                  {bottomTab === "data" &&
+                    !diagView &&
+                    !joinLensOn &&
+                    isHeavyPreviewFocus(
+                      project.workspace,
+                      dataWorkspace?.focus_query_id ||
+                        activeQueryId ||
+                        focusQueryId,
+                    ) && (
+                    <>
+                      <span
+                        className="rounded border border-slate-700/80 px-2 py-0.5 text-[10px] text-slate-400"
+                        title={
+                          previewMode === "full"
+                            ? "Full preview — no output row LIMIT"
+                            : `Sample — LIMIT ${PREVIEW_SAMPLE_LIMIT}`
+                        }
+                      >
+                        {previewMode === "full"
+                          ? "Full preview"
+                          : `Sample · LIMIT ${PREVIEW_SAMPLE_LIMIT}`}
+                      </span>
+                      {previewMode === "sample" ? (
+                        <button
+                          type="button"
+                          data-testid="preview-load-full"
+                          disabled={loading || !dataWorkspace}
+                          onClick={() => {
+                            if (!dataWorkspace) return;
+                            void runPreview(
+                              dataWorkspace,
+                              connections,
+                              sources,
+                              projectRefContext(project),
+                              "full",
+                            );
+                          }}
+                          className="rounded border border-teal-800/60 px-2 py-0.5 text-[10px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
+                          title="Run preview without an output row LIMIT"
+                        >
+                          Load full
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          data-testid="preview-load-sample"
+                          disabled={loading || !dataWorkspace}
+                          onClick={() => {
+                            if (!dataWorkspace) return;
+                            void runPreview(
+                              dataWorkspace,
+                              connections,
+                              sources,
+                              projectRefContext(project),
+                              "sample",
+                            );
+                          }}
+                          className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                        >
+                          Sample
+                        </button>
+                      )}
+                    </>
+                  )}
                   {(loading ||
                     joinDiagLoading ||
                     joinPrepareLoading ||
@@ -6149,7 +6245,9 @@ function App() {
                           : joinDiagLoading
                             ? "finding gaps…"
                             : loading
-                              ? "computing… (LIMIT on output only)"
+                              ? previewMode === "full"
+                                ? "computing full preview…"
+                                : "computing… (LIMIT on output only)"
                               : preview
                                 ? `${preview.rows.length} rows · ${preview.columns.length} cols`
                                 : "—"
@@ -6243,23 +6341,11 @@ function App() {
                         columns={preview.columns}
                         rows={preview.rows}
                       />
-                    ) : isHeavyPreviewFocus(
-                        project.workspace,
-                        activeQueryId,
-                      ) ? (
-                      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-slate-500">
-                        <p>
-                          {activeQueryId ?? "This node"} uses the full map, so
-                          the graph does not auto-preview it.
-                        </p>
-                        <p className="text-[12px] text-slate-600">
-                          Mapping quality tab for aggregates; Inspect a cell for
-                          a bounded Join Lens sample.
-                        </p>
-                      </div>
                     ) : (
                       <div className="flex h-full items-center justify-center text-slate-600">
-                        Waiting for preview…
+                        {loading
+                          ? "Computing preview…"
+                          : "Waiting for preview…"}
                       </div>
                     )
                   ) : (

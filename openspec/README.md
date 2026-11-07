@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [`changes/join-lens-in-place-confirm/`](changes/join-lens-in-place-confirm/) — ADR-0042 Join Lens in-place match confirm (decision; not implemented)
+- ~~[`changes/heavy-preview-sample/`](changes/heavy-preview-sample/)~~ — **merged** → [`specs/heavy-preview-sample/`](specs/heavy-preview-sample/) ([ADR-0041](../docs/adr/0041-heavy-preview-sample.md))
 - ~~[`changes/postgres-schema-import/`](changes/postgres-schema-import/)~~ — **merged** → [`specs/postgres-schema-import/`](specs/postgres-schema-import/) ([ADR-0040](../docs/adr/0040-postgres-schema-import.md))
 - ~~[`changes/help-lab-catalog/`](changes/help-lab-catalog/)~~ — **merged** → [`specs/help-lab/`](specs/help-lab/) ([ADR-0039](../docs/adr/0039-help-lab-catalog.md))
 - ~~[`changes/keymap-apply-operation/`](changes/keymap-apply-operation/)~~ — **merged** → [`specs/keymap-apply-*`](specs/) ([ADR-0038](../docs/adr/0038-keymap-apply-operation.md))

@@ -141,6 +141,11 @@ impl<'a> GraphCompiler<'a> {
     }
 
     pub fn to_sql(&self, is_preview: bool) -> Result<String, String> {
+        self.to_sql_with_limit(if is_preview { Some(50) } else { None })
+    }
+
+    /// Focus SELECT with an explicit output row LIMIT (`None` = unbounded).
+    pub fn to_sql_with_limit(&self, row_limit: Option<u64>) -> Result<String, String> {
         let compiled = self.compile_ctes()?;
         let focus_last = compiled
             .last_by_query
@@ -151,7 +156,7 @@ impl<'a> GraphCompiler<'a> {
                     self.workspace.focus_query_id
                 )
             })?;
-        Ok(compiled.select_sql(focus_last, if is_preview { Some(50) } else { None }))
+        Ok(compiled.select_sql(focus_last, row_limit))
     }
 }
 

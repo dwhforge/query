@@ -60,6 +60,23 @@ assert.equal(
 assert.equal(isHeavyPreviewFocus(wsMapped, "mapped"), true);
 assert.equal(isHeavyPreviewFocus(wsLight, "csv_a"), false);
 
+const wsLabNamed: Workspace = {
+  focus_query_id: "quality_summary",
+  queries: [
+    {
+      id: "quality_summary",
+      name: "summary",
+      steps: [{ type: "LoadCsv", payload: { path: "small.csv" } }],
+    },
+  ],
+  key_maps: [bigMap(8)],
+};
+assert.equal(
+  isHeavyPreviewFocus(wsLabNamed, "quality_summary"),
+  false,
+  "lab query id alone must not force heaviness",
+);
+
 const slim = workspaceForPreviewTransport(wsLight);
 assert.equal(slim.key_maps![0]!.entries.length, 0);
 assert.ok(keyMapIdsNeededForFocus(wsMapped, "mapped").has("km_big"));
@@ -164,9 +181,11 @@ const sqlSlim = workspaceForPreviewTransport(wsSql);
 assert.equal(sqlSlim.key_maps!.find((m) => m.id === "seed_map")!.entries.length, 3);
 assert.equal(sqlSlim.key_maps!.find((m) => m.id === "unused_map")!.entries.length, 0);
 
-const k1 = heavyPreviewCacheKey(wsMapped, "mapped");
-const k2 = heavyPreviewCacheKey(wsMapped, "mapped");
+const k1 = heavyPreviewCacheKey(wsMapped, "mapped", "sample");
+const k2 = heavyPreviewCacheKey(wsMapped, "mapped", "sample");
 assert.equal(k1, k2);
+const kFull = heavyPreviewCacheKey(wsMapped, "mapped", "full");
+assert.notEqual(k1, kFull);
 
 const cache = new HeavyPreviewCache();
 const fake = { columns: ["c"], rows: [["1"]] };

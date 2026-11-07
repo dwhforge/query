@@ -76,11 +76,19 @@ async function invoke<T>(
   }
 }
 
+export type PreviewWorkspaceOpts = {
+  /** Output row LIMIT. Default sample = 50. Ignored when `fullPreview`. */
+  rowLimit?: number;
+  /** No output row LIMIT (ADR-0041 Load full). */
+  fullPreview?: boolean;
+};
+
 export function previewWorkspace(
   workspace: Workspace,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
   projectRef?: ProjectRefContext,
+  opts?: PreviewWorkspaceOpts,
 ): Promise<PreviewResult> {
   return invoke<PreviewResult>("preview_workspace", {
     workspace,
@@ -91,6 +99,8 @@ export function previewWorkspace(
     references: projectRef?.references ?? [],
     connectionBindings: projectRef?.connectionBindings ?? [],
     executionEngine: projectRef?.executionEngine,
+    rowLimit: opts?.rowLimit,
+    fullPreview: opts?.fullPreview === true,
   });
 }
 

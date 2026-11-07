@@ -40,6 +40,9 @@ The rejected visual-card editor patch is not a prerequisite and is not included.
 - Existing seed semantics remain. The prototype does not solve general seed-scale
   transport: current workspace snapshots and seed SQL still contain mapping rows.
 - Overview queries are DuckDB SQL models; demo execution is explicitly DuckDB.
+- The lab pack is an ordinary generated project. Graph Data preview follows the
+  general heavy-sample policy ([ADR-0041](0041-heavy-preview-sample.md)); it does
+  not special-case lab query ids.
 - OpenSpec: `openspec/changes/mapping-quality-overview/` (merged to
   `openspec/specs/mapping-quality-overview/`).
 - Closed stewardship loop (saved check, cohort predicate, attributed recompute) is

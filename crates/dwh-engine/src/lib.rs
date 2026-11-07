@@ -73,7 +73,8 @@ pub use postgres_catalog::{
     scan_postgres_import, test_postgres_connection, PostgresColumn, PostgresObject,
 };
 pub use preview::{
-    describe_workspace, preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult,
+    describe_workspace, preview_pipeline, preview_workspace, preview_workspace_limited,
+    ColumnMetadata, PreviewResult, PREVIEW_SAMPLE_LIMIT,
 };
 pub use session::{DbSession, QueryCancelHandle};
 pub use session_limits::{

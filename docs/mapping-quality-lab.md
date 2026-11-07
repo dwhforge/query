@@ -1,12 +1,15 @@
 # Mapping quality lab (prototype)
 
 Open **Help → Mapping labs → Mapping quality — 100K products · overview prototype**.
-The app generates offline CSVs in `~/.dwhforge-query/demos/mapping-quality-v1/`.
+The app generates offline CSVs in `~/.dwhforge-query/demos/mapping-quality-v1/`
+and opens them as an ordinary project (same preview / KeyMap rules as any other).
 No Python, network request, Postgres or LLM is required. Reopening reuses these
 files; an incomplete cache reports an error rather than silently replacing it.
 
 The workspace contains 100000 commercial positions, 2400 canonical products and
-95000 seed links. It opens the **Mapping quality · Prototype** tab.
+95000 seed links. It opens the **Mapping quality · Prototype** tab. Graph Data
+auto-previews a `LIMIT 50` sample; **Load full** runs without an output LIMIT
+when the focus Applies the large seed map ([ADR-0041](adr/0041-heavy-preview-sample.md)).
 
 ## What to discover
 

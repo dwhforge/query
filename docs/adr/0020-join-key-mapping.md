@@ -27,7 +27,7 @@ Industry trend (Tableau Prep cleaners, Power Query From/To / merge columns, Alte
 
 **Where we are going (mapping):**
 
-1. **Discover** mismatch in Join Lens / near-miss → one click into a KeyMap tab (first-class surface next to Pipeline canvas).
+1. **Discover** mismatch in Join Lens / near-miss. Resolve proposed matches **in Join Lens** when speed matters ([ADR-0042](0042-join-lens-in-place-confirm.md)); KeyMap tab remains the SoT editor after confirm, not the primary dispute UI.
 2. **Edit** From→To in-app (grid feels like the table it is).
 3. **Persist** in the form DE already trust:
    - **seed** → `seeds/map_*.csv` in the exported dbt project (git + `dbt seed` in CI);

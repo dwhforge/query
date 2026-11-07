@@ -398,17 +398,13 @@ mod tests {
                 QueryDef {
                     id: "dim_region".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sales".into(),
                     name: "sales".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: sample.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -483,13 +479,12 @@ mod tests {
                 id: "q".into(),
                 name: "codes_out".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "dummy.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "dummy.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "c".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
@@ -500,12 +495,14 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert("q".into(), vec!["c".into()]);
         let plan = build_export_plan(
             "leadzero",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         assert!(

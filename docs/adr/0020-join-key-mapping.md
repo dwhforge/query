@@ -27,7 +27,7 @@ Industry trend (Tableau Prep cleaners, Power Query From/To / merge columns, Alte
 
 **Where we are going (mapping):**
 
-1. **Discover** mismatch in Join Lens / near-miss → one click into a KeyMap tab (first-class surface next to Pipeline canvas).
+1. **Discover** mismatch in Join Lens / near-miss. Resolve proposed matches **in Join Lens** when speed matters ([ADR-0042](0042-join-lens-in-place-confirm.md)); KeyMap tab remains the SoT editor after confirm, not the primary dispute UI.
 2. **Edit** From→To in-app (grid feels like the table it is).
 3. **Persist** in the form DE already trust:
    - **seed** → `seeds/map_*.csv` in the exported dbt project (git + `dbt seed` in CI);
@@ -52,7 +52,7 @@ Data engineers edit mappings as a **table** (`from`, `to`) — in git as `seeds/
 4. **Source of truth (DE-aligned):**
    - **Before first export:** KeyMap in the project (editor) is SoT; export writes `seeds/map_*.csv`.
    - **After first export** (project has `last_dbt_export_path` / linked export tree): the seed file (and thus the warehouse table after `dbt seed`) is SoT. Opening the project or refreshing maps **SHALL sync seed → KeyMap** (and refresh ApplyKeyMap snapshots). Re-export must not clobber hand-edited seeds without the safe-re-export conflict rules (hash / refuse).
-   - **Bind:** KeyMap storage may be generated **seed** (default), existing dbt **`ref(model)`**, or **`source(name, table)`**. Explorer lists KeyMaps; editor sets storage + from/to column names. CSV seed is the default portable form, not the only backend.
+   - **Bind:** KeyMap storage may be generated **seed** (default), existing dbt **`ref(model)`**, **`source(name, table)`**, or a local workspace **`query`** ([ADR-0036](0036-query-backed-keymap.md)). Explorer lists KeyMaps; editor sets storage + from/to column names. CSV seed is the default portable form, not the only backend.
    - **Write-back (source):** editing From→To (+ whitelisted attrs) and Save upserts by **From** into the Postgres `source.table` via DuckDB ATTACH (writable); see scale/wizard rules in [ADR-0022](0022-keymap-postgres-live-bind.md). Open/Reload pages live rows from WH. **ref** has no write-back (dbt run owns the model). **seed** write-back is the export CSV / push to export tree.
 5. **Out of scope:** automatic fuzzy merge; AI inventing aliases; universal column schema mapper.
 

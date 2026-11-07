@@ -28,6 +28,8 @@ interface PreviewTableProps {
   highlightKeys?: string[];
   /** Per-column Join Lens origin (same length as columns). */
   columnOrigins?: JoinColumnOrigin[];
+  /** Optional header titles (e.g. right `name` instead of collision `name_1`). */
+  columnDisplayNames?: string[];
   activeRowIndex?: number;
   onActiveRowChange?: (index: number) => void;
   onVisibleRangeChange?: (range: { start: number; end: number }) => void;

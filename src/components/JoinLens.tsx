@@ -47,6 +47,13 @@ import { JoinLensAuto } from "./JoinLensAuto";
 import { PreviewTable } from "./PreviewTable";
 import type { JoinPrepareStatus } from "../lib/bridge";
 
+const EMPTY_SIDE_INDICES: number[] = [];
+const EMPTY_ROWS: unknown[][] = [];
+const EMPTY_COLUMNS: ColumnMetadata[] = [];
+/** Stable prop defaults — `sources = []` is a new identity every render → update-depth. */
+const EMPTY_SOURCES: SourceDef[] = [];
+const EMPTY_CONNECTIONS: ConnectionDef[] = [];
+
 /** Fill result right-origin columns from a Probe right row (hypothetical map pair). */
 function overlayRightOntoResultRows(
   baseRows: unknown[][],
@@ -168,7 +175,7 @@ function rowMatchesSearch(row: unknown[], q: string): boolean {
 }
 
 function asColumns(sample: JoinDiagSample | null | undefined): ColumnMetadata[] {
-  if (!sample) return [];
+  if (!sample) return EMPTY_COLUMNS;
   return sample.columns.map((c) => ({ name: c.name, type: c.type }));
 }
 
@@ -496,6 +503,15 @@ export type JoinLensProps = {
       fromParts?: string[][];
       applyColumns?: string[];
       outputColumn?: string;
+      /** ADR-0037: named output cells from one target row (not positional toValues). */
+      cellPatches?: import("../lib/keyMap").LensOutputCell[][];
+      /**
+       * ADR-0042 Auto Apply accepted: merge KeyMap + ApplyKeyMap in place
+       * (no Mapping tab hop).
+       */
+      applyAcceptedInPlace?: boolean;
+      fromLabels?: (string | null)[];
+      toLabels?: (string | null)[];
     },
   ) => void;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
@@ -512,8 +528,8 @@ function JoinLensImpl({
   rightQueryId,
   leftOn,
   rightOn,
-  connections,
-  sources = [],
+  connections = EMPTY_CONNECTIONS,
+  sources = EMPTY_SOURCES,
   projectRef,
   columns,
   rows,
@@ -610,46 +626,56 @@ function JoinLensImpl({
   // object churn (that wiped samples and blocked auto Show rows via attempted ref).
   const joinParentsKey = `${hostQueryId}#${joinStepIndex}#${rightQueryId}#${leftOn.join("\0")}#${rightOn.join("\0")}`;
 
+  const connectionsRef = useRef(connections);
+  const sourcesRef = useRef(sources);
+  const projectRefRef = useRef(projectRef);
+  const workspaceRef = useRef(workspace);
+  connectionsRef.current = connections;
+  sourcesRef.current = sources;
+  projectRefRef.current = projectRef;
+  workspaceRef.current = workspace;
+
   useEffect(() => {
     if (!enabled || !leftInputWs || !rightInputWs) return;
     let cancelled = false;
     // Drop any in-flight sample load that may have set only one side.
     samplesLoadGenRef.current += 1;
-    setLeftSideLoading(true);
-    setRightSideLoading(true);
-    setSamplesLoading(false);
-    setSamplesLoaded(false);
-    setSamplesError(null);
-    setParentLeftRows([]);
-    setParentRightRows([]);
+    setLeftSideLoading((v) => (v ? v : true));
+    setRightSideLoading((v) => (v ? v : true));
+    setSamplesLoading((v) => (v ? false : v));
+    setSamplesLoaded((v) => (v ? false : v));
+    setSamplesError((cur) => (cur == null ? cur : null));
+    // Guard empties — unguarded `setX([])` never bails (new [] ≠ prev []).
+    setParentLeftRows((cur) => (cur.length === 0 ? cur : EMPTY_ROWS));
+    setParentRightRows((cur) => (cur.length === 0 ? cur : EMPTY_ROWS));
     // Allow small-join auto-load to run again after this wipe.
     autoSamplesAttemptedRef.current = "";
     void (async () => {
       try {
         const left = await describeWorkspace(
           leftInputWs,
-          connections,
-          sources,
-          projectRef,
+          connectionsRef.current,
+          sourcesRef.current,
+          projectRefRef.current,
         );
         if (cancelled) return;
         setParentLeftCols(left.columns);
       } catch {
-        if (!cancelled) setParentLeftCols([]);
+        if (!cancelled) setParentLeftCols((c) => (c.length === 0 ? c : EMPTY_COLUMNS));
       } finally {
         if (!cancelled) setLeftSideLoading(false);
       }
       try {
         const right = await describeWorkspace(
           rightInputWs,
-          connections,
-          sources,
-          projectRef,
+          connectionsRef.current,
+          sourcesRef.current,
+          projectRefRef.current,
         );
         if (cancelled) return;
         setParentRightCols(right.columns);
       } catch {
-        if (!cancelled) setParentRightCols([]);
+        if (!cancelled) setParentRightCols((c) => (c.length === 0 ? c : EMPTY_COLUMNS));
       } finally {
         if (!cancelled) setRightSideLoading(false);
       }
@@ -658,18 +684,19 @@ function JoinLensImpl({
       cancelled = true;
       samplesLoadGenRef.current += 1;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- joinParentsKey pins identity; ws from that render
-  }, [enabled, joinParentsKey, connections, sources]);
+    // joinParentsKey only — connections/sources via refs (unstable [] defaults used to loop).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, joinParentsKey, leftInputWs, rightInputWs]);
 
   function refreshPrepareStatus() {
     if (!hostQueryId || joinStepIndex < 1) return;
     void joinPrepareStatus(
-      workspace,
+      workspaceRef.current,
       hostQueryId,
       joinStepIndex,
-      sources,
-      connections,
-      projectRef,
+      sourcesRef.current,
+      connectionsRef.current,
+      projectRefRef.current,
     )
       .then((s) => {
         setPrepareStatus(s);
@@ -708,8 +735,9 @@ function JoinLensImpl({
   useEffect(() => {
     if (!enabled) return;
     refreshPrepareStatus();
+    // joinParentsKey — not workspace/sources object identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, hostQueryId, joinStepIndex, workspace, sources]);
+  }, [enabled, joinParentsKey]);
 
   const resultKeysFetchedRef = useRef("");
   const resultKeysStamp = useMemo(() => {
@@ -759,14 +787,9 @@ function JoinLensImpl({
     );
     if (!preparedReady && !autoOk) return;
     const id = joinParentsKey;
-    if (autoSamplesAttemptedRef.current === id) {
-      // Stale gate with nothing in flight: free and retry once.
-      if (activeSamplesGenRef.current === 0) {
-        autoSamplesAttemptedRef.current = "";
-      } else {
-        return;
-      }
-    }
+    // Do not clear-and-retry in the same effect: that re-fires forever when a
+    // load aborts and leaves gen=0 with the attempt gate still set.
+    if (autoSamplesAttemptedRef.current === id) return;
     autoSamplesAttemptedRef.current = id;
     void loadLinkedSamples({
       forcePrepared: preparedReady,
@@ -777,8 +800,8 @@ function JoinLensImpl({
     enabled,
     sideMode,
     joinParentsKey,
-    workspace,
-    prepareStatus,
+    prepareStatus?.prepared,
+    prepareStatus?.stale,
     samplesLoaded,
     samplesLoading,
     samplesError,
@@ -1017,25 +1040,25 @@ function JoinLensImpl({
 
   useEffect(() => {
     samplesLoadGenRef.current += 1;
-    setLeftSel(null);
-    setRightSel(null);
-    setSearchLeft("");
-    setSearchRight("");
-    setMatchesOnly(false);
-    setActiveIndex(0);
-    setSideMode("linked");
-    setKeyExplain(null);
-    setKeyBlame(null);
-    setKeyExplainError(null);
-    setNearMiss(null);
-    setNearMissOpen(false);
-    setSamplesLoading(false);
-    setSamplesLoaded(false);
-    setSamplesError(null);
-    setParentLeftRows([]);
-    setParentRightRows([]);
-    setPrepared(false);
-    setPrepareHint(null);
+    setLeftSel((cur) => (cur == null ? cur : null));
+    setRightSel((cur) => (cur == null ? cur : null));
+    setSearchLeft((cur) => (cur === "" ? cur : ""));
+    setSearchRight((cur) => (cur === "" ? cur : ""));
+    setMatchesOnly((cur) => (cur ? false : cur));
+    setActiveIndex((cur) => (cur === 0 ? cur : 0));
+    setSideMode((cur) => (cur === "linked" ? cur : "linked"));
+    setKeyExplain((cur) => (cur == null ? cur : null));
+    setKeyBlame((cur) => (cur == null ? cur : null));
+    setKeyExplainError((cur) => (cur == null ? cur : null));
+    setNearMiss((cur) => (cur == null ? cur : null));
+    setNearMissOpen((cur) => (cur ? false : cur));
+    setSamplesLoading((cur) => (cur ? false : cur));
+    setSamplesLoaded((cur) => (cur ? false : cur));
+    setSamplesError((cur) => (cur == null ? cur : null));
+    setParentLeftRows((cur) => (cur.length === 0 ? cur : EMPTY_ROWS));
+    setParentRightRows((cur) => (cur.length === 0 ? cur : EMPTY_ROWS));
+    setPrepared((cur) => (cur ? false : cur));
+    setPrepareHint((cur) => (cur == null ? cur : null));
   }, [hostQueryId, joinStepIndex, leftOn.join("\0"), rightOn.join("\0")]);
 
   // After join-identity reset — so return-from-KeyMap restore wins over linked default.
@@ -1080,8 +1103,10 @@ function JoinLensImpl({
     () => asColumns(unmatchedRight),
     [unmatchedRight],
   );
-  const probeLeftRows = unmatchedLeft?.rows ?? [];
-  const probeRightRows = unmatchedRight?.rows ?? [];
+  // Stable empty fallback — `?? []` is a new identity every render and was
+  // re-triggering explainFocus effects ("Maximum update depth exceeded").
+  const probeLeftRows = unmatchedLeft?.rows ?? EMPTY_ROWS;
+  const probeRightRows = unmatchedRight?.rows ?? EMPTY_ROWS;
 
   const leftCols = sideMode === "linked" ? parentLeftCols : probeLeftCols;
   const rightCols = sideMode === "linked" ? parentRightCols : probeRightCols;
@@ -1103,12 +1128,34 @@ function JoinLensImpl({
     return null;
   }, [leftSel, rightSel]);
 
+  const explainKeysStamp = useMemo(() => {
+    if (!explainFocus) return "";
+    const { side, index } = explainFocus;
+    const row = side === "left" ? leftRows[index] : rightRows[index];
+    const cols = side === "left" ? leftCols : rightCols;
+    const keysOn = side === "left" ? leftOn : rightOn;
+    if (!row) return "";
+    const keys = keyValuesFromRow(row, cols, keysOn);
+    if (keys.length === 0 || keys.every((v) => v == null)) return "";
+    return `${side}:${index}:${JSON.stringify(keys)}`;
+  }, [
+    explainFocus,
+    leftRows,
+    rightRows,
+    leftCols,
+    rightCols,
+    leftOn,
+    rightOn,
+  ]);
+
   useEffect(() => {
-    if (!enabled || !explainFocus) {
-      setKeyExplain(null);
-      setKeyBlame(null);
-      setKeyExplainError(null);
-      setKeyExplainLoading(false);
+    if (!enabled || !explainFocus || !explainKeysStamp) {
+      // Guard: unconditional setState here + unstable leftOn/workspace identities
+      // previously re-entered React ("Maximum update depth exceeded").
+      setKeyExplain((cur) => (cur == null ? cur : null));
+      setKeyBlame((cur) => (cur == null ? cur : null));
+      setKeyExplainError((cur) => (cur == null ? cur : null));
+      setKeyExplainLoading((cur) => (cur ? false : cur));
       return;
     }
     const { side, index } = explainFocus;
@@ -1117,11 +1164,7 @@ function JoinLensImpl({
     const keysOn = side === "left" ? leftOn : rightOn;
     if (!row) return;
     const keys = keyValuesFromRow(row, cols, keysOn);
-    if (keys.length === 0 || keys.every((v) => v == null)) {
-      setKeyExplain(null);
-      setKeyBlame(null);
-      return;
-    }
+    if (keys.length === 0 || keys.every((v) => v == null)) return;
     let cancelled = false;
     setKeyExplainLoading(true);
     setKeyExplainError(null);
@@ -1139,7 +1182,7 @@ function JoinLensImpl({
       .then(async (ex) => {
         if (cancelled) return;
         setKeyExplain(ex);
-        setMatchesOnly(true);
+        setMatchesOnly((m) => (m ? m : true));
         if (ex.result_match_count === 0) {
           try {
             const blame = await blameUnmatchedKey(
@@ -1174,24 +1217,13 @@ function JoinLensImpl({
     return () => {
       cancelled = true;
     };
-  }, [
-    enabled,
-    explainFocus,
-    leftRows,
-    rightRows,
-    leftCols,
-    rightCols,
-    leftOn,
-    rightOn,
-    workspace,
-    hostQueryId,
-    joinStepIndex,
-    connections,
-  ]);
+    // explainKeysStamp is the content key; live IR via closure on enabled fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, explainKeysStamp, hostQueryId, joinStepIndex]);
 
   // Pair preview is not a blame context — drop blame when both sides selected.
   useEffect(() => {
-    if (pairMode) setKeyBlame(null);
+    if (pairMode) setKeyBlame((cur) => (cur == null ? cur : null));
   }, [pairMode]);
 
   /** Result rows matching current side selection (one side or both). */
@@ -1285,7 +1317,11 @@ function JoinLensImpl({
   const leftPin = useMemo(() => {
     const resultRow = rows[activeIndex];
     if (!resultRow) {
-      return { indices: [] as number[], keyMatchCount: 0, pinned: false };
+      return {
+        indices: EMPTY_SIDE_INDICES,
+        keyMatchCount: 0,
+        pinned: false,
+      };
     }
     return pinSideIndicesToResult({
       side: "left",
@@ -1311,7 +1347,11 @@ function JoinLensImpl({
   const rightPin = useMemo(() => {
     const resultRow = rows[activeIndex];
     if (!resultRow) {
-      return { indices: [] as number[], keyMatchCount: 0, pinned: false };
+      return {
+        indices: EMPTY_SIDE_INDICES,
+        keyMatchCount: 0,
+        pinned: false,
+      };
     }
     return pinSideIndicesToResult({
       side: "right",
@@ -1334,8 +1374,9 @@ function JoinLensImpl({
     rightOn,
   ]);
 
-  const linkedLeft = sideMode === "linked" ? leftPin.indices : [];
-  const linkedRight = sideMode === "linked" ? rightPin.indices : [];
+  const linkedLeft = sideMode === "linked" ? leftPin.indices : EMPTY_SIDE_INDICES;
+  const linkedRight =
+    sideMode === "linked" ? rightPin.indices : EMPTY_SIDE_INDICES;
 
   /**
    * Linked: parents of center only (stable pin order) — no text filter
@@ -1722,7 +1763,7 @@ function JoinLensImpl({
     }, 3500);
   }
 
-  /** Left unmatched → From, right unmatched → To (dirty names → canon id). */
+  /** Left unmatched → From, right unmatched → To / named output cells (ADR-0037). */
   function emitMapPair() {
     if (!onMapKey || leftSel == null || rightSel == null) return;
     const fromVals = keyValsFor("left", leftSel);
@@ -1732,7 +1773,25 @@ function JoinLensImpl({
     }
     const fromLabel = fromVals.map((v) => v.trim() || "∅").join(" · ");
     pinCenterToFromKey(fromLabel);
-    onMapKey("left", fromVals, { toValues: toVals });
+    // Named cells from the whole right row — App/merge keeps only map output names.
+    const row = rightRows[rightSel];
+    const cellPatches =
+      row && rightCols.length
+        ? [
+            rightCols
+              .map((c, i) => ({
+                column: c.name,
+                value: String(row[i] ?? "").trim(),
+              }))
+              .filter((c) => c.column.trim() && c.value),
+          ]
+        : undefined;
+    onMapKey("left", fromVals.length === 1 ? fromVals : [fromLabel], {
+      // Scalar To list: one suggestion → first right key (not multi-output).
+      toValues: [toVals.map((v) => v.trim()).filter(Boolean)[0] ?? toVals[0] ?? ""],
+      fromParts: [fromVals],
+      cellPatches,
+    });
     const toast = `Opened mapping · ${fromLabel} → ${toVals.map((v) => v.trim() || "∅").join(" · ")}`;
     setMapToast(toast);
     window.setTimeout(() => {
@@ -2006,7 +2065,7 @@ function JoinLensImpl({
   const nearMissCount = nearMiss?.hypotheses.length ?? 0;
   const showNearMissChrome = nearMissOpen;
 
-  // Stay mounted when disabled (KeyMap tab open) so mode/selection survive.
+  // Stay mounted when disabled (Mapping tab open) so mode/selection survive.
   return (
     <div
       className={`relative flex h-full min-h-0 gap-2 p-1 ${enabled ? "" : "hidden"}`}
@@ -2097,7 +2156,7 @@ function JoinLensImpl({
           <button
             type="button"
             onClick={() => switchMode("auto")}
-            title="Action: propose renames for unmatched keys, then add to a mapping"
+            title="Batch-match unmatched keys by name/similarity, then Apply accepted"
             className={`rounded border px-2 py-1 text-[11px] font-medium ${
               sideMode === "auto"
                 ? "border-amber-600/80 bg-amber-500/20 text-amber-50"
@@ -2112,14 +2171,14 @@ function JoinLensImpl({
               sideMode === "linked"
                 ? "Which left/right rows built this result row?"
                 : sideMode === "auto"
-                  ? "Propose renames for unmatched keys → add selected to a mapping"
+                  ? "Fuzzy + LLM into one batch, then Write Mapping once"
                   : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
               ? "Where this result came from"
               : sideMode === "auto"
-                ? "Batch suggestions — pick pairs, then add to a mapping"
+                ? "One batch → Write Mapping"
                 : "Values that didn’t join"}
           </span>
         </div>
@@ -2129,22 +2188,21 @@ function JoinLensImpl({
             <div className="flex items-start justify-between gap-2">
               <ol className="list-decimal space-y-1 pl-3.5">
                 <li>
-                  <span className="font-semibold text-teal-200">This row</span> —
-                  see which left/right rows made the selected result
-                </li>
-                <li>
-                  <span className="font-semibold text-teal-200">No match</span> —
-                  list values that didn’t find a partner; pick left (+ right) →{" "}
-                  <span className="font-semibold text-amber-200">
-                    Save mapping…
-                  </span>
-                </li>
-                <li>
-                  Then{" "}
                   <span className="font-semibold text-amber-200">
                     Suggest all…
                   </span>{" "}
-                  for batch rename ideas (action, not a third investigate mode)
+                  — fuzzy + optional LLM into one batch →{" "}
+                  <span className="font-semibold text-amber-200">
+                    Write Mapping
+                  </span>
+                </li>
+                <li>
+                  <span className="font-semibold text-teal-200">No match</span> —
+                  one key at a time if you prefer manual pick
+                </li>
+                <li>
+                  <span className="font-semibold text-teal-200">This row</span> —
+                  see which left/right rows made a result row
                 </li>
               </ol>
               <button
@@ -2175,13 +2233,18 @@ function JoinLensImpl({
             onAccept={
               onMapKey
                 ? (fromValues, toValues, opts) => {
+                    // ADR-0042: parent Apply accepted path merges KeyMap + ApplyKeyMap
+                    // without requiring a Mapping tab hop.
                     onMapKey("left", fromValues, {
                       toValues,
                       fromParts: opts?.fromParts,
                       applyColumns: opts?.applyColumns,
                       outputColumn: opts?.outputColumn,
+                      applyAcceptedInPlace: true,
+                      fromLabels: opts?.fromLabels,
+                      toLabels: opts?.toLabels,
                     });
-                    const toast = `Opened mapping · ${fromValues.length} suggestion${fromValues.length === 1 ? "" : "s"}`;
+                    const toast = `Applied ${fromValues.length} accepted alias${fromValues.length === 1 ? "" : "es"}`;
                     setMapToast(toast);
                     window.setTimeout(() => {
                       setMapToast((cur) => (cur === toast ? null : cur));

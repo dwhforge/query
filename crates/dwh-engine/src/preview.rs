@@ -1,5 +1,7 @@
 use crate::arrow_json::{batches_to_rows, map_arrow_type};
-use crate::compile::{compile_focus_sql, graph_compiler, prepare_workspace};
+use crate::compile::{
+    compile_focus_sql_for_execution_limited, graph_compiler, prepare_workspace,
+};
 use crate::session::DbSession;
 use dwh_pipeline::{ConnectionDef, SourceDef, TransformationStep, Workspace};
 use duckdb::arrow::record_batch::RecordBatch;
@@ -43,14 +45,35 @@ fn run_sql(db: &DbSession, sql: String) -> Result<PreviewResult, String> {
     })
 }
 
+/// Default structural preview sample (ADR-0041 / Power Query-shaped head).
+pub const PREVIEW_SAMPLE_LIMIT: u64 = 50;
+
 pub fn preview_workspace(
     db: &DbSession,
     workspace: &Workspace,
     connections: &[ConnectionDef],
     sources: &[SourceDef],
 ) -> Result<PreviewResult, String> {
+    preview_workspace_limited(db, workspace, connections, sources, Some(PREVIEW_SAMPLE_LIMIT))
+}
+
+/// Structural preview with an explicit output row LIMIT (`None` = full / unbounded).
+pub fn preview_workspace_limited(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[SourceDef],
+    row_limit: Option<u64>,
+) -> Result<PreviewResult, String> {
     let resolved = db.prepare_workspace(workspace, connections)?;
-    let sql = compile_focus_sql(db, &resolved, connections, sources, true)?;
+    // ADR-0038: prepare + validate + compile (explicit), not hidden inside compile_*.
+    let sql = compile_focus_sql_for_execution_limited(
+        db,
+        &resolved,
+        connections,
+        sources,
+        row_limit,
+    )?;
     run_sql(db, sql)
 }
 
@@ -61,7 +84,13 @@ pub fn preview_pipeline(
 ) -> Result<PreviewResult, String> {
     let ws = Workspace::from_linear_steps(steps.to_vec());
     let resolved = db.prepare_workspace(&ws, connections)?;
-    let sql = compile_focus_sql(db, &resolved, connections, &[], true)?;
+    let sql = compile_focus_sql_for_execution_limited(
+        db,
+        &resolved,
+        connections,
+        &[],
+        Some(PREVIEW_SAMPLE_LIMIT),
+    )?;
     run_sql(db, sql)
 }
 
@@ -112,17 +141,13 @@ mod tests {
                 QueryDef {
                     id: "sales_eu".into(),
                     name: "sales_eu".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: eu.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: eu.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sales_us".into(),
                     name: "sales_us".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: us.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: us.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -205,25 +230,19 @@ mod tests {
                 QueryDef {
                     id: "dim_region".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim_r.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim_r.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "dim_channel".into(),
                     name: "dim_channel".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim_c.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim_c.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sparse_sales".into(),
                     name: "sparse_sales".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: sparse.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: sparse.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -287,9 +306,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: path.to_string_lossy().into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: path.to_string_lossy().into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "sales".into(),
@@ -328,7 +345,7 @@ mod tests {
                 id: "commercial_catalog".into(),
                 name: "commercial_catalog".into(),
                 steps: vec![TransformationStep::LoadParquet {
-                    path: path.into(),
+                    path: path.into(), path_kind: Default::default(),
                     connection_id: None,
                 }],
                 execution: Default::default(),
@@ -340,5 +357,35 @@ mod tests {
         assert!(!out.columns.is_empty());
         assert!(out.rows.len() <= 50);
         assert!(out.sql.contains("LIMIT 50"));
+    }
+
+    #[test]
+    fn full_preview_omits_output_row_limit() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let path = fixtures.join("sample.csv");
+        if !path.is_file() {
+            eprintln!("skip: fixtures/sample.csv missing");
+            return;
+        }
+        let ws = Workspace {
+            queries: vec![QueryDef {
+                id: "sales".into(),
+                name: "sales".into(),
+                steps: vec![TransformationStep::LoadCsv { path: path.to_string_lossy().into(), path_kind: Default::default() }],
+                execution: Default::default(),
+            }],
+            focus_query_id: "sales".into(),
+            key_maps: vec![],
+        };
+        let db = DbSession::new().expect("duckdb");
+        let sample = preview_workspace(&db, &ws, &[], &[]).expect("sample");
+        assert!(sample.sql.contains("LIMIT 50"));
+        let full = preview_workspace_limited(&db, &ws, &[], &[], None).expect("full");
+        assert!(
+            !full.sql.contains("LIMIT "),
+            "full preview must not wrap an output LIMIT, got {}",
+            full.sql
+        );
+        assert!(full.rows.len() >= sample.rows.len());
     }
 }

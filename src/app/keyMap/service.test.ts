@@ -7,6 +7,7 @@ import {
   mapForProjectAst,
   mergeFromValuesIntoMap,
   mergeKeyMapTabSession,
+  mergeLensOutputCells,
   normalizeKeyMapForEditor,
   planMapFillFromLens,
   resolveJoinStepFromCtx,
@@ -14,8 +15,9 @@ import {
   settleSeedDraftAfterSave,
   upsertKeyMapIntoProject,
 } from "./service";
+import { keyMapRevisionFingerprint } from "./applyPlan";
 import type { KeyMapJoinCtx, KeyMapTabSession } from "./types";
-import type { Project } from "../../types/pipeline";
+import type { KeyMapDef, Project } from "../../types/pipeline";
 import { findApplyKeyMapIdForJoin } from "../../lib/keyMap";
 
 function assert(cond: boolean, msg: string) {
@@ -78,8 +80,188 @@ const applied = applyKeyMapOntoProject(project, {
   rightCols: ["id"],
   outputColumnLeft: "sku_mapped",
   outputColumnRight: "id",
+  expectedMapRevision: keyMapRevisionFingerprint(map as never, project.workspace),
 });
 assert(applied.result.status === "ok", "apply ok");
+
+{
+  // Two Joins to the same right query — rewrite must hit Join #2 only.
+  const dualMap = {
+    ...map,
+    output_columns: ["product_id", "variant_code"],
+    to_column: "product_id",
+  };
+  const dualWs = {
+    queries: [
+      {
+        id: "fact",
+        name: "fact",
+        steps: [
+          { type: "LoadCsv", payload: { path: "f.csv" } },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              left_on: ["old_product_id"],
+              right_on: ["product_id"],
+              join_type: "left",
+            },
+          },
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              left_on: ["external_sku"],
+              right_on: ["sku"],
+              join_type: "left",
+            },
+          },
+        ],
+      },
+      { id: "dim", name: "dim", steps: [] },
+    ],
+    focus_query_id: "fact",
+    key_maps: [dualMap],
+  } as never;
+  const dualCtx = {
+    hostQueryId: "fact",
+    joinStepIndex: 2,
+    rightQueryId: "dim",
+    leftOn: ["external_sku"],
+    rightOn: ["sku"],
+    joinType: "left" as const,
+  };
+  const dual = applyKeyMapOntoProject(
+    { ...project, workspace: dualWs } as never,
+    {
+      map: dualMap as never,
+      ctx: dualCtx,
+      side: "left",
+      leftCols: ["external_sku"],
+      rightCols: ["sku"],
+      outputColumnLeft: "product_id",
+      outputColumnRight: "sku",
+      outputBindingsLeft: [
+        { map_column: "product_id", destination_column: "product_id" },
+        { map_column: "variant_code", destination_column: "variant_code" },
+      ],
+      joinRewrite: {
+        leftOn: ["product_id", "variant_code"],
+        rightOn: ["product_id", "variant_code"],
+      },
+      expectedMapRevision: keyMapRevisionFingerprint(
+        dualMap as never,
+        dualWs,
+      ),
+    },
+  );
+  assert(dual.result.status === "ok", "dual join apply ok");
+  const steps =
+    dual.result.status === "ok"
+      ? dual.result.workspace.queries.find((q) => q.id === "fact")!.steps
+      : [];
+  const joins = steps.filter((s) => s.type === "Join");
+  assert(joins.length === 2, "still two joins");
+  assert(
+    joins[0]!.type === "Join" &&
+      joins[0]!.payload.left_on.join(",") === "old_product_id" &&
+      joins[0]!.payload.right_on.join(",") === "product_id",
+    "first Join ON unchanged",
+  );
+  assert(
+    joins[1]!.type === "Join" &&
+      joins[1]!.payload.left_on.join(",") === "product_id,variant_code",
+    "second Join ON rewritten",
+  );
+}
+
+{
+  // Right-side Apply must honour review destinations (not defaults).
+  const rightMap = {
+    ...map,
+    output_columns: ["product_id", "variant_code"],
+    to_column: "product_id",
+  };
+  const rightWs = {
+    queries: [
+      {
+        id: "fact",
+        name: "fact",
+        steps: [
+          {
+            type: "Join",
+            payload: {
+              right_query_id: "dim",
+              left_on: ["sku"],
+              right_on: ["sku"],
+              join_type: "left",
+            },
+          },
+        ],
+      },
+      { id: "dim", name: "dim", steps: [] },
+    ],
+    focus_query_id: "fact",
+    key_maps: [rightMap],
+  } as never;
+  const right = applyKeyMapOntoProject(
+    { ...project, workspace: rightWs } as never,
+    {
+      map: rightMap as never,
+      ctx: {
+        hostQueryId: "fact",
+        joinStepIndex: 0,
+        rightQueryId: "dim",
+        leftOn: ["sku"],
+        rightOn: ["sku"],
+        joinType: "left",
+      },
+      side: "right",
+      leftCols: ["sku"],
+      rightCols: ["sku"],
+      outputColumnLeft: "sku",
+      outputColumnRight: "sku",
+      outputBindingsRight: [
+        {
+          map_column: "product_id",
+          destination_column: "canonical_product_id",
+        },
+        {
+          map_column: "variant_code",
+          destination_column: "canonical_variant_code",
+        },
+      ],
+      expectedMapRevision: keyMapRevisionFingerprint(
+        rightMap as never,
+        rightWs,
+      ),
+    },
+  );
+  assert(right.result.status === "ok", "right apply ok");
+  const dimSteps =
+    right.result.status === "ok"
+      ? right.result.workspace.queries.find((q) => q.id === "dim")!.steps
+      : [];
+  const applyStep = dimSteps.find((s) => s.type === "ApplyKeyMap");
+  assert(!!applyStep && applyStep.type === "ApplyKeyMap", "Apply on dim");
+  const bindings =
+    applyStep && applyStep.type === "ApplyKeyMap"
+      ? applyStep.payload.output_bindings ?? []
+      : [];
+  assert(
+    bindings.some(
+      (b) =>
+        b.map_column === "product_id" &&
+        b.destination_column === "canonical_product_id",
+    ) &&
+      bindings.some(
+        (b) =>
+          b.map_column === "variant_code" &&
+          b.destination_column === "canonical_variant_code",
+      ),
+    `right Apply payload destinations: ${JSON.stringify(bindings)}`,
+  );
+}
 
 const sourceMap = {
   ...map,
@@ -94,6 +276,28 @@ const norm = normalizeKeyMapForEditor({
   entries: [],
 } as never);
 assert(norm.from_column === "from" && norm.to_column === "to", "defaults");
+
+{
+  const m: KeyMapDef = {
+    id: "m",
+    name: "m",
+    entries: [{ from: "k", from_parts: ["k"], to: "x", output_values: ["x", ""] }],
+    output_columns: ["a", "b"],
+    to_column: "a",
+  };
+  const r = mergeLensOutputCells(m.entries[0]!, ["a", "b"], [
+    { column: "b", value: "y" },
+  ]);
+  if (!r.ok || r.entry.output_values?.join() !== "x,y") {
+    throw new Error("mergeLensOutputCells fills empty named cell");
+  }
+  const c = mergeLensOutputCells(m.entries[0]!, ["a", "b"], [
+    { column: "a", value: "z" },
+  ]);
+  if (c.ok || c.conflicts.length !== 1) {
+    throw new Error("mergeLensOutputCells reports conflict");
+  }
+}
 
 const merged = mergeFromValuesIntoMap({
   map: map as never,

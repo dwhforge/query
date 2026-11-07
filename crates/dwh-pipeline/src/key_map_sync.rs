@@ -51,21 +51,20 @@ pub fn sync_key_maps_from_export(
             continue;
         }
         let body = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let (from_cols, to_col, extras) = workspace
+        let (from_cols, out_cols, extras) = workspace
             .key_maps
             .iter()
             .find(|m| key_map_seed_name(&m.id) == stem || m.id == stem)
             .map(|m| {
-                let to = if m.to_column.trim().is_empty() {
-                    "to".to_string()
-                } else {
-                    m.to_column.clone()
-                };
-                (m.from_columns_eff(), to, m.stewardship_columns())
+                (
+                    m.from_columns_eff(),
+                    m.output_columns_eff(),
+                    m.stewardship_columns(),
+                )
             })
-            .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
-        let entries = crate::emit::parse_key_map_seed_csv_full(
-            &body, &from_cols, &to_col, &extras,
+            .unwrap_or_else(|| (vec!["from".into()], vec!["to".into()], vec![]));
+        let entries = crate::emit::parse_key_map_seed_csv_outputs(
+            &body, &from_cols, &out_cols, &extras,
         )?;
         seed_files.push(format!("seeds/{stem}.csv"));
 
@@ -132,13 +131,10 @@ pub fn push_key_map_to_export(
     let seeds_dir = export_root.join("seeds");
     fs::create_dir_all(&seeds_dir).map_err(|e| format!("mkdir seeds: {e}"))?;
     let from_cols = map.from_columns_eff();
-    let to_col = if map.to_column.trim().is_empty() {
-        "to".to_string()
-    } else {
-        map.to_column.trim().to_string()
-    };
+    let out_cols = map.output_columns_eff();
     let extras = map.stewardship_columns();
-    let body = crate::emit::key_map_seed_csv_full(&map.entries, &from_cols, &to_col, &extras);
+    let body =
+        crate::emit::key_map_seed_csv_outputs(&map.entries, &from_cols, &out_cols, &extras);
     let path = export_root.join(&rel);
 
     let previous = if path.is_file() {
@@ -258,6 +254,7 @@ mod tests {
                     column: "channel".into(),
                     columns: vec![],
                     output_column: None,
+                    output_bindings: vec![],
                     as_of_column: None,
                     map_id: "map_channel".into(),
                     entries: vec![KeyMapEntry {
@@ -405,6 +402,41 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].from, "a\nb");
         assert_eq!(back[0].to, "x");
+    }
+
+    #[test]
+    fn push_and_sync_preserve_multi_outputs() {
+        let dir = tempfile_dir();
+        let mut map = KeyMapDef::new("sku_pv", "sku");
+        map.output_columns = vec!["product_id".into(), "variant_code".into()];
+        map.to_column = "product_id".into();
+        map.entries = vec![KeyMapEntry::parts_multi(
+            vec!["X1".into()],
+            vec!["P1".into(), "BLUE-M".into()],
+        )];
+        push_key_map_to_export(&dir, &map).unwrap();
+        let on_disk = fs::read_to_string(dir.join("seeds/map_sku_pv.csv")).unwrap();
+        assert!(
+            on_disk.contains("product_id") && on_disk.contains("variant_code") && on_disk.contains("BLUE-M"),
+            "{on_disk}"
+        );
+        // Simulate Save after Export: push again must not drop the second output.
+        map.entries[0] = KeyMapEntry::parts_multi(
+            vec!["X1".into()],
+            vec!["P1".into(), "RED-L".into()],
+        );
+        push_key_map_to_export(&dir, &map).unwrap();
+        let mut ws = Workspace {
+            queries: vec![],
+            focus_query_id: String::new(),
+            key_maps: vec![map.clone()],
+        };
+        sync_key_maps_from_export(&mut ws, &dir).unwrap();
+        assert_eq!(
+            ws.key_maps[0].entries[0].output_values_eff(),
+            vec!["P1".to_string(), "RED-L".to_string()]
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn tempfile_dir() -> PathBuf {

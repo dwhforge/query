@@ -57,8 +57,11 @@ fn collect_seed_key_maps(workspace: &Workspace) -> BTreeMap<String, Vec<KeyMapEn
     out
 }
 
-/// map_id → SQL relation for ApplyKeyMap emit (`ref` / `source` / seed ref).
-fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
+/// map_id → SQL relation for ApplyKeyMap emit (`ref` / `source` / seed / query model).
+fn key_map_relations(
+    workspace: &Workspace,
+    models: &HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for km in &workspace.key_maps {
         let rel = match &km.storage {
@@ -69,6 +72,17 @@ fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
             KeyMapStorage::Ref { model } => format!("{{{{ ref('{model}') }}}}"),
             KeyMapStorage::Source { source, table, .. } => {
                 format!("{{{{ source('{source}', '{table}') }}}}")
+            }
+            KeyMapStorage::Query { query_id } => {
+                let q = query_id.trim();
+                let model = models
+                    .get(q)
+                    .cloned()
+                    .or_else(|| {
+                        workspace.query(q).map(|query| dbt_model_name(workspace, query, &[]))
+                    })
+                    .unwrap_or_else(|| sanitize_id(q));
+                format!("{{{{ ref('{model}') }}}}")
             }
         };
         out.insert(km.id.clone(), rel);
@@ -90,17 +104,11 @@ fn key_map_relations(workspace: &Workspace) -> HashMap<String, String> {
     out
 }
 
-/// map_id → (from_columns, to_column) for ApplyKeyMap join emit.
-fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, String)> {
+/// map_id → (from_columns, output_columns) for ApplyKeyMap join emit.
+fn key_map_columns(workspace: &Workspace) -> HashMap<String, (Vec<String>, Vec<String>)> {
     let mut out = HashMap::new();
     for km in &workspace.key_maps {
-        let froms = km.from_columns_eff();
-        let to = if km.to_column.trim().is_empty() {
-            "to".into()
-        } else {
-            km.to_column.clone()
-        };
-        out.insert(km.id.clone(), (froms, to));
+        out.insert(km.id.clone(), (km.from_columns_eff(), km.output_columns_eff()));
     }
     out
 }
@@ -382,23 +390,23 @@ pub fn build_export_plan_routed(
         seeds_cfg.push_str(&format!("  {pipeline_name}:\n"));
         for map_id in key_maps.keys() {
             let seed = key_map_seed_name(map_id);
-            let (from_cols, to_col, extras) = workspace
+            let (from_cols, out_cols, extras) = workspace
                 .key_map(map_id)
                 .map(|m| {
-                    let froms = m.from_columns_eff();
-                    let to = if m.to_column.trim().is_empty() {
-                        "to".to_string()
-                    } else {
-                        m.to_column.clone()
-                    };
-                    (froms, to, m.stewardship_columns())
+                    (
+                        m.from_columns_eff(),
+                        m.output_columns_eff(),
+                        m.stewardship_columns(),
+                    )
                 })
-                .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
+                .unwrap_or_else(|| (vec!["from".into()], vec!["to".into()], vec![]));
             seeds_cfg.push_str(&format!("    {seed}:\n      +column_types:\n"));
             for fc in &from_cols {
                 seeds_cfg.push_str(&format!("        {fc}: varchar\n"));
             }
-            seeds_cfg.push_str(&format!("        {to_col}: varchar\n"));
+            for oc in &out_cols {
+                seeds_cfg.push_str(&format!("        {oc}: varchar\n"));
+            }
             let temporal: std::collections::HashSet<String> = workspace
                 .key_map(map_id)
                 .filter(|m| m.is_range_scd())
@@ -475,20 +483,19 @@ models:\n  {pipeline_name}:\n    staging:\n      +materialized: view\n    interm
 
     for (map_id, entries) in &key_maps {
         let seed = key_map_seed_name(map_id);
-        let (from_cols, to_col, extras) = workspace
+        let (from_cols, out_cols, extras) = workspace
             .key_map(map_id)
             .map(|m| {
-                let to = if m.to_column.trim().is_empty() {
-                    "to".to_string()
-                } else {
-                    m.to_column.clone()
-                };
-                (m.from_columns_eff(), to, m.stewardship_columns())
+                (
+                    m.from_columns_eff(),
+                    m.output_columns_eff(),
+                    m.stewardship_columns(),
+                )
             })
-            .unwrap_or_else(|| (vec!["from".into()], "to".into(), vec![]));
+            .unwrap_or_else(|| (vec!["from".into()], vec!["to".into()], vec![]));
         plan.insert(
             format!("seeds/{seed}.csv"),
-            crate::emit::key_map_seed_csv_full(entries, &from_cols, &to_col, &extras),
+            crate::emit::key_map_seed_csv_outputs(entries, &from_cols, &out_cols, &extras),
         );
     }
 
@@ -631,7 +638,55 @@ Working file `local.duckdb` is separate from any DuckDB *source* files.\n"
     };
     plan.insert("models/sources.yml".into(), sources_yml);
 
+    // ADR-0036: not_null + uniqueness tests on query-backed map models.
+    if let Some(yml) = query_backed_keymap_schema_yml(workspace, &model_name_by_query) {
+        plan.insert("models/schema_keymap_query.yml".into(), yml);
+    }
+
     Ok(plan)
+}
+
+/// dbt data tests for query-backed KeyMaps (ADR-0036).
+fn query_backed_keymap_schema_yml(
+    workspace: &Workspace,
+    models: &HashMap<String, String>,
+) -> Option<String> {
+    let mut models_block = String::new();
+    for km in &workspace.key_maps {
+        let KeyMapStorage::Query { query_id } = &km.storage else {
+            continue;
+        };
+        let q = query_id.trim();
+        let model = models.get(q)?;
+        let froms = km.from_columns_eff();
+        let outs = km.output_columns_eff();
+        models_block.push_str(&format!("  - name: {model}\n    columns:\n"));
+        for (i, fc) in froms.iter().enumerate() {
+            models_block.push_str(&format!("      - name: {fc}\n        data_tests:\n          - not_null\n"));
+            if froms.len() == 1 && i == 0 {
+                models_block.push_str("          - unique\n");
+            }
+        }
+        for oc in &outs {
+            models_block.push_str(&format!(
+                "      - name: {oc}\n        data_tests:\n          - not_null\n"
+            ));
+        }
+        if froms.len() > 1 {
+            let cols = froms
+                .iter()
+                .map(|c| format!("          - {c}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            models_block.push_str(&format!(
+                "    data_tests:\n      - unique_combination_of_columns:\n          combination_of_columns:\n{cols}\n"
+            ));
+        }
+    }
+    if models_block.is_empty() {
+        return None;
+    }
+    Some(format!("version: 2\nmodels:\n{models_block}"))
 }
 
 fn is_source_only_query(query: &crate::model::QueryDef) -> bool {
@@ -786,13 +841,14 @@ fn compile_query_as_dbt_model(
     // Single Load* / FromQuery — one-shot select.
     if query.steps.len() == 1 {
         return Ok(match &query.steps[0] {
-            TransformationStep::LoadCsv { path } => format!(
+            TransformationStep::LoadCsv { path, path_kind: _ } => format!(
                 "-- source: csv\nselect * from read_csv_auto('{}')\n",
                 escape_sql_string(path)
             ),
             TransformationStep::LoadParquet {
                 path,
                 connection_id,
+                ..
             } => {
                 let hive = crate::project::parquet_hive_partitioning(
                     sources,
@@ -870,7 +926,7 @@ fn compile_query_as_dbt_model(
             None
         };
         let body = match step {
-            TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadCsv { path, path_kind: _ } => {
                 left_dbt = None;
                 format!(
                     "select * from read_csv_auto('{}')",
@@ -880,6 +936,7 @@ fn compile_query_as_dbt_model(
             TransformationStep::LoadParquet {
                 path,
                 connection_id,
+                ..
             } => {
                 left_dbt = None;
                 let hive = crate::project::parquet_hive_partitioning(
@@ -928,7 +985,7 @@ fn compile_query_as_dbt_model(
                 substitute_query_placeholders(raw_sql, &relations)
             }
             other => {
-                let key_map_relations = key_map_relations(workspace);
+                let key_map_relations = key_map_relations(workspace, models);
                 let key_map_columns = key_map_columns(workspace);
                 let key_map_range = key_map_range(workspace);
                 let sql = emit_transform_step_ex(
@@ -1000,18 +1057,14 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "dim.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "dim.csv".into(), path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
                     id: "fact".into(),
                     name: "fact_sales".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "fact.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "fact.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1071,9 +1124,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "q".into(),
                 name: "stg_sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: "x.csv".into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() }],
              execution: Default::default(),
 }],
             focus_query_id: "q".into(),
@@ -1092,9 +1143,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "q".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: "sales.csv".into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: "sales.csv".into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "q".into(),
@@ -1290,18 +1339,14 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "dim.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "dim.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "fact".into(),
                     name: "fact_sales".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "fact.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "fact.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1322,9 +1367,7 @@ mod tests {
         ws.queries.push(QueryDef {
             id: "extra".into(),
             name: "orphan_csv".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "extra.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "extra.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         let after = dbt_model_names(&ws).unwrap();
@@ -1340,9 +1383,7 @@ mod tests {
                 QueryDef {
                     id: "daily".into(),
                     name: "daily_pnl".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "a.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -1373,17 +1414,13 @@ mod tests {
                 QueryDef {
                     id: "a".into(),
                     name: "sales_eu".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "eu.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "eu.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "b".into(),
                     name: "sales_us".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "us.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "us.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -1421,9 +1458,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "q".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: "x.csv".into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "q".into(),
@@ -1457,6 +1492,7 @@ mod tests {
         let mut map = KeyMapDef::new("offer_day", "offer");
         map.from_columns = vec!["ext_offer_id".into(), "as_of_day".into()];
         map.to_column = "offer_sk".into();
+        map.output_columns = vec!["offer_sk".into()];
         map.entries = vec![KeyMapEntry::parts(
             vec!["001".into(), "2024-06-01".into()],
             "SK-1",
@@ -1466,13 +1502,12 @@ mod tests {
                 id: "q".into(),
                 name: "events".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "x.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: String::new(),
                         columns: vec!["ext_offer_id".into(), "day".into()],
                         output_column: Some("offer_sk".into()),
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
@@ -1518,13 +1553,12 @@ mod tests {
                 id: "q".into(),
                 name: "sales".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "x.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
@@ -1535,12 +1569,14 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert("q".into(), vec!["channel".into()]);
         let plan = build_export_plan(
             "keymap_demo",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         assert!(plan.contains_key("seeds/map_channel_alias.csv"));
@@ -1572,7 +1608,7 @@ mod tests {
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         assert_eq!(
@@ -1601,13 +1637,12 @@ mod tests {
                 id: "q".into(),
                 name: "sales".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "x.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: map.id.clone().into(),
                         entries: map.entries.clone(),
@@ -1618,12 +1653,14 @@ mod tests {
             focus_query_id: "q".into(),
             key_maps: vec![map],
         };
+        let mut seeds = HashMap::new();
+        seeds.insert("q".into(), vec!["channel".into()]);
         let plan = build_export_plan(
             "keymap_src",
             &ws,
             DbtTarget::V1,
             WarehouseDialect::Duckdb,
-            &HashMap::new(),
+            &seeds,
         )
         .unwrap();
         let sources = &plan["models/sources.yml"];

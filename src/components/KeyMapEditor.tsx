@@ -11,17 +11,35 @@ import type {
   KeyMapEntry,
   KeyMapStorage,
 } from "../types/pipeline";
-import { listPostgresObjects, readKeyMap, type KeyMapDirtyDelta } from "../lib/bridge";
+import {
+  describeWorkspace,
+  listPostgresObjects,
+  previewWorkspace,
+  readKeyMap,
+  type KeyMapDirtyDelta,
+} from "../lib/bridge";
+import {
+  isQueryBackedMap,
+  queryMapPreviewQuery,
+  validateQueryMapRows,
+} from "../lib/keyMapQuery";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { KeyMapFuzzyPanel } from "./KeyMapFuzzyPanel";
 import type { Workspace } from "../types/pipeline";
 import {
+  buildApplyReviewState,
+  confirmApplyReview,
+  formatJoinOn,
   fromColumnsEff,
   fromPartsEff,
   keyMapSeedName,
+  mergeLensOutputCells,
+  outputColumnsEff,
+  outputValuesEff,
   parseFromToPaste,
   tupleKey,
   validateKeyMapEntries,
+  type ApplyReviewState,
   type ApplySide,
 } from "../lib/keyMap";
 import {
@@ -78,7 +96,23 @@ export type KeyMapEditorProps = {
   saveInFlight?: boolean;
   /** Bumped by App after WH Save when saveApi was absent (legacy clear). */
   dirtyResetSeq?: number;
-  onApply?: (side: ApplySide) => void;
+  /**
+   * Multi-output maps with a Join context open an inline review first
+   * (ADR-0037); opts carry the confirmed destinations / Join rewrite.
+   */
+  /**
+   * ADR-0038: pass side + optional confirmed ApplyUserChoice fields.
+   * App resolves ApplyPlan — does not invent bindings here.
+   */
+  onApply?: (
+    side: ApplySide,
+    choice?: {
+      bindings: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
+      joinRewrite?: { leftOn: string[]; rightOn: string[] };
+    },
+  ) => void;
+  /** Create a Join-anchored mapping quality check for this KeyMap (ADR-0035). */
+  onMappingCheck?: () => void;
   onClose?: () => void;
   onSave?: () => void;
   onDelete?: () => void;
@@ -106,22 +140,34 @@ export type KeyMapEditorProps = {
   /** Compact for Hero playground. */
   compact?: boolean;
   title?: string;
+  /** Import binding problem or refused write-back (ADR-0040). */
+  importNotice?: string | null;
+  /** Read-only or broken import: rows stay visible, edits and deletes do not. */
+  importRowsLocked?: boolean;
 };
 
-function storageKind(s: KeyMapStorage | undefined): "seed" | "ref" | "source" {
+function storageKind(
+  s: KeyMapStorage | undefined,
+): "seed" | "ref" | "source" | "query" {
   return s?.kind ?? "seed";
 }
+
+/** Stable defaults. `= []` in the signature is a new array every render and retriggers effects. */
+const NO_CONNECTIONS: ConnectionDef[] = [];
+const NO_STRINGS: string[] = [];
+const NO_STRING_TUPLES: string[][] = [];
+const NO_SOURCE_OPTIONS: KeyMapSourceOption[] = [];
 
 export function KeyMapEditor({
   map,
   workspace,
-  connections = [],
-  pickToOptions = [],
-  suggestedFrom = [],
-  suggestedFromParts = [],
-  sourceOptions = [],
-  postgresConnections = [],
-  refOptions = [],
+  connections = NO_CONNECTIONS,
+  pickToOptions = NO_STRINGS,
+  suggestedFrom = NO_STRINGS,
+  suggestedFromParts = NO_STRING_TUPLES,
+  sourceOptions = NO_SOURCE_OPTIONS,
+  postgresConnections = NO_CONNECTIONS,
+  refOptions = NO_STRINGS,
   onChange,
   onWarehouseRead,
   onDirtyChange,
@@ -129,6 +175,7 @@ export function KeyMapEditor({
   dirtyResetSeq,
   saveInFlight = false,
   onApply,
+  onMappingCheck,
   onClose,
   onSave,
   onDelete,
@@ -139,12 +186,17 @@ export function KeyMapEditor({
   onChooseOtherMap,
   compact = false,
   title,
+  importNotice = null,
+  importRowsLocked = false,
 }: KeyMapEditorProps) {
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [showOtherApplySides, setShowOtherApplySides] = useState(false);
+  /** ADR-0037 inline Apply+Join review (multi-output + Join context). */
+  const [applyReview, setApplyReview] = useState<ApplyReviewState | null>(null);
+  const [applyReviewError, setApplyReviewError] = useState<string | null>(null);
   const [pgTableOptions, setPgTableOptions] = useState<KeyMapSourceOption[]>(
     [],
   );
@@ -163,6 +215,15 @@ export function KeyMapEditor({
   const dirtyResetSeen = useRef(dirtyResetSeq);
   const gridRef = useRef<HTMLDivElement>(null);
   const isSource = map.storage?.kind === "source";
+  const rowsReadOnly = isQueryBackedMap(map);
+  const [queryPreviewNote, setQueryPreviewNote] = useState<string | null>(null);
+  const [queryPreviewBusy, setQueryPreviewBusy] = useState(false);
+  const [queryColOptions, setQueryColOptions] = useState<string[]>([]);
+  const [queryPreviewEntries, setQueryPreviewEntries] = useState<KeyMapEntry[]>(
+    [],
+  );
+  const [queryReloadNonce, setQueryReloadNonce] = useState(0);
+  const queryPreviewSeq = useRef(0);
   const rangeCols =
     map.time_mode === "range_scd"
       ? [
@@ -179,7 +240,10 @@ export function KeyMapEditor({
   ];
   const fromCols = fromColumnsEff(map);
   const arity = fromCols.length;
+  const outCols = outputColumnsEff(map);
+  const outArity = outCols.length;
   const validateOpts = {
+    outputArity: outArity,
     timeMode: map.time_mode === "range_scd" ? ("range_scd" as const) : ("none" as const),
     validFromColumn: map.valid_from_column ?? "valid_from",
     validToColumn: map.valid_to_column ?? "valid_to",
@@ -188,10 +252,155 @@ export function KeyMapEditor({
     return validateKeyMapEntries(entries, arity, validateOpts);
   }
   const saving = saveInFlight || storeRef.current.isSaveInFlight();
+  const duplicateMapColumn = (() => {
+    const seen = new Set<string>();
+    for (const c of [...fromCols, ...outCols]) {
+      const k = c.trim().toLowerCase();
+      if (!k) continue;
+      if (seen.has(k)) return c;
+      seen.add(k);
+    }
+    return null;
+  })();
+
+  /**
+   * ADR-0037: change the ordered output set. Entries' `output_values` stay
+   * aligned by position (rename keeps values; add pads; remove drops that slot).
+   * Source maps with dirty rows need explicit discard; Cancel keeps the prior
+   * binding (no `onChange`).
+   */
+  function commitOutputColumns(
+    next: string[],
+    kind: "add" | "rename" | "remove",
+    removedIdx?: number,
+  ) {
+    if (!next.length) return;
+    if (isSource) {
+      if (saving) {
+        setError("Wait for Save to finish before changing output columns.");
+        return;
+      }
+      const dirty = storeRef.current.dirtyCount();
+      if (dirty > 0) {
+        const ok = window.confirm(
+          `Changing output columns discards ${dirty} unsaved row(s) and reloads from the warehouse. Continue?`,
+        );
+        if (!ok) return; // Cancel: prior binding stays
+      }
+      storeRef.current.clear();
+      pageRef.current = [];
+      newIdsRef.current = [];
+      loadedTableKey.current = "";
+      bumpDirty();
+    }
+    const pad = (values: string[]): string[] => {
+      let out = [...values];
+      if (kind === "remove" && removedIdx !== undefined) {
+        out = out.filter((_, j) => j !== removedIdx);
+      }
+      out = out.slice(0, next.length);
+      while (out.length < next.length) out.push("");
+      return out;
+    };
+    setError(null);
+    onChange({
+      ...map,
+      output_columns: next,
+      to_column: next[0],
+      entries: (isSource ? [] : map.entries).map((e) => {
+        const outputs = pad(outputValuesEff(e));
+        return { ...e, to: outputs[0] ?? "", output_values: outputs };
+      }),
+    });
+  }
 
   useEffect(() => {
-    storeRef.current.setSchema({ arity, editable: editableCols });
-  }, [arity, editableCols]);
+    storeRef.current.setSchema({
+      arity,
+      editable: editableCols,
+      outputColumns: outCols,
+    });
+  }, [arity, editableCols, outCols]);
+
+  // ADR-0036: describe map query columns + refresh read-only preview rows.
+  useEffect(() => {
+    if (!rowsReadOnly || !workspace || map.storage?.kind !== "query") {
+      setQueryColOptions((cur) => (cur.length === 0 ? cur : []));
+      return;
+    }
+    const qid = map.storage.query_id.trim();
+    if (!qid) return;
+    const seq = ++queryPreviewSeq.current;
+    setQueryPreviewBusy(true);
+    setQueryPreviewNote(null);
+    void (async () => {
+      try {
+        const focused = {
+          ...workspace,
+          focus_query_id: qid,
+        };
+        const desc = await describeWorkspace(focused, connections, []);
+        if (seq !== queryPreviewSeq.current) return;
+        setQueryColOptions(desc.columns.map((c) => c.name));
+        const previewQ = queryMapPreviewQuery(map, 50);
+        if (!previewQ) return;
+        const ws = {
+          ...workspace,
+          focus_query_id: previewQ.id,
+          queries: [
+            ...workspace.queries.filter((q) => q.id !== previewQ.id),
+            previewQ,
+          ],
+        };
+        const result = await previewWorkspace(ws, connections, []);
+        if (seq !== queryPreviewSeq.current) return;
+        const fromN = fromColumnsEff(map).length;
+        const outN = outputColumnsEff(map).length;
+        const rows = result.rows.map((r) =>
+          Array.from({ length: fromN + outN }, (_, i) => {
+            const v = r[i];
+            return v == null ? null : String(v);
+          }),
+        );
+        const checked = validateQueryMapRows(map.id, fromN, rows, outN);
+        const entries = result.rows.map((r) => {
+          const parts = Array.from({ length: fromN }, (_, i) =>
+            String(r[i] ?? ""),
+          );
+          const outputs = Array.from({ length: outN }, (_, o) =>
+            String(r[fromN + o] ?? ""),
+          );
+          return {
+            from: parts[0] ?? "",
+            from_parts: parts,
+            to: outputs[0] ?? "",
+            output_values: outputs,
+          } satisfies KeyMapEntry;
+        });
+        // Do not persist preview rows into the project map (ADR-0036).
+        setQueryPreviewEntries(entries);
+        setQueryPreviewNote(
+          checked.ok
+            ? `Preview ${entries.length} row(s) · full Apply uses entire query`
+            : `Preview loaded — validation: ${checked.error}`,
+        );
+      } catch (e) {
+        if (seq !== queryPreviewSeq.current) return;
+        setQueryPreviewNote(typeof e === "string" ? e : String(e));
+      } finally {
+        if (seq === queryPreviewSeq.current) setQueryPreviewBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh on binding identity
+  }, [
+    rowsReadOnly,
+    map.storage?.kind === "query" ? map.storage.query_id : "",
+    (map.from_columns ?? []).join(","),
+    map.from_column,
+    map.to_column,
+    (map.output_columns ?? []).join(","),
+    queryReloadNonce,
+  ]);
 
   function publishView() {
     if (!isSource) return;
@@ -257,8 +466,8 @@ export function KeyMapEditor({
 
   useEffect(() => {
     if (map.storage?.kind !== "source") {
-      setPgTableOptions([]);
-      setPgCatalogStatus(null);
+      setPgTableOptions((cur) => (cur.length === 0 ? cur : []));
+      setPgCatalogStatus((cur) => (cur == null ? cur : null));
       return;
     }
     const conn = postgresConnections.find((c) => c.id === activeConnectionId);
@@ -308,7 +517,14 @@ export function KeyMapEditor({
     return () => window.clearTimeout(t);
   }, [filter, isSource]);
 
+  const activeDsn =
+    postgresConnections.find((c) => c.id === activeConnectionId)?.postgres
+      ?.connection_string?.trim() ?? "";
+
   // Paged WH read when schema+table are chosen (ADR-0022).
+  // Depend on the DSN string. A fresh connections array on every parent render
+  // (Join Lens preview ticks) must not cancel the in-flight page and then skip
+  // the retry because the table key is unchanged.
   useEffect(() => {
     if (map.storage?.kind !== "source") {
       loadedTableKey.current = "";
@@ -317,10 +533,8 @@ export function KeyMapEditor({
       return;
     }
     const { source, table } = map.storage;
-    if (!source.trim() || !table.trim() || !activeConnectionId) return;
-    const conn = postgresConnections.find((c) => c.id === activeConnectionId);
-    const dsn = conn?.postgres?.connection_string?.trim();
-    if (!dsn) return;
+    if (!source.trim() || !table.trim() || !activeConnectionId || !activeDsn) return;
+    const dsn = activeDsn;
     const key = [
       activeConnectionId,
       source,
@@ -328,6 +542,7 @@ export function KeyMapEditor({
       map.from_column ?? "from",
       (map.from_columns ?? []).join(","),
       map.to_column ?? "to",
+      outCols.join(","),
       (map.editable_columns ?? []).join(","),
       pageOffset,
       serverFilter,
@@ -395,9 +610,10 @@ export function KeyMapEditor({
     map.from_column,
     map.from_columns,
     map.to_column,
+    map.output_columns,
     map.editable_columns,
     activeConnectionId,
-    postgresConnections,
+    activeDsn,
     reloadNonce,
     pageOffset,
     serverFilter,
@@ -428,22 +644,23 @@ export function KeyMapEditor({
   }, [tableOptions, selectedSchema]);
 
   const rows = useMemo(() => {
+    const sourceEntries = rowsReadOnly ? queryPreviewEntries : map.entries;
     if (isSource) {
       // Server-side fromPrefix already applied.
       return map.entries.map((e, i) => ({ e, i }));
     }
     const q = filter.trim().toLowerCase();
-    if (!q) return map.entries.map((e, i) => ({ e, i }));
-    return map.entries
+    if (!q) return sourceEntries.map((e, i) => ({ e, i }));
+    return sourceEntries
       .map((e, i) => ({ e, i }))
       .filter(({ e }) => {
         const parts = fromPartsEff(e);
         return (
           parts.some((p) => p.toLowerCase().includes(q)) ||
-          e.to.toLowerCase().includes(q)
+          outputValuesEff(e).some((v) => v.toLowerCase().includes(q))
         );
       });
-  }, [map.entries, filter, isSource]);
+  }, [map.entries, filter, isSource, rowsReadOnly, queryPreviewEntries]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -463,6 +680,20 @@ export function KeyMapEditor({
     }
     setError(null);
     onChange({ ...map, entries: v.entries });
+  }
+
+  function padOutputs(values: string[]): string[] {
+    const out = values.slice(0, outArity);
+    while (out.length < outArity) out.push("");
+    return out;
+  }
+
+  function setOutput(index: number, oi: number, value: string) {
+    const prev = map.entries[index];
+    if (!prev) return;
+    const outs = padOutputs(outputValuesEff(prev));
+    outs[oi] = value;
+    updateRow(index, { to: outs[0] ?? "", output_values: outs });
   }
 
   function updateRow(index: number, patch: Partial<KeyMapEntry>) {
@@ -489,7 +720,7 @@ export function KeyMapEditor({
         rowId,
         {
           fromParts: fromPartsEff(merged),
-          to: merged.to,
+          outputs: padOutputs(outputValuesEff(merged)),
           attrs: merged.attrs ?? {},
         },
         slot?.loaded ?? null,
@@ -541,7 +772,7 @@ export function KeyMapEditor({
     if (isSource) {
       const id = storeRef.current.addRow({
         fromParts: parts,
-        to,
+        outputs: padOutputs([to]),
         attrs: Object.fromEntries(editableCols.map((c) => [c, ""])),
       });
       newIdsRef.current = [...newIdsRef.current, id];
@@ -559,6 +790,7 @@ export function KeyMapEditor({
       from: parts[0] ?? "",
       from_parts: parts,
       to,
+      output_values: padOutputs([to]),
     };
     if (editableCols.length) {
       entry.attrs = Object.fromEntries(editableCols.map((c) => [c, ""]));
@@ -619,12 +851,13 @@ export function KeyMapEditor({
       from: p.fromParts[0]!,
       from_parts: p.fromParts,
       to: "",
+      output_values: padOutputs([]),
     }));
     setEntries([...map.entries, ...extra]);
   }
 
   function applyPaste() {
-    const parsed = parseFromToPaste(pasteText, arity);
+    const parsed = parseFromToPaste(pasteText, arity, outArity);
     if (!parsed.length) {
       setError("Paste TSV/CSV with from,to columns");
       return;
@@ -645,13 +878,17 @@ export function KeyMapEditor({
         if (existingId) {
           storeRef.current.updateDraft(
             existingId,
-            { fromParts: parts, to: e.to, attrs: e.attrs ?? {} },
+            {
+              fromParts: parts,
+              outputs: padOutputs(outputValuesEff(e)),
+              attrs: e.attrs ?? {},
+            },
             pageHit?.loaded ?? null,
           );
         } else {
           const id = storeRef.current.addRow({
             fromParts: parts,
-            to: e.to,
+            outputs: padOutputs(outputValuesEff(e)),
             attrs: e.attrs ?? {},
           });
           newIdsRef.current.push(id);
@@ -691,10 +928,12 @@ export function KeyMapEditor({
     e: KeyboardEvent<HTMLInputElement>,
     rowIndex: number,
     col: "from" | "to",
+    outIdx = 0,
   ) {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (rowIndex === map.entries.length - 1 && col === "to") {
+      const lastOut = col === "to" && outIdx >= outArity - 1;
+      if (rowIndex === map.entries.length - 1 && lastOut) {
         addRow();
         return;
       }
@@ -703,6 +942,14 @@ export function KeyMapEditor({
           e.currentTarget
             .closest("tr")
             ?.querySelector<HTMLInputElement>('input[data-col="to"]') ?? null
+        )?.focus();
+      } else if (!lastOut) {
+        (
+          e.currentTarget
+            .closest("tr")
+            ?.querySelector<HTMLInputElement>(
+              `input[data-col="to-${outIdx + 1}"]`,
+            ) ?? null
         )?.focus();
       } else {
         const next = e.currentTarget
@@ -723,6 +970,8 @@ export function KeyMapEditor({
   const sourceStorage =
     map.storage?.kind === "source" ? map.storage : null;
   const refStorage = map.storage?.kind === "ref" ? map.storage : null;
+  const queryStorage =
+    map.storage?.kind === "query" ? map.storage : null;
   const kind = storageKind(map.storage);
   const sotLine = (() => {
     if (kind === "source") {
@@ -741,6 +990,19 @@ export function KeyMapEditor({
         detail: refStorage?.model?.trim()
           ? `{{ ref('${refStorage.model}') }} · DuckDB preview cannot resolve this model; local rows are a draft cache, not the relation`
           : "set model name · local cache is not the dbt model",
+      };
+    }
+    if (kind === "query") {
+      const q = workspace?.queries.find(
+        (x) => x.id === queryStorage?.query_id,
+      );
+      return {
+        label: "SoT · workspace query",
+        detail: q
+          ? `${q.name} (${q.id}) · read-only · Apply joins live result (ADR-0036)`
+          : queryStorage?.query_id
+            ? `missing query ${queryStorage.query_id}`
+            : "pick a local query",
       };
     }
     if (exportPath) {
@@ -778,19 +1040,30 @@ export function KeyMapEditor({
           value={storageKind(map.storage)}
           onChange={(e) => {
             if (saving) return;
-            const kind = e.target.value as "seed" | "ref" | "source";
+            const next = e.target.value as "seed" | "ref" | "source" | "query";
             const storage: KeyMapStorage =
-              kind === "seed"
+              next === "seed"
                 ? { kind: "seed" }
-                : kind === "ref"
+                : next === "ref"
                   ? { kind: "ref", model: "" }
-                  : {
-                      kind: "source",
-                      source: "",
-                      table: "",
-                    };
-            onChange({ ...map, storage });
-            if (kind === "source") setRebindOpen(true);
+                  : next === "query"
+                    ? {
+                        kind: "query",
+                        query_id: workspace?.queries[0]?.id ?? "",
+                      }
+                    : {
+                        kind: "source",
+                        source: "",
+                        table: "",
+                      };
+            onChange({
+              ...map,
+              storage,
+              entries: next === "query" ? [] : map.entries,
+              editable_columns: next === "query" ? [] : map.editable_columns,
+              time_mode: next === "query" ? "none" : map.time_mode,
+            });
+            if (next === "source") setRebindOpen(true);
           }}
           disabled={saving}
           className={fieldClass}
@@ -798,8 +1071,42 @@ export function KeyMapEditor({
           <option value="seed">dbt seed (seeds/map_*.csv)</option>
           <option value="ref">Existing dbt ref(model)</option>
           <option value="source">Warehouse source table</option>
+          <option value="query">Workspace query (ADR-0036)</option>
         </select>
       </label>
+      {queryStorage && (
+        <div className="space-y-3">
+          <p className="rounded border border-teal-900/50 bg-teal-950/25 px-2 py-1.5 text-[10px] leading-snug text-teal-100/90">
+            Correspondences come from the selected query. Rows are read-only;
+            Save stores the binding only — not query results (ADR-0036).
+          </p>
+          <label className={labelClass}>
+            Query
+            <select
+              value={queryStorage.query_id}
+              onChange={(e) =>
+                onChange({
+                  ...map,
+                  storage: { kind: "query", query_id: e.target.value },
+                  from_columns: [],
+                  from_column: "from",
+                  to_column: "to",
+                  output_columns: ["to"],
+                  entries: [],
+                })
+              }
+              className={fieldClass}
+            >
+              <option value="">Select query…</option>
+              {(workspace?.queries ?? []).map((q) => (
+                <option key={q.id} value={q.id}>
+                  {q.name} ({q.id})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       {refStorage && (
         <>
           <p className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1.5 text-[10px] leading-snug text-amber-100/90">
@@ -807,7 +1114,7 @@ export function KeyMapEditor({
             <span className="font-mono">
               {`{{ ref('${refStorage.model?.trim() || "…"}') }}`}
             </span>
-            . Preview will refuse ApplyKeyMap for this map — local rows below are
+            . Preview will refuse Apply Mapping for this map — local rows below are
             a draft cache only (not write-back, not live preview).
           </p>
           <label className={labelClass}>
@@ -1024,11 +1331,23 @@ export function KeyMapEditor({
             + Column
           </button>
         </div>
+        {queryColOptions.length > 0 && (
+          <datalist id={`keymap-query-cols-${map.id}`}>
+            {queryColOptions.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        )}
         {fromCols.map((col, i) => (
           <label key={`from-col-${i}`} className={labelClass}>
             Match[{i + 1}]
             <div className="mt-1 flex gap-1">
               <input
+                list={
+                  queryColOptions.length
+                    ? `keymap-query-cols-${map.id}`
+                    : undefined
+                }
                 value={col}
                 onChange={(e) => {
                   const next = [...fromCols];
@@ -1069,15 +1388,68 @@ export function KeyMapEditor({
             </div>
           </label>
         ))}
-        <label className={labelClass}>
-          Target value column
-          <input
-            value={map.to_column ?? "to"}
-            onChange={(e) => onChange({ ...map, to_column: e.target.value })}
-            className={`${fieldClass} font-mono`}
-          />
-        </label>
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <span className={labelClass}>Output columns</span>
+          <button
+            type="button"
+            onClick={() => {
+              const used = new Set(
+                [...fromCols, ...outCols].map((c) => c.toLowerCase()),
+              );
+              let n = outCols.length + 1;
+              while (used.has(`to_${n}`)) n += 1;
+              commitOutputColumns([...outCols, `to_${n}`], "add");
+            }}
+            className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-teal-200"
+          >
+            + Output
+          </button>
+        </div>
+        {outCols.map((col, i) => (
+          <label key={`out-col-${i}`} className={labelClass}>
+            Output[{i + 1}]
+            <div className="mt-1 flex gap-1">
+              <input
+                list={
+                  queryColOptions.length
+                    ? `keymap-query-cols-${map.id}`
+                    : undefined
+                }
+                value={col}
+                onChange={(e) => {
+                  const next = [...outCols];
+                  next[i] = e.target.value;
+                  commitOutputColumns(next, "rename");
+                }}
+                className={`${fieldClass} mt-0 font-mono`}
+              />
+              {outCols.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    commitOutputColumns(
+                      outCols.filter((_, j) => j !== i),
+                      "remove",
+                      i,
+                    )
+                  }
+                  className="rounded border border-slate-700 px-2 text-slate-500 hover:text-rose-300"
+                  aria-label="Remove output column"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </label>
+        ))}
+        {duplicateMapColumn && (
+          <p className="text-[11px] text-amber-300/90">
+            Duplicate map column “{duplicateMapColumn}” — names must be unique
+            across match and output columns.
+          </p>
+        )}
       </div>
+      {!rowsReadOnly && (
       <div className="space-y-2 border-t border-slate-800/80 pt-3">
         <div className="flex items-center justify-between gap-2">
           <span className={labelClass}>Attribute columns</span>
@@ -1214,6 +1586,7 @@ export function KeyMapEditor({
           </div>
         )}
       </div>
+      )}
       <p className="text-[11px] leading-snug text-slate-500">
         Mapping relation column names. Arity {arity}: uniqueness is the match{" "}
         <span className="font-mono text-slate-400">key</span>
@@ -1222,7 +1595,7 @@ export function KeyMapEditor({
         <span className="font-mono text-slate-400">
           {[
             ...fromCols,
-            map.to_column ?? "to",
+            ...outCols,
             ...(map.time_mode === "range_scd"
               ? [
                   map.valid_from_column ?? "valid_from",
@@ -1251,6 +1624,7 @@ export function KeyMapEditor({
           compact ? "w-28 py-0.5 text-[11px]" : "w-48"
         }`}
       />
+      {!rowsReadOnly && !importRowsLocked && (
       <button
         type="button"
         onClick={() => addRow()}
@@ -1258,6 +1632,17 @@ export function KeyMapEditor({
       >
         Add row
       </button>
+      )}
+      {rowsReadOnly && (
+        <button
+          type="button"
+          disabled={queryPreviewBusy}
+          onClick={() => setQueryReloadNonce((n) => n + 1)}
+          className="rounded-md border border-teal-800/50 px-2.5 py-1.5 text-[12px] text-teal-200 hover:bg-teal-500/10 disabled:opacity-40"
+        >
+          {queryPreviewBusy ? "Refreshing…" : "Refresh"}
+        </button>
+      )}
       {map.storage?.kind === "source" &&
         map.storage.source &&
         map.storage.table && (
@@ -1278,7 +1663,7 @@ export function KeyMapEditor({
             Reload
           </button>
         )}
-      {(suggestedFromParts.length > 0 || suggestedFrom.length > 0) && (
+      {!importRowsLocked && (suggestedFromParts.length > 0 || suggestedFrom.length > 0) && (
         <button
           type="button"
           onClick={addSuggested}
@@ -1291,6 +1676,7 @@ export function KeyMapEditor({
           )
         </button>
       )}
+      {!rowsReadOnly && !importRowsLocked && (
       <button
         type="button"
         onClick={() => setPasteOpen((v) => !v)}
@@ -1298,6 +1684,12 @@ export function KeyMapEditor({
       >
         Paste CSV
       </button>
+      )}
+      {queryPreviewNote && (
+        <span className="max-w-md truncate text-[11px] text-slate-500" title={queryPreviewNote}>
+          {queryPreviewNote}
+        </span>
+      )}
       <span className="text-[11px] text-slate-500">
         {isSource
           ? `${map.entries.length} on page`
@@ -1361,9 +1753,14 @@ export function KeyMapEditor({
                 {col || `match_${fi + 1}`}
               </th>
             ))}
-            <th className="px-3 py-2 font-semibold font-mono normal-case text-slate-300">
-              {map.to_column?.trim() || "to"}
-            </th>
+            {outCols.map((col, oi) => (
+              <th
+                key={`oh-${oi}`}
+                className="px-3 py-2 font-semibold font-mono normal-case text-slate-300"
+              >
+                {col.trim() || `output_${oi + 1}`}
+              </th>
+            ))}
             {editableCols.map((c) => (
               <th key={c} className="px-3 py-2 font-semibold font-mono normal-case">
                 {c}
@@ -1373,7 +1770,7 @@ export function KeyMapEditor({
           </tr>
         </thead>
         <tbody>
-          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
+          {virtualRows.length > 0 && virtualRows[0]!.start > 0 && <tr aria-hidden="true"><td colSpan={2 + fromCols.length + outArity + editableCols.length} style={{height: virtualRows[0]!.start, padding: 0}} /></tr>}
           {virtualRows.map((v) => { const {e,i}=rows[v.index]!; return (
             <tr
               key={i}
@@ -1389,8 +1786,10 @@ export function KeyMapEditor({
                   <td key={`fc-${fi}`} className="px-2 py-1">
                     <input
                       data-col={fi === 0 ? "from" : `from-${fi}`}
+                      readOnly={importRowsLocked}
                       value={parts[fi] ?? ""}
                       onChange={(ev) => {
+                        if (importRowsLocked) return;
                         const nextParts = [...fromPartsEff(e)];
                         while (nextParts.length < arity) nextParts.push("");
                         nextParts[fi] = ev.target.value;
@@ -1409,30 +1808,41 @@ export function KeyMapEditor({
                   </td>
                 );
               })}
-              <td className="px-2 py-1">
-                <input
-                  data-col="to"
-                  list={
-                    pickToOptions.length > 0
-                      ? `keymap-to-${map.id}`
-                      : undefined
-                  }
-                  value={e.to}
-                  onChange={(ev) => updateRow(i, { to: ev.target.value })}
-                  onKeyDown={(ev) => onCellKeyDown(ev, i, "to")}
-                  className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-teal-200/90 focus:border-slate-600 focus:bg-slate-950"
-                />
-              </td>
+              {outCols.map((_, oi) => (
+                <td key={`oc-${oi}`} className="px-2 py-1">
+                  <input
+                    data-col={oi === 0 ? "to" : `to-${oi}`}
+                    readOnly={importRowsLocked}
+                    list={
+                      oi === 0 && pickToOptions.length > 0
+                        ? `keymap-to-${map.id}`
+                        : undefined
+                    }
+                    value={outputValuesEff(e)[oi] ?? ""}
+                    onChange={(ev) => {
+                      if (importRowsLocked) return;
+                      setOutput(i, oi, ev.target.value);
+                    }}
+                    onKeyDown={(ev) => onCellKeyDown(ev, i, "to", oi)}
+                    className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-teal-200/90 focus:border-slate-600 focus:bg-slate-950"
+                  />
+                </td>
+              ))}
               {editableCols.map((c) => (
                 <td key={c} className="px-2 py-1">
                   <input
+                    readOnly={importRowsLocked}
                     value={e.attrs?.[c] ?? ""}
-                    onChange={(ev) => updateAttr(i, c, ev.target.value)}
+                    onChange={(ev) => {
+                      if (importRowsLocked) return;
+                      updateAttr(i, c, ev.target.value);
+                    }}
                     className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 font-mono text-slate-300 focus:border-slate-600 focus:bg-slate-950"
                   />
                 </td>
               ))}
               <td className="px-2 text-center">
+                {!importRowsLocked && (
                 <button
                   type="button"
                   onClick={() => deleteRow(i)}
@@ -1441,10 +1851,11 @@ export function KeyMapEditor({
                 >
                   ×
                 </button>
+                )}
               </td>
             </tr>
           ); })}
-          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={3 + fromCols.length + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
+          {virtualRows.length > 0 && <tr aria-hidden="true"><td colSpan={2 + fromCols.length + outArity + editableCols.length} style={{height: Math.max(0,virtualizer.getTotalSize()-virtualRows[virtualRows.length-1]!.end), padding: 0}} /></tr>}
         </tbody>
       </table>
       {pickToOptions.length > 0 && (
@@ -1494,6 +1905,16 @@ export function KeyMapEditor({
               )}
           </div>
         </div>
+        {onMappingCheck && (
+          <button
+            type="button"
+            onClick={onMappingCheck}
+            className="rounded-md border border-teal-800/50 bg-teal-500/10 px-2.5 py-1 text-[12px] font-medium text-teal-200 hover:bg-teal-500/20"
+            title="Open mapping quality overview for a Join that applies this Mapping"
+          >
+            Mapping check…
+          </button>
+        )}
         {onClose && (
           <button
             type="button"
@@ -1504,6 +1925,12 @@ export function KeyMapEditor({
           </button>
         )}
       </div>
+
+      {importNotice && (
+        <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-[12px] text-amber-100">
+          {importNotice}
+        </div>
+      )}
 
       {!compact && joinApplyHint && onApply && (
         <div className="shrink-0 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-[12px] leading-snug text-amber-100/90">
@@ -1548,7 +1975,7 @@ export function KeyMapEditor({
         {settingsPanel}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {toolbar}
-          {!compact && workspace && <KeyMapFuzzyPanel
+          {!compact && workspace && !rowsReadOnly && <KeyMapFuzzyPanel
             key={map.id}
             workspace={workspace}
             connections={connections}
@@ -1569,12 +1996,26 @@ export function KeyMapEditor({
                   if (!parts.length || !s.to_key.trim()) continue;
                   const key = tupleKey(parts);
                   const i = byFrom.get(key);
-                  if (i !== undefined && merged[i]!.to.trim()) continue;
-                  const entry = {
-                    from: parts[0]!,
-                    from_parts: parts,
-                    to: s.to_key,
-                  };
+                  if (
+                    i !== undefined &&
+                    outputValuesEff(merged[i]!).some((v) => v.trim())
+                  ) {
+                    continue;
+                  }
+                  // Fuzzy To proposals fill the primary output only (ADR-0037).
+                  const base: KeyMapEntry = i !== undefined
+                    ? merged[i]!
+                    : {
+                        from: parts[0]!,
+                        from_parts: parts,
+                        to: "",
+                        output_values: padOutputs([]),
+                      };
+                  const m = mergeLensOutputCells(base, outCols, [
+                    { column: outCols[0]!, value: s.to_key },
+                  ]);
+                  if (!m.ok) continue;
+                  const entry = m.entry;
                   if (i === undefined) {
                     byFrom.set(key, merged.length);
                     merged.push(entry);
@@ -1620,8 +2061,8 @@ export function KeyMapEditor({
                 onChange={(e) => setPasteText(e.target.value)}
                 rows={compact ? 3 : 6}
                 placeholder={
-                  arity > 1
-                    ? `${fromCols.join(",")},${map.to_column ?? "to"}\nid,2024-06-01,sk1`
+                  arity > 1 || outArity > 1
+                    ? `${[...fromCols, ...outCols].join(",")}\nid,2024-06-01,sk1`
                     : "from,to\nwww,web\nshop,store"
                 }
                 className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 font-mono text-[12px] text-slate-200"
@@ -1644,6 +2085,239 @@ export function KeyMapEditor({
         </div>
       </div>
 
+      {!compact && onApply && joinApplyContext && applyReview && (() => {
+        const review = applyReview;
+        const leftOnCols = joinApplyContext.leftOnCols ?? [joinApplyContext.leftOn];
+        const rightOnCols = joinApplyContext.rightOnCols ?? [joinApplyContext.rightOn];
+        const canRewrite = review.side !== "right";
+        const rewrite = canRewrite && review.rewriteJoin;
+        const patchOutput = (
+          i: number,
+          p: Partial<(typeof review.outputs)[number]>,
+        ) => {
+          const outputs = review.outputs.map((o, j) =>
+            j === i ? { ...o, ...p } : o,
+          );
+          setApplyReview({ ...review, outputs });
+        };
+        const patchKeep = (i: number, keep: boolean) => {
+          const keepEqualities = review.keepEqualities.map((e, j) =>
+            j === i ? { ...e, keep } : e,
+          );
+          setApplyReview({ ...review, keepEqualities });
+        };
+        const preview = (() => {
+          if (!rewrite) return null;
+          const left: string[] = [];
+          const right: string[] = [];
+          for (const eq of review.keepEqualities) {
+            if (!eq.keep) continue;
+            left.push(eq.left);
+            right.push(eq.right);
+          }
+          for (const o of review.outputs) {
+            if (!o.includeJoin) continue;
+            left.push(o.destination.trim() || o.mapColumn);
+            right.push(o.rightCol.trim() || "?");
+          }
+          return { left, right };
+        })();
+        const confirm = (withJoin: boolean) => {
+          const state: ApplyReviewState = {
+            ...review,
+            rewriteJoin: withJoin && canRewrite,
+          };
+          const conf = confirmApplyReview(state);
+          if (conf.error) {
+            setApplyReviewError(conf.error);
+            return;
+          }
+          setApplyReview(null);
+          setApplyReviewError(null);
+          onApply(review.side, {
+            bindings: conf.bindings,
+            joinRewrite: withJoin ? conf.joinRewrite : undefined,
+          });
+        };
+        const listId = "keymap-apply-review-right-cols";
+        const applyCount = review.outputs.filter((o) => o.includeApply).length;
+        return (
+          <div className="shrink-0 space-y-3 border-t border-teal-900/50 bg-slate-900/70 px-4 py-3 text-[12px] text-slate-300">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="font-semibold text-teal-200">
+                Review Apply — {applyCount}/{review.outputs.length} outputs
+                <span className="ml-2 font-normal text-slate-500">
+                  on {joinApplyContext.hostQueryName} · {review.side}
+                </span>
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-[11px] text-slate-500">
+                Include in Apply → destination
+                {rewrite ? " · Include in Join → right column" : ""}
+              </p>
+              {review.outputs.map((o, i) => (
+                <div key={`${o.mapColumn}-${i}`} className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-slate-400">
+                    <input
+                      type="checkbox"
+                      checked={o.includeApply}
+                      onChange={(e) =>
+                        patchOutput(i, {
+                          includeApply: e.target.checked,
+                          includeJoin: e.target.checked ? o.includeJoin : false,
+                        })
+                      }
+                      aria-label={`Include ${o.mapColumn} in Apply`}
+                      className="accent-teal-500"
+                    />
+                    <span className="w-28 truncate font-mono" title={o.mapColumn}>
+                      {o.mapColumn}
+                    </span>
+                  </label>
+                  <span className="text-slate-600">→</span>
+                  <input
+                    value={o.destination}
+                    disabled={!o.includeApply}
+                    onChange={(e) => patchOutput(i, { destination: e.target.value })}
+                    aria-label={`Destination for ${o.mapColumn}`}
+                    className="w-40 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[12px] text-slate-200 focus:border-teal-600 focus:outline-none disabled:opacity-40"
+                  />
+                  {rewrite && (
+                    <>
+                      <label className="ml-1 flex items-center gap-1 text-slate-500">
+                        <input
+                          type="checkbox"
+                          checked={o.includeJoin}
+                          disabled={!o.includeApply}
+                          onChange={(e) =>
+                            patchOutput(i, { includeJoin: e.target.checked })
+                          }
+                          aria-label={`Include ${o.mapColumn} in Join`}
+                          className="accent-teal-500"
+                        />
+                        Join
+                      </label>
+                      <span className="text-slate-600">=</span>
+                      <input
+                        value={o.rightCol}
+                        list={listId}
+                        disabled={!o.includeApply || !o.includeJoin}
+                        onChange={(e) =>
+                          patchOutput(i, { rightCol: e.target.value })
+                        }
+                        aria-label={`Right Join column for ${o.destination}`}
+                        className="w-40 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[12px] text-slate-200 focus:border-teal-600 focus:outline-none disabled:opacity-40"
+                      />
+                    </>
+                  )}
+                </div>
+              ))}
+              <datalist id={listId}>
+                {rightOnCols.map((r) => (
+                  <option key={r} value={r} />
+                ))}
+              </datalist>
+            </div>
+            {canRewrite && (
+              <label className="flex cursor-pointer items-center gap-2 text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={review.rewriteJoin}
+                  onChange={(e) =>
+                    setApplyReview({ ...review, rewriteJoin: e.target.checked })
+                  }
+                  className="accent-teal-500"
+                />
+                Also change Join ON
+              </label>
+            )}
+            {rewrite && review.keepEqualities.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-[11px] text-slate-500">
+                  Keep existing equalities (e.g. day = day)
+                </p>
+                {review.keepEqualities.map((eq, i) => (
+                  <label
+                    key={`${eq.left}-${eq.right}-${i}`}
+                    className="flex cursor-pointer items-center gap-2 font-mono text-[11px] text-slate-400"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={eq.keep}
+                      onChange={(e) => patchKeep(i, e.target.checked)}
+                      className="accent-teal-500"
+                    />
+                    {eq.left} = {eq.right}
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="space-y-0.5 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 font-mono text-[11px]">
+              <p className="text-slate-500">
+                old ON{" "}
+                <span className="text-slate-300">
+                  {formatJoinOn(leftOnCols, rightOnCols)}
+                </span>
+              </p>
+              <p className={rewrite ? "text-teal-200" : "text-slate-600"}>
+                new ON{" "}
+                {rewrite && preview ? (
+                  preview.left.length ? (
+                    formatJoinOn(preview.left, preview.right)
+                  ) : (
+                    <span className="text-amber-200">(no equalities selected)</span>
+                  )
+                ) : (
+                  <>unchanged — {formatJoinOn(leftOnCols, rightOnCols)}</>
+                )}
+              </p>
+            </div>
+            {applyReviewError && (
+              <p className="text-[12px] text-amber-200">{applyReviewError}</p>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => confirm(false)}
+                className={
+                  rewrite
+                    ? "rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:border-teal-700"
+                    : "rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400"
+                }
+              >
+                Apply map only
+              </button>
+              {canRewrite && (
+                <button
+                  type="button"
+                  disabled={!review.rewriteJoin}
+                  title={
+                    review.rewriteJoin
+                      ? undefined
+                      : 'Turn on "Also change Join ON" first'
+                  }
+                  onClick={() => confirm(true)}
+                  className="rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Apply map and change Join
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setApplyReview(null);
+                  setApplyReviewError(null);
+                }}
+                className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {!compact && (onSave || onDelete || onApply) && (() => {
         const probeSide = joinApplyContext?.probeSide;
         const primarySide: ApplySide | null = probeSide ?? null;
@@ -1657,6 +2331,24 @@ export function KeyMapEditor({
           const v = validateEntries(map.entries);
           if (!v.ok) {
             setError(v.error);
+            return;
+          }
+          if (outCols.length > 1 && joinApplyContext) {
+            const leftOnCols = joinApplyContext.leftOnCols ?? [
+              joinApplyContext.leftOn,
+            ];
+            const rightOnCols = joinApplyContext.rightOnCols ?? [
+              joinApplyContext.rightOn,
+            ];
+            setApplyReviewError(null);
+            setApplyReview(
+              buildApplyReviewState({
+                side,
+                outCols,
+                leftOnCols,
+                rightOnCols,
+              }),
+            );
             return;
           }
           onApply!(side);
@@ -1703,7 +2395,7 @@ export function KeyMapEditor({
               ) : onApply ? (
                 <>
                   <span className="mr-1 text-[11px] text-slate-500">
-                    Insert ApplyKeyMap:
+                    Insert Apply Mapping:
                   </span>
                   {otherSides.map((side) => (
                     <button
@@ -1781,7 +2473,7 @@ export function KeyMapEditor({
                     Apply to {primarySide}
                   </span>
                   {" → inserts "}
-                  <span className="font-mono text-slate-400">ApplyKeyMap</span>
+                  <span className="font-mono text-slate-400">Apply Mapping</span>
                   {" on "}
                   <span className="font-mono text-slate-300">{primaryTarget}</span>
                   {primarySide === "left" ? " before Join" : ""}.{" "}
@@ -1803,7 +2495,7 @@ export function KeyMapEditor({
                   Join Lens context only
                 </span>
                 {" — inserts "}
-                <span className="font-mono text-slate-400">ApplyKeyMap</span>
+                <span className="font-mono text-slate-400">Apply Mapping</span>
                 {" for this Join; map stays unbound."}
                 {joinApplyHint ? ` ${joinApplyHint}` : ""}
               </p>

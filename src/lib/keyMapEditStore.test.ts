@@ -257,4 +257,23 @@ function summarize(store: KeyMapEditStore) {
   );
 }
 
+// --- ADR-0037 multi-output ---
+{
+  const store = new KeyMapEditStore();
+  store.setSchema({ arity: 1, editable: [], outputColumns: ["a", "b"] });
+  const page = store.adoptPage(
+    [{ from: "K", from_parts: ["K"], to: "1", output_values: ["1", "2"] }],
+    [],
+  );
+  const slot = page[0]!;
+  store.updateDraft(slot.id, { outputs: ["1", "3"] }, slot.loaded);
+  const d = store.toDelta()!;
+  assert(d.upserts[0]!.output_values?.join() === "1,3", "upsert outputs");
+  assert(d.baselines![0]!.outputs?.b === "2", "baseline outputs by name");
+  store.updateDraft(slot.id, { outputs: ["1", ""] }, slot.loaded);
+  assert(store.toDelta() === null, "empty output not sendable");
+  store.updateDraft(slot.id, { outputs: ["1", "2"] }, slot.loaded);
+  assert(store.isEmpty(), "revert prunes");
+}
+
 console.log("keyMapEditStore.test.ts: ok");

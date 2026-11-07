@@ -31,6 +31,14 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/specs/project-relative-load-paths/` — ADR-0043 relative Load paths + path_kind (merged)
+- `openspec/specs/join-lens-in-place-confirm/` — ADR-0042 Join Lens in-place confirm (merged)
+- `openspec/specs/heavy-preview-sample/` — ADR-0041 heavy preview sample + Load full (merged)
+- `openspec/specs/postgres-schema-import/` — ADR-0040 Postgres schema import (merged)
+- `openspec/specs/help-lab/` — ADR-0039 Help Lab catalog + recon flagship (merged)
+- `openspec/specs/keymap-apply-*` — ADR-0038 ApplyPlan / prepare-validate-execute (merged)
+- `openspec/specs/query-backed-keymap/` — ADR-0036 query-backed KeyMap SoT (merged)
+- `openspec/specs/keymap-multi-output-*` — ADR-0037 multi-output KeyMap (merged)
 - `openspec/changes/query-based-mapping-create/` — ADR-0034 query-based KeyMap create (v0.3.1)
 - `openspec/changes/return-and-edit-foundation/` — ADR-0018 foundation
 - `openspec/changes/join-key-mapping/` — ADR-0020 KeyMap / near-miss

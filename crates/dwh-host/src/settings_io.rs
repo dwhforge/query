@@ -8,20 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn default_llm_base_url() -> String {
-    "https://api.openai.com/v1".into()
-}
-
-fn default_llm_model() -> String {
-    "gpt-4o-mini".into()
-}
-
-/// OpenAI-compatible chat endpoint. `api_key` stays in this file (mode 0600 once set).
+/// OpenAI-compatible chat endpoint. Empty until the user fills Connect LLM.
+/// `api_key` stays in this file (mode 0600 once set).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmSettings {
-    #[serde(default = "default_llm_base_url")]
+    #[serde(default)]
     pub base_url: String,
-    #[serde(default = "default_llm_model")]
+    #[serde(default)]
     pub model: String,
     /// Bearer token. Empty means the Join Lens chat is not connected.
     #[serde(default)]
@@ -31,8 +24,8 @@ pub struct LlmSettings {
 impl Default for LlmSettings {
     fn default() -> Self {
         Self {
-            base_url: default_llm_base_url(),
-            model: default_llm_model(),
+            base_url: String::new(),
+            model: String::new(),
             api_key: String::new(),
         }
     }

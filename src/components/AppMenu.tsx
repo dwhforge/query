@@ -45,7 +45,7 @@ export interface AppMenuProps {
   /** Legacy: sets both engine and destination to the same dialect. */
   onSetTargetDialect: (d: WarehouseDialect) => void;
   onLoadDemo: (id: DemoId) => void;
-  onNewMappingCheck?: () => void;
+  onOpenHelpLab: () => void;
   onOpenHelp: () => void;
   onZoomIn?: () => void;
   onZoomOut?: () => void;
@@ -238,7 +238,7 @@ export function AppMenu({
   onSetDestinationKind,
   onSetDestinationConnection,
   onLoadDemo,
-  onNewMappingCheck,
+  onOpenHelpLab,
   onOpenHelp,
   onZoomIn,
   onZoomOut,
@@ -458,86 +458,21 @@ export function AppMenu({
           onClick={() => toggle("help")}
           onHoverOpen={() => setOpenMenu("help")}
         >
+          <Item label="Help Lab…" onClick={() => run(onOpenHelpLab)} />
           <Item label="User guide…" onClick={() => run(onOpenHelp)} />
           <Sep />
-          <SubLabel>Load demo</SubLabel>
+          <SubLabel>Quick load</SubLabel>
           <Item
-            label="Sales — medallion · join · top-N"
-            onClick={() => run(() => onLoadDemo("sales"))}
+            label="Shipments ↔ sales — reconciliation"
+            onClick={() => run(() => onLoadDemo("recon_ship_sales"))}
           />
           <Item
-            label="Union — Append multi-feed"
-            onClick={() => run(() => onLoadDemo("union"))}
-          />
-          <Item
-            label="SQL hybrid — SqlModel · window"
-            onClick={() => run(() => onLoadDemo("sql"))}
-          />
-          <Item
-            label="Right joins — two RIGHT OUTER · coverage"
-            onClick={() => run(() => onLoadDemo("right"))}
-          />
-          <Sep />
-          <SubLabel>Mapping quality</SubLabel>
-          {onNewMappingCheck && (
-            <Item
-              label="New mapping check… (Join host + KeyMap)"
-              onClick={() => run(() => onNewMappingCheck())}
-            />
-          )}
-          <SubLabel>Mapping labs</SubLabel>
-          <Item
-            label="Mapping quality — 100K products · overview prototype"
-            onClick={() => run(() => onLoadDemo("mapping_quality"))}
-          />
-          <Item
-            label="F&B hub — seed · daily → month"
+            label="Key mapping — F&B aliases"
             onClick={() => run(() => onLoadDemo("keymap"))}
           />
           <Item
-            label="Crosswalk — POS sku ↔ WMS (seed)"
-            onClick={() => run(() => onLoadDemo("keymap_crosswalk"))}
-          />
-          <Item
-            label="Dual maps — parties + master (seed)"
-            onClick={() => run(() => onLoadDemo("keymap_dual"))}
-          />
-          <Item
-            label="Channel codes — synonyms (seed)"
-            onClick={() => run(() => onLoadDemo("keymap_codes"))}
-          />
-          <Item
-            label="Multi-hop — store → region → country"
-            onClick={() => run(() => onLoadDemo("keymap_hop"))}
-          />
-          <Item
-            label="Composite From — offer id + day (ADR-0024)"
-            onClick={() => run(() => onLoadDemo("keymap_offer"))}
-          />
-          <Item
-            label="Ref map — channel model ref"
-            onClick={() => run(() => onLoadDemo("keymap_ref"))}
-          />
-          <Item
-            label="Parquet lab — seed · duckdb dest"
-            onClick={() => run(() => onLoadDemo("keymap_parquet"))}
-          />
-          <SubLabel>KeyMap · needs Postgres</SubLabel>
-          <Item
-            label="PG crosswalk — source map (dwh_tests)"
-            onClick={() => run(() => onLoadDemo("keymap_pg"))}
-          />
-          <Item
-            label="PG dual + master — two source maps"
-            onClick={() => run(() => onLoadDemo("keymap_pg_dual"))}
-          />
-          <Item
-            label="PG facts + seed map — channels"
-            onClick={() => run(() => onLoadDemo("keymap_pg_seed"))}
-          />
-          <Item
-            label="Mixed — parquet POS + PG WMS/map"
-            onClick={() => run(() => onLoadDemo("keymap_mixed"))}
+            label="Mapping quality — 100K overview"
+            onClick={() => run(() => onLoadDemo("mapping_quality"))}
           />
         </MenuBarItem>
       </nav>

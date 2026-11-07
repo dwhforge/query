@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cancelRunningQuery, previewWorkspace } from "../../lib/bridge";
-import { attrsSummarySql } from "../../lib/mappingCheck";
+import {
+  attrsSummarySql,
+  normalizeAttrsProjection,
+  workspaceForJoinAnchoredAttrsOverview,
+} from "../../lib/mappingCheck";
 import type { MappingCheckProjection } from "../../types/mappingCheck";
 import type { ConnectionDef, SourceDef, Workspace } from "../../types/pipeline";
 import {
@@ -16,6 +20,13 @@ import {
   type QualityTarget,
 } from "../../lib/mappingQuality";
 import "./mapping-quality.css";
+
+export type AttrsJoinOverviewContext = {
+  joinStepIndex: number;
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+};
 
 export type CohortInspectPayload =
   | {
@@ -55,6 +66,12 @@ type Props = {
   deltaNote?: string | null;
   /** ADR-0027 projection; default lab_v1. */
   projection?: MappingCheckProjection;
+  /** ADR-0035 Join binding for side-anchored attrs overview. */
+  attrsJoin?: AttrsJoinOverviewContext | null;
+  /** Short context under the header (lab vs user check). */
+  contextNote?: string | null;
+  /** Open attribute picker (user attrs checks). */
+  onChangeAttrs?: () => void;
 };
 const count = (value: number) => value.toLocaleString("en-US");
 const percent = (part: number, total: number) =>
@@ -99,6 +116,9 @@ export function MappingQualityOverview({
   allowNote,
   deltaNote,
   projection = { kind: "lab_v1" },
+  attrsJoin = null,
+  contextNote = null,
+  onChangeAttrs,
 }: Props) {
   const [cells, setCells] = useState<QualityCell[]>([]);
   const [aggregateNote, setAggregateNote] = useState<string | null>(null);
@@ -136,23 +156,30 @@ export function MappingQualityOverview({
     onProgressRef.current?.(state);
   };
 
+  const attrsNormalized =
+    projection.kind === "attrs" ? normalizeAttrsProjection(projection) : null;
   const projectionKey = useMemo(
     () =>
       qualityProjectionCacheKey(workspace, {
         hostQueryId:
-          projection.kind === "attrs" ? projection.host_query_id : undefined,
+          attrsNormalized && attrsNormalized.kind === "attrs"
+            ? attrsNormalized.host_query_id
+            : undefined,
         projection:
-          projection.kind === "attrs"
+          attrsNormalized && attrsNormalized.kind === "attrs"
             ? {
-                kind: projection.kind,
-                host_query_id: projection.host_query_id,
-                left_attr: projection.left_attr,
-                right_attr: projection.right_attr,
-                sample_column: projection.sample_column,
+                kind: attrsNormalized.kind,
+                host_query_id: attrsNormalized.host_query_id,
+                left_attr: attrsNormalized.left_attrs.join("\0"),
+                right_attr: attrsNormalized.right_attrs.join("\0"),
+                sample_column: attrsNormalized.sample_columns.join("\0"),
               }
             : { kind: projection.kind },
-      }),
-    [workspace, projection],
+      }) +
+      (attrsJoin
+        ? `#j${attrsJoin.joinStepIndex}:${attrsJoin.rightQueryId}:${attrsJoin.leftOn.join(",")}`
+        : ""),
+    [workspace, projection.kind, attrsNormalized, attrsJoin],
   );
   const stamp = `${projectionKey}#${revision}`;
   const hasFreshCache = cacheStamp === stamp && cells.length > 0;
@@ -201,12 +228,28 @@ export function MappingQualityOverview({
         let summaryWs = workspace;
         if (projection.kind === "lab_v1") {
           summaryWs = { ...workspace, focus_query_id: QUALITY_SUMMARY };
-        } else {
+        } else if (
+          attrsNormalized &&
+          attrsNormalized.kind === "attrs" &&
+          attrsJoin
+        ) {
+          summaryWs = workspaceForJoinAnchoredAttrsOverview(workspace, {
+            hostQueryId: attrsNormalized.host_query_id,
+            joinStepIndex: attrsJoin.joinStepIndex,
+            rightQueryId: attrsJoin.rightQueryId,
+            leftOn: attrsJoin.leftOn,
+            rightOn: attrsJoin.rightOn,
+            leftAttrs: attrsNormalized.left_attrs,
+            rightAttrs: attrsNormalized.right_attrs,
+            sampleColumns: attrsNormalized.sample_columns,
+          });
+        } else if (attrsNormalized && attrsNormalized.kind === "attrs") {
+          // Legacy host-result path when Join binding is unavailable.
           const sql = attrsSummarySql(
-            projection.host_query_id,
-            projection.left_attr,
-            projection.right_attr,
-            projection.sample_column,
+            attrsNormalized.host_query_id,
+            attrsNormalized.left_attr,
+            attrsNormalized.right_attr,
+            attrsNormalized.sample_column,
           );
           summaryWs = {
             ...workspace,
@@ -382,6 +425,11 @@ export function MappingQualityOverview({
           </p>
         </div>
         <div className="quality-header-actions">
+          {onChangeAttrs && (
+            <button type="button" onClick={onChangeAttrs}>
+              Change attributes…
+            </button>
+          )}
           <button onClick={onCanvas}>Pipeline canvas ↗</button>
           <button
             disabled={busy}
@@ -392,8 +440,18 @@ export function MappingQualityOverview({
         </div>
       </header>
       <div className="quality-context">
-        Offline Help lab · 100,000 commercial positions → 2,400 catalog products
-        · all-data aggregates · synthetic decision annotations
+        {contextNote ??
+          (projection.kind === "lab_v1"
+            ? "Offline Help lab · 100,000 commercial positions → 2,400 catalog products · all-data aggregates · synthetic decision annotations"
+            : attrsNormalized && attrsNormalized.kind === "attrs"
+              ? `Attrs · ${attrsNormalized.left_attrs.join(" · ")} × ${attrsNormalized.right_attrs.join(" · ")}${
+                  attrsJoin
+                    ? ` · joined on ${attrsJoin.leftOn
+                        .map((l, i) => `${l}=${attrsJoin.rightOn[i] ?? "?"}`)
+                        .join(" · ")}`
+                    : ""
+                }`
+              : "Mapping check overview")}
         {deltaNote ? ` · ${deltaNote}` : ""}
         {allowNote ? ` · ${allowNote}` : ""}
       </div>
@@ -797,7 +855,7 @@ export function MappingQualityOverview({
               <p className="quality-sample-note">
                 {!selection && !target
                   ? "Select a matrix cell or concentrated target first. Inspect opens the check cohort in Join Lens (predicate, not join ON)."
-                  : "Cohort = check predicate (samples illustrate it). Ephemeral query is TEMP — not saved. Accept links only via KeyMap; Allow records a check decision."}
+                  : "Cohort = check predicate (samples illustrate it). Ephemeral query is TEMP — not saved. Accept links only via Mapping; Allow records a check decision."}
               </p>
               <details>
                 <summary>Sample keys</summary>

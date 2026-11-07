@@ -12,6 +12,7 @@ import {
   ReactFlowProvider,
   getBezierPath,
   useEdgesState,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
   type Connection,
@@ -32,6 +33,13 @@ import {
   useState,
   type MouseEvent,
 } from "react";
+import { graphEdgesVisuallySame } from "../lib/graphEdges";
+import {
+  GRAPH_EXPANDED_PITCH,
+  GRAPH_ROW_H,
+  placeWithoutOverlap,
+  rankGridPosition,
+} from "../lib/graphLayout";
 import { formatJoinKeyLabel } from "../lib/joinKeys";
 import { isQualityInspectionQuery } from "../lib/mappingQuality";
 import type { ExternalBoundary } from "../lib/projectRefs";
@@ -273,6 +281,10 @@ function queryDepths(queries: QueryDef[]): Map<string, number> {
     let d = 0;
     if (q) {
       for (const step of q.steps) {
+        // Left → right on a wide, short canvas: sources, then FromQuery, then Join.
+        if (step.type === "FromQuery") {
+          d = Math.max(d, depth(targetKey(step.payload.query_id), stack) + 1);
+        }
         if (step.type === "Join") {
           d = Math.max(d, depth(targetKey(step.payload.right_query_id), stack) + 1);
         }
@@ -312,16 +324,44 @@ function buildGraph(
   }
 
   const localIds = new Set(queries.map((q) => q.id));
-  const nodes: QueryNodeType[] = queries.map((q) => {
-    const d = depths.get(q.id) ?? 0;
+  const externals = externalBoundaries.filter((b) => !localIds.has(b.key));
+  // Occupied boxes start as saved nodes. New nodes share the same rank origin
+  // and only step down when that cell is already taken.
+  const occupied: { x: number; y: number }[] = [...prevPositions.values()];
+  const placeNew = (
+    depth: number,
+    row: number,
+    bucketLength: number,
+    expanded: boolean,
+  ) => {
+    const pitch = expanded ? GRAPH_EXPANDED_PITCH : GRAPH_ROW_H;
+    const pos = placeWithoutOverlap(
+      rankGridPosition(depth, row, bucketLength, expanded),
+      occupied,
+      pitch,
+    );
+    occupied.push(pos);
+    return pos;
+  };
+  const placeQuery = (id: string) => {
+    const saved = prevPositions.get(id);
+    if (saved) return saved;
+    const d = depths.get(id) ?? 0;
     const bucket = rankBuckets.get(d) ?? [];
-    const row = bucket.indexOf(q.id);
-    const saved = prevPositions.get(q.id);
+    const row = Math.max(0, bucket.indexOf(id));
+    return placeNew(d, row, bucket.length, expandedIds.has(id));
+  };
+  const placeExternal = (id: string, row: number) => {
+    const saved = prevPositions.get(id);
+    if (saved) return saved;
+    return placeNew(-1, row, externals.length, false);
+  };
+  const nodes: QueryNodeType[] = queries.map((q) => {
     const expanded = expandedIds.has(q.id);
     return {
       id: q.id,
       type: "query",
-      position: saved ?? { x: 48 + d * 260, y: 48 + row * (expanded ? 200 : 130) },
+      position: placeQuery(q.id),
       data: {
         label: q.name,
         sourceKind: sourceKind(q),
@@ -442,13 +482,11 @@ function buildGraph(
     }
   }
 
-  externalBoundaries.forEach((b, i) => {
-    if (localIds.has(b.key)) return;
-    const saved = prevPositions.get(b.key);
+  externals.forEach((b, i) => {
     nodes.push({
       id: b.key,
       type: "query",
-      position: saved ?? { x: 48, y: 48 + i * 110 },
+      position: placeExternal(b.key, i),
       data: {
         label: b.objectId,
         sourceKind: "External",
@@ -614,6 +652,9 @@ const QueryNode = memo(function QueryNode({
 });
 
 const nodeTypes = { query: QueryNode };
+/** Wide short pane: center the graph and let a small one grow enough to read. */
+const fitViewOptions = { padding: 0.16, maxZoom: 1.75, minZoom: 0.35, duration: 180 };
+const proOptions = { hideAttribution: true };
 
 function edgeInfoFromEdge(edge: Edge): GraphEdgeInfo | null {
   const d = edge.data as EdgeData | undefined;
@@ -645,34 +686,16 @@ function GraphCanvasInner({
   onDeriveExternal,
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+  const fitViewRef = useRef(fitView);
+  fitViewRef.current = fitView;
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const fittedKey = useRef<string>("");
+  /** Bumped after nodes land, so fitView runs on the next commit (not the same frame). */
+  const [fitNonce, setFitNonce] = useState(0);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeInfo | null>(null);
-  // Canvas stays mounted under `hidden` while Mapping quality / KeyMap tabs are
-  // open — React Flow then measures 0×0 and paints Background/MiniMap as NaN.
-  const flowHostRef = useRef<HTMLDivElement>(null);
-  const [flowReady, setFlowReady] = useState(false);
-  useEffect(() => {
-    const el = flowHostRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const sync = () => {
-      const ready = el.clientWidth > 1 && el.clientHeight > 1;
-      setFlowReady((prev) => (prev === ready ? prev : ready));
-    };
-    sync();
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  useEffect(() => {
-    if (!flowReady) return;
-    const id = window.requestAnimationFrame(() => {
-      fitView({ padding: 0.2 });
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [flowReady, fitView]);
 
   // Seed from persisted project positions once / when project changes.
   useEffect(() => {
@@ -743,9 +766,37 @@ function GraphCanvasInner({
         positionsRef.current.set(n.id, n.position);
       }
       const prevById = new Map(current.map((n) => [n.id, n]));
-      return built.nodes.map((node) => {
+      let changed = current.length !== built.nodes.length;
+      const next = built.nodes.map((node) => {
         const prev = prevById.get(node.id);
-        if (!prev) return node;
+        if (!prev) {
+          changed = true;
+          return node;
+        }
+        const d0 = prev.data;
+        const d1 = node.data;
+        const dataSame =
+          d0.label === d1.label &&
+          d0.sourceKind === d1.sourceKind &&
+          d0.stepCount === d1.stepCount &&
+          d0.stepSummary === d1.stepSummary &&
+          d0.expanded === d1.expanded &&
+          d0.isFocus === d1.isFocus &&
+          d0.isActive === d1.isActive &&
+          d0.isEphemeral === d1.isEphemeral &&
+          d0.isExternal === d1.isExternal &&
+          d0.externalAlias === d1.externalAlias &&
+          d0.steps.length === d1.steps.length &&
+          d0.steps.every((s, i) => s.label === d1.steps[i]?.label);
+        if (
+          dataSame &&
+          prev.type === node.type &&
+          prev.position.x === node.position.x &&
+          prev.position.y === node.position.y
+        ) {
+          return prev;
+        }
+        changed = true;
         return {
           ...prev,
           type: node.type,
@@ -753,8 +804,14 @@ function GraphCanvasInner({
           data: node.data,
         };
       });
+      // Keep the previous array when nothing visual changed — a fresh array
+      // retriggers React Flow and can hit "Maximum update depth".
+      if (!changed) return current;
+      return next;
     });
-    setEdges(built.edges);
+    setEdges((current) =>
+      graphEdgesVisuallySame(current, built.edges) ? current : built.edges,
+    );
 
     const key = [
       ...queries.map((q) => q.id),
@@ -764,9 +821,7 @@ function GraphCanvasInner({
       .join("|");
     if (key && key !== fittedKey.current) {
       fittedKey.current = key;
-      requestAnimationFrame(() => {
-        void fitView({ padding: 0.2, duration: 200 });
-      });
+      setFitNonce((n) => n + 1);
     }
   }, [
     queries,
@@ -778,8 +833,13 @@ function GraphCanvasInner({
     selectedExternalKey,
     setNodes,
     setEdges,
-    fitView,
   ]);
+
+  useEffect(() => {
+    // fitView before measurement locks the camera on an empty box at the origin.
+    if (!fitNonce || !nodesInitialized || nodes.length === 0) return;
+    void fitViewRef.current(fitViewOptions);
+  }, [fitNonce, nodesInitialized, nodes.length]);
 
   const persistPositions = useCallback(() => {
     if (!onPositionsChange) return;
@@ -885,16 +945,15 @@ function GraphCanvasInner({
         onNodeDragStop={persistPositions}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitViewOptions={{ padding: 0.2 }}
         minZoom={0.35}
-        maxZoom={1.6}
+        maxZoom={1.75}
         nodesConnectable={Boolean(onConnectJoin)}
         edgesFocusable
         edgesReconnectable={false}
         elementsSelectable={false}
         nodesDraggable
         deleteKeyCode={null}
-        proOptions={{ hideAttribution: true }}
+        proOptions={proOptions}
         className="dwh-flow"
       >
         <Background
@@ -960,11 +1019,42 @@ function GraphCanvasInner({
 }
 
 function GraphCanvasImpl(props: GraphCanvasProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [flowReady, setFlowReady] = useState(false);
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let raf = 0;
+    const sync = () => {
+      const ready = el.clientWidth > 1 && el.clientHeight > 1;
+      setFlowReady((prev) => (prev === ready ? prev : ready));
+    };
+    sync();
+    // rAF: avoid "ResizeObserver loop completed…" when the dock splitter
+    // resizes this host in the same frame as the observer callback.
+    const ro = new ResizeObserver(() => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        sync();
+      });
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
   return (
-    <div className="relative h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]">
-      <ReactFlowProvider>
-        <GraphCanvasInner {...props} />
-      </ReactFlowProvider>
+    <div
+      ref={hostRef}
+      className="relative h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[radial-gradient(ellipse_at_20%_0%,var(--glow),transparent_50%),linear-gradient(180deg,#0a1520,var(--bg0))]"
+    >
+      {flowReady ? (
+        <ReactFlowProvider>
+          <GraphCanvasInner {...props} />
+        </ReactFlowProvider>
+      ) : null}
       <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-slate-600">
         Drag · zoom · dblclick=focus · ref↳=FromQuery/dbt ref · ▸ steps ·
         Del=delete

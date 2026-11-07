@@ -46,6 +46,8 @@ interface ExplorerTreeProps {
   /** Local derivation: FromQuery → referenced query (ADR-0025). */
   onUseReferencedQuery: (referenceId: string, queryId: string, nameHint: string) => void;
   onAddConnection: () => void;
+  /** ADR-0040. Null asks the app to create a Postgres connection first. */
+  onImportPostgres?: (connectionId: string | null) => void;
   /** Catalog only — no query. */
   onAddSourceCsv: () => void;
   onAddSourceParquet: () => void;
@@ -272,6 +274,7 @@ export function ExplorerTree({
   onRemoveReference,
   onUseReferencedQuery,
   onAddConnection,
+  onImportPostgres,
   onAddSourceCsv,
   onAddSourceParquet,
   onAddSourceHiveParquet,
@@ -453,19 +456,43 @@ export function ExplorerTree({
                 </li>
               )}
               {project.connections.map((c) => (
-                <li key={c.id}>
+                <li key={c.id} className="flex items-center gap-1">
                   <button
                     type="button"
                     onClick={() => onSelectConnection(c)}
-                    className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-slate-300 hover:bg-slate-800/80"
                   >
                     <span className="w-8 shrink-0 text-[9px] uppercase text-amber-600/90">
                       {c.kind === "postgres" ? "pg" : "s3"}
                     </span>
                     <span className="truncate">{c.name}</span>
                   </button>
+                  {c.kind === "postgres" && onImportPostgres && (
+                    <button
+                      type="button"
+                      data-testid={`pg-import-open-${c.id}`}
+                      title="Импортировать объекты в проект…"
+                      onClick={() => onImportPostgres(c.id)}
+                      className="shrink-0 rounded px-1 py-0.5 text-[10px] text-teal-400 hover:bg-slate-800"
+                    >
+                      Импорт…
+                    </button>
+                  )}
                 </li>
               ))}
+              {onImportPostgres &&
+                !project.connections.some((c) => c.kind === "postgres") && (
+                  <li>
+                    <button
+                      type="button"
+                      data-testid="pg-import-open-new"
+                      onClick={() => onImportPostgres(null)}
+                      className="px-1.5 py-1 text-left text-[11px] text-teal-400"
+                    >
+                      Импортировать объекты в проект…
+                    </button>
+                  </li>
+                )}
             </ul>
           )}
         </div>
@@ -772,6 +799,7 @@ export function ExplorerTree({
                     ) : (
                       <button
                         type="button"
+                        data-testid={`pg-keymap-${m.name}`}
                         onClick={() => onSelectKeyMap(m)}
                         onDoubleClick={(e) => {
                           e.stopPropagation();
@@ -792,14 +820,14 @@ export function ExplorerTree({
                     )}
                     {!isRenaming && (
                       <IconBtn
-                        title="Delete KeyMap (ApplyKeyMap steps + seed CSV if exported)"
+                        title="Delete Mapping (Apply Mapping steps + seed CSV if exported)"
                         onClick={() => {
                           const seedCsv =
                             project.last_dbt_export_path &&
                             (!m.storage || m.storage.kind === "seed");
                           if (
                             window.confirm(
-                              `Delete KeyMap “${m.name}”? ApplyKeyMap steps that use it will be removed.${
+                              `Delete Mapping “${m.name}”? Apply Mapping steps that use it will be removed.${
                                 seedCsv
                                   ? " The export seed CSV will be deleted too."
                                   : ""

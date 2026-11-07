@@ -17,13 +17,18 @@ import {
   keyMapRevision,
   labMappingCheck,
   newCheckId,
+  normalizeAttrsProjection,
   upsertAllowDecision,
   type FrozenRemapPreview,
   type MappingCheck,
 } from "../../lib/mappingCheck";
 import {
   findApplyKeyMapIdForJoin,
+  fromColumnsEff,
   fromPartsEff,
+  outputColumnsEff,
+  outputValuesEff,
+  primaryTo,
 } from "../../lib/keyMap";
 import type { KeyMapDirtyBaseline, KeyMapDirtyDelta } from "../../lib/bridge";
 import {
@@ -32,14 +37,20 @@ import {
 } from "../../lib/mappingQuality";
 import type { KeyMapDef, Project, QueryDef, Workspace } from "../../types/pipeline";
 import { targetKey } from "../../types/pipeline";
-import type { CheckRun } from "../../types/mappingCheck";
+import type { CheckRun, MappingCheckProjection } from "../../types/mappingCheck";
 import { keyMapBindingFingerprint, upsertKeyMapIntoProject } from "../keyMap";
 
 export function resolveActiveMappingCheck(
   checks: MappingCheck[] | undefined,
 ): MappingCheck | null {
   const list = checks ?? [];
-  return list.find((c) => c.id === "check_lab_quality") ?? list.at(-1) ?? null;
+  // Prefer the latest user check so Create/Change after a Help lab still lands
+  // on the project KeyMap overview (ADR-0035). Lab only when it is the sole check.
+  const user = [...list]
+    .reverse()
+    .find((c) => c.id !== "check_lab_quality");
+  if (user) return user;
+  return list.find((c) => c.id === "check_lab_quality") ?? null;
 }
 
 export type NewCheckInput = {
@@ -55,10 +66,213 @@ export type NewCheckInput = {
    * Ambiguous hostQueryId alone is refused.
    */
   joinStepIndex?: number;
-  leftAttr: string;
-  rightAttr: string;
+  /** Prefer arrays (ADR-0035); singular fields soft-fill from first element. */
+  leftAttrs?: string[];
+  rightAttrs?: string[];
+  sampleColumns?: string[];
+  leftAttr?: string;
+  rightAttr?: string;
   sampleColumn?: string;
 };
+
+export type InferredCheckAttrs = {
+  leftAttrs: string[];
+  rightAttrs: string[];
+  sampleColumns: string[];
+  /** low when we could only suggest ON×ON or missing name-like right. */
+  confidence: "high" | "low";
+  reason: string;
+  /** True when both axes fell back to Join ON keys (tautology risk). */
+  onOnFallback: boolean;
+};
+
+const NAME_LIKE =
+  /(^|_)(name|label|title|company|product|desc|description)(_|$)|name$|label$|title$/i;
+const BARE_KEY = /^(id|key|code|sku|uuid|pk|nr|no)$/i;
+
+function foldCol(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+function pickNameLike(
+  columns: string[],
+  avoid: Set<string>,
+): string | undefined {
+  const scored = columns
+    .filter((c) => c.trim() && !avoid.has(foldCol(c)))
+    .map((c) => {
+      const f = foldCol(c);
+      let score = 0;
+      if (NAME_LIKE.test(f)) score += 3;
+      if (BARE_KEY.test(f)) score -= 2;
+      return { c, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.c.localeCompare(b.c));
+  return scored[0]?.c;
+}
+
+function pickFirstNonOn(
+  columns: string[],
+  avoid: Set<string>,
+): string | undefined {
+  return columns.find((c) => c.trim() && !avoid.has(foldCol(c)) && !BARE_KEY.test(foldCol(c)))
+    ?? columns.find((c) => c.trim() && !avoid.has(foldCol(c)));
+}
+
+/**
+ * Suggest overview axes from Join + KeyMap + side schemas (ADR-0035).
+ * Composite From/ON → full left tuple (date included). Never prefer bare ON×ON.
+ */
+export function inferCheckAttrsFromJoin(args: {
+  map: KeyMapDef;
+  leftOn: string[];
+  rightOn: string[];
+  leftColumns: string[];
+  rightColumns: string[];
+}): InferredCheckAttrs {
+  const leftOnSet = new Set(args.leftOn.map(foldCol));
+  const rightOnSet = new Set(args.rightOn.map(foldCol));
+  const fromCols = fromColumnsEff(args.map);
+
+  const resolveOnLeft = (cols: string[]): string[] =>
+    cols
+      .map((c) => {
+        const hit = args.leftColumns.find((x) => foldCol(x) === foldCol(c));
+        return hit ?? "";
+      })
+      .filter(Boolean);
+
+  const composite =
+    fromCols.length > 1 || args.leftOn.length > 1 || args.rightOn.length > 1;
+
+  let leftAttrs: string[];
+  if (composite) {
+    const fromOnLeft = resolveOnLeft(fromCols.length > 1 ? fromCols : args.leftOn);
+    leftAttrs =
+      fromOnLeft.length > 0
+        ? fromOnLeft
+        : resolveOnLeft(args.leftOn).length
+          ? resolveOnLeft(args.leftOn)
+          : args.leftOn.filter(Boolean);
+  } else {
+    const suggested =
+      pickNameLike(args.leftColumns, leftOnSet) ??
+      pickFirstNonOn(args.leftColumns, leftOnSet);
+    leftAttrs = suggested
+      ? [suggested]
+      : args.leftOn[0]
+        ? [args.leftOn[0]]
+        : args.leftColumns[0]
+          ? [args.leftColumns[0]]
+          : ["key"];
+  }
+
+  const rightSuggested =
+    pickNameLike(args.rightColumns, rightOnSet) ??
+    pickFirstNonOn(args.rightColumns, rightOnSet);
+  let rightAttrs: string[];
+  let onOnFallback = false;
+  if (rightSuggested) {
+    rightAttrs = [rightSuggested];
+  } else if (args.rightOn[0] && foldCol(args.rightOn[0]) !== foldCol(leftAttrs[0] ?? "")) {
+    rightAttrs = [args.rightOn[0]];
+    onOnFallback = leftAttrs.every((c) => leftOnSet.has(foldCol(c)));
+  } else if (args.rightColumns[0]) {
+    rightAttrs = [args.rightColumns[0]];
+  } else {
+    rightAttrs = args.rightOn[0] ? [args.rightOn[0]] : ["id"];
+    onOnFallback = true;
+  }
+
+  // Guard: if left is pure ON and right is pure ON → flag low confidence.
+  if (
+    leftAttrs.every((c) => leftOnSet.has(foldCol(c))) &&
+    rightAttrs.every((c) => rightOnSet.has(foldCol(c)))
+  ) {
+    onOnFallback = true;
+  }
+
+  const sampleColumns = leftAttrs.slice();
+  const confidence: "high" | "low" = onOnFallback ? "low" : "high";
+  const reason = onOnFallback
+    ? "Could not find a non-key label on the right — review before confirming (ON×ON is a tautology)."
+    : composite
+      ? `Row axis = Join/From tuple (${leftAttrs.join(" · ")}); columns = ${rightAttrs.join(" · ")}.`
+      : `Suggested ${leftAttrs[0]} × ${rightAttrs[0]} from side schemas.`;
+
+  return {
+    leftAttrs,
+    rightAttrs,
+    sampleColumns,
+    confidence,
+    reason,
+    onOnFallback,
+  };
+}
+
+export type AttrsJoinBinding = {
+  host: QueryDef;
+  joinStepIndex: number;
+  leftOn: string[];
+  rightOn: string[];
+  rightQueryId: string;
+};
+
+/** Resolve Join binding for an attrs MappingCheck (ADR-0035 overview / Inspect). */
+export function resolveAttrsJoinBinding(
+  queries: QueryDef[],
+  check: MappingCheck,
+): AttrsJoinBinding | null {
+  if (check.projection.kind !== "attrs") return null;
+  const hostId = check.projection.host_query_id;
+  const hosts = findJoinHostsForMap(queries, check.map_id).filter(
+    (h) => h.host.id === hostId,
+  );
+  if (!hosts.length) return null;
+  const hit = hosts.length === 1 ? hosts[0]! : hosts[hosts.length - 1]!;
+  const step = hit.host.steps[hit.joinStepIndex];
+  if (!step || step.type !== "Join") return null;
+  return {
+    host: hit.host,
+    joinStepIndex: hit.joinStepIndex,
+    leftOn: hit.leftOn,
+    rightOn: hit.rightOn,
+    rightQueryId: targetKey(step.payload.right_query_id),
+  };
+}
+
+export function updateMappingCheckProjection(
+  checks: MappingCheck[],
+  checkId: string,
+  projection: MappingCheckProjection,
+): { ok: true; mapping_checks: MappingCheck[]; note: string } | { ok: false; error: string } {
+  const idx = checks.findIndex((c) => c.id === checkId);
+  if (idx < 0) return { ok: false, error: `Check “${checkId}” not found.` };
+  const normalized =
+    projection.kind === "attrs" ? normalizeAttrsProjection(projection) : projection;
+  const next = checks.map((c, i) =>
+    i === idx
+      ? {
+          ...c,
+          projection: normalized,
+          group_attributes:
+            normalized.kind === "attrs"
+              ? [...normalized.left_attrs, ...normalized.right_attrs]
+              : c.group_attributes,
+        }
+      : c,
+  );
+  const label =
+    normalized.kind === "attrs"
+      ? `${normalized.left_attrs.join(" · ")} × ${normalized.right_attrs.join(" · ")}`
+      : "lab";
+  return {
+    ok: true,
+    mapping_checks: next,
+    note: `Updated check attributes · ${label}`,
+  };
+}
 
 export type NewCheckResult =
   | { ok: true; check: MappingCheck; note: string }
@@ -123,15 +337,31 @@ export function createMappingCheck(input: NewCheckInput): NewCheckResult {
   if (!map) {
     return {
       ok: false,
-      error: `KeyMap “${input.mapId}” not found — pick a map that exists in the project.`,
+      error: `Mapping “${input.mapId}” not found — pick a map that exists in the project.`,
     };
   }
-  const left = input.leftAttr.trim();
-  const right = input.rightAttr.trim();
-  if (!left || !right) {
+  const leftAttrs = (
+    input.leftAttrs?.length
+      ? input.leftAttrs
+      : input.leftAttr
+        ? [input.leftAttr]
+        : []
+  )
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const rightAttrs = (
+    input.rightAttrs?.length
+      ? input.rightAttrs
+      : input.rightAttr
+        ? [input.rightAttr]
+        : []
+  )
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!leftAttrs.length || !rightAttrs.length) {
     return {
       ok: false,
-      error: "Choose left and right check attributes (Join keys or mapped columns).",
+      error: "Choose left and right check attributes (side labels or From/ON tuple).",
     };
   }
   const hosts = findJoinHostsForMap(input.queries, map.id);
@@ -139,7 +369,7 @@ export function createMappingCheck(input: NewCheckInput): NewCheckResult {
   if (!onHost.length) {
     return {
       ok: false,
-      error: `Query “${input.hostQueryId}” has no ApplyKeyMap for map “${map.name}”. Pick a Join host that uses this map.`,
+      error: `Query “${input.hostQueryId}” has no Apply Mapping for map “${map.name}”. Pick a Join host that uses this map.`,
     };
   }
   let hostHit = onHost[0]!;
@@ -158,27 +388,43 @@ export function createMappingCheck(input: NewCheckInput): NewCheckResult {
       error: `Query “${input.hostQueryId}” has ${onHost.length} Joins wired to “${map.name}” — pick joinStepIndex explicitly.`,
     };
   }
-  const sample = (input.sampleColumn ?? left).trim() || left;
+  const sampleColumns = (
+    input.sampleColumns?.length
+      ? input.sampleColumns
+      : input.sampleColumn
+        ? [input.sampleColumn]
+        : leftAttrs
+  )
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const projection = normalizeAttrsProjection({
+    kind: "attrs",
+    host_query_id: hostHit.host.id,
+    left_attr: leftAttrs[0]!,
+    right_attr: rightAttrs[0]!,
+    sample_column: sampleColumns[0] ?? leftAttrs[0]!,
+    left_attrs: leftAttrs,
+    right_attrs: rightAttrs,
+    sample_columns: sampleColumns.length ? sampleColumns : leftAttrs,
+  });
   const check: MappingCheck = {
     id: newCheckId(input.checks.map((c) => c.id)),
     name: `Check · ${map.name}`,
     map_id: map.id,
     input_refs: [hostHit.host.id],
-    group_attributes: [left, right],
+    group_attributes: [...leftAttrs, ...rightAttrs],
     cohort_predicate: "",
-    projection: {
-      kind: "attrs",
-      host_query_id: hostHit.host.id,
-      left_attr: left,
-      right_attr: right,
-      sample_column: sample,
-    },
+    projection,
     allow_decisions: [],
   };
+  const axis =
+    leftAttrs.length > 1 || rightAttrs.length > 1
+      ? `${leftAttrs.join(" · ")} × ${rightAttrs.join(" · ")}`
+      : `${leftAttrs[0]} ↔ ${rightAttrs[0]}`;
   return {
     ok: true,
     check,
-    note: `Created ${check.name} · ${hostHit.host.name} · attrs ${left} ↔ ${right}`,
+    note: `Created ${check.name} · ${hostHit.host.name} · ${axis}`,
   };
 }
 
@@ -326,9 +572,13 @@ export function planCheckInspect(args: {
   payload: InspectPayload;
 }): InspectPlan {
   const { project, check, payload } = args;
-  const sampleColumn =
+  const attrsProj =
     check.projection.kind === "attrs"
-      ? check.projection.sample_column
+      ? normalizeAttrsProjection(check.projection)
+      : null;
+  const sampleColumn =
+    attrsProj && attrsProj.kind === "attrs"
+      ? attrsProj.sample_columns[0] || attrsProj.sample_column
       : QUALITY_SAMPLE_COLUMN;
   const orderedKeys = [...new Set(payload.samples)]
     .sort((a, b) => a.localeCompare(b))
@@ -336,10 +586,10 @@ export function planCheckInspect(args: {
   const predicate =
     payload.kind === "target"
       ? cohortPredicateForTarget(payload.targetKey)
-      : check.projection.kind === "attrs"
+      : attrsProj && attrsProj.kind === "attrs"
         ? cohortPredicateFromAttrCells(
-            check.projection.left_attr,
-            check.projection.right_attr,
+            attrsProj.left_attrs,
+            attrsProj.right_attrs,
             payload.cohortCells,
           )
         : cohortPredicateFromCells(payload.cohortCells);
@@ -358,7 +608,7 @@ export function planCheckInspect(args: {
     ? {
         check_id: check.id,
         map_id: map.id,
-        expected_map_revision: keyMapRevision(map),
+        expected_map_revision: keyMapRevision(map, project.workspace),
         expected_input_revisions: collectInputRevisions(
           project.workspace,
           checkWithPred,
@@ -440,7 +690,7 @@ export function applyConfirmRemapOntoProject(
       result: {
         status: "stale",
         opId: intent.opId,
-        reason: "KeyMap missing before Confirm could apply — refresh and retry.",
+        reason: "Mapping missing before Confirm could apply — refresh and retry.",
       },
     };
   }
@@ -451,18 +701,18 @@ export function applyConfirmRemapOntoProject(
         status: "stale",
         opId: intent.opId,
         reason:
-          "KeyMap binding changed before Confirm could apply — refresh and retry.",
+          "Mapping binding changed before Confirm could apply — refresh and retry.",
       },
     };
   }
-  if (keyMapRevision(live) !== intent.expectedMapRevision) {
+  if (keyMapRevision(live, project.workspace) !== intent.expectedMapRevision) {
     return {
       project,
       result: {
         status: "stale",
         opId: intent.opId,
         reason:
-          "KeyMap changed before Confirm could apply — refresh the remap preview.",
+          "Mapping changed before Confirm could apply — refresh the remap preview.",
       },
     };
   }
@@ -500,7 +750,7 @@ export function dirtyDeltaFromFrozenRemap(
   const isSource = map.storage?.kind === "source";
   if (isSource && priorEntries === undefined) {
     throw new Error(
-      "Source KeyMap Confirm requires warehouse baselines for the remapped From keys.",
+      "Source Mapping Confirm requires warehouse baselines for the remapped From keys.",
     );
   }
   const editable = map.editable_columns ?? [];
@@ -528,6 +778,7 @@ export function dirtyDeltaFromFrozenRemap(
       upserts.push({
         from,
         to: c.to,
+        output_values: [c.to],
         attrs: attrsFromPrior,
       });
     }
@@ -542,7 +793,10 @@ export function dirtyDeltaFromFrozenRemap(
       baselines.push({
         fromParts: fromPartsEff(prev),
         existed: true,
-        to: prev.to,
+        to: primaryTo(prev),
+        outputs: Object.fromEntries(
+          outputColumnsEff(map).map((c, i) => [c, outputValuesEff(prev)[i] ?? ""]),
+        ),
         attrs,
       });
     } else {
@@ -551,6 +805,7 @@ export function dirtyDeltaFromFrozenRemap(
         fromParts: [from],
         existed: false,
         to: "",
+        outputs: Object.fromEntries(outputColumnsEff(map).map((c) => [c, ""])),
         attrs: {},
       });
     }
@@ -589,6 +844,8 @@ export function confirmContextStillValid(args: {
   bindingAtStart: string;
   liveMap: KeyMapDef | undefined;
   bindingOf: (map: KeyMapDef) => string;
+  /** Needed for query-backed map revisions (ADR-0036). */
+  workspace?: Workspace;
 }): string | null {
   if (args.liveProjectId !== args.projectIdAtStart) {
     return "Project changed while reading baselines — Confirm cancelled.";
@@ -603,15 +860,16 @@ export function confirmContextStillValid(args: {
     return "Remap preview changed while reading baselines — Confirm cancelled.";
   }
   if (!args.liveMap) {
-    return "KeyMap missing after baseline read — Confirm cancelled.";
+    return "Mapping missing after baseline read — Confirm cancelled.";
   }
   if (args.bindingOf(args.liveMap) !== args.bindingAtStart) {
-    return "KeyMap binding changed while reading baselines — Confirm cancelled.";
+    return "Mapping binding changed while reading baselines — Confirm cancelled.";
   }
   if (
-    keyMapRevision(args.liveMap) !== args.frozenAtStart.expected_map_revision
+    keyMapRevision(args.liveMap, args.workspace) !==
+    args.frozenAtStart.expected_map_revision
   ) {
-    return "KeyMap changed while reading baselines — refresh the remap preview.";
+    return "Mapping changed while reading baselines — refresh the remap preview.";
   }
   return null;
 }
@@ -641,12 +899,12 @@ export function unrelatedDraftBlocksConfirm(args: {
     for (const f of draftFroms) {
       if (!f) continue;
       if (!frozen.has(f)) {
-        return `KeyMap has unsaved edits outside the check preview (e.g. “${f}”). Save or discard them before Confirm.`;
+        return `Mapping has unsaved edits outside the check preview (e.g. “${f}”). Save or discard them before Confirm.`;
       }
     }
   } else if (args.localDraft) {
     // Seed/ref draft without a dirty wire — cannot prove it is only frozen Froms.
-    return "Save or discard KeyMap editor drafts before confirming check remap.";
+    return "Save or discard Mapping editor drafts before confirming check remap.";
   }
   return null;
 }
@@ -697,7 +955,7 @@ export function confirmFrozenCheckRemap(args: {
       return {
         ok: false,
         error:
-          "Source KeyMap Confirm needs warehouse baselines for remapped keys — refresh and retry.",
+          "Source Mapping Confirm needs warehouse baselines for remapped keys — refresh and retry.",
       };
     }
     const nextMap = applyFrozenRemapToMap(
@@ -717,7 +975,7 @@ export function confirmFrozenCheckRemap(args: {
       ok: true,
       nextMap,
       dirtyDelta,
-      message: `Check remap confirmed · ${frozen.changes.length} link(s) via KeyMap`,
+      message: `Check remap confirmed · ${frozen.changes.length} link(s) via Mapping`,
     };
   } catch (reason) {
     return { ok: false, error: String(reason) };

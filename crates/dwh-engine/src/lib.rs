@@ -1,3 +1,4 @@
+mod apply_multi_output_exec;
 mod arrow_json;
 mod compile;
 mod export_e2e;
@@ -16,6 +17,7 @@ mod key_match_bench;
 mod load_seeds;
 mod postgres_catalog;
 mod preview;
+mod query_map_validate;
 mod secrets;
 mod session;
 mod session_limits;
@@ -60,14 +62,19 @@ pub use key_map_write::{
     write_key_map_to_postgres, write_key_map_with_delta, write_key_map_with_expected,
     KeyMapReadQuery, KeyMapReadResult, KeyMapWriteResult,
 };
-pub use compile::{collect_sql_model_schemas, prepare_workspace, PreparedWorkspace};
+pub use compile::{
+    collect_sql_model_schemas, compile_ctes_for_execution, compile_ctes_from,
+    compile_focus_sql, compile_focus_sql_for_execution, prepare_operation, prepare_workspace,
+    validate_prepared, PreparedWorkspace,
+};
 pub use load_seeds::{collect_load_seeds, LoadSeedDiagnostic, LoadSeedsResult};
 pub use postgres_catalog::{
-    describe_postgres_object, list_postgres_objects, test_postgres_connection,
-    PostgresColumn, PostgresObject,
+    describe_postgres_object, diagnose_mapping_relation, list_postgres_objects,
+    scan_postgres_import, test_postgres_connection, PostgresColumn, PostgresObject,
 };
 pub use preview::{
-    describe_workspace, preview_pipeline, preview_workspace, ColumnMetadata, PreviewResult,
+    describe_workspace, preview_pipeline, preview_workspace, preview_workspace_limited,
+    ColumnMetadata, PreviewResult, PREVIEW_SAMPLE_LIMIT,
 };
 pub use session::{DbSession, QueryCancelHandle};
 pub use session_limits::{

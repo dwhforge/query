@@ -19,6 +19,13 @@ export type KeyMapJoinCtx = {
   outputColumnLeft?: string;
   /** Output column on the right ApplyKeyMap (may differ, e.g. sku vs item_code). */
   outputColumnRight?: string;
+  /** ADR-0037: multi-output Apply destinations for the left (host) side. */
+  outputBindingsLeft?: import("../../lib/keyMap").ApplyKeyMapOutputBinding[];
+  outputBindingsRight?: import("../../lib/keyMap").ApplyKeyMapOutputBinding[];
+  /**
+   * When set with Apply+Join, rewrite Join ON to these equals (destinations ↔ right cols).
+   */
+  joinRewrite?: { leftOn: string[]; rightOn: string[] };
 };
 
 export type KeyMapTabSession = {
@@ -64,8 +71,17 @@ export type KeyMapApplyIntent = {
   rightCols: string[];
   outputColumnLeft: string;
   outputColumnRight: string;
+  outputBindingsLeft?: import("../../lib/keyMap").ApplyKeyMapOutputBinding[];
+  outputBindingsRight?: import("../../lib/keyMap").ApplyKeyMapOutputBinding[];
+  joinRewrite?: { leftOn: string[]; rightOn: string[] };
+  /**
+   * Revision fingerprint from resolveApplyPlan. Commit refuses when the live
+   * Project map no longer matches — does not upsert the plan's map snapshot.
+   */
+  expectedMapRevision: string;
 };
 
 export type KeyMapApplyResult =
   | { status: "ok"; mapId: string; workspace: Workspace }
-  | { status: "join_gone"; mapId: string };
+  | { status: "join_gone"; mapId: string; reason?: string }
+  | { status: "stale"; mapId: string; reason: string };

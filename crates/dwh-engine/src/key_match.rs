@@ -20,6 +20,11 @@ pub struct FuzzyPair {
     pub alt_to_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_score: Option<f64>,
+    /// Comparison label when fuzzy scored a sibling name column (id Join).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_label: Option<String>,
     /// Composite From tuple ([ADR-0024](../../../docs/adr/0024-keymap-composite.md)). Empty → `[from_key]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from_parts: Vec<String>,
@@ -274,6 +279,9 @@ pub(crate) fn match_keys(
             ambiguous: alternative.is_some(),
             alt_to_key: alternative.map(|r| right[r.row].key.clone()),
             alt_score: alternative.map(|r| r.score),
+            // Filled by Join Lens when a sibling name column was scored.
+            from_label: None,
+            to_label: None,
             from_parts: vec![],
         });
     }

@@ -76,11 +76,19 @@ async function invoke<T>(
   }
 }
 
+export type PreviewWorkspaceOpts = {
+  /** Output row LIMIT. Default sample = 50. Ignored when `fullPreview`. */
+  rowLimit?: number;
+  /** No output row LIMIT (ADR-0041 Load full). */
+  fullPreview?: boolean;
+};
+
 export function previewWorkspace(
   workspace: Workspace,
   connections: ConnectionDef[] = [],
   sources: SourceDef[] = [],
   projectRef?: ProjectRefContext,
+  opts?: PreviewWorkspaceOpts,
 ): Promise<PreviewResult> {
   return invoke<PreviewResult>("preview_workspace", {
     workspace,
@@ -91,6 +99,8 @@ export function previewWorkspace(
     references: projectRef?.references ?? [],
     connectionBindings: projectRef?.connectionBindings ?? [],
     executionEngine: projectRef?.executionEngine,
+    rowLimit: opts?.rowLimit,
+    fullPreview: opts?.fullPreview === true,
   });
 }
 
@@ -541,6 +551,9 @@ export type FuzzyChatContext = {
   existing_aliases: FuzzyAliasExample[];
   right_to_universe?: string[];
   context_truncated?: boolean;
+  /** Sibling name labels for Join keys — used when queueing LLM pairs into Auto. */
+  left_key_labels?: Record<string, string>;
+  right_key_labels?: Record<string, string>;
 };
 
 export type FuzzyPair = {
@@ -551,6 +564,9 @@ export type FuzzyPair = {
   ambiguous: boolean;
   alt_to_key?: string | null;
   alt_score?: number | null;
+  /** Sibling name/label when Join ON was an id (name_id_match lab / ADR-0028). */
+  from_label?: string | null;
+  to_label?: string | null;
   /** Composite From tuple when Suggest ran in composite-map mode (ADR-0024). */
   from_parts?: string[];
 };
@@ -674,7 +690,10 @@ export type KeyMapDirtyBaseline = {
   fromParts: string[];
   /** false = row must be absent (insert). */
   existed: boolean;
+  /** First output value (legacy single-To; ADR-0037 keeps for back-compat). */
   to: string;
+  /** Output column name → value at baseline (ADR-0037). */
+  outputs?: Record<string, string>;
   /**
    * Editable attrs at baseline. `null` ≡ SQL NULL; `""` ≡ empty string.
    * All editable columns should be present when known.
@@ -711,6 +730,7 @@ export function writeKeyMap(
   connectionString: string,
   expectedContentHash?: string | null,
   delta?: KeyMapDirtyDelta | null,
+  importRegistry?: import("./pgImport").PgImportRegistry | null,
 ): Promise<KeyMapWriteResult> {
   const args = {
     keyMap,
@@ -724,6 +744,7 @@ export function writeKeyMap(
           baselines: delta.baselines ?? [],
         }
       : undefined,
+    importRegistry: importRegistry ?? undefined,
   } satisfies KeyMapWhArgs;
   return invoke("write_key_map", args as Record<string, unknown>);
 }
@@ -869,12 +890,19 @@ export type DemoWorkspaceName =
   | "keymap_pg_seed"
   | "keymap_ref"
   | "keymap_mixed"
-  | "keymap_parquet";
+  | "keymap_parquet"
+  | "recon_ship_sales";
 
 export function loadDemoWorkspace(
   name: DemoWorkspaceName | string,
 ): Promise<Workspace> {
   return invoke<Workspace>("load_demo_workspace", { name });
+}
+
+export function listHelpLabs(): Promise<
+  import("../help/labCatalog").HelpLabCard[]
+> {
+  return invoke("list_help_labs", {});
 }
 
 export function loadSampleWorkspace(): Promise<Workspace> {
@@ -920,6 +948,39 @@ export function testPostgresConnection(
   connectionString: string,
 ): Promise<void> {
   return invoke<void>("test_postgres_connection", { connectionString });
+}
+
+export function pgImportFingerprint(project: Project): Promise<{ fingerprint: string }> {
+  return invoke("pg_import_fingerprint", { project });
+}
+
+export function scanPostgresImport(args: {
+  connectionString: string;
+  relations: { schema: string; name: string }[];
+  prefixes: string[];
+  ruleSchemas: string[];
+}): Promise<import("./pgImport").PgScanHit[]> {
+  return invoke("scan_postgres_import", args);
+}
+
+export function diagnosePostgresMapping(args: {
+  connectionString: string;
+  schema: string;
+  table: string;
+  fromColumns: string[];
+  outputColumns: string[];
+  validFrom?: string;
+  validTo?: string;
+}): Promise<import("./pgImport").MappingKeyDiagnosis> {
+  return invoke("diagnose_postgres_mapping", args);
+}
+
+export function commitPgImport(args: {
+  project: Project;
+  plan: import("./pgImport").PgImportPlan;
+  connectionString: string;
+}): Promise<import("./pgImport").PgImportOutcome<Project>> {
+  return invoke("commit_pg_import", args);
 }
 
 export function saveProject(path: string, project: Project): Promise<Project> {

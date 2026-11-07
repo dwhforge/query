@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { KeyMapDef } from "../types/pipeline";
-import { emptyKeyMap } from "../lib/keyMap";
+import { emptyKeyMap, primaryTo } from "../lib/keyMap";
 import { KeyMapEditor } from "./KeyMapEditor";
 
 export type DemoId =
@@ -10,6 +10,7 @@ export type DemoId =
   | "sql"
   | "right"
   | "keymap"
+  | "recon_ship_sales"
   | "keymap_crosswalk"
   | "keymap_dual"
   | "keymap_codes"
@@ -23,6 +24,7 @@ export type DemoId =
   | "keymap_parquet";
 
 interface EmptyHeroProps {
+  onOpenHelpLab: () => void;
   onLoadDemo: (id: DemoId) => void;
   onAddCsv: () => void;
   onAddParquet: () => void;
@@ -30,22 +32,6 @@ interface EmptyHeroProps {
   onAddPostgres: () => void;
   onAddSqlModel: () => void;
 }
-
-const DEMOS: { id: DemoId; label: string; hint: string }[] = [
-  { id: "sales", label: "Sales", hint: "medallion · join · top-N" },
-  { id: "union", label: "Union", hint: "Append multi-feed" },
-  { id: "sql", label: "SQL hybrid", hint: "SqlModel · window" },
-  {
-    id: "right",
-    label: "Right joins",
-    hint: "two RIGHT OUTER · coverage",
-  },
-  {
-    id: "keymap",
-    label: "Key mapping",
-    hint: "ticker · old name · No match",
-  },
-];
 
 /** Virtual sample — sales vs spend brand spellings → company_id (Hero only). */
 const HERO_UNMATCHED = [
@@ -75,6 +61,7 @@ function initialHeroMap(): KeyMapDef {
 }
 
 export function EmptyHero({
+  onOpenHelpLab,
   onLoadDemo,
   onAddCsv,
   onAddParquet,
@@ -85,7 +72,7 @@ export function EmptyHero({
   const [heroMap, setHeroMap] = useState<KeyMapDef>(initialHeroMap);
   const unmatchedLeft = useMemo(() => {
     const mapped = new Set(
-      heroMap.entries.filter((e) => e.to.trim()).map((e) => e.from.trim()),
+      heroMap.entries.filter((e) => primaryTo(e).trim()).map((e) => e.from.trim()),
     );
     return HERO_UNMATCHED.filter((k) => !mapped.has(k.trim()));
   }, [heroMap.entries]);
@@ -101,34 +88,35 @@ export function EmptyHero({
             DWHForge Query
           </h2>
           <p className="anim-rise-delay-2 mt-4 max-w-md text-base leading-relaxed text-slate-400 lg:mx-0 mx-auto">
-            F&B brands as tickers, old legal names, and feed spellings — map to a
-            canonical id, ship as a dbt seed. Accept aliases; never silent fuzzy ON.
+            Agree data from different systems, explain gaps, and keep a checked
+            calculation as SQL/dbt — starting with join keys that never match
+            on their own.
           </p>
-          <div className="anim-rise-delay-2 mt-8 w-full">
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-              Load demo
-            </p>
-            <div className="flex flex-wrap items-stretch justify-center gap-2 lg:justify-start">
-              {DEMOS.map((d) => (
-                <button
-                  key={d.id}
-                  type="button"
-                  onClick={() => onLoadDemo(d.id)}
-                  className={`min-w-[8.5rem] rounded-lg px-4 py-2.5 text-left transition ${
-                    d.id === "keymap"
-                      ? "bg-teal-400 shadow-[0_0_32px_rgba(45,212,191,0.35)] hover:bg-teal-300"
-                      : "bg-teal-500 shadow-[0_0_32px_rgba(45,212,191,0.25)] hover:bg-teal-400"
-                  }`}
-                >
-                  <div className="text-sm font-semibold text-slate-950">
-                    {d.label}
-                  </div>
-                  <div className="text-[10px] font-medium text-slate-800/80">
-                    {d.hint}
-                  </div>
-                </button>
-              ))}
-            </div>
+          <div className="anim-rise-delay-2 mt-8 flex w-full flex-wrap items-stretch justify-center gap-2 lg:justify-start">
+            <button
+              type="button"
+              onClick={onOpenHelpLab}
+              className="min-w-[10rem] rounded-lg bg-teal-400 px-4 py-2.5 text-left shadow-[0_0_32px_rgba(45,212,191,0.35)] hover:bg-teal-300"
+            >
+              <div className="text-sm font-semibold text-slate-950">
+                Open Help Lab
+              </div>
+              <div className="text-[10px] font-medium text-slate-800/80">
+                curated labs · what you keep
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => onLoadDemo("keymap")}
+              className="min-w-[8.5rem] rounded-lg border border-teal-700/60 bg-slate-950/40 px-4 py-2.5 text-left hover:border-teal-500/80"
+            >
+              <div className="text-sm font-semibold text-teal-100">
+                Key mapping
+              </div>
+              <div className="text-[10px] font-medium text-slate-500">
+                F&B aliases · quick load
+              </div>
+            </button>
           </div>
           <div className="anim-rise-delay-2 mt-6 flex flex-wrap items-center justify-center gap-3 lg:justify-start">
             <button
@@ -169,7 +157,6 @@ export function EmptyHero({
           </div>
         </div>
 
-        {/* Interactive virtual project — KeyMap playground */}
         <div className="anim-rise-delay-2 mt-10 w-full max-w-md lg:mt-0 lg:w-[26rem] lg:shrink-0">
           <div className="mb-2 flex items-end justify-between gap-2 px-0.5">
             <div>
@@ -227,9 +214,9 @@ export function EmptyHero({
       </div>
 
       <p className="shrink-0 pb-6 text-center text-[11px] text-slate-600">
-        <span className="text-slate-500">Help → User guide</span>
+        <span className="text-slate-500">Help → Help Lab</span>
         {" · "}
-        <span className="text-slate-500">Help → Load demo</span>
+        <span className="text-slate-500">Help → User guide</span>
         {" · "}
         Shortcuts: <kbd className="text-slate-500">⌘O</kbd> open ·{" "}
         <kbd className="text-slate-500">E</kbd> export ·{" "}

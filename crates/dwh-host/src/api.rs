@@ -18,12 +18,13 @@ use dwh_engine::{
     prepare_join_inputs_with_progress as run_prepare_join_inputs,
     preview_pipeline as run_preview_steps,
     preview_prepared_join_side_filtered as run_preview_prepared_join_side_filtered,
-    preview_workspace as run_preview_workspace,
+    preview_workspace_limited as run_preview_workspace_limited,
     set_extensions_dir, set_prepare_progress, test_postgres_connection as run_test_postgres_connection,
     BlameUnmatchedKeyResult,
     DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyFuzzySuggest,
     JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, JoinPrepareProgress, JoinPrepareResult,
     JoinPrepareStatus, PostgresColumn, PostgresObject, PreviewResult, QueryCancelHandle,
+    PREVIEW_SAMPLE_LIMIT,
 };
 use dwh_pipeline::{
     dbt_build_with_env, dbt_env_from_connections, dbt_parse_with_env,
@@ -198,13 +199,13 @@ fn demo_sales(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "dim_region".into(),
                 name: "dim_region".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim }],
+                steps: vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv { path: fact }],
+                steps: vec![TransformationStep::LoadCsv { path: fact, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -317,13 +318,13 @@ fn demo_union(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "sales_eu".into(),
                 name: "sales_eu".into(),
-                steps: vec![TransformationStep::LoadCsv { path: eu }],
+                steps: vec![TransformationStep::LoadCsv { path: eu, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sales_us".into(),
                 name: "sales_us".into(),
-                steps: vec![TransformationStep::LoadCsv { path: us }],
+                steps: vec![TransformationStep::LoadCsv { path: us, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -394,7 +395,7 @@ fn demo_sql(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv { path: fact }],
+                steps: vec![TransformationStep::LoadCsv { path: fact, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -444,19 +445,19 @@ fn demo_right_joins(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "dim_region".into(),
                 name: "dim_region".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim_r }],
+                steps: vec![TransformationStep::LoadCsv { path: dim_r, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "dim_channel".into(),
                 name: "dim_channel".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim_c }],
+                steps: vec![TransformationStep::LoadCsv { path: dim_c, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sparse_sales".into(),
                 name: "sparse_sales".into(),
-                steps: vec![TransformationStep::LoadCsv { path: sparse }],
+                steps: vec![TransformationStep::LoadCsv { path: sparse, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -620,19 +621,19 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "dim_company".into(),
                 name: "dim_company".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim }],
+                steps: vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sales_daily".into(),
                 name: "sales_daily".into(),
-                steps: vec![TransformationStep::LoadCsv { path: sales }],
+                steps: vec![TransformationStep::LoadCsv { path: sales, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "res_consumption".into(),
                 name: "res_consumption".into(),
-                steps: vec![TransformationStep::LoadCsv { path: spend }],
+                steps: vec![TransformationStep::LoadCsv { path: spend, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             // Case A — no map: sales names ≠ company_id → Join Lens Probe / Add to map…
@@ -664,6 +665,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                         column: "company".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
@@ -693,6 +695,7 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
                         column: "org_name".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: company_map.id.clone().into(),
                         entries: company_map.entries.clone(),
@@ -792,6 +795,7 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         return crate::demo_mapping_quality::load(&cache);
     }
     let fixtures = find_fixtures_dir()?;
+    use crate::demo_help_labs as help_labs;
     use crate::demo_keymap_labs as labs;
     match name.trim().to_ascii_lowercase().as_str() {
         "sales" | "sample" | "" => demo_sales(&fixtures),
@@ -799,6 +803,12 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "sql" | "sql_hybrid" | "hybrid" => demo_sql(&fixtures),
         "right" | "right_joins" | "coverage" => demo_right_joins(&fixtures),
         "keymap" | "key_map" | "mapping" | "aliases" => demo_keymap(&fixtures),
+        "recon_ship_sales" | "recon" | "ship_sales" => {
+            help_labs::demo_recon_ship_sales(&fixtures)
+        }
+        "name_id_match" | "name_id" | "crm_erp_names" => {
+            help_labs::demo_name_id_match(&fixtures)
+        }
         "keymap_crosswalk" | "crosswalk" => labs::demo_keymap_crosswalk(&fixtures),
         "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
         "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
@@ -813,11 +823,9 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "keymap_mixed" | "mixed" => labs::demo_keymap_mixed(&fixtures),
         "keymap_parquet" | "parquet" => labs::demo_keymap_parquet(&fixtures),
         other => Err(format!(
-            "Unknown demo '{other}'. Use: sales | union | sql | right | keymap | \
-             keymap_crosswalk | keymap_dual | keymap_codes | keymap_hop | \
-             keymap_pg | keymap_pg_dual | keymap_pg_seed | keymap_ref | \
-             keymap_mixed | keymap_parquet"
-        ).into()),
+            "Unknown demo '{other}'. Open Help Lab for the catalog, or use: sales | union | sql | \
+             right | keymap | recon_ship_sales | name_id_match | keymap_crosswalk | …"
+        )),
     }
 }
 
@@ -841,6 +849,12 @@ struct PreviewArgs {
     connection_bindings: Vec<ConnectionBinding>,
     #[serde(default)]
     execution_engine: Option<WarehouseDialect>,
+    /// Output row LIMIT. Ignored when `full_preview` is true. Default sample = 50.
+    #[serde(default)]
+    row_limit: Option<u64>,
+    /// No output row LIMIT (ADR-0041 Load full).
+    #[serde(default)]
+    full_preview: bool,
 }
 
 /// Read-only matching inputs; accepting proposals uses existing KeyMap editing.
@@ -1025,10 +1039,16 @@ fn lower_for_operation(
     kind: ResolveKind,
     published_fallback: Vec<String>,
 ) -> Result<LoweredOperation, String> {
-    if !cites_external(workspace) {
+    // ADR-0043: resolve relative Load/Source paths against the project file (local too).
+    let pf = project_file.filter(|s| !s.is_empty()).map(Path::new);
+    let mut local_ws = workspace.clone();
+    let mut local_sources = sources.to_vec();
+    dwh_pipeline::resolve_workspace_file_paths(pf, &mut local_ws, &mut local_sources)?;
+
+    if !cites_external(&local_ws) {
         return Ok(LoweredOperation {
-            workspace: workspace.clone(),
-            sources: sources.to_vec(),
+            workspace: local_ws,
+            sources: local_sources,
             published_query_ids: published_fallback,
             provenance_json: None,
         });
@@ -1042,8 +1062,8 @@ fn lower_for_operation(
         ),
         references,
         connection_bindings,
-        workspace,
-        sources,
+        workspace: &local_ws,
+        sources: &local_sources,
         available_connections: &available,
         kind,
     })
@@ -1556,12 +1576,28 @@ impl HostState {
                 } else {
                     "workspace"
                 };
-                fingerprint_json(&[
-                    &Value::String(kind.into()),
-                    &ws_v,
-                    &conns_v,
-                    &sources_v,
-                ])
+                if cmd == "preview_workspace" {
+                    // ADR-0041: sample vs full must not share a cache entry.
+                    let limit_v = if a.full_preview {
+                        Value::String("full".into())
+                    } else {
+                        Value::Number(a.row_limit.unwrap_or(PREVIEW_SAMPLE_LIMIT).into())
+                    };
+                    fingerprint_json(&[
+                        &Value::String(kind.into()),
+                        &ws_v,
+                        &conns_v,
+                        &sources_v,
+                        &limit_v,
+                    ])
+                } else {
+                    fingerprint_json(&[
+                        &Value::String(kind.into()),
+                        &ws_v,
+                        &conns_v,
+                        &sources_v,
+                    ])
+                }
             }
             _ => return None,
         };
@@ -1637,6 +1673,12 @@ impl HostState {
                 let ws = a.workspace.ok_or("preview_workspace: missing workspace")?;
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
+                let full_preview = a.full_preview;
+                let row_limit = if full_preview {
+                    None
+                } else {
+                    Some(a.row_limit.unwrap_or(PREVIEW_SAMPLE_LIMIT))
+                };
                 let lowered = lower_for_operation(
                     &ws,
                     &sources,
@@ -1654,11 +1696,16 @@ impl HostState {
                 let ws_v = serde_json::to_value(&ws).unwrap_or(Value::Null);
                 let conns_v = serde_json::to_value(&conns).unwrap_or(Value::Null);
                 let sources_v = serde_json::to_value(&sources).unwrap_or(Value::Null);
+                let limit_v = match row_limit {
+                    None => Value::String("full".into()),
+                    Some(n) => Value::Number(n.into()),
+                };
                 let key = fingerprint_json(&[
                     &Value::String("workspace".into()),
                     &ws_v,
                     &conns_v,
                     &sources_v,
+                    &limit_v,
                 ]);
                 if let Ok(mut cache) = self.preview_cache.lock() {
                     if let Some(hit) = cache.get(key) {
@@ -1666,7 +1713,8 @@ impl HostState {
                     }
                 }
                 let db = self.db.lock().map_err(|e| RpcError::from(e.to_string()))?;
-                let out = run_preview_workspace(&db, &ws, &conns, &sources)?;
+                let out =
+                    run_preview_workspace_limited(&db, &ws, &conns, &sources, row_limit)?;
                 let val = serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))?;
                 drop(db);
                 if let Ok(mut cache) = self.preview_cache.lock() {
@@ -2313,6 +2361,10 @@ impl HostState {
                     run_list_postgres_objects(&db, &a.connection_string)?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
+            "pg_import_fingerprint" => commands::pg_import::pg_import_fingerprint(args),
+            "scan_postgres_import" => commands::pg_import::scan_pg_import(&db, args),
+            "diagnose_postgres_mapping" => commands::pg_import::diagnose_pg_import(&db, args),
+            "commit_pg_import" => commands::pg_import::commit_pg_import_cmd(&db, args),
             "describe_postgres_object" => {
                 let a: DescribeArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
                 let out: Vec<PostgresColumn> = run_describe_postgres_object(
@@ -2498,6 +2550,12 @@ impl HostState {
             "load_sample_workspace" => {
                 drop(db);
                 let out = load_demo_workspace("sales")?;
+                serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
+            }
+            "list_help_labs" => {
+                drop(db);
+                let fixtures = find_fixtures_dir()?;
+                let out = crate::demo_help_labs::load_help_lab_catalog(&fixtures)?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             other => Err(format!("unknown command '{other}'").into()),

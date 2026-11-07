@@ -3,6 +3,7 @@ pub mod atomic_fs;
 pub mod commands;
 pub mod connections_io;
 pub mod dbt_setup;
+pub mod demo_help_labs;
 pub mod demo_keymap_labs;
 pub mod demo_mapping_quality;
 pub mod error;

@@ -306,9 +306,7 @@ mod tests {
                 queries: vec![QueryDef {
                     id: "q_main".into(),
                     name: "main".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "a.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 }],
                 focus_query_id: "q_main".into(),
@@ -325,6 +323,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let (disk, secrets) = project_for_disk(&p);
         assert!(disk.root_path.is_none());
@@ -373,6 +372,7 @@ mod tests {
                         column: "sku".into(),
                         columns: vec![],
                         output_column: None,
+            output_bindings: vec![],
                         as_of_column: None,
                         map_id: ObjectTarget::Local("map_wh".into()),
                         entries: vec![KeyMapEntry::pair("a", "1")],
@@ -393,6 +393,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let (disk, _) = project_for_disk(&p);
         assert!(disk.workspace.key_maps[0].entries.is_empty());

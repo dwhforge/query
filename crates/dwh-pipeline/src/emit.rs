@@ -3,7 +3,9 @@
 
 use crate::dialect::{sql_rename_column, WarehouseDialect};
 use crate::graph::direct_deps;
-use crate::model::{JoinType, KeyMapEntry, NormalizeOp, TransformationStep};
+use crate::model::{
+    ApplyKeyMapOutputBinding, JoinType, KeyMapEntry, NormalizeOp, TransformationStep,
+};
 use crate::sql_escape::{escape_sql_string, quote_ident};
 use std::collections::HashMap;
 
@@ -26,8 +28,8 @@ pub struct EmitSchemaOpts<'a> {
     pub query_columns: Option<&'a HashMap<String, Vec<String>>>,
     /// ApplyKeyMap: map_id → SQL relation (e.g. `{{ ref('map_x') }}`) for seed join on export.
     pub key_map_relations: Option<&'a HashMap<String, String>>,
-    /// ApplyKeyMap: map_id → (from_columns, to_column) on the map relation.
-    pub key_map_columns: Option<&'a HashMap<String, (Vec<String>, String)>>,
+    /// ApplyKeyMap: map_id → (from_columns, output_columns) on the map relation.
+    pub key_map_columns: Option<&'a HashMap<String, (Vec<String>, Vec<String>)>>,
     /// ApplyKeyMap range SCD: map_id → (valid_from_col, valid_to_col) on the map relation.
     pub key_map_range: Option<&'a HashMap<String, (String, String)>>,
 }
@@ -263,6 +265,7 @@ pub fn emit_transform_step_ex(
             column,
             columns,
             output_column,
+            output_bindings,
             as_of_column,
             map_id,
             entries,
@@ -279,11 +282,11 @@ pub fn emit_transform_step_ex(
             let seed_rel = opts
                 .key_map_relations
                 .and_then(|m| m.get(map_key).map(|s| s.as_str()));
-            let (from_cols, to_col) = opts
+            let (from_cols, output_cols) = opts
                 .key_map_columns
                 .and_then(|m| m.get(map_key))
-                .map(|(fs, t)| (fs.clone(), t.as_str()))
-                .unwrap_or_else(|| (vec!["from".into()], "to"));
+                .map(|(fs, outs)| (fs.clone(), outs.clone()))
+                .unwrap_or_else(|| (vec!["from".into()], vec!["to".into()]));
             if from_cols.len() != fact_cols.len() {
                 return Err(format!(
                     "ApplyKeyMap: fact columns ({}) vs map from_columns ({})",
@@ -291,11 +294,41 @@ pub fn emit_transform_step_ex(
                     from_cols.len()
                 ));
             }
-            let out = output_column
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(fact_cols[0].as_str());
+            if output_cols.is_empty() || output_cols.iter().any(|c| c.trim().is_empty()) {
+                return Err("ApplyKeyMap: map output_columns must be non-empty".into());
+            }
+            let primary_out = output_cols[0].as_str();
+            let bindings = crate::model::apply_keymap_output_bindings(
+                output_column.as_deref(),
+                output_bindings,
+                &fact_cols,
+                primary_out,
+            );
+            if bindings.is_empty() {
+                return Err("ApplyKeyMap: output_bindings must be non-empty".into());
+            }
+            let mut seen_dest = std::collections::HashSet::new();
+            for b in &bindings {
+                let d = b.destination_column.trim();
+                if d.is_empty() || b.map_column.trim().is_empty() {
+                    return Err("ApplyKeyMap: output_bindings need map_column and destination_column".into());
+                }
+                if !output_cols
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(b.map_column.trim()))
+                {
+                    return Err(format!(
+                        "ApplyKeyMap: map_column '{}' not in map outputs {:?}",
+                        b.map_column, output_cols
+                    ));
+                }
+                let fold = ascii_fold_name(d);
+                if !seen_dest.insert(fold) {
+                    return Err(format!(
+                        "ApplyKeyMap: duplicate destination_column '{d}'"
+                    ));
+                }
+            }
             let range = opts
                 .key_map_range
                 .and_then(|m| m.get(map_key))
@@ -314,19 +347,22 @@ pub fn emit_transform_step_ex(
             }
             emit_apply_key_map(
                 dialect,
-                prev,
-                &fact_cols,
-                out,
-                entries,
-                seed_rel,
-                &from_cols,
-                to_col,
-                opts.prev_columns,
-                as_of_column
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty()),
-                range,
+                &ApplyEmitSpec {
+                    prev,
+                    fact_cols: &fact_cols,
+                    from_cols: &from_cols,
+                    output_cols: &output_cols,
+                    bindings: &bindings,
+                    entries,
+                    map_id: map_key,
+                    seed_relation: seed_rel,
+                    prev_columns: opts.prev_columns,
+                    as_of_column: as_of_column
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty()),
+                    range_cols: range,
+                },
             )
         }
         TransformationStep::LoadCsv { .. }
@@ -471,64 +507,254 @@ fn output_column_exists_on_prev(
     ))
 }
 
+/// Runtime abort expression. `when_sql` must be the same predicate that guards
+/// the CASE branch so Postgres cannot constant-fold `1/0` at plan time (ADR-0037).
+fn emit_abort_expr(dialect: WarehouseDialect, message: &str, when_sql: &str) -> String {
+    let msg = escape_sql_string(message);
+    match dialect {
+        WarehouseDialect::Duckdb => format!("error('{msg}')"),
+        // Subquery WHERE depends on row predicates → not a plan-time constant.
+        // True → SELECT 0 → 1/0 fails the statement; false → empty → NULL (unused).
+        WarehouseDialect::Postgres => format!(
+            "((1 / (SELECT 0 WHERE ({when_sql})))::VARCHAR /* {msg} */)"
+        ),
+    }
+}
+
+/// Allocates collision-safe internal SQL identifiers (ADR-0037 review).
+struct AliasPool {
+    used: std::collections::HashSet<String>,
+}
+
+impl AliasPool {
+    fn with_reserved<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut used = std::collections::HashSet::new();
+        for n in names {
+            let t = n.trim();
+            if !t.is_empty() {
+                used.insert(ascii_fold_name(t));
+            }
+        }
+        Self { used }
+    }
+
+    fn alloc(&mut self, preferred: &str) -> String {
+        let base = preferred.trim();
+        let mut name = base.to_string();
+        let mut i = 0u32;
+        while self.used.contains(&ascii_fold_name(&name)) {
+            i += 1;
+            name = format!("{base}_{i}");
+        }
+        self.used.insert(ascii_fold_name(&name));
+        name
+    }
+}
+
+struct ApplyInternalAliases {
+    rid: String,
+    match_n: String,
+    guard: String,
+    rn: String,
+    from: Vec<String>,
+    out: Vec<String>,
+    vf: Option<String>,
+    vt: Option<String>,
+}
+
+fn alloc_apply_aliases(
+    n: usize,
+    out_n: usize,
+    range: bool,
+    prev_columns: Option<&[String]>,
+    fact_cols: &[String],
+    dest_cols: &[String],
+    from_cols: &[String],
+    output_cols: &[String],
+    as_of: Option<&str>,
+) -> Result<ApplyInternalAliases, String> {
+    // SELECT * / EXCLUDE shares the user namespace with internal aliases. Without the
+    // full prior schema we cannot prove uniqueness (DuckDB renames duplicate ids).
+    let Some(prev) = prev_columns else {
+        return Err(
+            "ApplyKeyMap: prev_columns required to allocate collision-safe internal \
+             aliases (SELECT * projection cannot prove uniqueness against an unknown schema)"
+                .into(),
+        );
+    };
+    let mut reserved: Vec<&str> = Vec::new();
+    for c in prev {
+        reserved.push(c.as_str());
+    }
+    for c in fact_cols {
+        reserved.push(c.as_str());
+    }
+    for c in dest_cols {
+        reserved.push(c.as_str());
+    }
+    for c in from_cols.iter().chain(output_cols.iter()) {
+        reserved.push(c.as_str());
+    }
+    if let Some(a) = as_of {
+        reserved.push(a);
+    }
+    let mut pool = AliasPool::with_reserved(reserved);
+    Ok(ApplyInternalAliases {
+        rid: pool.alloc("_dwh_rid"),
+        match_n: pool.alloc("_dwh_match_n"),
+        guard: pool.alloc("_dwh_apply_guard"),
+        rn: pool.alloc("_dwh_rn"),
+        from: (0..n)
+            .map(|i| pool.alloc(&format!("_dwh_mf_{i}")))
+            .collect(),
+        out: (0..out_n)
+            .map(|i| pool.alloc(&format!("_dwh_mo_{i}")))
+            .collect(),
+        vf: range.then(|| pool.alloc("_dwh_mvf")),
+        vt: range.then(|| pool.alloc("_dwh_mvt")),
+    })
+}
+
+/// Dialect-neutral Apply input for SQL emission ([ADR-0038]).
+/// Built by the compiler from the step + schema opts; emit does not invent bindings.
+#[derive(Debug, Clone)]
+pub struct ApplyEmitSpec<'a> {
+    pub prev: &'a str,
+    pub fact_cols: &'a [String],
+    pub from_cols: &'a [String],
+    pub output_cols: &'a [String],
+    pub bindings: &'a [ApplyKeyMapOutputBinding],
+    pub entries: &'a [KeyMapEntry],
+    pub map_id: &'a str,
+    pub seed_relation: Option<&'a str>,
+    pub prev_columns: Option<&'a [String]>,
+    pub as_of_column: Option<&'a str>,
+    pub range_cols: Option<(&'a str, &'a str)>,
+}
+
 fn emit_apply_key_map(
     dialect: WarehouseDialect,
-    prev: &str,
-    fact_cols: &[String],
-    output_column: &str,
-    entries: &[KeyMapEntry],
-    seed_relation: Option<&str>,
-    from_cols: &[String],
-    to_col: &str,
-    prev_columns: Option<&[String]>,
-    as_of_column: Option<&str>,
-    range_cols: Option<(&str, &str)>,
+    spec: &ApplyEmitSpec<'_>,
 ) -> Result<String, String> {
-    let q_out = quote_ident(output_column);
-    let q_to = quote_ident(to_col);
+    let prev = spec.prev;
+    let fact_cols = spec.fact_cols;
+    let from_cols = spec.from_cols;
+    let output_cols = spec.output_cols;
+    let bindings = spec.bindings;
+    let entries = spec.entries;
+    let map_id = spec.map_id;
+    let seed_relation = spec.seed_relation;
+    let prev_columns = spec.prev_columns;
+    let as_of_column = spec.as_of_column;
+    let range_cols = spec.range_cols;
+    if bindings.is_empty() {
+        return Err("ApplyKeyMap: ApplyEmitSpec.bindings must be non-empty".into());
+    }
     let n = fact_cols.len();
+    let out_n = output_cols.len();
     debug_assert_eq!(n, from_cols.len());
-    let out_exists = output_column_exists_on_prev(output_column, fact_cols, prev_columns)?;
     let scd = range_cols.zip(as_of_column);
+    let is_seed = seed_relation.is_some();
 
-    let map_sql = if let Some(rel) = seed_relation {
-        format!("{rel} AS m")
-    } else if entries.is_empty() {
-        // No map rows: keep existing output, or add NULL for a new column (ADR-0024).
-        if out_exists {
-            return emit_overwrite_columns(
-                dialect,
-                prev,
-                &[(
-                    output_column.to_string(),
-                    format!("CAST({} AS VARCHAR)", quote_ident(output_column)),
-                )],
-                prev_columns,
-            );
+    let mut dest_meta: Vec<(String, bool)> = Vec::with_capacity(bindings.len());
+    for b in bindings {
+        let dest = b.destination_column.trim().to_string();
+        let exists = output_column_exists_on_prev(&dest, fact_cols, prev_columns)?;
+        dest_meta.push((dest, exists));
+    }
+    let dest_cols: Vec<String> = dest_meta.iter().map(|(d, _)| d.clone()).collect();
+    let aliases = alloc_apply_aliases(
+        n,
+        out_n,
+        range_cols.is_some(),
+        prev_columns,
+        fact_cols,
+        &dest_cols,
+        from_cols,
+        output_cols,
+        as_of_column,
+    )?;
+
+    // Empty correspondence: miss path only.
+    if !is_seed && entries.is_empty() {
+        let mut overwrites = Vec::new();
+        let mut news = Vec::new();
+        for (dest, exists) in &dest_meta {
+            if *exists {
+                overwrites.push((
+                    dest.clone(),
+                    format!("CAST({} AS VARCHAR)", quote_ident(dest)),
+                ));
+            } else {
+                news.push(dest.clone());
+            }
+        }
+        if news.is_empty() {
+            return if overwrites.is_empty() {
+                Ok(format!("SELECT * FROM {prev} AS t"))
+            } else {
+                emit_overwrite_columns(dialect, prev, &overwrites, prev_columns)
+            };
         }
         return match dialect {
-            WarehouseDialect::Duckdb => Ok(format!(
-                "SELECT t.*, CAST(NULL AS VARCHAR) AS {q_out} FROM {prev} AS t"
-            )),
+            WarehouseDialect::Duckdb => {
+                let extras: Vec<String> = news
+                    .iter()
+                    .map(|d| format!("CAST(NULL AS VARCHAR) AS {}", quote_ident(d)))
+                    .collect();
+                if overwrites.is_empty() {
+                    Ok(format!(
+                        "SELECT t.*, {} FROM {prev} AS t",
+                        extras.join(", ")
+                    ))
+                } else {
+                    // Overwrite via EXCLUDE then append new nulls — reuse overwrite helper then wrap.
+                    let base = emit_overwrite_columns(dialect, prev, &overwrites, prev_columns)?;
+                    Ok(format!(
+                        "SELECT b.*, {} FROM ({base}) AS b",
+                        extras.join(", ")
+                    ))
+                }
+            }
             WarehouseDialect::Postgres => {
                 let Some(cols) = prev_columns else {
                     return Err("ApplyKeyMap (postgres): prev_columns required".into());
                 };
+                let overwrite_folds: std::collections::HashSet<String> = dest_meta
+                    .iter()
+                    .filter(|(_, e)| *e)
+                    .map(|(d, _)| ascii_fold_name(d))
+                    .collect();
                 let mut parts: Vec<String> = cols
                     .iter()
-                    .map(|c| format!("t.{}", quote_ident(c)))
+                    .map(|c| {
+                        if overwrite_folds.contains(&ascii_fold_name(c)) {
+                            format!(
+                                "CAST(t.{0} AS VARCHAR) AS {0}",
+                                quote_ident(c)
+                            )
+                        } else {
+                            format!("t.{}", quote_ident(c))
+                        }
+                    })
                     .collect();
-                parts.push(format!("CAST(NULL AS TEXT) AS {q_out}"));
+                for d in &news {
+                    parts.push(format!("CAST(NULL AS TEXT) AS {}", quote_ident(d)));
+                }
                 Ok(format!("SELECT {} FROM {prev} AS t", parts.join(", ")))
             }
         };
+    }
+
+    let map_sql = if let Some(rel) = seed_relation {
+        format!("{rel} AS m")
     } else {
-        let aliases: Vec<String> = (0..n).map(|i| format!("from_val_{i}")).collect();
         let (vf_name, vt_name) = range_cols.unwrap_or(("", ""));
         let values = entries
             .iter()
             .map(|e| {
                 let parts = e.from_parts_eff();
+                let outs = e.output_values_eff();
                 let mut cells: Vec<String> = parts
                     .iter()
                     .take(n)
@@ -537,7 +763,10 @@ fn emit_apply_key_map(
                 while cells.len() < n {
                     cells.push("''".into());
                 }
-                cells.push(format!("'{}'", escape_sql_string(&e.to)));
+                for i in 0..out_n {
+                    let v = outs.get(i).map(String::as_str).unwrap_or("");
+                    cells.push(format!("'{}'", escape_sql_string(v)));
+                }
                 if range_cols.is_some() {
                     let vf = e
                         .attrs
@@ -560,11 +789,11 @@ fn emit_apply_key_map(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let mut alias_list = aliases.clone();
-        alias_list.push("to_val".into());
-        if range_cols.is_some() {
-            alias_list.push("valid_from_val".into());
-            alias_list.push("valid_to_val".into());
+        let mut alias_list: Vec<String> = aliases.from.clone();
+        alias_list.extend(aliases.out.iter().cloned());
+        if let (Some(vf), Some(vt)) = (&aliases.vf, &aliases.vt) {
+            alias_list.push(vf.clone());
+            alias_list.push(vt.clone());
         }
         format!("(VALUES {values}) AS m({})", alias_list.join(", "))
     };
@@ -572,79 +801,231 @@ fn emit_apply_key_map(
     let mut join_parts: Vec<String> = (0..n)
         .map(|i| {
             let qf = quote_ident(&fact_cols[i]);
-            if seed_relation.is_some() {
+            let mf = &aliases.from[i];
+            if is_seed {
                 let qm = quote_ident(&from_cols[i]);
-                format!("CAST(t.{qf} AS VARCHAR) = CAST(m.{qm} AS VARCHAR)")
+                // Join uses physical map cols; projection aliases them separately.
+                format!("CAST(t0.{qf} AS VARCHAR) = CAST(m.{qm} AS VARCHAR)")
             } else {
-                format!("CAST(t.{qf} AS VARCHAR) = m.from_val_{i}")
+                format!("CAST(t0.{qf} AS VARCHAR) = m.{mf}")
             }
         })
         .collect();
     if let Some(((vf_col, vt_col), as_of)) = scd {
         let q_as = quote_ident(as_of);
-        // Timestamp-aware half-open (ADR-0028): keep time-of-day; date-only bounds = midnight UTC.
-        if seed_relation.is_some() {
+        if is_seed {
             let q_vf = quote_ident(vf_col);
             let q_vt = quote_ident(vt_col);
             join_parts.push(format!(
-                "CAST(t.{q_as} AS TIMESTAMP) >= CAST(m.{q_vf} AS TIMESTAMP) \
-                 AND (m.{q_vt} IS NULL OR CAST(t.{q_as} AS TIMESTAMP) < CAST(m.{q_vt} AS TIMESTAMP))"
+                "CAST(t0.{q_as} AS TIMESTAMP) >= CAST(m.{q_vf} AS TIMESTAMP) \
+                 AND (m.{q_vt} IS NULL OR CAST(t0.{q_as} AS TIMESTAMP) < CAST(m.{q_vt} AS TIMESTAMP))"
             ));
         } else {
+            let vf = aliases.vf.as_deref().unwrap();
+            let vt = aliases.vt.as_deref().unwrap();
             join_parts.push(format!(
-                "CAST(t.{q_as} AS TIMESTAMP) >= CAST(m.valid_from_val AS TIMESTAMP) \
-                 AND (m.valid_to_val IS NULL OR CAST(t.{q_as} AS TIMESTAMP) < CAST(m.valid_to_val AS TIMESTAMP))"
+                "CAST(t0.{q_as} AS TIMESTAMP) >= CAST(m.{vf} AS TIMESTAMP) \
+                 AND (m.{vt} IS NULL OR CAST(t0.{q_as} AS TIMESTAMP) < CAST(m.{vt} AS TIMESTAMP))"
             ));
         }
     }
     let join_on = join_parts.join(" AND ");
 
-    // Overwrite existing col: COALESCE(map, original). New col (ADR-0024): map value only.
-    let out_expr = if out_exists {
-        if seed_relation.is_some() {
-            format!("COALESCE(m.{q_to}, CAST(t.{q_out} AS VARCHAR))")
-        } else {
-            format!("COALESCE(m.to_val, CAST(t.{q_out} AS VARCHAR))")
+    // Always project map fields under collision-safe aliases (never same name as fact).
+    let mut map_select_cols: Vec<String> = Vec::new();
+    if is_seed {
+        for (i, c) in from_cols.iter().enumerate() {
+            map_select_cols.push(format!(
+                "m.{} AS {}",
+                quote_ident(c),
+                aliases.from[i]
+            ));
         }
-    } else if seed_relation.is_some() {
-        format!("CAST(m.{q_to} AS VARCHAR)")
+        for (i, c) in output_cols.iter().enumerate() {
+            map_select_cols.push(format!(
+                "m.{} AS {}",
+                quote_ident(c),
+                aliases.out[i]
+            ));
+        }
+        if let Some(((vf, vt), _)) = scd {
+            map_select_cols.push(format!(
+                "m.{} AS {}",
+                quote_ident(vf),
+                aliases.vf.as_deref().unwrap()
+            ));
+            map_select_cols.push(format!(
+                "m.{} AS {}",
+                quote_ident(vt),
+                aliases.vt.as_deref().unwrap()
+            ));
+        }
     } else {
-        "CAST(m.to_val AS VARCHAR)".to_string()
+        for a in &aliases.from {
+            map_select_cols.push(format!("m.{a}"));
+        }
+        for a in &aliases.out {
+            map_select_cols.push(format!("m.{a}"));
+        }
+        if let (Some(vf), Some(vt)) = (&aliases.vf, &aliases.vt) {
+            map_select_cols.push(format!("m.{vf}"));
+            map_select_cols.push(format!("m.{vt}"));
+        }
+    }
+    let map_select = if map_select_cols.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", map_select_cols.join(", "))
     };
+
+    let rid = &aliases.rid;
+    let match_n = &aliases.match_n;
+    let guard = &aliases.guard;
+    let rn = &aliases.rn;
+
+    let joined_cte = format!(
+        "SELECT t0.*, COUNT(*) OVER (PARTITION BY t0.{rid}) AS {match_n}{map_select}\n\
+         FROM (SELECT *, row_number() OVER () AS {rid} FROM {prev}) AS t0\n\
+         LEFT JOIN {map_sql} ON {join_on}"
+    );
+
+    // Predicates: `row_alias` is `j0` in the guard subquery, `j` in the outer SELECT.
+    let amb_cond = |alias: &str| format!("{alias}.{match_n} > 1");
+    let matched_probe = |alias: &str| format!("{alias}.{}", aliases.from[0]);
+    let null_cond = |alias: &str| {
+        let checks: Vec<String> = aliases
+            .out
+            .iter()
+            .map(|o| {
+                let expr = format!("{alias}.{o}");
+                format!("({expr} IS NULL OR CAST({expr} AS VARCHAR) = '')")
+            })
+            .collect();
+        format!(
+            "{} IS NOT NULL AND ({})",
+            matched_probe(alias),
+            checks.join(" OR ")
+        )
+    };
+
+    let amb_abort_j0 = emit_abort_expr(
+        dialect,
+        &format!("KeyMap {map_id}: ambiguous From (row-preserving Apply refused)"),
+        &amb_cond("j0"),
+    );
+    let null_abort_j0 = emit_abort_expr(
+        dialect,
+        &format!("KeyMap {map_id}: NULL or blank output on matched row"),
+        &null_cond("j0"),
+    );
+    let amb_abort_j = emit_abort_expr(
+        dialect,
+        &format!("KeyMap {map_id}: ambiguous From (row-preserving Apply refused)"),
+        &amb_cond("j"),
+    );
+    let null_abort_j = emit_abort_expr(
+        dialect,
+        &format!("KeyMap {map_id}: NULL or blank output on matched row"),
+        &null_cond("j"),
+    );
+
+    // Force uniqueness/NULL guards to evaluate even when destinations are pruned.
+    let guard_force = format!(
+        "CASE \
+           WHEN {} THEN {amb_abort_j0} \
+           WHEN {} THEN {null_abort_j0} \
+           ELSE CAST(NULL AS VARCHAR) \
+         END AS {guard}",
+        amb_cond("j0"),
+        null_cond("j0"),
+    );
+
+    let mut out_exprs: Vec<String> = Vec::new();
+    for (i, b) in bindings.iter().enumerate() {
+        let dest = b.destination_column.trim();
+        let exists = dest_meta[i].1;
+        let idx = output_cols
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(b.map_column.trim()))
+            .unwrap_or(0);
+        let map_expr = format!("j.{}", aliases.out[idx]);
+        let q_out = quote_ident(dest);
+        let miss_branch = if exists {
+            format!("CAST(j.{q_out} AS VARCHAR)")
+        } else {
+            "CAST(NULL AS VARCHAR)".to_string()
+        };
+        out_exprs.push(format!(
+            "CASE \
+               WHEN {} THEN {amb_abort_j} \
+               WHEN {} THEN {null_abort_j} \
+               WHEN {} IS NULL THEN {miss_branch} \
+               ELSE CAST({map_expr} AS VARCHAR) \
+             END AS {q_out}",
+            amb_cond("j"),
+            null_cond("j"),
+            matched_probe("j"),
+        ));
+    }
+
+    let overwrite_dests: Vec<String> = dest_meta
+        .iter()
+        .filter(|(_, e)| *e)
+        .map(|(d, _)| quote_ident(d))
+        .collect();
+
+    // Internal aliases only — never EXCLUDE fact columns that share map names.
+    let mut map_aliases: Vec<String> = aliases.from.clone();
+    map_aliases.extend(aliases.out.iter().cloned());
+    if let (Some(vf), Some(vt)) = (&aliases.vf, &aliases.vt) {
+        map_aliases.push(vf.clone());
+        map_aliases.push(vt.clone());
+    }
 
     match dialect {
         WarehouseDialect::Duckdb => {
-            if out_exists {
-                Ok(format!(
-                    "SELECT t.* EXCLUDE ({q_out}), {out_expr} AS {q_out}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}"
-                ))
-            } else {
-                Ok(format!(
-                    "SELECT t.*, {out_expr} AS {q_out}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}"
-                ))
-            }
+            let mut exclude = vec![
+                rid.clone(),
+                match_n.clone(),
+                guard.clone(),
+            ];
+            exclude.extend(overwrite_dests);
+            exclude.extend(map_aliases);
+            let mut seen = std::collections::HashSet::new();
+            exclude.retain(|c| seen.insert(c.clone()));
+            // WHERE forces guard evaluation before QUALIFY (no silent first-row).
+            Ok(format!(
+                "SELECT j.* EXCLUDE ({}), {}\nFROM (\n\
+                   SELECT j0.*, {guard_force} FROM (\n{joined_cte}\n) AS j0\n\
+                 ) AS j\n\
+                 WHERE j.{guard} IS NULL\n\
+                 QUALIFY row_number() OVER (PARTITION BY j.{rid} ORDER BY j.{match_n} DESC) = 1",
+                exclude.join(", "),
+                out_exprs.join(", "),
+            ))
         }
         WarehouseDialect::Postgres => {
             let Some(cols) = prev_columns else {
                 return Err("ApplyKeyMap (postgres): prev_columns required".into());
             };
-            let fold = ascii_fold_name(output_column);
+            let dest_folds: std::collections::HashSet<String> = dest_meta
+                .iter()
+                .map(|(d, _)| ascii_fold_name(d))
+                .collect();
             let mut parts: Vec<String> = cols
                 .iter()
-                .map(|c| {
-                    if out_exists && ascii_fold_name(c) == fold {
-                        format!("{out_expr} AS {q_out}")
-                    } else {
-                        format!("t.{}", quote_ident(c))
-                    }
-                })
+                .filter(|c| !dest_folds.contains(&ascii_fold_name(c)))
+                .map(|c| format!("j.{}", quote_ident(c)))
                 .collect();
-            if !out_exists {
-                parts.push(format!("{out_expr} AS {q_out}"));
-            }
+            parts.extend(out_exprs.clone());
+            // WHERE on guard forces abort even if an outer query drops destinations.
             Ok(format!(
-                "SELECT {}\n  FROM {prev} AS t\n  LEFT JOIN {map_sql} ON {join_on}",
-                parts.join(", ")
+                "SELECT {selects}\nFROM (\n\
+                   SELECT j0.*, {guard_force},\n\
+                          row_number() OVER (PARTITION BY j0.{rid} ORDER BY j0.{match_n} DESC) AS {rn}\n\
+                   FROM (\n{joined_cte}\n) AS j0\n\
+                 ) AS j\nWHERE j.{rn} = 1 AND j.{guard} IS NULL",
+                selects = parts.join(", "),
             ))
         }
     }
@@ -689,18 +1070,32 @@ pub fn key_map_seed_csv_full(
     to_col: &str,
     extra_cols: &[String],
 ) -> String {
+    key_map_seed_csv_outputs(entries, from_cols, &[to_col.to_string()], extra_cols)
+}
+
+/// Seed CSV: From columns, then one or more output columns, then stewardship ([ADR-0037]).
+pub fn key_map_seed_csv_outputs(
+    entries: &[KeyMapEntry],
+    from_cols: &[String],
+    output_cols: &[String],
+    extra_cols: &[String],
+) -> String {
     let mut wtr = csv::WriterBuilder::new()
         .flexible(true)
         .from_writer(vec![]);
     let mut header: Vec<&str> = from_cols.iter().map(|s| s.as_str()).collect();
-    header.push(to_col);
+    for c in output_cols {
+        header.push(c.as_str());
+    }
     for c in extra_cols {
         header.push(c.as_str());
     }
     wtr.write_record(&header).expect("csv header write");
     let n = from_cols.len().max(1);
+    let out_n = output_cols.len().max(1);
     for e in entries {
         let parts = e.from_parts_eff();
+        let outs = e.output_values_eff();
         let mut row: Vec<String> = (0..n)
             .map(|i| {
                 parts
@@ -709,7 +1104,9 @@ pub fn key_map_seed_csv_full(
                     .unwrap_or_default()
             })
             .collect();
-        row.push(e.to.clone());
+        for i in 0..out_n {
+            row.push(outs.get(i).cloned().unwrap_or_default());
+        }
         for c in extra_cols {
             row.push(e.attrs.get(c).cloned().unwrap_or_default());
         }
@@ -726,6 +1123,16 @@ pub enum KeyMapCsvMode<'a> {
     /// (case-insensitive). Otherwise every row is data — no content guessing.
     Header { from_col: &'a str, to_col: &'a str },
     /// No header row; columns are positional 0, 1.
+    Headerless,
+}
+
+/// Header policy for multi-output / stewardship seed CSV ([ADR-0037]).
+/// Do not mix: either require a named header row, or treat row 1 as data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedCsvHeaderPolicy {
+    /// Seed sync / export: first row must name all declared fields; dup headers refused.
+    RequireHeader,
+    /// Explicit headerless import: first row is data; no header/dup checks.
     Headerless,
 }
 
@@ -803,12 +1210,7 @@ pub fn parse_key_map_seed_csv_mode(
                 "key map seed: duplicate from '{from}' (line {lineno})"
             ));
         }
-        entries.push(KeyMapEntry {
-            from: from.clone(),
-            from_parts: vec![from],
-            to,
-            ..Default::default()
-        });
+        entries.push(KeyMapEntry::pair(from, to));
         Ok(())
     };
 
@@ -834,17 +1236,48 @@ pub fn parse_key_map_seed_csv_cols(
 }
 
 /// Parse seed with optional stewardship columns after To ([ADR-0028]).
-/// When `extra_cols` is empty, trailing header columns beyond From+To are treated as attrs
-/// if a matching header row is present.
+/// Requires a named header row (seed sync / export contract).
 pub fn parse_key_map_seed_csv_full(
     body: &str,
     from_cols: &[String],
     to_col: &str,
     extra_cols: &[String],
 ) -> Result<Vec<KeyMapEntry>, String> {
+    parse_key_map_seed_csv_outputs(body, from_cols, &[to_col.to_string()], extra_cols)
+}
+
+/// Parse seed with one or more output columns ([ADR-0037]). Seed sync contract:
+/// named header required; all declared fields resolve by name.
+pub fn parse_key_map_seed_csv_outputs(
+    body: &str,
+    from_cols: &[String],
+    output_cols: &[String],
+    extra_cols: &[String],
+) -> Result<Vec<KeyMapEntry>, String> {
+    parse_key_map_seed_csv_outputs_ex(
+        body,
+        from_cols,
+        output_cols,
+        extra_cols,
+        SeedCsvHeaderPolicy::RequireHeader,
+    )
+}
+
+/// Parse multi-output seed with an explicit header policy (no auto-guess).
+pub fn parse_key_map_seed_csv_outputs_ex(
+    body: &str,
+    from_cols: &[String],
+    output_cols: &[String],
+    extra_cols: &[String],
+    policy: SeedCsvHeaderPolicy,
+) -> Result<Vec<KeyMapEntry>, String> {
     let n = from_cols.len();
+    let out_n = output_cols.len();
     if n == 0 {
-        return Err("parse_key_map_seed_csv_cols: from_cols empty".into());
+        return Err("parse_key_map_seed_csv_outputs: from_cols empty".into());
+    }
+    if out_n == 0 {
+        return Err("parse_key_map_seed_csv_outputs: output_cols empty".into());
     }
     let mut rdr = csv::ReaderBuilder::new()
         .flexible(true)
@@ -856,60 +1289,114 @@ pub fn parse_key_map_seed_csv_full(
         Some(Err(e)) => return Err(format!("key map seed CSV: {e}")),
         None => return Ok(vec![]),
     };
-    if first.len() < n + 1 {
+    if first.len() < n + out_n {
         return Err(format!(
-            "key map seed CSV: need {} columns (from×{n} + to)",
-            n + 1
+            "key map seed CSV: need {} columns (from×{n} + outputs×{out_n})",
+            n + out_n
         ));
     }
-    let header_from_to = (0..n).all(|i| {
-        first
-            .get(i)
-            .unwrap_or("")
-            .trim()
-            .eq_ignore_ascii_case(from_cols[i].trim())
-    }) && first
-        .get(n)
-        .unwrap_or("")
-        .trim()
-        .eq_ignore_ascii_case(to_col);
+
+    let header_cells: Vec<String> = (0..first.len())
+        .map(|i| first.get(i).unwrap_or("").trim().to_string())
+        .collect();
+
+    let find_idx = |want: &str| -> Option<usize> {
+        header_cells
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(want.trim()))
+    };
+
     let extras: Vec<String> = if !extra_cols.is_empty() {
         extra_cols.to_vec()
-    } else if header_from_to && first.len() > n + 1 {
-        (n + 1..first.len())
-            .map(|i| first.get(i).unwrap_or("").trim().to_string())
-            .filter(|s| !s.is_empty())
+    } else if policy == SeedCsvHeaderPolicy::RequireHeader
+        && from_cols.iter().all(|c| find_idx(c).is_some())
+        && output_cols.iter().all(|c| find_idx(c).is_some())
+        && header_cells.len() > n + out_n
+    {
+        // Trailing unnamed headers become attrs only under a recognized header row.
+        let named: std::collections::HashSet<String> = from_cols
+            .iter()
+            .chain(output_cols.iter())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        header_cells
+            .iter()
+            .filter(|h| !h.is_empty() && !named.contains(&h.to_ascii_lowercase()))
+            .cloned()
             .collect()
     } else {
         vec![]
     };
-    let header_ok = header_from_to
-        && (extras.is_empty()
-            || (first.len() >= n + 1 + extras.len()
-                && extras.iter().enumerate().all(|(i, c)| {
-                    first
-                        .get(n + 1 + i)
-                        .unwrap_or("")
-                        .trim()
-                        .eq_ignore_ascii_case(c.trim())
-                })));
+
+    let name_map: Vec<(String, usize)> = match policy {
+        SeedCsvHeaderPolicy::RequireHeader => {
+            // Resolve declared names first. Only then treat row 1 as a header
+            // (dup check). Data rows like `A,A` must not be mistaken for headers.
+            let mut out = Vec::with_capacity(n + out_n + extras.len());
+            for c in from_cols.iter().chain(output_cols.iter()).chain(extras.iter()) {
+                let i = find_idx(c).ok_or_else(|| {
+                    format!("key map seed CSV: missing header for column '{c}'")
+                })?;
+                out.push((c.clone(), i));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for h in &header_cells {
+                if h.is_empty() {
+                    continue;
+                }
+                let k = h.to_ascii_lowercase();
+                if !seen.insert(k) {
+                    return Err(format!(
+                        "key map seed CSV: duplicate header '{h}' (case-insensitive)"
+                    ));
+                }
+            }
+            out
+        }
+        SeedCsvHeaderPolicy::Headerless => Vec::new(),
+    };
+
     let allow_dup_from = !extras.is_empty(); // SCD / attrs maps may repeat From
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
+
+    let col_by_name = |rec: &csv::StringRecord, name: &str| -> String {
+        if let Some((_, i)) = name_map.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            return rec.get(*i).unwrap_or("").to_string();
+        }
+        String::new()
+    };
+
     let mut push_row = |rec: &csv::StringRecord, lineno: usize| -> Result<(), String> {
-        let parts: Vec<String> = (0..n)
-            .map(|i| rec.get(i).unwrap_or("").trim().to_string())
-            .collect();
-        let to = rec.get(n).unwrap_or("").to_string();
-        if parts.iter().all(|p| p.is_empty()) && to.trim().is_empty() {
+        let parts: Vec<String> = if name_map.is_empty() {
+            (0..n)
+                .map(|i| rec.get(i).unwrap_or("").trim().to_string())
+                .collect()
+        } else {
+            from_cols
+                .iter()
+                .map(|c| col_by_name(rec, c).trim().to_string())
+                .collect()
+        };
+        let outs: Vec<String> = if name_map.is_empty() {
+            (0..out_n)
+                .map(|i| rec.get(n + i).unwrap_or("").to_string())
+                .collect()
+        } else {
+            output_cols
+                .iter()
+                .map(|c| col_by_name(rec, c))
+                .collect()
+        };
+        if parts.iter().all(|p| p.is_empty()) && outs.iter().all(|o| o.trim().is_empty()) {
             return Ok(());
         }
         if parts.iter().any(|p| p.is_empty()) {
             return Err(format!("key map seed line {lineno}: empty from part"));
         }
-        if to.is_empty() {
+        if outs.iter().any(|o| o.is_empty()) {
             return Err(format!(
-                "key map seed line {lineno}: empty to for from {:?}",
+                "key map seed line {lineno}: empty output for from {:?}",
                 parts
             ));
         }
@@ -919,9 +1406,15 @@ pub fn parse_key_map_seed_csv_full(
                 parts
             ));
         }
-        let mut entry = KeyMapEntry::parts(parts, to);
-        for (i, c) in extras.iter().enumerate() {
-            let v = rec.get(n + 1 + i).unwrap_or("").to_string();
+        let mut entry = KeyMapEntry::parts_multi(parts, outs);
+        for c in &extras {
+            let v = if name_map.is_empty() {
+                let base = n + out_n;
+                let i = extras.iter().position(|x| x == c).unwrap_or(0);
+                rec.get(base + i).unwrap_or("").to_string()
+            } else {
+                col_by_name(rec, c)
+            };
             if !v.is_empty() {
                 entry.attrs.insert(c.clone(), v);
             }
@@ -930,17 +1423,7 @@ pub fn parse_key_map_seed_csv_full(
         Ok(())
     };
     let mut lineno = 1usize;
-    if !header_ok {
-        // Arity-1 without known extras: fall back to classic single-from parser.
-        if n == 1 && extras.is_empty() {
-            return parse_key_map_seed_csv_mode(
-                body,
-                KeyMapCsvMode::Header {
-                    from_col: from_cols[0].as_str(),
-                    to_col,
-                },
-            );
-        }
+    if policy == SeedCsvHeaderPolicy::Headerless {
         push_row(&first, lineno)?;
     }
     for rec in records {
@@ -1695,12 +2178,134 @@ mod tests {
     }
 
     #[test]
+    fn apply_key_map_multi_output_bindings() {
+        use crate::model::{ApplyKeyMapOutputBinding, KeyMapEntry};
+        let step = TransformationStep::ApplyKeyMap {
+            column: "sku".into(),
+            columns: vec![],
+            output_column: None,
+            output_bindings: vec![
+                ApplyKeyMapOutputBinding {
+                    map_column: "product_id".into(),
+                    destination_column: "mapped_product_id".into(),
+                },
+                ApplyKeyMapOutputBinding {
+                    map_column: "variant_code".into(),
+                    destination_column: "mapped_variant".into(),
+                },
+            ],
+            as_of_column: None,
+            map_id: "sku_map".into(),
+            entries: vec![KeyMapEntry::parts_multi(
+                vec!["X1".into()],
+                vec!["P1".into(), "V1".into()],
+            )],
+        };
+        let mut cols = HashMap::new();
+        cols.insert(
+            "sku_map".into(),
+            (
+                vec!["from".into()],
+                vec!["product_id".into(), "variant_code".into()],
+            ),
+        );
+        let prev = vec!["sku".into()];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_columns: Some(&cols),
+                prev_columns: Some(&prev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(sql.contains("mapped_product_id"), "{sql}");
+        assert!(sql.contains("mapped_variant"), "{sql}");
+        assert!(sql.contains("_dwh_mo_0") && sql.contains("_dwh_mo_1"), "{sql}");
+        assert!(sql.contains("_dwh_match_n"), "{sql}");
+        assert!(sql.contains("_dwh_apply_guard"), "{sql}");
+        assert!(sql.contains("error('KeyMap sku_map: ambiguous"), "{sql}");
+    }
+
+    #[test]
+    fn apply_key_map_same_named_fact_and_map_outputs() {
+        use crate::model::{ApplyKeyMapOutputBinding, KeyMapEntry};
+        // Fact already has product_id=OLD; map overwrites with NEW via same name.
+        let step = TransformationStep::ApplyKeyMap {
+            column: "sku".into(),
+            columns: vec![],
+            output_column: None,
+            output_bindings: vec![
+                ApplyKeyMapOutputBinding {
+                    map_column: "product_id".into(),
+                    destination_column: "product_id".into(),
+                },
+                ApplyKeyMapOutputBinding {
+                    map_column: "variant_code".into(),
+                    destination_column: "variant_code".into(),
+                },
+            ],
+            as_of_column: None,
+            map_id: "sku_map".into(),
+            entries: vec![KeyMapEntry::parts_multi(
+                vec!["X1".into()],
+                vec!["NEW".into(), "BLUE-M".into()],
+            )],
+        };
+        let mut cols = HashMap::new();
+        cols.insert(
+            "sku_map".into(),
+            (
+                vec!["sku".into()],
+                vec!["product_id".into(), "variant_code".into()],
+            ),
+        );
+        let prev = vec!["sku".into(), "product_id".into()];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_columns: Some(&cols),
+                key_map_relations: Some(&{
+                    let mut r = HashMap::new();
+                    r.insert("sku_map".into(), "map_sku".into());
+                    r
+                }),
+                prev_columns: Some(&prev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Map side must use internal aliases — never `m."product_id" AS "product_id"`.
+        assert!(
+            !sql.contains("m.\"product_id\" AS \"product_id\""),
+            "must not project map cols under fact names: {sql}"
+        );
+        assert!(sql.contains("_dwh_mo_0") && sql.contains("_dwh_mf_0"), "{sql}");
+        assert!(
+            sql.contains("CAST(j._dwh_mo_0 AS VARCHAR)"),
+            "overwrite must read map alias: {sql}"
+        );
+        // Miss path must keep fact product_id (j."product_id"), not the map alias.
+        assert!(
+            sql.contains("WHEN j._dwh_mf_0 IS NULL THEN CAST(j.\"product_id\" AS VARCHAR)"),
+            "miss must preserve fact column: {sql}"
+        );
+    }
+
+    #[test]
     fn apply_key_map_values_join() {
         use crate::model::KeyMapEntry;
         let step = TransformationStep::ApplyKeyMap {
             column: "channel".into(),
             columns: vec![],
             output_column: None,
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "ch".into(),
             entries: vec![KeyMapEntry {
@@ -1710,10 +2315,21 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let sql = emit_transform_step(&step, "s0", &HashMap::new(), WarehouseDialect::Duckdb)
-            .unwrap();
+        let prev = vec!["channel".into()];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                prev_columns: Some(&prev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(sql.contains("VALUES"));
-        assert!(sql.contains("COALESCE"));
+        assert!(sql.contains("LEFT JOIN"));
+        assert!(sql.contains("_dwh_match_n"));
         assert!(sql.contains("web"));
         assert!(sql.contains("online"));
     }
@@ -1725,6 +2341,7 @@ mod tests {
             column: String::new(),
             columns: vec!["ext_id".into(), "day".into()],
             output_column: Some("ext_id".into()),
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "offers".into(),
             entries: vec![KeyMapEntry::parts(
@@ -1735,8 +2352,9 @@ mod tests {
         let mut cols = HashMap::new();
         cols.insert(
             "offers".into(),
-            (vec!["ext_id".into(), "day".into()], "offer_sk".into()),
+            (vec!["ext_id".into(), "day".into()], vec!["offer_sk".into()]),
         );
+        let prev = vec!["ext_id".into(), "day".into()];
         let sql = emit_transform_step_ex(
             &step,
             "s0",
@@ -1744,11 +2362,12 @@ mod tests {
             WarehouseDialect::Duckdb,
             EmitSchemaOpts {
                 key_map_columns: Some(&cols),
+                prev_columns: Some(&prev),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert!(sql.contains("from_val_0") && sql.contains("from_val_1"), "{sql}");
+        assert!(sql.contains("_dwh_mf_0") && sql.contains("_dwh_mf_1"), "{sql}");
         assert!(sql.contains("AND"), "{sql}");
         assert!(sql.contains("OFF-42") && sql.contains("2024-06-01"), "{sql}");
         assert!(sql.contains("EXCLUDE"), "{sql}");
@@ -1762,6 +2381,7 @@ mod tests {
             column: "ext".into(),
             columns: vec!["ext".into()],
             output_column: Some("canonical".into()),
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "m".into(),
             entries: vec![KeyMapEntry::pair("OLD", "NEW")],
@@ -1796,6 +2416,7 @@ mod tests {
             column: String::new(),
             columns: vec!["ext_offer_id".into(), "day".into()],
             output_column: Some("offer_sk".into()),
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "offers".into(),
             entries: vec![KeyMapEntry::parts(
@@ -1808,7 +2429,7 @@ mod tests {
             "offers".into(),
             (
                 vec!["ext_offer_id".into(), "as_of_day".into()],
-                "offer_sk".into(),
+                vec!["offer_sk".into()],
             ),
         );
         let prev_cols = vec!["ext_offer_id".into(), "day".into()];
@@ -1825,21 +2446,25 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !sql.contains("EXCLUDE"),
-            "new output must not EXCLUDE missing col: {sql}"
+            !sql.contains("EXCLUDE (\"offer_sk\"")
+                && !sql.contains("EXCLUDE (_dwh_rid, _dwh_match_n, \"offer_sk\""),
+            "new output must not be in EXCLUDE overwrite list: {sql}"
         );
-        assert!(sql.contains("t.*"), "{sql}");
         assert!(sql.contains("AS \"offer_sk\""), "{sql}");
         assert!(sql.contains("SK-SUMMER-A"), "{sql}");
+        assert!(sql.contains("_dwh_match_n"), "{sql}");
     }
 
     #[test]
-    fn apply_key_map_unknown_schema_refuses_non_fact_output() {
+    fn apply_key_map_unknown_schema_refuses_alias_allocation() {
         use crate::model::KeyMapEntry;
+        // Even overwrite of a fact column is unsafe without the full prior schema:
+        // unknown inputs may already use `_dwh_*` and collide under SELECT *.
         let step = TransformationStep::ApplyKeyMap {
-            column: "ext".into(),
-            columns: vec!["ext".into()],
-            output_column: Some("canonical".into()),
+            column: "sku".into(),
+            columns: vec!["sku".into()],
+            output_column: Some("sku".into()),
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "m".into(),
             entries: vec![KeyMapEntry::pair("OLD", "NEW")],
@@ -1853,8 +2478,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.contains("cannot tell if output_column"),
-            "must refuse ambiguous overwrite: {err}"
+            err.contains("prev_columns required"),
+            "must refuse unknown schema for SELECT * aliases: {err}"
         );
     }
 
@@ -1929,12 +2554,14 @@ mod tests {
             column: "sku".into(),
             columns: vec![],
             output_column: None,
+            output_bindings: vec![],
             as_of_column: Some("event_day".into()),
             map_id: "scd".into(),
             entries: vec![e],
         };
         let mut range = HashMap::new();
         range.insert("scd".into(), ("valid_from".into(), "valid_to".into()));
+        let prev = vec!["sku".into(), "event_day".into()];
         let sql = emit_transform_step_ex(
             &step,
             "s0",
@@ -1942,21 +2569,184 @@ mod tests {
             WarehouseDialect::Duckdb,
             EmitSchemaOpts {
                 key_map_range: Some(&range),
+                prev_columns: Some(&prev),
                 ..Default::default()
             },
         )
         .unwrap();
         assert!(
-            sql.contains("valid_from_val") && sql.contains("event_day"),
+            sql.contains("_dwh_mvf") && sql.contains("event_day"),
             "{sql}"
         );
         assert!(
-            sql.contains("CAST(t.\"event_day\" AS TIMESTAMP) >= CAST(m.valid_from_val AS TIMESTAMP)")
-                && sql.contains("valid_to_val IS NULL OR")
+            sql.contains(
+                "CAST(t0.\"event_day\" AS TIMESTAMP) >= CAST(m._dwh_mvf AS TIMESTAMP)"
+            ) && sql.contains("_dwh_mvt IS NULL OR")
                 && sql.contains(
-                    "CAST(t.\"event_day\" AS TIMESTAMP) < CAST(m.valid_to_val AS TIMESTAMP)"
+                    "CAST(t0.\"event_day\" AS TIMESTAMP) < CAST(m._dwh_mvt AS TIMESTAMP)"
                 ),
             "half-open TIMESTAMP predicate: {sql}"
+        );
+    }
+
+    #[test]
+    fn parse_seed_csv_reorder_attrs_and_outputs_by_name() {
+        let body = "\
+external_sku,note,product_id,variant_code,valid_from,valid_to\n\
+X1,reviewed,P100,BLUE-M,2024-01-01,2024-06-01\n";
+        let entries = parse_key_map_seed_csv_outputs(
+            body,
+            &["external_sku".into()],
+            &["product_id".into(), "variant_code".into()],
+            &["note".into(), "valid_from".into(), "valid_to".into()],
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].output_values_eff(),
+            vec!["P100".to_string(), "BLUE-M".to_string()]
+        );
+        assert_eq!(entries[0].attrs.get("note").map(String::as_str), Some("reviewed"));
+        assert_eq!(
+            entries[0].attrs.get("valid_from").map(String::as_str),
+            Some("2024-01-01")
+        );
+        assert_eq!(
+            entries[0].attrs.get("valid_to").map(String::as_str),
+            Some("2024-06-01")
+        );
+    }
+
+    #[test]
+    fn parse_seed_csv_rejects_duplicate_headers() {
+        let err = parse_key_map_seed_csv_outputs(
+            "a,A,to\n1,2,3\n",
+            &["a".into()],
+            &["to".into()],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate header"), "{err}");
+    }
+
+    #[test]
+    fn parse_seed_csv_headerless_allows_duplicate_data_cells() {
+        // Row 1 is data (A→A), not a header — must not trip duplicate-header.
+        let entries = parse_key_map_seed_csv_outputs_ex(
+            "A,A\nB,C\n",
+            &["from".into()],
+            &["to".into()],
+            &[],
+            SeedCsvHeaderPolicy::Headerless,
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].from, "A");
+        assert_eq!(entries[0].to, "A");
+        assert_eq!(entries[1].from, "B");
+        assert_eq!(entries[1].to, "C");
+    }
+
+    #[test]
+    fn parse_seed_csv_require_header_refuses_missing_columns() {
+        let err = parse_key_map_seed_csv_outputs(
+            "A,A\nB,C\n",
+            &["from".into()],
+            &["to".into()],
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("missing header"),
+            "RequireHeader must not fall back to positional data: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_key_map_internal_aliases_avoid_prev_collision() {
+        use crate::model::{ApplyKeyMapOutputBinding, KeyMapEntry};
+        let step = TransformationStep::ApplyKeyMap {
+            column: "sku".into(),
+            columns: vec![],
+            output_column: None,
+            output_bindings: vec![ApplyKeyMapOutputBinding {
+                map_column: "product_id".into(),
+                destination_column: "product_id".into(),
+            }],
+            as_of_column: None,
+            map_id: "m".into(),
+            entries: vec![KeyMapEntry::pair("X1", "NEW")],
+        };
+        let mut cols = HashMap::new();
+        cols.insert(
+            "m".into(),
+            (vec!["sku".into()], vec!["product_id".into()]),
+        );
+        // Fact already has our preferred internal names — allocator must suffix.
+        let prev = vec![
+            "sku".into(),
+            "product_id".into(),
+            "_dwh_rid".into(),
+            "_dwh_mo_0".into(),
+            "_dwh_apply_guard".into(),
+        ];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Duckdb,
+            EmitSchemaOpts {
+                key_map_columns: Some(&cols),
+                prev_columns: Some(&prev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            sql.contains("_dwh_rid_1") || sql.contains("AS _dwh_rid_1"),
+            "rid must be reallocated: {sql}"
+        );
+        assert!(
+            sql.contains("_dwh_mo_0_1") || sql.contains("_dwh_mo_1"),
+            "map out alias must avoid prev _dwh_mo_0: {sql}"
+        );
+        assert!(
+            !sql.contains("EXCLUDE (_dwh_rid,"),
+            "must not EXCLUDE the user's _dwh_rid column name alone: {sql}"
+        );
+    }
+
+    #[test]
+    fn apply_key_map_postgres_abort_not_constant_div_zero() {
+        use crate::model::KeyMapEntry;
+        let step = TransformationStep::ApplyKeyMap {
+            column: "sku".into(),
+            columns: vec![],
+            output_column: None,
+            output_bindings: vec![],
+            as_of_column: None,
+            map_id: "m".into(),
+            entries: vec![KeyMapEntry::pair("a", "b")],
+        };
+        let prev = vec!["sku".into()];
+        let sql = emit_transform_step_ex(
+            &step,
+            "s0",
+            &HashMap::new(),
+            WarehouseDialect::Postgres,
+            EmitSchemaOpts {
+                prev_columns: Some(&prev),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !sql.contains("(1 / 0)") && !sql.contains("1 / 0"),
+            "must not use plan-time constant 1/0: {sql}"
+        );
+        assert!(
+            sql.contains("SELECT 0 WHERE") && sql.contains("_dwh_apply_guard"),
+            "runtime abort + forced guard: {sql}"
         );
     }
 
@@ -1966,6 +2756,7 @@ mod tests {
             column: "sku".into(),
             columns: vec![],
             output_column: None,
+            output_bindings: vec![],
             as_of_column: None,
             map_id: "scd".into(),
             entries: vec![],

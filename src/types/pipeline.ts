@@ -1,3 +1,7 @@
+import type { ApplyKeyMapOutputBinding } from "./generated/ApplyKeyMapOutputBinding";
+import type { KeyMapAuthoringContext } from "./generated/KeyMapAuthoringContext";
+export type { ApplyKeyMapOutputBinding, KeyMapAuthoringContext };
+
 export type ColumnType = "INTEGER" | "VARCHAR" | "FLOAT" | "TIMESTAMP" | "BOOLEAN";
 
 export interface ColumnMetadata {
@@ -47,11 +51,18 @@ export interface ConnectionDef {
   duckdb?: DuckdbParams;
 }
 
+/** Absolute vs project-relative file locator (ADR-0043). */
+export type FilePathKind = "absolute" | "relative";
+
 export type TransformationStep =
-  | { type: "LoadCsv"; payload: { path: string } }
+  | { type: "LoadCsv"; payload: { path: string; path_kind?: FilePathKind } }
   | {
       type: "LoadParquet";
-      payload: { path: string; connection_id?: string };
+      payload: {
+        path: string;
+        path_kind?: FilePathKind;
+        connection_id?: string;
+      };
     }
   | {
       type: "LoadPostgres";
@@ -72,6 +83,7 @@ export type TransformationStep =
       payload: {
         connection_id?: string;
         path?: string;
+        path_kind?: FilePathKind;
         schema: string;
         table_name: string;
       };
@@ -112,7 +124,10 @@ export type TransformationStep =
       payload: {
         column?: string;
         columns?: string[];
+        /** Legacy single destination. Prefer `output_bindings` (ADR-0037). */
         output_column?: string;
+        /** Map output → fact destination (ADR-0037). */
+        output_bindings?: ApplyKeyMapOutputBinding[];
         /** Fact event-time column when KeyMap is range SCD (ADR-0028). */
         as_of_column?: string;
         map_id: ObjectTarget;
@@ -182,12 +197,15 @@ export interface KeyMapEntry {
   from: string;
   /** Composite From tuple ([ADR-0024]); soft-migrate: omit → [from]. */
   from_parts?: string[];
-  to: string;
+  /** Legacy single To. Prefer `output_values` (ADR-0037). */
+  to?: string;
+  /** Values aligned to KeyMapDef.output_columns (ADR-0037). */
+  output_values?: string[];
   /** Extra editable WH columns (ADR-0022); keys ⊆ KeyMapDef.editable_columns. */
   attrs?: Record<string, string>;
 }
 
-/** Where the From→To table lives (ADR-0020). */
+/** Where the From→To table lives (ADR-0020 / ADR-0036). */
 export type KeyMapStorage =
   | { kind: "seed" }
   | { kind: "ref"; model: string }
@@ -197,16 +215,19 @@ export type KeyMapStorage =
       table: string;
       /** Postgres connection for read / write-back. */
       connection_id?: string;
+      /** DB schema when `source` is only the dbt source name. */
+      db_schema?: string;
+    }
+  | {
+      /** Local workspace query result is the correspondence SoT (ADR-0036). */
+      kind: "query";
+      query_id: string;
     };
 
 /** Effectivity mode ([ADR-0028](../../docs/adr/0028-keymap-stewardship-shapes.md)). */
 export type KeyMapTimeMode = "none" | "range_scd";
 
-/** Creation intent from query-based mapping wizard ([ADR-0034]) — generated from Rust. */
-import type { KeyMapAuthoringContext } from "./generated/KeyMapAuthoringContext";
-export type { KeyMapAuthoringContext };
-
-/** Named From→To join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034). */
+/** Named From→outputs join-key alias table (ADR-0020 / ADR-0022 / ADR-0024 / ADR-0028 / ADR-0034 / ADR-0037). */
 export interface KeyMapDef {
   id: string;
   name: string;
@@ -216,8 +237,11 @@ export interface KeyMapDef {
   from_column?: string;
   /** Composite From columns on the map relation; soft-migrate: omit → [from_column]. */
   from_columns?: string[];
+  /** Legacy single To. Prefer `output_columns` (ADR-0037). */
   to_column?: string;
-  /** Extra columns editable in the UI (not From/To); seed export includes them. */
+  /** Ordered output columns on the map relation (ADR-0037). */
+  output_columns?: string[];
+  /** Extra columns editable in the UI (not From/outputs); seed export includes them. */
   editable_columns?: string[];
   /** Default `none` — classic unique From. */
   time_mode?: KeyMapTimeMode;
@@ -299,6 +323,8 @@ export interface SourceDef {
   name: string;
   kind: SourceKind;
   path?: string;
+  /** Absolute vs project-relative when `path` is a file (ADR-0043). */
+  path_kind?: FilePathKind;
   connection_id?: string;
   /** Legacy mirror; prefer connection_id. */
   connection_string?: string;
@@ -318,7 +344,7 @@ export interface CanvasLayout {
  * Engine ≠ destination (four routes).
  */
 /** On-disk project document version (ADR-0030). Missing ⇒ 0 at load. */
-export const PROJECT_FORMAT_VERSION = 1 as const;
+export const PROJECT_FORMAT_VERSION = 5 as const;
 
 export interface Project {
   /** Document schema version (ADR-0030). */
@@ -352,6 +378,8 @@ export interface Project {
   mapping_checks?: import("./mappingCheck").MappingCheck[];
   /** Immutable check execution results (ADR-0027). */
   mapping_check_runs?: import("./mappingCheck").CheckRun[];
+  /** Postgres import provenance (ADR-0040). No rows, no credentials. */
+  pg_import?: import("../lib/pgImport").PgImportRegistry;
 }
 
 export interface PreviewResult {
@@ -613,6 +641,7 @@ export function syncSourcesFromQueries(
         name: fileName,
         kind: "csv",
         path: step.payload.path,
+        path_kind: step.payload.path_kind ?? "absolute",
       });
     } else if (step.type === "LoadParquet") {
       const key = `parquet:${step.payload.connection_id ?? ""}:${step.payload.path}`;
@@ -625,6 +654,7 @@ export function syncSourcesFromQueries(
         name: fileName,
         kind: "parquet",
         path: step.payload.path,
+        path_kind: step.payload.path_kind ?? "absolute",
         connection_id: step.payload.connection_id,
         // Hive is source-specific — preserve when re-syncing from queries.
         hive_partitioning: existing?.hive_partitioning || undefined,

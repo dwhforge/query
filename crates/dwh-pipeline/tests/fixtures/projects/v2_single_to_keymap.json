@@ -1,0 +1,50 @@
+{
+  "format_version": 2,
+  "id": "fixture_v2_keymap",
+  "name": "v2 single-To KeyMap",
+  "connections": [],
+  "sources": [],
+  "workspace": {
+    "queries": [
+      {
+        "id": "sales",
+        "name": "sales",
+        "steps": [
+          {
+            "type": "LoadCsv",
+            "path": "sales.csv"
+          },
+          {
+            "type": "ApplyKeyMap",
+            "payload": {
+              "column": "external_sku",
+              "columns": [],
+              "output_column": "external_sku",
+              "map_id": "map_sku",
+              "entries": [
+                { "from": "X-1", "to": "P1" }
+              ]
+            }
+          }
+        ],
+        "execution": "local"
+      }
+    ],
+    "focus_query_id": "sales",
+    "key_maps": [
+      {
+        "id": "map_sku",
+        "name": "external sku",
+        "from_column": "from",
+        "to_column": "to",
+        "entries": [
+          { "from": "X-1", "to": "P1" }
+        ],
+        "storage": { "kind": "seed" }
+      }
+    ]
+  },
+  "dbt_target": "v1",
+  "execution_engine": "duckdb",
+  "destination": { "kind": "duckdb", "duckdb_path": "local.duckdb" }
+}

@@ -79,6 +79,8 @@ async function runLlm(
   }
 }
 
+const EMPTY_SOURCES: SourceDef[] = [];
+
 export function FindRightDialog({
   open,
   fromParts,
@@ -86,7 +88,7 @@ export function FindRightDialog({
   hostQueryId,
   joinStepIndex,
   connections,
-  sources = [],
+  sources = EMPTY_SOURCES,
   projectRef,
   onClose,
   onAccept,

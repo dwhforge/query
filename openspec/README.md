@@ -20,7 +20,16 @@ openspec/
 
 Active changes:
 
+- ~~[`changes/project-relative-load-paths/`](changes/project-relative-load-paths/)~~ — **merged** → [`specs/project-relative-load-paths/`](specs/project-relative-load-paths/) ([ADR-0043](../docs/adr/0043-project-relative-load-paths.md))
+
+- ~~[`changes/join-lens-in-place-confirm/`](changes/join-lens-in-place-confirm/)~~ — **merged** → [`specs/join-lens-in-place-confirm/`](specs/join-lens-in-place-confirm/) ([ADR-0042](../docs/adr/0042-join-lens-in-place-confirm.md))
+- ~~[`changes/heavy-preview-sample/`](changes/heavy-preview-sample/)~~ — **merged** → [`specs/heavy-preview-sample/`](specs/heavy-preview-sample/) ([ADR-0041](../docs/adr/0041-heavy-preview-sample.md))
+- ~~[`changes/postgres-schema-import/`](changes/postgres-schema-import/)~~ — **merged** → [`specs/postgres-schema-import/`](specs/postgres-schema-import/) ([ADR-0040](../docs/adr/0040-postgres-schema-import.md))
+- ~~[`changes/help-lab-catalog/`](changes/help-lab-catalog/)~~ — **merged** → [`specs/help-lab/`](specs/help-lab/) ([ADR-0039](../docs/adr/0039-help-lab-catalog.md))
+- ~~[`changes/keymap-apply-operation/`](changes/keymap-apply-operation/)~~ — **merged** → [`specs/keymap-apply-*`](specs/) ([ADR-0038](../docs/adr/0038-keymap-apply-operation.md))
+- ~~[`changes/keymap-multi-output/`](changes/keymap-multi-output/)~~ — **merged** → [`specs/keymap-multi-output-*`](specs/) ([ADR-0037](../docs/adr/0037-keymap-multi-output.md))
 - [`changes/query-based-mapping-create/`](changes/query-based-mapping-create/) — query-based KeyMap create v0.3.1 ([ADR-0034](../docs/adr/0034-keymap-authoring-context.md))
+- ~~[`changes/query-backed-keymap/`](changes/query-backed-keymap/)~~ — **merged** → [`specs/query-backed-keymap/`](specs/query-backed-keymap/) ([ADR-0036](../docs/adr/0036-query-backed-keymap.md))
 - ~~[`changes/typed-wire-contract/`](changes/typed-wire-contract/)~~ — **merged** → [`specs/typed-wire-contract/`](specs/typed-wire-contract/) ([ADR-0029](../docs/adr/0029-typed-wire-contract.md))
 - ~~[`changes/ui-host-decomposition/`](changes/ui-host-decomposition/)~~ — **merged** → [`specs/ui-host-decomposition/`](specs/ui-host-decomposition/) ([ADR-0032](../docs/adr/0032-ui-host-decomposition.md))
 - ~~[`changes/mapping-data-plane/`](changes/mapping-data-plane/)~~ — **merged** → [`specs/mapping-data-plane/`](specs/mapping-data-plane/) ([ADR-0033](../docs/adr/0033-mapping-data-plane.md))

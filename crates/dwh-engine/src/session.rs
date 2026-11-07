@@ -320,8 +320,8 @@ fn workspace_needs_httpfs(workspace: &Workspace, connections: &[ConnectionDef]) 
     }
     workspace.queries.iter().any(|q| {
         q.steps.iter().any(|s| match s {
-            TransformationStep::LoadParquet { path, .. }
-            | TransformationStep::LoadCsv { path } => path_needs_httpfs(path),
+            TransformationStep::LoadParquet { path, path_kind: _, .. }
+            | TransformationStep::LoadCsv { path, path_kind: _ } => path_needs_httpfs(path),
             TransformationStep::SqlModel { raw_sql }
             | TransformationStep::CustomSql { raw_sql } => {
                 let lower = raw_sql.to_ascii_lowercase();

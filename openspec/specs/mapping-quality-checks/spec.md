@@ -23,6 +23,19 @@ The overview SHALL run against a KeyMap and inputs in the open project, with use
 - **THEN** aggregates reflect that map and those inputs
 - **AND** observations remain distinct from correctness verdicts
 
+### Requirement: Join-anchored attrs axes (ADR-0035)
+Attrs overview SHALL select left-axis columns from the Join’s left input and right-axis columns from the right input (side-anchored), not only from columns that survive the final host SELECT. Composite From/ON tuples (including date parts) SHALL form the row-axis identity. Creation and attribute changes SHALL go through an inference+override dialog from KeyMap editor or Join inspector — not Help. The product SHALL NOT default both axes to bare Join ON×ON when a non-key label is available on a side.
+
+#### Scenario: Side-anchored composite overview
+- **WHEN** the user confirms a check whose From key is `(ext_offer_id, as_of_day)` with a right-side name-like attribute
+- **THEN** the overview matrix rows are labeled by the full left tuple (date included)
+- **AND** the SQL rebuilds the Join to read those side columns
+
+#### Scenario: Entry points outside Help
+- **WHEN** the user creates a mapping check from the KeyMap editor or Join inspector
+- **THEN** a setup dialog shows inferred attributes for override
+- **AND** Help remains for Mapping labs only (not check creation)
+
 ### Requirement: Cohort is a predicate
 Selecting a matrix cell or equivalent group SHALL define a cohort via the check’s selection condition. The UI SHALL NOT require loading every cohort key into the client to open investigation.
 

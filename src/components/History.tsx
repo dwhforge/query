@@ -112,7 +112,7 @@ export function stepSummaryLine(
       };
     case "ApplyKeyMap":
       return {
-        kind: "ApplyKeyMap",
+        kind: "Apply Mapping",
         detail: `${step.payload.column} ← ${targetKey(step.payload.map_id)}`,
       };
     default:

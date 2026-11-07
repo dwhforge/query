@@ -7,7 +7,7 @@
  * full right-key universe).
  */
 import type { Workspace } from "../types/pipeline";
-import { findApplyKeyMapIdForJoin } from "./keyMap";
+import { findApplyKeyMapIdForJoin, primaryTo } from "./keyMap";
 
 export type JoinMapEffectCtx = {
   hostQueryId: string;
@@ -87,7 +87,7 @@ export function wiredMapKeyLabels(
   if (!map) return { from, to, mapId };
   for (const e of map.entries) {
     const f = mapEntryFromLabel(e);
-    const t = foldKey(e.to);
+    const t = foldKey(primaryTo(e));
     if (f) from.add(f);
     if (t) to.add(t);
   }

@@ -5,9 +5,13 @@ import type { KeyMapDirtyDelta, KeyMapSaveResult } from "../../lib/bridge";
 import {
   applyKeyMapToWorkspace,
   fromPartsEff,
+  mergeLensOutputCells,
+  outputColumnsEff,
+  outputValuesEff,
   syncApplyKeyMapEntries,
   tupleKey,
   upsertKeyMapList,
+  type LensOutputCell,
 } from "../../lib/keyMap";
 import type {
   KeyMapDef,
@@ -18,6 +22,7 @@ import type {
   Workspace,
 } from "../../types/pipeline";
 import { targetKey } from "../../types/pipeline";
+import { keyMapRevisionFingerprint } from "./applyPlan";
 import type {
   KeyMapApplyIntent,
   KeyMapApplyResult,
@@ -52,6 +57,7 @@ export function keyMapEntryIdentity(
 function storageBindingKey(storage: KeyMapStorage | undefined): string {
   if (!storage || storage.kind === "seed") return "seed";
   if (storage.kind === "ref") return `ref:${storage.model}`;
+  if (storage.kind === "query") return `query:${storage.query_id}`;
   return `source:${storage.connection_id ?? ""}:${storage.source}:${storage.table}`;
 }
 
@@ -118,7 +124,7 @@ export function applyKeyMapTabMapChange(
     return {
       ok: false,
       reason:
-        "KeyMap warehouse save still in progress — wait or abort before changing storage binding.",
+        "Mapping warehouse save still in progress — wait or abort before changing storage binding.",
     };
   }
   return {
@@ -168,6 +174,31 @@ export function applyKeyMapOntoProject(
   project: Project,
   intent: KeyMapApplyIntent,
 ): { project: Project; result: KeyMapApplyResult } {
+  const liveMap = (project.workspace.key_maps ?? []).find(
+    (m) => m.id === intent.map.id,
+  );
+  if (!liveMap) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        mapId: intent.map.id,
+        reason: `Mapping '${intent.map.id}' is missing from the project — re-open Apply.`,
+      },
+    };
+  }
+  const liveRevision = keyMapRevisionFingerprint(liveMap, project.workspace);
+  if (liveRevision !== intent.expectedMapRevision) {
+    return {
+      project,
+      result: {
+        status: "stale",
+        mapId: intent.map.id,
+        reason:
+          "Mapping changed since Apply was prepared — re-open the map and Apply again.",
+      },
+    };
+  }
   const joinIdx = resolveJoinStepFromCtx(project.workspace, intent.ctx);
   if (joinIdx == null) {
     return {
@@ -175,26 +206,48 @@ export function applyKeyMapOntoProject(
       result: { status: "join_gone", mapId: intent.map.id },
     };
   }
-  const workspace = applyKeyMapToWorkspace(
-    {
-      ...project.workspace,
-      key_maps: upsertKeyMapList(project.workspace.key_maps ?? [], intent.map),
-    },
+  const joinRewrite = intent.joinRewrite ?? intent.ctx.joinRewrite;
+  // Use the live Project map — never replace R2 with a stale plan snapshot.
+  const applied = applyKeyMapToWorkspace(
+    project.workspace,
     intent.ctx.hostQueryId,
     joinIdx,
     intent.ctx.rightQueryId,
     intent.side,
     intent.leftCols[0]!,
     intent.rightCols[0]!,
-    intent.map,
+    liveMap,
     intent.leftCols,
     intent.rightCols,
     intent.outputColumnLeft,
     intent.outputColumnRight,
+    intent.outputBindingsLeft ?? intent.ctx.outputBindingsLeft,
+    intent.outputBindingsRight ?? intent.ctx.outputBindingsRight,
+    joinRewrite,
+    {
+      rightQueryId: intent.ctx.rightQueryId,
+      leftOn: intent.ctx.leftOn,
+      rightOn: intent.ctx.rightOn,
+      joinType: intent.ctx.joinType,
+    },
   );
+  if (!applied.ok) {
+    return {
+      project,
+      result: {
+        status: "join_gone",
+        mapId: intent.map.id,
+        reason: applied.error,
+      },
+    };
+  }
   return {
-    project: { ...project, workspace },
-    result: { status: "ok", mapId: intent.map.id, workspace },
+    project: { ...project, workspace: applied.workspace },
+    result: {
+      status: "ok",
+      mapId: intent.map.id,
+      workspace: applied.workspace,
+    },
   };
 }
 
@@ -207,11 +260,23 @@ export function normalizeKeyMapForEditor(map: KeyMapDef): KeyMapDef {
       : [map.from_column ?? "from"],
     to_column: "to",
     ...map,
+    output_columns: outputColumnsEff(map),
   };
 }
 
+export { mergeLensOutputCells, outputColumnsEff, outputValuesEff };
+export type { LensOutputCell };
+
+function outputsKey(e: KeyMapEntry): string {
+  return JSON.stringify(outputValuesEff(e).map((v) => v.trim()));
+}
+
+function hasAnyOutput(e: KeyMapEntry): boolean {
+  return outputValuesEff(e).some((v) => v.trim());
+}
+
 function entrySnapshotsEqual(a: KeyMapEntry, b: KeyMapEntry): boolean {
-  if (a.from.trim() !== b.from.trim() || a.to.trim() !== b.to.trim()) {
+  if (a.from.trim() !== b.from.trim() || outputsKey(a) !== outputsKey(b)) {
     return false;
   }
   const ap = fromPartsEff(a).map((p) => p.trim());
@@ -246,7 +311,7 @@ export function keyMapEntriesFingerprint(map: KeyMapDef): string {
       const attrPart = attrKeys
         .map((k) => `${k}=${(attrs[k] ?? "").trim()}`)
         .join("&");
-      return `${id}\t${e.to.trim()}\t${attrPart}`;
+      return `${id}\t${outputsKey(e)}\t${attrPart}`;
     })
     .sort();
   return rows.join("\n");
@@ -341,8 +406,8 @@ export function mergeKeyMapTabSession(
     if (protectLocalDrafts && !entrySnapshotsEqual(cur, e)) {
       continue;
     }
-    const toIn = e.to.trim();
-    const toCur = cur.to.trim();
+    const toIn = hasAnyOutput(e) ? outputsKey(e) : "";
+    const toCur = hasAnyOutput(cur) ? outputsKey(cur) : "";
     if (toIn && toIn !== toCur) {
       // Fresh To from SoT/suggest; keep local attrs only if incoming omitted them.
       byId.set(id, {
@@ -354,11 +419,17 @@ export function mergeKeyMapTabSession(
       // Incoming omitted attr keys are left as-is (not treated as explicit clear).
       byId.set(id, {
         ...cur,
-        to: toIn || cur.to,
+        ...(toIn
+          ? { to: e.to, output_values: outputValuesEff(e) }
+          : {}),
         attrs: { ...(cur.attrs ?? {}), ...e.attrs },
       });
     } else if (toIn && !toCur) {
-      byId.set(id, { ...cur, to: e.to });
+      byId.set(id, {
+        ...cur,
+        to: e.to,
+        output_values: outputValuesEff(e),
+      });
     }
   }
 
@@ -427,14 +498,14 @@ export function seedSaveResult(args: {
     return {
       local: "saved",
       external: "skipped",
-      message: "KeyMap saved in project (not exported yet — no seed CSV)",
+      message: "Mapping saved in project (not exported yet — no seed CSV)",
     };
   }
   if (!args.syncError) {
     return {
       local: "saved",
       external: "synced",
-      message: "KeyMap saved in project · synced → seeds (export tree)",
+      message: "Mapping saved in project · synced → seeds (export tree)",
     };
   }
   const isConflict = isSyncConflictMessage(args.syncError);
@@ -458,7 +529,7 @@ export function sourceSaveSynced(args: {
   return {
     local: "saved",
     external: "synced",
-    message: `KeyMap saved in project · upsert → ${args.schema}.${args.table} (${args.rowsWritten} dirty rows)`,
+    message: `Mapping saved in project · upsert → ${args.schema}.${args.table} (${args.rowsWritten} dirty rows)`,
     contentHash: args.contentHash,
   };
 }
@@ -476,7 +547,7 @@ export function refSaveResult(): KeyMapSaveResult {
   return {
     local: "saved",
     external: "none",
-    message: "KeyMap saved in project (ref storage — no warehouse write-back)",
+    message: "Mapping saved in project (ref storage — no warehouse write-back)",
   };
 }
 
@@ -568,15 +639,42 @@ export function planMapFillFromLens(args: {
   };
 }
 
-/** Merge From values (and optional To / parts) into a map for Join Lens → editor. */
+/**
+ * Merge From values (and optional To / parts) into a map for Join Lens → editor.
+ * `toValues` fill the first output column only; `cellPatches[i]` name columns
+ * per suggestion (ADR-0037) and merge via `mergeLensOutputCells`.
+ */
 export function mergeFromValuesIntoMap(args: {
   map: KeyMapDef;
   fromValues: string[];
   joinCtx: KeyMapJoinCtx;
   toValues?: string[];
+  /** Parallel to `fromValues`: named output cells per suggestion. */
+  cellPatches?: LensOutputCell[][];
   fromParts?: string[][];
 }): KeyMapDef {
-  const { map, fromValues, joinCtx, toValues, fromParts } = args;
+  const { map, fromValues, joinCtx, toValues, fromParts, cellPatches } = args;
+  const outCols = outputColumnsEff(map);
+  const knownOut = new Set(outCols.map((c) => c.trim().toLowerCase()));
+  const cellsFor = (i: number): LensOutputCell[] => {
+    // Right-row dumps may include join keys / attrs — keep only map outputs.
+    const named = (cellPatches?.[i] ?? []).filter((c) =>
+      knownOut.has(c.column.trim().toLowerCase()),
+    );
+    const to = (toValues?.[i] ?? "").trim();
+    if (!to) return named;
+    const first = outCols[0]!.trim().toLowerCase();
+    if (named.some((c) => c.column.trim().toLowerCase() === first)) {
+      return named;
+    }
+    return [{ column: outCols[0]!, value: to }, ...named];
+  };
+  const blank = (parts: string[]): KeyMapEntry => ({
+    from: parts[0]!,
+    from_parts: parts,
+    to: "",
+    output_values: outCols.map(() => ""),
+  });
   const entries: KeyMapEntry[] = [...map.entries];
   const indexByFrom = new Map(
     entries.map((e, i) => {
@@ -595,16 +693,26 @@ export function mergeFromValuesIntoMap(args: {
     ).map((p) => p.trim());
     if (!parts.length || parts.some((p) => !p)) return;
     const key = JSON.stringify(parts);
-    const to = (toValues?.[i] ?? "").trim();
+    const cells = cellsFor(i);
     const existing = indexByFrom.get(key);
     if (existing !== undefined) {
-      if (to && !entries[existing]!.to.trim()) {
-        entries[existing] = { ...entries[existing]!, to };
+      const cur = entries[existing]!;
+      if (cells.length) {
+        const r = mergeLensOutputCells(cur, outCols, cells);
+        // Conflicts: keep the filled entry; apply only non-conflicting cells.
+        if (r.ok) {
+          entries[existing] = r.entry;
+        } else if (r.conflicts.length) {
+          const rest = cells.filter((c) => !r.conflicts.includes(c));
+          const r2 = mergeLensOutputCells(cur, outCols, rest);
+          if (r2.ok) entries[existing] = r2.entry;
+        }
       }
       return;
     }
     indexByFrom.set(key, entries.length);
-    entries.push({ from: parts[0]!, from_parts: parts, to });
+    const fresh = mergeLensOutputCells(blank(parts), outCols, cells);
+    entries.push(fresh.ok ? fresh.entry : blank(parts));
   });
   const arity = Math.max(
     map.from_columns?.length ?? 0,
@@ -639,6 +747,7 @@ export function mapEditorFillSnapshot(args: {
   joinCtx: KeyMapJoinCtx;
   fromValues: string[];
   toValues?: string[];
+  cellPatches?: LensOutputCell[][];
   fromParts?: string[][];
 }): {
   entries: KeyMapEntry[];
@@ -654,8 +763,8 @@ export function mapEditorFillSnapshot(args: {
     args.fromParts && args.fromParts.length > 0
       ? args.fromParts.map((p) => p.map((x) => x.trim()))
       : args.fromValues.map((s) => [s.trim()]);
-  const emptyToCount = merged.entries.filter((e) => !e.to.trim()).length;
-  const filledToCount = merged.entries.filter((e) => e.to.trim()).length;
+  const emptyToCount = merged.entries.filter((e) => !hasAnyOutput(e)).length;
+  const filledToCount = merged.entries.filter((e) => hasAnyOutput(e)).length;
   return {
     entries: merged.entries,
     suggestedFrom: args.fromValues,

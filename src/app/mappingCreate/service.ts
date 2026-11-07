@@ -2,7 +2,11 @@
  * Query-based KeyMap creation (v0.3.1 / ADR-0034).
  * Pure plan / validate / commit — React applies via projectBag fold.
  */
-import { emptyKeyMap } from "../../lib/keyMap";
+import {
+  emptyKeyMap,
+  fromColumnsEff,
+  outputColumnsEff,
+} from "../../lib/keyMap";
 import { slugify, targetKey } from "../../types/pipeline";
 import type {
   KeyMapDef,
@@ -62,9 +66,13 @@ export function isLocalQueryId(id: string): boolean {
 
 /**
  * Direct upstream query ids via FromQuery / Join right / Append / SqlModel /
- * CustomSql `{{query:id}}`. Mirrors supported edges in `graph::direct_deps`.
+ * CustomSql `{{query:id}}`, and ApplyKeyMap → query-backed map query_id when
+ * `keyMaps` is provided. Mirrors Rust `graph::direct_deps_ex` (ADR-0036).
  */
-export function directUpstreamQueryIds(query: QueryDef): string[] {
+export function directUpstreamQueryIds(
+  query: QueryDef,
+  keyMaps?: KeyMapDef[] | null,
+): string[] {
   const out: string[] = [];
   for (const s of query.steps) {
     if (s.type === "FromQuery") {
@@ -75,26 +83,82 @@ export function directUpstreamQueryIds(query: QueryDef): string[] {
       for (const t of s.payload.other_query_ids) out.push(targetKey(t));
     } else if (s.type === "SqlModel" || s.type === "CustomSql") {
       out.push(...sqlPlaceholderQueryIds(s.payload.raw_sql));
+    } else if (s.type === "ApplyKeyMap" && keyMaps?.length) {
+      const mid = targetKey(s.payload.map_id);
+      const km = keyMaps.find((m) => m.id === mid);
+      if (km?.storage?.kind === "query") {
+        const qid = km.storage.query_id.trim();
+        if (qid) out.push(qid);
+      }
     }
   }
   return [...new Set(out.filter(Boolean))];
 }
 
 /**
- * Fingerprints for `rootQueryId` and its transitive known upstreams.
+ * Mapping definition for dependency basis (ADR-0038 nested Apply).
+ * - seed: schema + entry content (affects upstream Apply computation)
+ * - query/source/ref: schema/binding only — not warehouse content
+ */
+export function fingerprintKeyMapForBasis(map: KeyMapDef): string {
+  const kind = map.storage?.kind ?? "seed";
+  const schema = {
+    from_columns: fromColumnsEff(map),
+    output_columns: outputColumnsEff(map),
+    editable_columns: map.editable_columns ?? [],
+    time_mode: map.time_mode ?? "none",
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
+  };
+  if (kind !== "seed") {
+    return JSON.stringify({ schema });
+  }
+  const rows = [...(map.entries ?? [])]
+    .map((e) =>
+      JSON.stringify({
+        from_parts: e.from_parts?.length
+          ? e.from_parts
+          : e.from != null && e.from !== ""
+            ? [e.from]
+            : [],
+        output_values: e.output_values?.length
+          ? e.output_values
+          : e.to != null && e.to !== ""
+            ? [e.to]
+            : [],
+        attrs: Object.fromEntries(
+          Object.entries(e.attrs ?? {}).sort(([a], [b]) =>
+            a.localeCompare(b),
+          ),
+        ),
+      }),
+    )
+    .sort();
+  return JSON.stringify({ schema, rows });
+}
+
+/**
+ * Fingerprints for `rootQueryId` and its transitive known upstreams,
+ * plus definitions of KeyMaps Applied along that walk (ADR-0038).
  * Missing upstream ids → refuse (conservative outside supported graph).
  */
 export function basisQueryFingerprints(
   workspace: Workspace,
   rootQueryId: string,
-): { ok: true; defs: Record<string, string> } | { ok: false; error: string } {
+):
+  | { ok: true; defs: Record<string, string>; maps: Record<string, string> }
+  | { ok: false; error: string } {
   const byId = new Map(workspace.queries.map((q) => [q.id, q]));
   if (!byId.has(rootQueryId)) {
     return { ok: false, error: `Query “${rootQueryId}” is missing.` };
   }
+  const keyMaps = workspace.key_maps ?? [];
   const defs: Record<string, string> = {};
+  const maps: Record<string, string> = {};
   const stack = [rootQueryId];
   const seen = new Set<string>();
+  const seenMaps = new Set<string>();
   while (stack.length) {
     const id = stack.pop()!;
     if (seen.has(id)) continue;
@@ -113,9 +177,25 @@ export function basisQueryFingerprints(
       };
     }
     defs[id] = fingerprintSteps(q.steps);
-    for (const up of directUpstreamQueryIds(q)) stack.push(up);
+    for (const s of q.steps) {
+      if (s.type !== "ApplyKeyMap") continue;
+      const mid = targetKey(s.payload.map_id);
+      if (!mid || seenMaps.has(mid)) continue;
+      const km = keyMaps.find((m) => m.id === mid);
+      if (!km) {
+        return {
+          ok: false,
+          error: `Applied Mapping “${mid}” is missing — cannot confirm basis.`,
+        };
+      }
+      seenMaps.add(mid);
+      maps[mid] = fingerprintKeyMapForBasis(km);
+    }
+    for (const up of directUpstreamQueryIds(q, keyMaps)) {
+      stack.push(up);
+    }
   }
-  return { ok: true, defs };
+  return { ok: true, defs, maps };
 }
 
 /**
@@ -296,10 +376,13 @@ export function allocateMapRelationColumns(args: {
   sourceColumns: string[];
   /** Preferred To name (default `to`). */
   preferredTo?: string;
+  /** Multi-output (ADR-0037): preferred physical names, in order. */
+  preferredOutputs?: string[];
 }): {
   from_columns: string[];
   from_column: string;
   to_column: string;
+  output_columns: string[];
 } {
   const from_columns = uniqueOrdered(args.sourceColumns);
   if (!from_columns.length) {
@@ -307,16 +390,25 @@ export function allocateMapRelationColumns(args: {
   }
   const used = new Set(from_columns.map((c) => c.toLowerCase()));
   const preferred = (args.preferredTo ?? "to").trim() || "to";
-  let to_column = preferred;
-  if (used.has(to_column.toLowerCase())) {
-    let i = 2;
-    while (used.has(`${preferred}_${i}`.toLowerCase())) i += 1;
-    to_column = `${preferred}_${i}`;
-  }
+  const allocate = (want: string): string => {
+    let name = want;
+    if (used.has(name.toLowerCase())) {
+      let i = 2;
+      while (used.has(`${want}_${i}`.toLowerCase())) i += 1;
+      name = `${want}_${i}`;
+    }
+    used.add(name.toLowerCase());
+    return name;
+  };
+  const wants = args.preferredOutputs?.length
+    ? args.preferredOutputs.map((c) => c.trim() || "to")
+    : [preferred];
+  const output_columns = wants.map(allocate);
   return {
     from_columns,
     from_column: from_columns[0]!,
-    to_column,
+    to_column: output_columns[0]!,
+    output_columns,
   };
 }
 
@@ -372,8 +464,8 @@ export function validateDraftSelection(args: {
   if (!fromCols.length) {
     return { ok: false, error: "Pick at least one source key column." };
   }
-  const toCol = args.draft.targetColumn.trim();
-  if (!toCol) return { ok: false, error: "Pick a target value column." };
+  const toCols = draftTargetColumns(args.draft);
+  if (!toCols.length) return { ok: false, error: "Pick a target value column." };
   for (const c of fromCols) {
     if (
       !args.sourceOutputColumns.some(
@@ -386,17 +478,29 @@ export function validateDraftSelection(args: {
       };
     }
   }
-  if (
-    !args.targetOutputColumns.some(
-      (x) => x.trim().toLowerCase() === toCol.toLowerCase(),
-    )
-  ) {
-    return {
-      ok: false,
-      error: `Target column “${toCol}” is not available after planned Fields changes.`,
-    };
+  for (const toCol of toCols) {
+    if (
+      !args.targetOutputColumns.some(
+        (x) => x.trim().toLowerCase() === toCol.toLowerCase(),
+      )
+    ) {
+      return {
+        ok: false,
+        error: `Target column “${toCol}” is not available after planned Fields changes.`,
+      };
+    }
   }
   return { ok: true };
+}
+
+/** Ordered selected target fields (ADR-0037); falls back to legacy single. */
+export function draftTargetColumns(
+  draft: Pick<MappingCreateDraft, "targetColumn" | "targetColumns">,
+): string[] {
+  const raw = draft.targetColumns?.length
+    ? draft.targetColumns
+    : [draft.targetColumn];
+  return uniqueOrdered(raw.map((c) => c.trim()).filter(Boolean));
 }
 
 function newMapId(name: string, existing: Set<string>): string {
@@ -443,7 +547,8 @@ export function buildMappingCreatePlan(args: {
 }): { ok: true; plan: MappingCreatePlan } | { ok: false; error: string } {
   const { project, draft } = args;
   const sourceCols = uniqueOrdered(draft.sourceColumns);
-  const targetCol = draft.targetColumn.trim();
+  const targetCols = draftTargetColumns(draft);
+  const targetCol = targetCols[0] ?? "";
   const srcEv = args.schemas.find((s) => s.queryId === draft.sourceQueryId);
   const tgtEv = args.schemas.find((s) => s.queryId === draft.targetQueryId);
   if (!srcEv || !tgtEv) {
@@ -491,7 +596,12 @@ export function buildMappingCreatePlan(args: {
   const plannedTarget = plannedOutputColumns(tgtEv, patches);
   const sel = validateDraftSelection({
     workspace: project.workspace,
-    draft: { ...draft, sourceColumns: sourceCols, targetColumn: targetCol },
+    draft: {
+      ...draft,
+      sourceColumns: sourceCols,
+      targetColumn: targetCol,
+      targetColumns: targetCols,
+    },
     sourceOutputColumns: plannedSource,
     targetOutputColumns: plannedTarget,
   });
@@ -506,8 +616,12 @@ export function buildMappingCreatePlan(args: {
     source_columns: sourceCols,
     target_query_id: draft.targetQueryId,
     target_column: targetCol,
+    target_columns: targetCols,
   };
-  const relation = allocateMapRelationColumns({ sourceColumns: sourceCols });
+  const relation = allocateMapRelationColumns({
+    sourceColumns: sourceCols,
+    preferredOutputs: targetCols,
+  });
   const map: KeyMapDef = {
     ...emptyKeyMap(draft.name.trim()),
     id: mapId,
@@ -517,6 +631,7 @@ export function buildMappingCreatePlan(args: {
     from_column: relation.from_column,
     from_columns: relation.from_columns,
     to_column: relation.to_column,
+    output_columns: relation.output_columns,
     authoring_context: authoringContext,
   };
 
@@ -636,7 +751,7 @@ export function validateMappingCreatePlan(
     return { ok: false, error: "Project changed — re-run review." };
   }
   if ((project.workspace.key_maps ?? []).some((m) => m.id === plan.map.id)) {
-    return { ok: false, error: `KeyMap id “${plan.map.id}” already exists.` };
+    return { ok: false, error: `Mapping id “${plan.map.id}” already exists.` };
   }
   for (const [qid, fp] of Object.entries(plan.expectedQueryDefs)) {
     const q = project.workspace.queries.find((x) => x.id === qid);
@@ -695,16 +810,16 @@ export function validateMappingCreatePlan(
       };
     }
   }
-  if (
-    !plannedTarget.some(
-      (c) =>
-        c.toLowerCase() === plan.authoringContext.target_column.toLowerCase(),
-    )
-  ) {
-    return {
-      ok: false,
-      error: `Target column “${plan.authoringContext.target_column}” is not available after planned Fields changes.`,
-    };
+  const plannedTargets = plan.authoringContext.target_columns?.length
+    ? plan.authoringContext.target_columns
+    : [plan.authoringContext.target_column];
+  for (const col of plannedTargets) {
+    if (!plannedTarget.some((c) => c.toLowerCase() === col.toLowerCase())) {
+      return {
+        ok: false,
+        error: `Target column “${col}” is not available after planned Fields changes.`,
+      };
+    }
   }
   return { ok: true };
 }

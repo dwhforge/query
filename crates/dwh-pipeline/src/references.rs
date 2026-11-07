@@ -628,6 +628,7 @@ impl<'a> Resolver<'a> {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         // Keep the caller's published list off the owner-facing fingerprint.
         let _ = &mut project;
@@ -944,7 +945,17 @@ impl<'a> Resolver<'a> {
                     let mut src = src.clone();
                     if let Some(path) = src.path.as_mut() {
                         if let Some(file) = self.loaded.get(&inc.uid).map(|l| l.file.as_path()) {
-                            *path = absolutize(file, path);
+                            if let Ok(resolved) = crate::file_path::resolve_for_engine(
+                                Some(file),
+                                path,
+                                src.path_kind,
+                            ) {
+                                *path = resolved;
+                                src.path_kind = crate::file_path::FilePathKind::Absolute;
+                            } else {
+                                *path = absolutize_legacy(file, path);
+                                src.path_kind = crate::file_path::FilePathKind::Absolute;
+                            }
                         }
                     }
                     src.connection_id = bind_connection(
@@ -1299,18 +1310,28 @@ fn sanitize_take(id: &str, max: usize) -> String {
 }
 
 fn absolutize_steps(owner_file: Option<&Path>, steps: &[TransformationStep]) -> Vec<TransformationStep> {
-    let Some(file) = owner_file else {
-        return steps.to_vec();
-    };
     steps
         .iter()
         .map(|s| {
             let mut s = s.clone();
             match &mut s {
-                TransformationStep::LoadCsv { path }
-                | TransformationStep::LoadParquet { path, .. }
-                | TransformationStep::LoadDuckdb { path, .. } => {
-                    *path = absolutize(file, path);
+                TransformationStep::LoadCsv { path, path_kind }
+                | TransformationStep::LoadParquet {
+                    path, path_kind, ..
+                }
+                | TransformationStep::LoadDuckdb {
+                    path, path_kind, ..
+                } => {
+                    if let Ok(resolved) =
+                        crate::file_path::resolve_for_engine(owner_file, path, *path_kind)
+                    {
+                        *path = resolved;
+                        *path_kind = crate::file_path::FilePathKind::Absolute;
+                    } else if let Some(file) = owner_file {
+                        // Legacy fallback when kind missing semantics already defaulted.
+                        *path = absolutize_legacy(file, path);
+                        *path_kind = crate::file_path::FilePathKind::Absolute;
+                    }
                 }
                 _ => {}
             }
@@ -1319,9 +1340,9 @@ fn absolutize_steps(owner_file: Option<&Path>, steps: &[TransformationStep]) -> 
         .collect()
 }
 
-fn absolutize(owner_file: &Path, path: &str) -> String {
+fn absolutize_legacy(owner_file: &Path, path: &str) -> String {
     let trimmed = path.trim();
-    if trimmed.starts_with("s3://") || Path::new(trimmed).is_absolute() {
+    if crate::file_path::looks_absolute_cross_platform(trimmed) {
         return path.to_string();
     }
     owner_file
@@ -1401,12 +1422,13 @@ fn matching_sources(sources: &[SourceDef], query: &QueryDef) -> Vec<SourceDef> {
 
 fn source_matches(source: &SourceDef, step: &TransformationStep) -> bool {
     match step {
-        TransformationStep::LoadCsv { path } => {
+        TransformationStep::LoadCsv { path, path_kind: _ } => {
             source.kind == SourceKind::Csv && source.path.as_deref() == Some(path.as_str())
         }
         TransformationStep::LoadParquet {
             path,
             connection_id,
+            ..
         } => {
             source.kind == SourceKind::Parquet
                 && source.path.as_deref() == Some(path.as_str())
@@ -1850,6 +1872,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         }
     }
 
@@ -1878,9 +1901,7 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "q_products".into(),
             name: "Products".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "data/products.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "data/products.csv".into(), path_kind: Default::default() }],
             execution: QueryExecution::Local,
         });
         owner.workspace.focus_query_id = "q_products".into();
@@ -1956,9 +1977,7 @@ mod tests {
         a.workspace.queries.push(QueryDef {
             id: "q_products".into(),
             name: "Products".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "a.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         a.workspace.focus_query_id = "q_products".into();
@@ -2026,9 +2045,7 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "q_products".into(),
             name: "products".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "data/products.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "data/products.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         owner.workspace.focus_query_id = "q_products".into();
@@ -2037,9 +2054,7 @@ mod tests {
         consumer.workspace.queries.push(QueryDef {
             id: "q_local".into(),
             name: "local_only".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: dir.join("data/products.csv").to_string_lossy().into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: dir.join("data/products.csv").to_string_lossy().into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         consumer.workspace.focus_query_id = "q_local".into();
@@ -2092,7 +2107,7 @@ mod tests {
             .find(|q| q.id != "q_ext" && q.id != "q_local")
             .unwrap();
         match &ext.steps[0] {
-            TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadCsv { path, path_kind: _ } => {
                 assert!(path.contains("owner"), "{path}");
                 assert!(!path.contains(&format!("{}/data/products.csv", dir.display())));
             }
@@ -2263,9 +2278,7 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "q".into(),
             name: "q".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "a.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         let path = write_proj(&dir, "o.dwhproj.json", &owner);
@@ -2313,9 +2326,7 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "base".into(),
             name: "base".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "owner_base.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "owner_base.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         owner.workspace.queries.push(QueryDef {
@@ -2334,9 +2345,7 @@ mod tests {
         consumer.workspace.queries.push(QueryDef {
             id: "base".into(),
             name: "consumer_base".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "consumer_base.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "consumer_base.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         let cpath = write_proj(&dir, "c.dwhproj.json", &consumer);
@@ -2400,9 +2409,7 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "dep".into(),
             name: "dep".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "rel.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "rel.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         owner.workspace.queries.push(QueryDef {
@@ -2475,7 +2482,7 @@ mod tests {
             panic!("expected query");
         };
         match &dep_copy.steps[0] {
-            TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadCsv { path, path_kind: _ } => {
                 assert!(
                     Path::new(path).is_absolute(),
                     "expected absolute path, got {path}"
@@ -2701,13 +2708,12 @@ mod tests {
             id: "q".into(),
             name: "q".into(),
             steps: vec![
-                TransformationStep::LoadCsv {
-                    path: "a.csv".into(),
-                },
+                TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() },
                 TransformationStep::ApplyKeyMap {
                     column: "sku".into(),
                     columns: vec![],
                     output_column: None,
+            output_bindings: vec![],
                     as_of_column: None,
                     map_id: "map_live".into(),
                     entries: vec![],
@@ -2728,6 +2734,7 @@ mod tests {
                     column: "sku".into(),
                     columns: vec![],
                     output_column: None,
+            output_bindings: vec![],
                     as_of_column: None,
                     map_id: ObjectTarget::external(&reference.id, ObjectKind::Mapping, "map_live"),
                     entries: vec![],

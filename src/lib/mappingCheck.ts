@@ -10,6 +10,7 @@ import type {
   CheckRun,
   FrozenRemapPreview,
   MappingCheck,
+  MappingCheckProjection,
 } from "../types/mappingCheck";
 import type {
   JoinType,
@@ -28,7 +29,12 @@ import {
   type QualityCell,
 } from "./mappingQuality";
 import type { PreviewResult } from "../types/pipeline";
-import { fromColumnsEff, fromPartsEff } from "./keyMap";
+import {
+  fromColumnsEff,
+  fromPartsEff,
+  outputColumnsEff,
+  outputValuesEff,
+} from "./keyMap";
 
 export type {
   CheckAggregateCell,
@@ -54,9 +60,50 @@ export function newCheckRunId(): string {
   return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Semantic map fingerprint — links, attrs, SCD bounds, schema, storage (ADR-0027/0028). */
-export function keyMapRevision(map: KeyMapDef | undefined | null): string {
+/** Semantic map fingerprint — links, attrs, SCD bounds, schema, storage (ADR-0027/0028/0036). */
+export function keyMapRevision(
+  map: KeyMapDef | undefined | null,
+  workspace?: Workspace | null,
+): string {
   if (!map) return "missing_map";
+  // ADR-0037: Apply output_bindings change remap semantics without map rows.
+  // Single-output / legacy wiring is omitted so existing revisions stay stable.
+  const consumers = (workspace?.queries ?? [])
+    .flatMap((q) =>
+      q.steps.flatMap((step) =>
+        step.type === "ApplyKeyMap" &&
+        targetKey(step.payload.map_id) === map.id &&
+        step.payload.output_bindings?.length
+          ? [{ q: q.id, output_bindings: step.payload.output_bindings }]
+          : [],
+      ),
+    )
+    .sort((a, b) => a.q.localeCompare(b.q));
+  const outCols = outputColumnsEff(map);
+  const schema = JSON.stringify({
+    from_columns: fromColumnsEff(map),
+    to_column: map.to_column ?? "to",
+    ...(outCols.length > 1 ? { output_columns: outCols } : {}),
+    ...(consumers.length ? { consumers } : {}),
+    editable_columns: map.editable_columns ?? [],
+    time_mode: map.time_mode ?? "none",
+    valid_from_column: map.valid_from_column ?? null,
+    valid_to_column: map.valid_to_column ?? null,
+    storage: map.storage ?? { kind: "seed" },
+  });
+  // ADR-0036: query-backed SoT is the query definition, not entries.
+  if (map.storage?.kind === "query") {
+    const qid = map.storage.query_id.trim();
+    const q = workspace?.queries.find((x) => x.id === qid);
+    const qFinger = q
+      ? JSON.stringify({
+          id: q.id,
+          steps: q.steps,
+          execution: q.execution ?? "local",
+        })
+      : `missing:${qid}`;
+    return `map:${map.id}:query:h=${fnv1a(qFinger + "|" + schema)}`;
+  }
   const rows = [...map.entries]
     .map((e) => {
       const from = (e.from_parts?.length ? e.from_parts.join("\0") : e.from).trim();
@@ -64,18 +111,12 @@ export function keyMapRevision(map: KeyMapDef | undefined | null): string {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([k, v]) => `${k}=${v}`)
         .join(";");
-      return `${from}\t${e.to.trim()}\t${attrs}`;
+      const outs = outputValuesEff(e)
+        .map((v) => v.trim())
+        .join("\0");
+      return `${from}\t${outs}\t${attrs}`;
     })
     .sort();
-  const schema = JSON.stringify({
-    from_columns: fromColumnsEff(map),
-    to_column: map.to_column ?? "to",
-    editable_columns: map.editable_columns ?? [],
-    time_mode: map.time_mode ?? "none",
-    valid_from_column: map.valid_from_column ?? null,
-    valid_to_column: map.valid_to_column ?? null,
-    storage: map.storage ?? { kind: "seed" },
-  });
   return `map:${map.id}:n=${rows.length}:h=${fnv1a(rows.join("\n") + "|" + schema)}`;
 }
 
@@ -263,12 +304,12 @@ export function assertRemapConfirmable(
   check?: MappingCheck,
 ): void {
   if (!map || map.id !== freeze.map_id) {
-    throw new Error("KeyMap missing or mismatched — refresh the remap preview.");
+    throw new Error("Mapping missing or mismatched — refresh the remap preview.");
   }
-  const current = keyMapRevision(map);
+  const current = keyMapRevision(map, workspace);
   if (current !== freeze.expected_map_revision) {
     throw new Error(
-      "KeyMap changed since preview — run a new preview before confirming.",
+      "Mapping changed since preview — run a new preview before confirming.",
     );
   }
   if (workspace && check && freeze.expected_input_revisions?.length) {
@@ -312,7 +353,7 @@ export function applyFrozenRemapToMap(
   const isSource = map.storage?.kind === "source";
   if (isSource && priorEntries === undefined) {
     throw new Error(
-      "Source KeyMap Confirm requires warehouse baselines for the remapped From keys.",
+      "Source Mapping Confirm requires warehouse baselines for the remapped From keys.",
     );
   }
   const base = isSource ? priorEntries! : map.entries;
@@ -401,7 +442,7 @@ export function buildCheckRun(args: {
     id: newCheckRunId(),
     check_id: args.check.id,
     ran_at: new Date().toISOString(),
-    map_revision: keyMapRevision(args.map),
+    map_revision: keyMapRevision(args.map, args.workspace),
     input_revisions,
     check_definition_revision: checkDefinitionRevision(args.check),
     total_positions: args.totalPositions,
@@ -454,19 +495,36 @@ export function cohortPredicateFromCells(cells: QualityCell[]): string {
   return [...new Set(parts)].join(" OR ");
 }
 
+/** Axis expression: one column or concat_ws tuple (matches attrs summary labels). */
+export function attrsAxisExpr(columns: string[]): string {
+  const cols = columns.filter(Boolean);
+  if (!cols.length) throw new Error("attrs axis needs at least one column");
+  if (cols.length === 1) {
+    return `CAST(${quoteIdent(cols[0]!)} AS VARCHAR)`;
+  }
+  return `concat_ws(' | ', ${cols
+    .map((c) => `CAST(${quoteIdent(c)} AS VARCHAR)`)
+    .join(", ")})`;
+}
+
 /** Attrs-projection cohort: equality on left/right attr values of selected cells. */
 export function cohortPredicateFromAttrCells(
-  leftAttr: string,
-  rightAttr: string,
+  leftAttr: string | string[],
+  rightAttr: string | string[],
   cells: QualityCell[],
 ): string {
   if (!cells.length) throw new Error("No cells for cohort predicate.");
+  const leftCols = Array.isArray(leftAttr) ? leftAttr : [leftAttr];
+  const rightCols = Array.isArray(rightAttr) ? rightAttr : [rightAttr];
+  const leftExpr = attrsAxisExpr(leftCols);
+  const rightExpr = attrsAxisExpr(rightCols);
+  const rightNull = quoteIdent(rightCols[0]!);
   const parts = cells.map((c) => {
     const right =
       c.targetFamily === "Unmapped"
-        ? `${quoteIdent(rightAttr)} IS NULL`
-        : eqSql(rightAttr, c.targetFamily);
-    return `(${eqSql(leftAttr, c.sourceFamily)} AND ${right})`;
+        ? `${rightNull} IS NULL`
+        : `${rightExpr} = '${c.targetFamily.replace(/'/g, "''")}'`;
+    return `(${leftExpr} = '${c.sourceFamily.replace(/'/g, "''")}' AND ${right})`;
   });
   return [...new Set(parts)].join(" OR ");
 }
@@ -558,9 +616,13 @@ export function cohortInspectionQuery(
   if (!check.cohort_predicate.trim()) {
     throw new Error("Select a matrix cell (cohort) before opening Join Lens.");
   }
-  const sampleColumn =
+  const attrsProj =
     check.projection.kind === "attrs"
-      ? check.projection.sample_column
+      ? normalizeAttrsProjection(check.projection)
+      : null;
+  const sampleColumn =
+    attrsProj && attrsProj.kind === "attrs"
+      ? attrsProj.sample_columns[0] || attrsProj.sample_column
       : QUALITY_SAMPLE_COLUMN;
   const pred = check.cohort_predicate.trim();
 
@@ -643,10 +705,56 @@ ORDER BY ${quoteIdent(sampleColumn)}
 /** Max aggregate groups returned for attrs overview (under preview LIMIT 50). */
 export const CHECK_ATTRS_GROUP_BUDGET = 40;
 
+/** Ephemeral left-side query id for Join-anchored attrs summary (ADR-0035). */
+export const CHECK_LEFT_QUERY_ID = "__check_left__";
+export const CHECK_SUMMARY_QUERY_ID = "__check_summary__";
+
+/** Soft-migrate singular left_attr ↔ left_attrs[] (ADR-0035). */
+export function normalizeAttrsProjection(
+  projection: MappingCheckProjection,
+): MappingCheckProjection {
+  if (projection.kind !== "attrs") return projection;
+  const left_attrs =
+    projection.left_attrs?.length > 0
+      ? projection.left_attrs
+      : projection.left_attr
+        ? [projection.left_attr]
+        : [];
+  const right_attrs =
+    projection.right_attrs?.length > 0
+      ? projection.right_attrs
+      : projection.right_attr
+        ? [projection.right_attr]
+        : [];
+  const sample_columns =
+    projection.sample_columns?.length > 0
+      ? projection.sample_columns
+      : projection.sample_column
+        ? [projection.sample_column]
+        : [...left_attrs];
+  return {
+    kind: "attrs",
+    host_query_id: projection.host_query_id,
+    left_attr: left_attrs[0] ?? "",
+    right_attr: right_attrs[0] ?? "",
+    sample_column: sample_columns[0] ?? "",
+    left_attrs,
+    right_attrs,
+    sample_columns,
+  };
+}
+
+function concatWsVarchar(alias: string, cols: string[]): string {
+  if (cols.length === 1) {
+    return `CAST(${alias}.${quoteIdent(cols[0]!)} AS VARCHAR)`;
+  }
+  return `concat_ws(' | ', ${cols
+    .map((c) => `CAST(${alias}.${quoteIdent(c)} AS VARCHAR)`)
+    .join(", ")})`;
+}
+
 /**
- * Attrs overview SQL with an explicit group budget.
- * Full group_count + total_positions come from `stats`; `kept` is top-N by size
- * so a truncated matrix does not silently claim completeness via preview LIMIT.
+ * Legacy host-result attrs SQL (arity-1). Prefer {@link attrsJoinAnchoredSummarySql}.
  */
 export function attrsSummarySql(
   hostQueryId: string,
@@ -655,28 +763,82 @@ export function attrsSummarySql(
   sampleColumn: string,
   groupBudget: number = CHECK_ATTRS_GROUP_BUDGET,
 ): string {
-  const L = quoteIdent(leftAttr);
-  const R = quoteIdent(rightAttr);
-  const S = quoteIdent(sampleColumn);
-  const budget = Math.max(1, Math.min(groupBudget, 40));
-  return `
+  return attrsJoinAnchoredSummarySql({
+    leftQueryId: hostQueryId,
+    rightQueryId: hostQueryId,
+    leftOn: [],
+    rightOn: [],
+    leftAttrs: [leftAttr],
+    rightAttrs: [rightAttr],
+    sampleColumns: [sampleColumn],
+    hostResultMode: true,
+    groupBudget,
+  });
+}
+
+/**
+ * Join-anchored attrs overview (ADR-0035): left attrs from left input, right from
+ * right input — independent of columns dropped downstream of the Join.
+ * Composite left_attrs (incl. date) become one axis label via concat_ws.
+ */
+export function attrsJoinAnchoredSummarySql(args: {
+  leftQueryId: string;
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+  leftAttrs: string[];
+  rightAttrs: string[];
+  sampleColumns: string[];
+  /** When true, read a single host result (legacy); ignore ON / dual queries. */
+  hostResultMode?: boolean;
+  groupBudget?: number;
+}): string {
+  const budget = Math.max(
+    1,
+    Math.min(args.groupBudget ?? CHECK_ATTRS_GROUP_BUDGET, 40),
+  );
+  const leftAttrs = args.leftAttrs.filter(Boolean);
+  const rightAttrs = args.rightAttrs.filter(Boolean);
+  const sampleColumns = (args.sampleColumns.filter(Boolean).length
+    ? args.sampleColumns
+    : leftAttrs
+  ).filter(Boolean);
+  if (!leftAttrs.length || !rightAttrs.length) {
+    throw new Error("attrs summary requires left_attrs and right_attrs");
+  }
+
+  if (args.hostResultMode) {
+    const leftExpr =
+      leftAttrs.length === 1
+        ? `CAST(${quoteIdent(leftAttrs[0]!)} AS VARCHAR)`
+        : `concat_ws(' | ', ${leftAttrs.map((c) => `CAST(${quoteIdent(c)} AS VARCHAR)`).join(", ")})`;
+    const rightExpr =
+      rightAttrs.length === 1
+        ? `CAST(${quoteIdent(rightAttrs[0]!)} AS VARCHAR)`
+        : `concat_ws(' | ', ${rightAttrs.map((c) => `CAST(${quoteIdent(c)} AS VARCHAR)`).join(", ")})`;
+    const sampleExpr =
+      sampleColumns.length === 1
+        ? `CAST(${quoteIdent(sampleColumns[0]!)} AS VARCHAR)`
+        : `concat_ws(' | ', ${sampleColumns.map((c) => `CAST(${quoteIdent(c)} AS VARCHAR)`).join(", ")})`;
+    const rightNull = quoteIdent(rightAttrs[0]!);
+    return `
 WITH observed AS (
-  SELECT *,
-    CASE WHEN ${R} IS NULL THEN 'unmapped'
-         WHEN CAST(${L} AS VARCHAR) IS DISTINCT FROM CAST(${R} AS VARCHAR) THEN 'attribute_difference'
-         ELSE 'aligned_attributes' END AS signal
-  FROM {{query:${hostQueryId}}}
+  SELECT
+    ${leftExpr} AS source_family,
+    COALESCE(${rightExpr}, 'Unmapped') AS target_family,
+    '—' AS source_grade,
+    '—' AS target_grade,
+    'rule' AS decision_method,
+    CASE WHEN ${rightNull} IS NULL THEN 'unmapped'
+         WHEN ${leftExpr} IS DISTINCT FROM ${rightExpr} THEN 'attribute_difference'
+         ELSE 'aligned_attributes' END AS signal,
+    ${sampleExpr} AS sample_key
+  FROM {{query:${args.leftQueryId}}}
 ),
 agg AS (
-  SELECT CAST(${L} AS VARCHAR) AS source_family,
-         COALESCE(CAST(${R} AS VARCHAR), 'Unmapped') AS target_family,
-         '—' AS source_grade,
-         '—' AS target_grade,
-         'rule' AS decision_method,
-         signal,
-         COUNT(*) AS positions,
-         0::DOUBLE AS revenue,
-         to_json(list_sort(list(CAST(${S} AS VARCHAR)))[1:6]) AS sample_keys
+  SELECT source_family, target_family, source_grade, target_grade, decision_method, signal,
+         COUNT(*) AS positions, 0::DOUBLE AS revenue,
+         to_json(list_sort(list(sample_key))[1:6]) AS sample_keys
   FROM observed
   GROUP BY 1,2,3,4,5,6
 ),
@@ -687,26 +849,148 @@ stats AS (
   FROM agg
 ),
 kept AS (
-  SELECT * FROM agg
-  ORDER BY positions DESC, source_family, target_family
-  LIMIT ${budget}
+  SELECT * FROM agg ORDER BY positions DESC, source_family, target_family LIMIT ${budget}
 )
-SELECT k.source_family,
-       k.target_family,
-       k.source_grade,
-       k.target_grade,
-       k.decision_method,
-       k.signal,
-       k.positions,
-       s.total_positions,
-       k.revenue,
-       k.sample_keys,
-       s.group_count,
-       s.unmapped_positions
-FROM kept k
-CROSS JOIN stats s
+SELECT k.source_family, k.target_family, k.source_grade, k.target_grade, k.decision_method,
+       k.signal, k.positions, s.total_positions, k.revenue, k.sample_keys, s.group_count, s.unmapped_positions
+FROM kept k CROSS JOIN stats s
 ORDER BY k.positions DESC, k.source_family, k.target_family
 `.trim();
+  }
+
+  const n = Math.min(args.leftOn.length, args.rightOn.length);
+  if (n < 1) {
+    throw new Error("Join-anchored attrs summary requires Join ON keys");
+  }
+  const onSql = Array.from({ length: n }, (_, i) => {
+    const L = quoteIdent(args.leftOn[i]!);
+    const R = quoteIdent(args.rightOn[i]!);
+    return `CAST(l.${L} AS VARCHAR) = CAST(r.${R} AS VARCHAR)`;
+  }).join(" AND ");
+  const leftExpr = concatWsVarchar("l", leftAttrs);
+  const rightExpr = concatWsVarchar("r", rightAttrs);
+  const sampleExpr = concatWsVarchar("l", sampleColumns);
+  const rightNull = `r.${quoteIdent(rightAttrs[0]!)}`;
+
+  return `
+WITH joined AS (
+  SELECT
+    ${leftExpr} AS source_family,
+    ${rightExpr} AS target_family_raw,
+    ${sampleExpr} AS sample_key,
+    ${rightNull} AS _right_probe
+  FROM {{query:${args.leftQueryId}}} AS l
+  LEFT JOIN {{query:${args.rightQueryId}}} AS r ON ${onSql}
+),
+observed AS (
+  SELECT
+    source_family,
+    COALESCE(CAST(target_family_raw AS VARCHAR), 'Unmapped') AS target_family,
+    '—' AS source_grade,
+    '—' AS target_grade,
+    'rule' AS decision_method,
+    CASE WHEN _right_probe IS NULL THEN 'unmapped'
+         WHEN CAST(source_family AS VARCHAR) IS DISTINCT FROM CAST(target_family_raw AS VARCHAR)
+           THEN 'attribute_difference'
+         ELSE 'aligned_attributes' END AS signal,
+    sample_key
+  FROM joined
+),
+agg AS (
+  SELECT source_family, target_family, source_grade, target_grade, decision_method, signal,
+         COUNT(*) AS positions, 0::DOUBLE AS revenue,
+         to_json(list_sort(list(CAST(sample_key AS VARCHAR)))[1:6]) AS sample_keys
+  FROM observed
+  GROUP BY 1,2,3,4,5,6
+),
+stats AS (
+  SELECT COUNT(*)::BIGINT AS group_count,
+         COALESCE(SUM(positions), 0)::BIGINT AS total_positions,
+         COALESCE(SUM(CASE WHEN signal = 'unmapped' THEN positions ELSE 0 END), 0)::BIGINT AS unmapped_positions
+  FROM agg
+),
+kept AS (
+  SELECT * FROM agg ORDER BY positions DESC, source_family, target_family LIMIT ${budget}
+)
+SELECT k.source_family, k.target_family, k.source_grade, k.target_grade, k.decision_method,
+       k.signal, k.positions, s.total_positions, k.revenue, k.sample_keys, s.group_count, s.unmapped_positions
+FROM kept k CROSS JOIN stats s
+ORDER BY k.positions DESC, k.source_family, k.target_family
+`.trim();
+}
+
+/**
+ * Ephemeral workspace for Join-anchored attrs overview (ADR-0035).
+ * Left input = host steps before Join; summary SqlModel rebuilds the Join.
+ */
+export function workspaceForJoinAnchoredAttrsOverview(
+  workspace: Workspace,
+  args: {
+    hostQueryId: string;
+    joinStepIndex: number;
+    rightQueryId: string;
+    leftOn: string[];
+    rightOn: string[];
+    leftAttrs: string[];
+    rightAttrs: string[];
+    sampleColumns: string[];
+    groupBudget?: number;
+  },
+): Workspace {
+  const host = workspace.queries.find((q) => q.id === args.hostQueryId);
+  if (!host) {
+    throw new Error(`Attrs overview host “${args.hostQueryId}” not found`);
+  }
+  if (args.joinStepIndex < 0 || args.joinStepIndex >= host.steps.length) {
+    throw new Error(`Join step ${args.joinStepIndex} out of range on host`);
+  }
+  const leftSteps = host.steps.slice(0, args.joinStepIndex);
+  if (!leftSteps.length) {
+    throw new Error("Join-anchored overview needs at least one step before Join");
+  }
+  const proj = normalizeAttrsProjection({
+    kind: "attrs",
+    host_query_id: args.hostQueryId,
+    left_attr: args.leftAttrs[0] ?? "",
+    right_attr: args.rightAttrs[0] ?? "",
+    sample_column: args.sampleColumns[0] ?? args.leftAttrs[0] ?? "",
+    left_attrs: args.leftAttrs,
+    right_attrs: args.rightAttrs,
+    sample_columns: args.sampleColumns,
+  });
+  if (proj.kind !== "attrs") throw new Error("expected attrs projection");
+  const sql = attrsJoinAnchoredSummarySql({
+    leftQueryId: CHECK_LEFT_QUERY_ID,
+    rightQueryId: args.rightQueryId,
+    leftOn: args.leftOn,
+    rightOn: args.rightOn,
+    leftAttrs: proj.left_attrs,
+    rightAttrs: proj.right_attrs,
+    sampleColumns: proj.sample_columns,
+    groupBudget: args.groupBudget,
+  });
+  const withoutEphemeral = workspace.queries.filter(
+    (q) => q.id !== CHECK_LEFT_QUERY_ID && q.id !== CHECK_SUMMARY_QUERY_ID,
+  );
+  return {
+    ...workspace,
+    focus_query_id: CHECK_SUMMARY_QUERY_ID,
+    queries: [
+      ...withoutEphemeral,
+      {
+        id: CHECK_LEFT_QUERY_ID,
+        name: "check_left",
+        steps: leftSteps,
+        execution: host.execution,
+      },
+      {
+        id: CHECK_SUMMARY_QUERY_ID,
+        name: "check_summary",
+        steps: [{ type: "SqlModel", payload: { raw_sql: sql } }],
+        execution: host.execution,
+      },
+    ],
+  };
 }
 
 function eqSql(column: string, value: string): string {

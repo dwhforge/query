@@ -10,4 +10,12 @@ export type KeyMapAuthoringContext = { source_query_id: string,
 /**
  * Ordered From columns on the source query (composite arity ≥ 1).
  */
-source_columns: Array<string>, target_query_id: string, target_column: string, };
+source_columns: Array<string>, target_query_id: string, 
+/**
+ * Legacy single target field. Prefer `target_columns` ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
+ */
+target_column: string, 
+/**
+ * Ordered target-query fields chosen at create (intent, not Apply SoT).
+ */
+target_columns: Array<string>, };

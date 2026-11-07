@@ -104,6 +104,21 @@ select option {
   animation: rise 0.55s ease-out 0.16s both;
 }
 
+/* Bottom sheet: starts fully below the clip, slides up into view. */
+@keyframes lens-llm-slide-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.lens-llm-enter {
+  animation: lens-llm-slide-up 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform;
+}
+
 .edge-pulse {
   animation: pulse-edge 2.4s ease-in-out infinite;
 }

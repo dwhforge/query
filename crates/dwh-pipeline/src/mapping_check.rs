@@ -38,12 +38,81 @@ pub struct MappingAllowDecision {
 #[ts(tag = "kind")]
 pub enum MappingCheckProjection {
     LabV1,
+    /// Join-anchored attrs overview ([ADR-0035](../../../docs/adr/0035-mapping-check-attrs-ux.md)).
+    /// Prefer `left_attrs` / `right_attrs` / `sample_columns`; singular fields soft-migrate on load.
     Attrs {
         host_query_id: String,
+        /// First left-axis column (legacy wire + convenience).
+        #[serde(default)]
         left_attr: String,
+        /// First right-axis column (legacy wire + convenience).
+        #[serde(default)]
         right_attr: String,
+        /// First sample column (legacy wire + convenience).
+        #[serde(default)]
         sample_column: String,
+        /// Full row-axis columns (From/ON tuple when composite; includes date parts).
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        left_attrs: Vec<String>,
+        /// Full column-axis columns (usually one right-side label).
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        right_attrs: Vec<String>,
+        /// Inspect grain columns (typically aligns with left_attrs or Join left_on).
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        sample_columns: Vec<String>,
     },
+}
+
+impl MappingCheckProjection {
+    /// Normalize singular ↔ array fields after deserialize (ADR-0035).
+    pub fn normalize_attrs(self) -> Self {
+        match self {
+            MappingCheckProjection::LabV1 => MappingCheckProjection::LabV1,
+            MappingCheckProjection::Attrs {
+                host_query_id,
+                left_attr,
+                right_attr,
+                sample_column,
+                left_attrs,
+                right_attrs,
+                sample_columns,
+            } => {
+                let left_attrs = if !left_attrs.is_empty() {
+                    left_attrs
+                } else if !left_attr.is_empty() {
+                    vec![left_attr.clone()]
+                } else {
+                    vec![]
+                };
+                let right_attrs = if !right_attrs.is_empty() {
+                    right_attrs
+                } else if !right_attr.is_empty() {
+                    vec![right_attr.clone()]
+                } else {
+                    vec![]
+                };
+                let sample_columns = if !sample_columns.is_empty() {
+                    sample_columns
+                } else if !sample_column.is_empty() {
+                    vec![sample_column.clone()]
+                } else {
+                    left_attrs.clone()
+                };
+                MappingCheckProjection::Attrs {
+                    host_query_id,
+                    left_attr: left_attrs.first().cloned().unwrap_or_default(),
+                    right_attr: right_attrs.first().cloned().unwrap_or_default(),
+                    sample_column: sample_columns.first().cloned().unwrap_or_default(),
+                    left_attrs,
+                    right_attrs,
+                    sample_columns,
+                }
+            }
+        }
+    }
 }
 
 /// Durable mapping quality check definition (ADR-0027).
@@ -121,6 +190,32 @@ pub struct CheckRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attrs_singular_soft_migrates_to_arrays() {
+        let json = serde_json::json!({
+            "kind": "attrs",
+            "host_query_id": "q1",
+            "left_attr": "a",
+            "right_attr": "b",
+            "sample_column": "id"
+        });
+        let p: MappingCheckProjection = serde_json::from_value(json).unwrap();
+        let n = p.normalize_attrs();
+        match n {
+            MappingCheckProjection::Attrs {
+                left_attrs,
+                right_attrs,
+                sample_columns,
+                ..
+            } => {
+                assert_eq!(left_attrs, vec!["a"]);
+                assert_eq!(right_attrs, vec!["b"]);
+                assert_eq!(sample_columns, vec!["id"]);
+            }
+            _ => panic!("expected attrs"),
+        }
+    }
 
     #[test]
     fn mapping_check_round_trip_json() {

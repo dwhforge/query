@@ -7,6 +7,7 @@ export {
   mapForProjectAst,
   mapEditorFillSnapshot,
   mergeFromValuesIntoMap,
+  mergeLensOutputCells,
   planMapFillFromLens,
   isKeyMapBindingChanged,
   keyMapBindingFingerprint,
@@ -23,6 +24,16 @@ export {
   sourceSaveSynced,
   upsertKeyMapIntoProject,
 } from "./service";
+export {
+  intentFromApplyPlan,
+  keyMapRevisionFingerprint,
+  resolveApplyPlan,
+} from "./applyPlan";
+export type {
+  ApplyPlan,
+  ApplyUserChoice,
+  ResolveApplyPlanError,
+} from "./applyPlan";
 export type {
   KeyMapApplyIntent,
   KeyMapApplyResult,

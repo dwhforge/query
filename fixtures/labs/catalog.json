@@ -1,0 +1,287 @@
+[
+  {
+    "id": "recon_ship_sales",
+    "track": "start",
+    "title": "Shipments ↔ sales",
+    "tagline": "Plant SKUs vs commercial codes — map, then explain qty and revenue gaps by month.",
+    "teaches": [
+      "Why a plain Join fails when two systems name the same product differently",
+      "Partial KeyMap + Join Lens on unmatched commercial SKUs",
+      "Monthly reconciliation after ApplyKeyMap"
+    ],
+    "youKeep": [
+      "KeyMap seed map_sku (exportable dbt seed)",
+      "dirty_recon, sales_mapped, recon_by_month queries",
+      "A checked calculation you can re-export as SQL/dbt"
+    ],
+    "requires": "offline",
+    "featured": true
+  },
+  {
+    "id": "name_id_match",
+    "track": "start",
+    "title": "Two lists · match by name → id seed",
+    "tagline": "CRM and ERP catalogs share names, not ids. Auto matches on name; the seed stores id→id with name attrs for later edits.",
+    "teaches": [
+      "Join on id fails across systems; Join Lens Auto scores sibling name columns",
+      "Apply accepted writes crm_id → erp_id (not the display names)",
+      "Edit the map later via from_name / to_name attrs — Apply still joins on ids"
+    ],
+    "youKeep": [
+      "KeyMap seed map_crm_to_erp (from,to,from_name,to_name)",
+      "dirty_by_id + crm_mapped queries",
+      "A pattern you can re-export as dbt seed"
+    ],
+    "requires": "offline",
+    "featured": true
+  },
+  {
+    "id": "keymap",
+    "track": "start",
+    "title": "F&B company aliases",
+    "tagline": "POS and cost feeds spell brands differently — one map to company_id, daily then monthly PnL.",
+    "teaches": [
+      "Unmatched names → Add to map from Join Lens",
+      "Reuse one KeyMap on two feeds",
+      "Derive net and roll up by month"
+    ],
+    "youKeep": [
+      "seeds/map_company_alias.csv after export",
+      "sales_canon / spend_canon / daily_pnl / monthly_pnl"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "sales",
+    "track": "start",
+    "title": "Sales medallion",
+    "tagline": "File staging → clean → join dim → top-N by region.",
+    "teaches": [
+      "Multi-query fan-out from shared staging",
+      "Rename, select, derive, group, sort"
+    ],
+    "youKeep": [
+      "A small medallion-style workspace ready to export"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "union",
+    "track": "start",
+    "title": "Union multi-feed",
+    "tagline": "Append EU + US sales, then roll up by region.",
+    "teaches": [
+      "Append same-grain feeds",
+      "GroupBy after union"
+    ],
+    "youKeep": [
+      "sales_all + by_region mart pattern"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "mapping_quality",
+    "track": "quality",
+    "title": "Mapping quality · 100K",
+    "tagline": "Whole-map overview: family/grade drift, concentration, inspect into Join Lens.",
+    "teaches": [
+      "Coverage is not correctness",
+      "Aggregate observations with bounded samples",
+      "Durable MappingCheck on the lab map"
+    ],
+    "youKeep": [
+      "Local demo cache under ~/.dwhforge-query/demos/",
+      "Overview tab + lab MappingCheck"
+    ],
+    "requires": "local_cache",
+    "featured": true
+  },
+  {
+    "id": "keymap_crosswalk",
+    "track": "mapping",
+    "title": "POS ↔ WMS crosswalk",
+    "tagline": "Grocery sku_code vs item_code — seed map before Join.",
+    "teaches": [
+      "Crosswalk between two operational codes",
+      "Dirty join vs mapped join"
+    ],
+    "youKeep": [
+      "map_pos_to_wms seed + pos_mapped query"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_dual",
+    "track": "mapping",
+    "title": "Dual maps + party master",
+    "tagline": "Restaurant brands vs AP vendors → dim_party with two KeyMaps.",
+    "teaches": [
+      "Separate maps into one master",
+      "Edit master without colliding aliases"
+    ],
+    "youKeep": [
+      "Two seed maps + dim_party pattern"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_codes",
+    "track": "mapping",
+    "title": "Channel code synonyms",
+    "tagline": "eCom channel spellings → canonical channel.",
+    "teaches": [
+      "Simple synonym seed"
+    ],
+    "youKeep": [
+      "map_channel seed"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_hop",
+    "track": "mapping",
+    "title": "Multi-hop geography",
+    "tagline": "Store → region → country with chained ApplyKeyMap.",
+    "teaches": [
+      "Compose two maps in sequence"
+    ],
+    "youKeep": [
+      "Two geography seeds + hop queries"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_offer",
+    "track": "mapping",
+    "title": "Composite From · offer + day",
+    "tagline": "Recycled offer id needs day in the From key (ADR-0024).",
+    "teaches": [
+      "Composite From arity",
+      "Join after composite ApplyKeyMap"
+    ],
+    "youKeep": [
+      "map_offer_day seed"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_ref",
+    "track": "mapping",
+    "title": "KeyMap storage = ref",
+    "tagline": "Channel map bound as ref(model), not a disposable seed-only grid.",
+    "teaches": [
+      "ref storage for maps"
+    ],
+    "youKeep": [
+      "ref-backed map wiring"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_parquet",
+    "track": "mapping",
+    "title": "Parquet + seed",
+    "tagline": "Same crosswalk on Parquet inputs, DuckDB destination.",
+    "teaches": [
+      "LoadParquet + seed ApplyKeyMap"
+    ],
+    "youKeep": [
+      "Parquet-friendly project shape"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "sql",
+    "track": "advanced",
+    "title": "SQL hybrid",
+    "tagline": "SqlModel node + CustomSql window escape hatch.",
+    "teaches": [
+      "When visual steps are not enough"
+    ],
+    "youKeep": [
+      "Hybrid SQL + visual graph"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "right",
+    "track": "advanced",
+    "title": "Chained RIGHT joins",
+    "tagline": "Coverage dims with two RIGHT OUTER joins — read Lens per step.",
+    "teaches": [
+      "Multi-join coverage pattern"
+    ],
+    "youKeep": [
+      "coverage mart with two join edges"
+    ],
+    "requires": "offline",
+    "featured": false
+  },
+  {
+    "id": "keymap_pg",
+    "track": "advanced",
+    "title": "PG crosswalk (source map)",
+    "tagline": "Facts and map live in Postgres keymap_demo (dwh_tests).",
+    "teaches": [
+      "KeyMap storage = source with write-back"
+    ],
+    "youKeep": [
+      "Live WH map table binding"
+    ],
+    "requires": "postgres",
+    "featured": false
+  },
+  {
+    "id": "keymap_pg_dual",
+    "track": "advanced",
+    "title": "PG dual + master",
+    "tagline": "Two source maps and dim_party in Postgres.",
+    "teaches": [
+      "Dual source maps in WH"
+    ],
+    "youKeep": [
+      "PG dual-map project"
+    ],
+    "requires": "postgres",
+    "featured": false
+  },
+  {
+    "id": "keymap_pg_seed",
+    "track": "advanced",
+    "title": "PG facts + seed map",
+    "tagline": "Postgres sales with a seed channel map.",
+    "teaches": [
+      "Mixed PG facts + seed KeyMap"
+    ],
+    "youKeep": [
+      "Hybrid storage demo"
+    ],
+    "requires": "postgres",
+    "featured": false
+  },
+  {
+    "id": "keymap_mixed",
+    "track": "advanced",
+    "title": "Parquet POS + PG WMS",
+    "tagline": "File POS joined to Postgres WMS/map.",
+    "teaches": [
+      "Mixed source engines in one workspace"
+    ],
+    "youKeep": [
+      "Mixed-route project pattern"
+    ],
+    "requires": "postgres",
+    "featured": false
+  }
+]

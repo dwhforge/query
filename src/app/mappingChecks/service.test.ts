@@ -7,6 +7,7 @@ import {
   dirtyDeltaFromFrozenRemap,
   findJoinHostsForMap,
   frozenRemapFingerprint,
+  inferCheckAttrsFromJoin,
   recordCheckRun,
   resolveActiveMappingCheck,
   stageFrozenRemapChanges,
@@ -15,7 +16,7 @@ import {
 } from "./service";
 import { keyMapRevision, labMappingCheck } from "../../lib/mappingCheck";
 import { keyMapBindingFingerprint } from "../keyMap";
-import type { Project, QueryDef } from "../../types/pipeline";
+import type { KeyMapDef, Project, QueryDef } from "../../types/pipeline";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -61,7 +62,26 @@ const joinQuery: QueryDef = {
 
 assert(resolveActiveMappingCheck([]) === null, "empty");
 const lab = resolveActiveMappingCheck([labMappingCheck()]);
-assert(lab != null && lab.id === "check_lab_quality", "lab preferred");
+assert(lab != null && lab.id === "check_lab_quality", "lab alone");
+{
+  const userCheck = {
+    ...labMappingCheck(),
+    id: "check_user",
+    map_id: "map_actual",
+    projection: {
+      kind: "attrs" as const,
+      host_query_id: "q_host",
+      left_attr: "sku",
+      right_attr: "id",
+      sample_column: "sku",
+      left_attrs: ["sku"],
+      right_attrs: ["id"],
+      sample_columns: ["sku"],
+    },
+  };
+  const active = resolveActiveMappingCheck([labMappingCheck(), userCheck]);
+  assert(active?.id === "check_user", "user check preferred over lab");
+}
 
 {
   const hosts = findJoinHostsForMap([joinQuery], "map_actual");
@@ -730,6 +750,62 @@ assert(frozen.changes.length === 1 && frozen.changes[0].to === "NEW", "stage");
     rightAttr: "id",
   });
   assert(explicit.ok === true, "ok with explicit joinStepIndex");
+}
+
+{
+  const companyMap = {
+    id: "map_co",
+    name: "Companies",
+    from_column: "ext_code",
+    entries: [],
+    storage: { kind: "seed" as const },
+  } as KeyMapDef;
+  const inferred = inferCheckAttrsFromJoin({
+    map: companyMap,
+    leftOn: ["ext_code"],
+    rightOn: ["id"],
+    leftColumns: ["ext_code", "dirty_name", "qty"],
+    rightColumns: ["id", "company_name", "region"],
+  });
+  assert(inferred.rightAttrs[0] === "company_name", "prefer name-like right");
+  assert(inferred.leftAttrs[0] !== "ext_code" || inferred.rightAttrs[0] !== "id", "not bare ON×ON");
+  assert(inferred.onOnFallback === false, "found labels");
+  assert(inferred.confidence === "high", "high when name-like right");
+}
+
+{
+  const compositeMap = {
+    id: "map_offer",
+    name: "Offers",
+    from_columns: ["ext_offer_id", "as_of_day"],
+    entries: [],
+    storage: { kind: "seed" as const },
+  } as KeyMapDef;
+  const inferred = inferCheckAttrsFromJoin({
+    map: compositeMap,
+    leftOn: ["ext_offer_id", "as_of_day"],
+    rightOn: ["offer_id", "as_of_day"],
+    leftColumns: ["ext_offer_id", "as_of_day", "channel"],
+    rightColumns: ["offer_id", "as_of_day", "product_name"],
+  });
+  assert(
+    inferred.leftAttrs.join(",") === "ext_offer_id,as_of_day",
+    "composite left keeps date in tuple",
+  );
+  assert(inferred.rightAttrs[0] === "product_name", "right name-like");
+  assert(inferred.sampleColumns.length === 2, "sample = left grain");
+}
+
+{
+  const bare = inferCheckAttrsFromJoin({
+    map: map as KeyMapDef,
+    leftOn: ["sku"],
+    rightOn: ["id"],
+    leftColumns: ["sku"],
+    rightColumns: ["id"],
+  });
+  assert(bare.onOnFallback === true, "ON×ON flagged");
+  assert(bare.confidence === "low", "low confidence");
 }
 
 console.log("mappingChecks/service.test.ts: ok");

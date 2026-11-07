@@ -1,8 +1,16 @@
-use crate::model::{TransformationStep, Workspace};
+use crate::model::{KeyMapStorage, TransformationStep, Workspace};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// Query ids that `query_id` depends on via Join/Append.
+/// Query ids that `query_id` depends on via Join/Append/SqlModel/`{{query:}}`.
 pub fn direct_deps(steps: &[TransformationStep]) -> Result<Vec<String>, String> {
+    direct_deps_ex(steps, None)
+}
+
+/// Like [`direct_deps`], plus ApplyKeyMap → query-backed KeyMap `query_id` ([ADR-0036]).
+pub fn direct_deps_ex(
+    steps: &[TransformationStep],
+    key_maps: Option<&[crate::model::KeyMapDef]>,
+) -> Result<Vec<String>, String> {
     let mut deps = Vec::new();
     for step in steps {
         match step {
@@ -22,6 +30,21 @@ pub fn direct_deps(steps: &[TransformationStep]) -> Result<Vec<String>, String> 
                 // {{query:id}} — external {{xref:…}} is rewritten before compile.
                 for cap in extract_query_placeholders(raw_sql) {
                     deps.push(cap);
+                }
+            }
+            TransformationStep::ApplyKeyMap { map_id, .. } => {
+                if let Some(maps) = key_maps {
+                    let Ok(mid) = map_id.compiler_id() else {
+                        continue;
+                    };
+                    if let Some(km) = maps.iter().find(|m| m.id == mid) {
+                        if let KeyMapStorage::Query { query_id } = &km.storage {
+                            let q = query_id.trim();
+                            if !q.is_empty() {
+                                deps.push(q.to_string());
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -93,7 +116,7 @@ pub fn reachable_from(workspace: &Workspace, root_id: &str) -> Result<HashSet<St
         let q = workspace
             .query(&id)
             .ok_or_else(|| format!("missing query {id}"))?;
-        for dep in direct_deps(&q.steps)? {
+        for dep in direct_deps_ex(&q.steps, Some(&workspace.key_maps))? {
             if !ids.contains(&dep) {
                 return Err(format!(
                     "query '{id}' references unknown query '{dep}'"
@@ -142,7 +165,7 @@ fn topo_subset(workspace: &Workspace, need: &HashSet<String>) -> Result<Vec<Stri
         let q = workspace
             .query(id)
             .ok_or_else(|| format!("missing query {id}"))?;
-        for dep in direct_deps(&q.steps)? {
+        for dep in direct_deps_ex(&q.steps, Some(&workspace.key_maps))? {
             if !need.contains(&dep) {
                 continue;
             }
@@ -268,18 +291,14 @@ mod tests {
                 QueryDef {
                     id: "orders".into(),
                     name: "orders".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "o.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "o.csv".into(), path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
                     id: "joined".into(),
                     name: "joined".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "c.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "c.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "orders".into(),
                             join_type: JoinType::Inner,
@@ -310,7 +329,7 @@ mod tests {
                     id: "batches".into(),
                     name: "batches".into(),
                     steps: vec![TransformationStep::LoadParquet {
-                        path: "b.parquet".into(),
+                        path: "b.parquet".into(), path_kind: Default::default(),
                         connection_id: None,
                     }],
                     execution: Default::default(),
@@ -341,7 +360,7 @@ mod tests {
                     name: "costed".into(),
                     steps: vec![
                         TransformationStep::LoadParquet {
-                            path: "a.parquet".into(),
+                            path: "a.parquet".into(), path_kind: Default::default(),
                             connection_id: None,
                         },
                         TransformationStep::Join {

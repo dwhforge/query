@@ -7,6 +7,7 @@ export {
   buildMappingCreatePlan,
   directQueryConsumers,
   directUpstreamQueryIds,
+  fingerprintKeyMapForBasis,
   excludedByLastFields,
   extractQueryPlaceholders,
   isLocalQueryId,

@@ -29,17 +29,13 @@ mod tests {
                 QueryDef {
                     id: "sales_eu".into(),
                     name: "sales_eu".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: eu.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: eu.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sales_us".into(),
                     name: "sales_us".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: us.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: us.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -330,10 +326,12 @@ mod tests {
         map.from_column = "system_code".into();
         map.from_columns = vec!["system_code".into(), "product_code".into()];
         map.to_column = "canonical_id".into();
+        map.output_columns = vec!["canonical_id".into()];
         map.entries = vec![
             KeyMapEntry::parts(vec!["SYS".into(), "P1".into()], "CAN-1"),
             KeyMapEntry::parts(vec!["SYS".into(), "P2".into()], "CAN-2"),
         ];
+        map.canonicalize_outputs();
         let mut owner = Project {
             format_version: dwh_pipeline::PROJECT_FORMAT_VERSION,
             id: "proj_owner".into(),
@@ -348,9 +346,7 @@ mod tests {
                 queries: vec![QueryDef {
                     id: "q_products".into(),
                     name: "products".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "data/products.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "data/products.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 }],
                 focus_query_id: "q_products".into(),
@@ -367,6 +363,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         let owner_path = owner_dir.join("lib.dwhproj.json");
         fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
@@ -398,6 +395,7 @@ mod tests {
             canvas: None,
             mapping_checks: vec![],
             mapping_check_runs: vec![],
+            pg_import: None,
         };
         fs::write(&consumer_path, consumer.to_json_pretty().unwrap()).unwrap();
         let reference =
@@ -414,6 +412,7 @@ mod tests {
                     column: "system_code".into(),
                     columns: vec!["system_code".into(), "product_code".into()],
                     output_column: Some("canonical_id".into()),
+            output_bindings: vec![],
                     as_of_column: None,
                     map_id: ObjectTarget::external(
                         &reference.id,
@@ -572,7 +571,11 @@ mod tests {
             eprintln!("skip dbt build: dbt not installed");
         }
 
-        owner.workspace.key_maps[0].entries[0].to = "CAN-9".into();
+        {
+            let e = &mut owner.workspace.key_maps[0].entries[0];
+            e.to = "CAN-9".into();
+            e.output_values = vec!["CAN-9".into()];
+        }
         fs::write(&owner_path, owner.to_json_pretty().unwrap()).unwrap();
         let stale = resolve(&consumer.references, &consumer.workspace);
         let err = stale.expect_err("owner change must require refresh");

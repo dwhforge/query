@@ -1,7 +1,7 @@
 //! Query adapter for full KeyMap suggestions. DuckDB reads query results; Rust
 //! owns normalization, candidate retrieval, scoring and ambiguity decisions.
 
-use crate::compile::compile_ctes_from;
+use crate::compile::compile_ctes_for_execution;
 use crate::key_match::{
     match_keys, normalize_label, CandidateSearch, FuzzyPair, KeyMatchOptions, MatchPolicy,
     MatchRecord,
@@ -95,7 +95,7 @@ fn input_sql(
         .len()
         .checked_sub(1)
         .ok_or_else(|| format!("Mapping query '{}' has no steps", source.query_id))?;
-    let compiled = compile_ctes_from(db, workspace, connections, &[], &source.query_id)?;
+    let compiled = compile_ctes_for_execution(db, workspace, connections, &[], &source.query_id)?;
     Ok(compiled.wrap_select(&format!(
         "SELECT CAST({} AS VARCHAR), CAST({} AS VARCHAR) FROM {} LIMIT {}",
         quote_ident(&source.key_column),

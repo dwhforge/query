@@ -15,8 +15,12 @@ pub struct KeyMapDirtyBaseline {
     /// false → row must be absent (insert).
     #[serde(default)]
     pub existed: bool,
+    /// Legacy single To. Prefer `outputs` ([ADR-0037](../../../docs/adr/0037-keymap-multi-output.md)).
     #[serde(default)]
     pub to: String,
+    /// Frozen output column → value at first local edit (name-keyed).
+    #[serde(default)]
+    pub outputs: BTreeMap<String, String>,
     /// Editable attrs: JSON `null` ≡ SQL NULL; string (incl. `""`) ≡ that value.
     #[serde(default)]
     pub attrs: BTreeMap<String, Option<String>>,
@@ -93,12 +97,15 @@ fn normalize_from_parts(parts: &[String], arity: usize, ctx: &str) -> Result<Vec
 
 fn normalize_entry(entry: &KeyMapEntry, arity: usize) -> Result<KeyMapEntry, String> {
     let parts = normalize_from_parts(&entry.from_parts_eff(), arity, "upsert")?;
-    if entry.to.is_empty() {
-        return Err(format!("refused: empty to for from {parts:?}"));
+    let outs = entry.output_values_eff();
+    if outs.is_empty() || outs.iter().any(|v| v.trim().is_empty()) {
+        return Err(format!("refused: empty output for from {parts:?}"));
     }
     let mut out = entry.clone();
     out.from = parts[0].clone();
     out.from_parts = parts;
+    out.to = outs[0].clone();
+    out.output_values = outs;
     Ok(out)
 }
 
@@ -208,6 +215,7 @@ mod tests {
             from_parts: vec![from.into()],
             existed,
             to: to.into(),
+            outputs: BTreeMap::new(),
             attrs: BTreeMap::new(),
         }
     }
@@ -222,6 +230,7 @@ mod tests {
                 from_parts: vec!["A".into(), "".into()],
                 existed: true,
                 to: "X".into(),
+                outputs: BTreeMap::new(),
                 attrs: BTreeMap::new(),
             }],
         };

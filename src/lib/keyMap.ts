@@ -21,10 +21,262 @@ export function fromColumnsEff(map: KeyMapDef): string[] {
   return [one];
 }
 
+/** Effective output column names on the map relation (ADR-0037). */
+export function outputColumnsEff(map: KeyMapDef): string[] {
+  if (map.output_columns?.length) return map.output_columns;
+  const one = (map.to_column ?? "to").trim() || "to";
+  return [one];
+}
+
 /** Effective From parts on an entry (ADR-0024). */
 export function fromPartsEff(e: KeyMapEntry): string[] {
   if (e.from_parts?.length) return e.from_parts;
   return e.from?.trim() ? [e.from] : [];
+}
+
+/** Effective output values on an entry (ADR-0037). */
+export function outputValuesEff(e: KeyMapEntry): string[] {
+  if (e.output_values?.length) return e.output_values;
+  if (e.to != null && e.to !== "") return [e.to];
+  return [];
+}
+
+/** First output value (legacy single-To). */
+export function primaryTo(e: KeyMapEntry): string {
+  return outputValuesEff(e)[0] ?? "";
+}
+
+export type ApplyKeyMapOutputBinding = {
+  map_column: string;
+  destination_column: string;
+};
+
+/** Effective Apply output bindings (ADR-0037). */
+export function applyKeymapOutputBindings(args: {
+  output_column?: string;
+  output_bindings?: ApplyKeyMapOutputBinding[];
+  factCols: string[];
+  mapColumnHint?: string;
+}): ApplyKeyMapOutputBinding[] {
+  if (args.output_bindings?.length) return args.output_bindings;
+  const dest =
+    args.output_column?.trim() ||
+    args.factCols[0] ||
+    "";
+  if (!dest) return [];
+  const mapCol = (args.mapColumnHint ?? "to").trim() || "to";
+  return [{ map_column: mapCol, destination_column: dest }];
+}
+
+/**
+ * Default destinations for the multi-output Apply review (ADR-0037):
+ * first output → current left ON / fact column, others → map column name.
+ */
+export function defaultReviewDestinations(
+  outCols: string[],
+  currentLeftOn: string,
+): string[] {
+  return outCols.map((c, i) => (i === 0 && currentLeftOn.trim() ? currentLeftOn : c));
+}
+
+/**
+ * Default right Join column per destination: `rightOnCols[i]`, else a
+ * right column with the same name as the destination, else the destination.
+ */
+export function defaultReviewRightCols(
+  destinations: string[],
+  rightOnCols: string[],
+): string[] {
+  return destinations.map(
+    (d, i) =>
+      rightOnCols[i] ??
+      rightOnCols.find((r) => r.toLowerCase() === d.toLowerCase()) ??
+      d,
+  );
+}
+
+/** `a, b = x, y` style ON preview text. */
+export function formatJoinOn(left: string[], right: string[]): string {
+  return `${left.join(", ")} = ${right.join(", ")}`;
+}
+
+/** One map output row in the Apply+Join review. */
+export type ApplyReviewOutputRow = {
+  mapColumn: string;
+  destination: string;
+  /** Include in ApplyKeyMap output_bindings. */
+  includeApply: boolean;
+  /** Include destination = rightCol in the rewritten Join ON. */
+  includeJoin: boolean;
+  rightCol: string;
+};
+
+/** Existing Join equality the user may keep when rewriting ON. */
+export type ApplyReviewKeepEquality = {
+  left: string;
+  right: string;
+  keep: boolean;
+};
+
+export type ApplyReviewState = {
+  side: ApplySide;
+  outputs: ApplyReviewOutputRow[];
+  keepEqualities: ApplyReviewKeepEquality[];
+  rewriteJoin: boolean;
+};
+
+/** Build the initial review state for a multi-output Apply. */
+export function buildApplyReviewState(args: {
+  side: ApplySide;
+  outCols: string[];
+  leftOnCols: string[];
+  rightOnCols: string[];
+}): ApplyReviewState {
+  // Anchor destination for the first output on the side being Applied.
+  // `both` confirms one destination set for both sides (same bindings) —
+  // default from the host (left) ON; user can edit before confirm.
+  const anchorCol =
+    args.side === "right"
+      ? args.rightOnCols[0] ?? ""
+      : args.leftOnCols[0] ?? "";
+  const dests = defaultReviewDestinations(args.outCols, anchorCol);
+  const rights = defaultReviewRightCols(dests, args.rightOnCols);
+  // Default Join participation: one equality per current ON slot (extra
+  // outputs like category_id stay Apply-only). Existing ON is opt-in keep
+  // so rewritten keys are not duplicated beside new destinations.
+  const joinSlots = Math.max(1, Math.min(args.outCols.length, args.leftOnCols.length || 1));
+  return {
+    side: args.side,
+    outputs: args.outCols.map((mapColumn, i) => ({
+      mapColumn,
+      destination: dests[i]!,
+      includeApply: true,
+      includeJoin: i < joinSlots,
+      rightCol: rights[i]!,
+    })),
+    keepEqualities: args.leftOnCols.map((left, i) => ({
+      left,
+      right: args.rightOnCols[i] ?? args.rightOnCols[0] ?? left,
+      keep: false,
+    })),
+    rewriteJoin: false,
+  };
+}
+
+/** Route confirmed bindings to the Apply side the user chose. */
+export function applyReviewBindingsForSide(
+  side: ApplySide,
+  bindings: ApplyKeyMapOutputBinding[],
+): {
+  outputBindingsLeft?: ApplyKeyMapOutputBinding[];
+  outputBindingsRight?: ApplyKeyMapOutputBinding[];
+} {
+  if (side === "left") return { outputBindingsLeft: bindings };
+  if (side === "right") return { outputBindingsRight: bindings };
+  return {
+    outputBindingsLeft: bindings,
+    outputBindingsRight: bindings,
+  };
+}
+
+/** Collect Apply bindings + optional Join rewrite from review state. */
+export function confirmApplyReview(state: ApplyReviewState): {
+  bindings: ApplyKeyMapOutputBinding[];
+  joinRewrite?: { leftOn: string[]; rightOn: string[] };
+  error: string | null;
+} {
+  const included = state.outputs.filter((o) => o.includeApply);
+  if (!included.length) {
+    return { bindings: [], error: "Select at least one output to Apply." };
+  }
+  const seen = new Set<string>();
+  for (const o of included) {
+    const k = o.destination.trim().toLowerCase();
+    if (!k) {
+      return {
+        bindings: [],
+        error: "Every included output needs a destination column.",
+      };
+    }
+    if (seen.has(k)) {
+      return {
+        bindings: [],
+        error: `Duplicate destination column "${o.destination.trim()}".`,
+      };
+    }
+    seen.add(k);
+  }
+  const bindings = included.map((o) => ({
+    map_column: o.mapColumn,
+    destination_column: o.destination.trim(),
+  }));
+
+  if (!state.rewriteJoin || state.side === "right") {
+    return { bindings, error: null };
+  }
+
+  const leftOn: string[] = [];
+  const rightOn: string[] = [];
+  for (const eq of state.keepEqualities) {
+    if (!eq.keep) continue;
+    if (!eq.left.trim() || !eq.right.trim()) {
+      return {
+        bindings: [],
+        error: "Kept Join equalities need both left and right columns.",
+      };
+    }
+    leftOn.push(eq.left.trim());
+    rightOn.push(eq.right.trim());
+  }
+  for (const o of state.outputs) {
+    if (!o.includeJoin) continue;
+    if (!o.includeApply) {
+      return {
+        bindings: [],
+        error: `Join uses "${o.mapColumn}" — include it in Apply too.`,
+      };
+    }
+    if (!o.rightCol.trim()) {
+      return {
+        bindings: [],
+        error: "Every Join equality needs a right column.",
+      };
+    }
+    leftOn.push(o.destination.trim());
+    rightOn.push(o.rightCol.trim());
+  }
+  if (!leftOn.length) {
+    return {
+      bindings: [],
+      error: "Join rewrite needs at least one equality (keep old or map output).",
+    };
+  }
+  return {
+    bindings,
+    joinRewrite: { leftOn, rightOn },
+    error: null,
+  };
+}
+
+/** @deprecated Prefer confirmApplyReview — kept for older unit checks. */
+export function validateApplyReview(
+  destinations: string[],
+  rights: string[],
+  rewriteJoin: boolean,
+): string | null {
+  const state: ApplyReviewState = {
+    side: "left",
+    outputs: destinations.map((destination, i) => ({
+      mapColumn: `out_${i}`,
+      destination,
+      includeApply: true,
+      includeJoin: rewriteJoin,
+      rightCol: rights[i] ?? "",
+    })),
+    keepEqualities: [],
+    rewriteJoin,
+  };
+  return confirmApplyReview(state).error;
 }
 
 /** Stable key for dirty-buffer / uniqueness (JSON tuple). */
@@ -123,6 +375,7 @@ export function emptyKeyMap(name = "Key map"): KeyMapDef {
     from_column: "from",
     from_columns: ["from"],
     to_column: "to",
+    output_columns: ["to"],
   };
 }
 
@@ -141,6 +394,8 @@ export type ValidateKeyMapOpts = {
   timeMode?: "none" | "range_scd";
   validFromColumn?: string;
   validToColumn?: string;
+  /** ADR-0037: required length of output_values (default 1). */
+  outputArity?: number;
 };
 
 export { parseScdBound, parseScdBoundDetailed } from "./scdBound";
@@ -153,6 +408,7 @@ export function validateKeyMapEntries(
   opts?: ValidateKeyMapOpts,
 ): { ok: true; entries: KeyMapEntry[] } | { ok: false; error: string } {
   const n = Math.max(1, arity);
+  const outN = Math.max(1, opts?.outputArity ?? 1);
   const range = opts?.timeMode === "range_scd";
   const vfCol = opts?.validFromColumn?.trim() || "valid_from";
   const vtCol = opts?.validToColumn?.trim() || "valid_to";
@@ -178,10 +434,15 @@ export function validateKeyMapEntries(
     if (parts.some((p) => !p)) {
       return { ok: false, error: "Empty From part is not allowed" };
     }
-    if (!e.to) {
+    let outs = outputValuesEff(e);
+    if (outs.length < outN) {
+      while (outs.length < outN) outs.push("");
+    }
+    if (outs.length > outN) outs = outs.slice(0, outN);
+    if (outs.some((v) => !v)) {
       return {
         ok: false,
-        error: `Empty To for From ${JSON.stringify(parts)}`,
+        error: `Empty output for From ${JSON.stringify(parts)}`,
       };
     }
     const key = tupleKey(parts);
@@ -245,7 +506,8 @@ export function validateKeyMapEntries(
     cleaned.push({
       from: parts[0]!,
       from_parts: parts,
-      to: e.to,
+      to: outs[0]!,
+      output_values: outs,
       ...(e.attrs && Object.keys(e.attrs).length ? { attrs: e.attrs } : {}),
       ...(rowId ? { __dwhRowId: rowId } : {}),
     } as KeyMapEntry);
@@ -256,8 +518,10 @@ export function validateKeyMapEntries(
 export function parseFromToPaste(
   text: string,
   arity = 1,
+  outputArity = 1,
 ): KeyMapEntry[] {
   const n = Math.max(1, arity);
+  const outN = Math.max(1, outputArity);
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -274,21 +538,68 @@ export function parseFromToPaste(
     const fromParts = parts
       .slice(0, n)
       .map((p) => p.trim().replace(/^"|"$/g, ""));
-    const to = parts
-      .slice(n)
-      .join(line.includes(",") ? "," : "\t")
-      .trim()
-      .replace(/^"|"$/g, "");
+    const clean = (p: string) => p.trim().replace(/^"|"$/g, "");
+    // Last output absorbs extra delimiters (legacy single-To behavior at outN=1).
+    const tail = parts.slice(n);
+    const outputs =
+      outN === 1
+        ? [
+            tail
+              .join(line.includes(",") ? "," : "\t")
+              .trim()
+              .replace(/^"|"$/g, ""),
+          ]
+        : Array.from({ length: outN }, (_, i) =>
+            i < outN - 1
+              ? clean(tail[i] ?? "")
+              : clean(
+                  tail
+                    .slice(i)
+                    .join(line.includes(",") ? "," : "\t"),
+                ),
+          );
     if (fromParts.every(Boolean)) {
       out.push({
         from: fromParts[0]!,
         from_parts: fromParts,
-        to,
+        to: outputs[0] ?? "",
+        output_values: outputs,
       });
     }
   }
   return out;
 }
+
+function defaultOutputBindings(
+  map: KeyMapDef,
+  factCols: string[],
+  outputColumn?: string,
+  explicit?: ApplyKeyMapOutputBinding[],
+): ApplyKeyMapOutputBinding[] {
+  if (explicit?.length) return explicit;
+  const outs = outputColumnsEff(map);
+  if (outs.length <= 1) {
+    return applyKeymapOutputBindings({
+      output_column: outputColumn,
+      factCols,
+      mapColumnHint: outs[0] ?? "to",
+    });
+  }
+  // Multi-output: destination defaults to map column name (new fact cols).
+  // First binding may still use a legacy scalar outputColumn overwrite.
+  return outs.map((map_column, i) => ({
+    map_column,
+    destination_column:
+      i === 0 && outputColumn?.trim() ? outputColumn.trim() : map_column,
+  }));
+}
+
+/** Result of upserting Apply before a Join index. */
+export type UpsertApplyResult = {
+  steps: TransformationStep[];
+  /** True when a new Apply was spliced at `at` (Join and later steps shift +1). */
+  insertedBefore: boolean;
+};
 
 function upsertApplyStep(
   steps: TransformationStep[],
@@ -296,14 +607,16 @@ function upsertApplyStep(
   columns: string[],
   map: KeyMapDef,
   outputColumn?: string,
-): TransformationStep[] {
+  outputBindings?: ApplyKeyMapOutputBinding[],
+): UpsertApplyResult {
   const next = [...steps];
   const cols = columns.filter((c) => c.trim());
-  if (!cols.length) return next;
+  if (!cols.length) return { steps: next, insertedBefore: false };
+  const bindings = defaultOutputBindings(map, cols, outputColumn, outputBindings);
   const payload = {
     column: cols[0]!,
     columns: cols,
-    ...(outputColumn?.trim() ? { output_column: outputColumn.trim() } : {}),
+    output_bindings: bindings,
     map_id: map.id,
     entries: map.entries,
   };
@@ -323,10 +636,10 @@ function upsertApplyStep(
   });
   if (existing >= 0) {
     next[existing] = { type: "ApplyKeyMap", payload };
-    return next;
+    return { steps: next, insertedBefore: false };
   }
   next.splice(at, 0, { type: "ApplyKeyMap", payload });
-  return next;
+  return { steps: next, insertedBefore: true };
 }
 
 function upsertNormalizeBeforeJoin(
@@ -354,7 +667,36 @@ function upsertNormalizeBeforeJoin(
   return next;
 }
 
-/** Insert/update ApplyKeyMap on left (before join) and/or right (append). */
+/** Join identity frozen before Apply insert (right + ON + type). */
+export type JoinStepIdentity = {
+  rightQueryId: string;
+  leftOn: string[];
+  rightOn: string[];
+  joinType: import("../types/pipeline").JoinType;
+};
+
+function joinMatchesIdentity(
+  s: TransformationStep | undefined,
+  id: JoinStepIdentity,
+): s is TransformationStep & { type: "Join" } {
+  return (
+    s?.type === "Join" &&
+    targetKey(s.payload.right_query_id) === id.rightQueryId &&
+    s.payload.left_on.join("\0") === id.leftOn.join("\0") &&
+    s.payload.right_on.join("\0") === id.rightOn.join("\0") &&
+    s.payload.join_type === id.joinType
+  );
+}
+
+export type ApplyKeyMapWorkspaceResult =
+  | { ok: true; workspace: Workspace }
+  | { ok: false; error: string };
+
+/**
+ * Insert/update ApplyKeyMap on left (before join) and/or right (append).
+ * Join rewrite uses the same Join that was at `joinStepIndex` before insert —
+ * never re-search by right query alone (ADR-0037 review).
+ */
 export function applyKeyMapToWorkspace(
   workspace: Workspace,
   hostQueryId: string,
@@ -368,42 +710,96 @@ export function applyKeyMapToWorkspace(
   columnsRight?: string[],
   outputColumnLeft?: string,
   outputColumnRight?: string,
-): Workspace {
+  /** ADR-0037: explicit multi-output destinations (left Apply). */
+  outputBindingsLeft?: ApplyKeyMapOutputBinding[],
+  outputBindingsRight?: ApplyKeyMapOutputBinding[],
+  /** When set, rewrite that Join's ON to these left/right equals after Apply. */
+  joinRewrite?: { leftOn: string[]; rightOn: string[] },
+  /** Required when joinRewrite is set — identity of the Join before insert. */
+  joinIdentity?: JoinStepIdentity,
+): ApplyKeyMapWorkspaceResult {
   const leftCols = columnsLeft?.length ? columnsLeft : [columnLeft];
   const rightCols = columnsRight?.length ? columnsRight : [columnRight];
   const outLeft =
     outputColumnLeft?.trim() || leftCols[0];
   const outRight =
     outputColumnRight?.trim() || rightCols[0];
-  const queries = workspace.queries.map((q) => {
-    if (side !== "right" && q.id === hostQueryId) {
+  const wantRewrite =
+    !!joinRewrite?.leftOn.length && !!joinRewrite?.rightOn.length;
+
+  if (wantRewrite && side !== "right") {
+    if (!joinIdentity) {
       return {
-        ...q,
-        steps: upsertApplyStep(
-          q.steps,
-          joinStepIndex,
-          leftCols,
-          map,
-          outLeft,
-        ),
+        ok: false,
+        error:
+          "Apply+Join requires a frozen Join identity (right query, ON, type).",
       };
     }
-    if (side !== "left" && q.id === rightQueryId) {
+    const host = workspace.queries.find((q) => q.id === hostQueryId);
+    if (!host || !joinMatchesIdentity(host.steps[joinStepIndex], joinIdentity)) {
       return {
-        ...q,
-        steps: upsertApplyStep(
-          q.steps,
-          q.steps.length,
-          rightCols,
-          map,
-          outRight,
-        ),
+        ok: false,
+        error:
+          "Target Join was removed or changed — Apply+Join refused (no ambiguous fallback).",
       };
+    }
+  }
+
+  let failed: string | null = null;
+  const queries = workspace.queries.map((q) => {
+    if (failed) return q;
+    if (side !== "right" && q.id === hostQueryId) {
+      const before = q.steps[joinStepIndex];
+      if (wantRewrite && joinIdentity && !joinMatchesIdentity(before, joinIdentity)) {
+        failed =
+          "Target Join was removed or changed — Apply+Join refused (no ambiguous fallback).";
+        return q;
+      }
+      const { steps: withApply, insertedBefore } = upsertApplyStep(
+        q.steps,
+        joinStepIndex,
+        leftCols,
+        map,
+        outLeft,
+        outputBindingsLeft,
+      );
+      let steps = withApply;
+      if (wantRewrite && joinRewrite && joinIdentity) {
+        const joinIdxAfter = insertedBefore ? joinStepIndex + 1 : joinStepIndex;
+        const j = steps[joinIdxAfter];
+        if (!joinMatchesIdentity(j, joinIdentity)) {
+          failed =
+            "Target Join could not be located after Apply insert — refused without rewriting another Join.";
+          return q;
+        }
+        steps = [...steps];
+        steps[joinIdxAfter] = {
+          ...j,
+          payload: {
+            ...j.payload,
+            left_on: [...joinRewrite.leftOn],
+            right_on: [...joinRewrite.rightOn],
+          },
+        };
+      }
+      return { ...q, steps };
+    }
+    if (side !== "left" && q.id === rightQueryId) {
+      const { steps } = upsertApplyStep(
+        q.steps,
+        q.steps.length,
+        rightCols,
+        map,
+        outRight,
+        outputBindingsRight,
+      );
+      return { ...q, steps };
     }
     return q;
   });
+  if (failed) return { ok: false, error: failed };
   const key_maps = upsertKeyMapList(workspace.key_maps ?? [], map);
-  return { ...workspace, queries, key_maps };
+  return { ok: true, workspace: { ...workspace, queries, key_maps } };
 }
 
 export function applyNormalizeToWorkspace(
@@ -491,7 +887,7 @@ export function resolveKeyMapConnection(
   forWrite = false,
 ): KeyMapConnResolve {
   if (map.storage?.kind !== "source") {
-    return { ok: false, error: "KeyMap storage is not source" };
+    return { ok: false, error: "Mapping storage is not source" };
   }
   const { source, table, connection_id } = map.storage;
   const cid = connection_id?.trim() ?? "";
@@ -501,7 +897,7 @@ export function resolveKeyMapConnection(
     if (!conn) {
       return {
         ok: false,
-        error: `KeyMap connection_id “${cid}” not found — pick a Connection in the editor (no fallback).`,
+        error: `Mapping connection_id “${cid}” not found — pick a Connection in the editor (no fallback).`,
       };
     }
     const dsn = pgDsn(conn);
@@ -518,7 +914,7 @@ export function resolveKeyMapConnection(
     return {
       ok: false,
       error:
-        "KeyMap write requires an explicit Connection on the map (Storage → Connection). No silent fallback to target / other PG.",
+        "Mapping write requires an explicit Connection on the map (Storage → Connection). No silent fallback to target / other PG.",
     };
   }
 
@@ -546,7 +942,7 @@ export function resolveKeyMapConnection(
 
   return {
     ok: false,
-    error: `No connection for KeyMap source ${source}.${table} — set Storage → Connection.`,
+    error: `No connection for Mapping source ${source}.${table} — set Storage → Connection.`,
   };
 }
 
@@ -607,12 +1003,62 @@ export function mergeKeyMapProposals(
           : [];
     if (!parts.length) continue;
     const key = tupleKey(parts);
-    if (merged.get(key)?.to.trim()) continue;
+    const cur = merged.get(key);
+    if (cur && outputValuesEff(cur).some((v) => v.trim())) continue;
     merged.set(key, {
       from: parts[0]!,
       from_parts: parts,
       to: proposal.to_key,
+      output_values: [proposal.to_key],
     });
   }
   return [...merged.values()];
+}
+
+/** One named output cell from a lens / query result (ADR-0037). */
+export type LensOutputCell = { column: string; value: string };
+
+/**
+ * Merge named cells into `output_values` by column name. Unnamed columns are
+ * unchanged; a filled cell that differs is reported and never overwritten.
+ */
+export function mergeLensOutputCells(
+  entry: KeyMapEntry,
+  outputColumns: string[],
+  cells: LensOutputCell[],
+):
+  | { ok: true; entry: KeyMapEntry }
+  | { ok: false; error: string; conflicts: LensOutputCell[] } {
+  const cols = outputColumns.length ? outputColumns : ["to"];
+  const index = new Map(cols.map((c, i) => [c.trim().toLowerCase(), i] as const));
+  const outs = outputValuesEff(entry).slice(0, cols.length);
+  while (outs.length < cols.length) outs.push("");
+  const conflicts: LensOutputCell[] = [];
+  for (const cell of cells) {
+    const i = index.get(cell.column.trim().toLowerCase());
+    if (i === undefined) {
+      return {
+        ok: false,
+        error: `Unknown output column “${cell.column}”`,
+        conflicts: [],
+      };
+    }
+    const cur = outs[i] ?? "";
+    if (cur.trim() && cur !== cell.value) {
+      conflicts.push(cell);
+      continue;
+    }
+    if (!cur.trim()) outs[i] = cell.value;
+  }
+  if (conflicts.length) {
+    return {
+      ok: false,
+      error: `Output conflict on ${conflicts.map((c) => `“${c.column}”`).join(", ")}`,
+      conflicts,
+    };
+  }
+  return {
+    ok: true,
+    entry: { ...entry, to: outs[0] ?? "", output_values: outs },
+  };
 }

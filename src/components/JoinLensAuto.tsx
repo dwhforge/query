@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConnectionDef, SourceDef, Workspace } from "../types/pipeline";
 import {
   getLlmConfig,
@@ -24,6 +24,10 @@ import {
   skipProposal,
   type LensConfirmProposal,
 } from "../lib/joinLensConfirm";
+import { PanelResizeHandle } from "./PanelResizeHandle";
+
+const LLM_SHEET_MIN = 140;
+const LLM_SHEET_DEFAULT = 280;
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -157,6 +161,10 @@ export function JoinLensAuto({
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  /** Brief entrance cue after "Add LLM leftovers". */
+  const [chatReveal, setChatReveal] = useState(false);
+  /** LLM bottom-sheet height (px); drag the top splitter. */
+  const [llmHeightPx, setLlmHeightPx] = useState(LLM_SHEET_DEFAULT);
   /** Per-column Suggest on composite Join (ADR-0024). */
   const [keyIndex, setKeyIndex] = useState<number | null>(null);
   /** Composite-map mode: use all Join keys as From tuple. */
@@ -164,6 +172,42 @@ export function JoinLensAuto({
   const [compositeFuzzySlot, setCompositeFuzzySlot] = useState(0);
   /** Bumps when Join target changes — ignore late LLM replies. */
   const chatGen = useRef(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const chatPanelRef = useRef<HTMLElement | null>(null);
+  const chatRevealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clampLlmHeight = useCallback((px: number) => {
+    const host = rootRef.current?.clientHeight ?? 480;
+    const max = Math.max(LLM_SHEET_MIN + 40, Math.floor(host * 0.85));
+    return Math.max(LLM_SHEET_MIN, Math.min(max, Math.round(px)));
+  }, []);
+
+  const onLlmResizeDelta = useCallback(
+    (dy: number) => {
+      // Drag handle at top of sheet: pointer down → shrink sheet.
+      setLlmHeightPx((h) => clampLlmHeight(h - dy));
+    },
+    [clampLlmHeight],
+  );
+
+  function openLlmLeftovers() {
+    setChatOpen(true);
+    setChatReveal(true);
+    if (chatRevealTimer.current) clearTimeout(chatRevealTimer.current);
+    chatRevealTimer.current = setTimeout(() => setChatReveal(false), 1400);
+    requestAnimationFrame(() => {
+      chatPanelRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    });
+  }
+
+  useEffect(() => {
+    return () => {
+      if (chatRevealTimer.current) clearTimeout(chatRevealTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -237,7 +281,8 @@ export function JoinLensAuto({
           !result.disabled_reason &&
           result.suggestions.length === 0 &&
           (result.leftover_left.length > 0 || result.leftover_right.length > 0);
-        setChatOpen(openChat);
+        if (openChat) openLlmLeftovers();
+        else setChatOpen(false);
       } catch (e) {
         if (!cancelled) setError(typeof e === "string" ? e : String(e));
       } finally {
@@ -330,9 +375,13 @@ export function JoinLensAuto({
 
   /** ADR-0042: LLM queues into the same Lens batch as fuzzy; one Write commits all. */
   function queueLlmPairs(mode: "accepted" | "pending") {
-    const added = proposalsFromLlmPairs(chatPairs, proposals).map((p) =>
-      mode === "accepted" ? acceptProposal(p) : p,
-    );
+    const ctx = report?.chat_context;
+    const added = proposalsFromLlmPairs(chatPairs, proposals, {
+      leftLabels: ctx?.left_key_labels,
+      rightLabels: ctx?.right_key_labels,
+      leftSamples: ctx?.leftover_left_samples,
+      rightSamples: ctx?.leftover_right_samples,
+    }).map((p) => (mode === "accepted" ? acceptProposal(p) : p));
     if (!added.length) return;
     setProposals((prev) => [...prev, ...added]);
   }
@@ -357,7 +406,10 @@ export function JoinLensAuto({
     (report?.leftover_left.length ?? 0) + (report?.leftover_right.length ?? 0);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div
+      ref={rootRef}
+      className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+    >
       <section
         className="flex min-h-0 flex-1 flex-col"
         aria-label="Fuzzy match confirm"
@@ -384,14 +436,15 @@ export function JoinLensAuto({
                   Yellow → <span className="font-semibold">Best</span> /{" "}
                   <span className="font-semibold">Skip</span>
                   {" · "}
-                  then one <span className="font-semibold">Write KeyMap</span>{" "}
-                  for the whole batch (fuzzy + LLM)
+                  then one{" "}
+                  <span className="font-semibold">Write Mapping</span> for the
+                  whole batch (fuzzy + LLM)
                 </>
               ) : (
                 <>
                   Batch ready — optional: add LLM leftovers into{" "}
                   <span className="font-semibold">this same list</span>, then
-                  one <span className="font-semibold">Write KeyMap</span>
+                  one <span className="font-semibold">Write Mapping</span>
                 </>
               )}
             </p>
@@ -626,64 +679,97 @@ export function JoinLensAuto({
           ))}
         </div>
 
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-amber-900/40 bg-amber-950/25 px-2 py-2">
+      </section>
+
+      {/* Stay above the LLM sheet so Write is never covered. */}
+      <div
+        className={`flex shrink-0 flex-wrap items-center gap-2 border-t border-amber-900/40 bg-amber-950/25 px-2 py-2 ${
+          chatOpen ? "relative z-30 shadow-[0_-8px_24px_rgba(0,0,0,0.35)]" : ""
+        }`}
+        style={chatOpen ? { marginBottom: llmHeightPx } : undefined}
+      >
+        <button
+          type="button"
+          data-testid="lens-apply-accepted"
+          disabled={!onAccept || accepted.length === 0}
+          onClick={commitAccepted}
+          className="rounded border-2 border-amber-500 bg-amber-500/35 px-3 py-2 text-[13px] font-bold text-amber-50 shadow-[0_0_0_1px_rgba(245,158,11,0.25)] disabled:opacity-40"
+          title="Writes Mapping (KeyMap) + Apply. LLM queue is not a write."
+        >
+          Write Mapping · {accepted.length} pair
+          {accepted.length === 1 ? "" : "s"}
+          {pending.length > 0 ? " (yellow skipped)" : ""}
+        </button>
+        <span className="max-w-[14rem] text-[10px] leading-snug text-amber-100/85">
+          {pending.length > 0
+            ? "Yellow stay out until Best / Skip."
+            : leftoverCount > 0
+              ? "Can still pull LLM leftovers into this batch before Write."
+              : "Writes Mapping + Apply for every accepted row."}
+        </span>
+        {!chatOpen && leftoverCount > 0 && (
           <button
             type="button"
-            data-testid="lens-apply-accepted"
-            disabled={!onAccept || accepted.length === 0}
-            onClick={commitAccepted}
-            className="rounded border-2 border-amber-500 bg-amber-500/35 px-3 py-2 text-[13px] font-bold text-amber-50 shadow-[0_0_0_1px_rgba(245,158,11,0.25)] disabled:opacity-40"
-            title="Only this button writes KeyMap + ApplyKeyMap. LLM queue is not a write."
+            onClick={() => openLlmLeftovers()}
+            className="ml-auto rounded border border-teal-800/70 px-2 py-1 text-[10px] text-teal-200/90 hover:border-teal-600 hover:text-teal-50"
           >
-            Write KeyMap · {accepted.length} pair
-            {accepted.length === 1 ? "" : "s"}
-            {pending.length > 0 ? " (yellow skipped)" : ""}
+            Add LLM leftovers · {leftoverCount} ▾
           </button>
-          <span className="max-w-[14rem] text-[10px] leading-snug text-amber-100/85">
-            {pending.length > 0
-              ? "Yellow stay out until Best / Skip."
-              : leftoverCount > 0
-                ? "Can still pull LLM leftovers into this batch before Write."
-                : "Writes KeyMap + Apply for every accepted row."}
-          </span>
-          {!chatOpen && leftoverCount > 0 && (
-            <button
-              type="button"
-              onClick={() => setChatOpen(true)}
-              className="ml-auto rounded border border-teal-800/70 px-2 py-1 text-[10px] text-teal-200/90 hover:border-teal-600 hover:text-teal-50"
-            >
-              Add LLM leftovers · {leftoverCount}
-            </button>
-          )}
-        </div>
-      </section>
+        )}
+      </div>
 
       {chatOpen && report && (
         <section
-          className="flex min-h-0 flex-1 flex-col bg-[#06141c]"
+          ref={chatPanelRef}
+          className={`absolute inset-x-0 bottom-0 z-20 flex flex-col border-t border-teal-400/80 bg-[#06141c] shadow-[0_-12px_40px_rgba(0,0,0,0.45)] ${
+            chatReveal ? "lens-llm-enter" : ""
+          }`}
+          style={{ height: llmHeightPx }}
           aria-label="LLM chat for leftovers"
+          aria-live="polite"
         >
-          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-teal-950/60 bg-teal-950/30 px-2 py-1.5">
+          <PanelResizeHandle
+            orientation="horizontal"
+            onDelta={onLlmResizeDelta}
+            aria-label="Resize LLM panel"
+            title="Drag to resize LLM height"
+          />
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-teal-500/40 bg-teal-500/15 px-2 py-1 text-[10px] text-teal-50">
+            <span className="font-semibold tracking-wide">▴ LLM</span>
+            <span className="text-teal-200/50">·</span>
+            <span>
+              drag top edge to resize · ask → Add to batch →{" "}
+              <span className="font-semibold text-amber-100">
+                Write Mapping
+              </span>
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-2 border-b border-teal-950/60 bg-teal-950/30 px-2 py-1.5">
             <span className="rounded bg-teal-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-teal-200/95">
               LLM chat
             </span>
-            <span className="text-[10px] text-slate-400">
+            <span className="min-w-0 flex-1 truncate text-[10px] text-slate-400">
               Same batch as fuzzy above
               {leftoverCount ? ` · ${leftoverCount} leftover keys` : ""}
             </span>
             <button
               type="button"
               onClick={() => setShowConn((v) => !v)}
-              className="ml-auto rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+              className="shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
             >
               {llm ? llm.model : "Connect LLM"}
             </button>
             <button
               type="button"
-              onClick={() => setChatOpen(false)}
-              className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+              onClick={() => {
+                setChatReveal(false);
+                setChatOpen(false);
+              }}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-600/80 bg-slate-950/90 text-[14px] leading-none text-slate-300 hover:border-slate-400 hover:text-white"
+              title="Hide LLM panel"
+              aria-label="Hide LLM panel"
             >
-              Hide
+              ×
             </button>
           </div>
 
@@ -778,9 +864,10 @@ export function JoinLensAuto({
               <div className="text-[10px] text-red-300">{chatError}</div>
             )}
             <div className="rounded border border-teal-900/60 bg-teal-950/40 px-2 py-1.5 text-[10px] leading-snug text-teal-100/90">
-              Fuzzy + LLM share one list above. Add model pairs into that
-              batch, then one <span className="font-semibold">Write KeyMap</span>
-              .
+              Fuzzy + LLM share one list. Add model pairs into that batch,
+              then one{" "}
+              <span className="font-semibold">Write Mapping</span> on the bar
+              above.
             </div>
             {chatPairs.length > 0 && (
               <div className="rounded border border-teal-800/70 bg-teal-950/25 p-1.5">
@@ -805,7 +892,7 @@ export function JoinLensAuto({
                     data-testid="lens-queue-llm"
                     onClick={() => queueLlmPairs("accepted")}
                     className="rounded border border-teal-500/80 bg-teal-500/20 px-2 py-0.5 text-[10px] font-semibold text-teal-50"
-                    title="Add as accepted into the list above; then Write KeyMap once for fuzzy + these"
+                    title="Add as accepted into the list above; then Write Mapping once for fuzzy + these"
                   >
                     Add to batch ({chatPairs.length})
                   </button>

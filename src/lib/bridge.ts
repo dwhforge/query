@@ -551,6 +551,9 @@ export type FuzzyChatContext = {
   existing_aliases: FuzzyAliasExample[];
   right_to_universe?: string[];
   context_truncated?: boolean;
+  /** Sibling name labels for Join keys — used when queueing LLM pairs into Auto. */
+  left_key_labels?: Record<string, string>;
+  right_key_labels?: Record<string, string>;
 };
 
 export type FuzzyPair = {

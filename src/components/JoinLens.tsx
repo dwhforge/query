@@ -2135,14 +2135,14 @@ function JoinLensImpl({
               sideMode === "linked"
                 ? "Which left/right rows built this result row?"
                 : sideMode === "auto"
-                  ? "Fuzzy + LLM into one batch, then Write KeyMap once"
+                  ? "Fuzzy + LLM into one batch, then Write Mapping once"
                   : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
               ? "Where this result came from"
               : sideMode === "auto"
-                ? "One batch → Write KeyMap"
+                ? "One batch → Write Mapping"
                 : "Values that didn’t join"}
           </span>
         </div>
@@ -2157,7 +2157,7 @@ function JoinLensImpl({
                   </span>{" "}
                   — fuzzy + optional LLM into one batch →{" "}
                   <span className="font-semibold text-amber-200">
-                    Write KeyMap
+                    Write Mapping
                   </span>
                 </li>
                 <li>

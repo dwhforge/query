@@ -55,6 +55,22 @@ assert.equal(llm.length, 1);
 assert.equal(llm[0]!.decision, "pending");
 assert.equal(llm[0]!.source, "llm");
 
+const llmLabeled = proposalsFromLlmPairs(
+  [{ from: "C-100", to: "E-U46", why: "exact name" }],
+  [],
+  {
+    leftLabels: { "C-100": "Urea 46" },
+    rightLabels: { "E-U46": "Urea 46" },
+  },
+);
+assert.equal(llmLabeled[0]!.from_label, "Urea 46");
+assert.equal(llmLabeled[0]!.to_label, "Urea 46");
+const acceptedLlm = collectAcceptedPairs(
+  llmLabeled.map((p) => acceptProposal(p)),
+);
+assert.deepEqual(acceptedLlm.fromLabels, ["Urea 46"]);
+assert.deepEqual(acceptedLlm.toLabels, ["Urea 46"]);
+
 const dup = proposalsFromLlmPairs(
   [{ from: "COM-UREA", to: "other" }],
   withAlt,

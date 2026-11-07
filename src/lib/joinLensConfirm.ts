@@ -42,9 +42,34 @@ export function proposalsFromFuzzy(
   }));
 }
 
+const LABEL_FIELD_RE =
+  /^(name|title|label|product_name|display_name|from_name|to_name)(_\d+)?$/i;
+
+/** Prefer host label maps; fall back to leftover sample neighbor fields. */
+export function resolveKeyLabel(
+  key: string,
+  labels?: Record<string, string> | null,
+  samples?: { key: string; fields: { name: string; value: string }[] }[],
+): string | null {
+  const trimmed = key.trim();
+  if (!trimmed) return null;
+  const fromMap = labels?.[trimmed]?.trim();
+  if (fromMap) return fromMap;
+  const sample = samples?.find((s) => s.key === trimmed);
+  const field = sample?.fields.find((f) => LABEL_FIELD_RE.test(f.name.trim()));
+  const v = field?.value?.trim();
+  return v && v !== "∅" ? v : null;
+}
+
 export function proposalsFromLlmPairs(
   pairs: { from: string; to: string; why?: string }[],
   existing: LensConfirmProposal[],
+  labelCtx?: {
+    leftLabels?: Record<string, string> | null;
+    rightLabels?: Record<string, string> | null;
+    leftSamples?: { key: string; fields: { name: string; value: string }[] }[];
+    rightSamples?: { key: string; fields: { name: string; value: string }[] }[];
+  },
 ): LensConfirmProposal[] {
   const taken = new Set(
     existing.map((p) => p.from_key.trim().toLowerCase()),
@@ -60,6 +85,16 @@ export function proposalsFromLlmPairs(
       id: `llm:${i}:${from}→${to}`,
       from_key: from,
       to_key: to,
+      from_label: resolveKeyLabel(
+        from,
+        labelCtx?.leftLabels,
+        labelCtx?.leftSamples,
+      ),
+      to_label: resolveKeyLabel(
+        to,
+        labelCtx?.rightLabels,
+        labelCtx?.rightSamples,
+      ),
       score: 0,
       edits: 0,
       ambiguous: true,

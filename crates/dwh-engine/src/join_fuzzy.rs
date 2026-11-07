@@ -75,6 +75,34 @@ pub struct FuzzyChatContext {
     /// True when prompt-side lists were truncated for size.
     #[serde(default)]
     pub context_truncated: bool,
+    /// Sibling name/label per Join key (same maps used for fuzzy-by-name).
+    /// Lets LLM-queued pairs keep `from_name` / `to_name` attrs on Write (ADR-0028/0042).
+    #[serde(default)]
+    pub left_key_labels: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub right_key_labels: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for FuzzyChatContext {
+    fn default() -> Self {
+        Self {
+            left_query_id: String::new(),
+            left_query_name: String::new(),
+            right_query_id: String::new(),
+            right_query_name: String::new(),
+            left_lineage: String::new(),
+            right_lineage: String::new(),
+            left_columns: vec![],
+            right_columns: vec![],
+            leftover_left_samples: vec![],
+            leftover_right_samples: vec![],
+            existing_aliases: vec![],
+            right_to_universe: vec![],
+            context_truncated: false,
+            left_key_labels: Default::default(),
+            right_key_labels: Default::default(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -261,6 +289,8 @@ pub fn join_key_fuzzy_suggest_on(
                         existing_aliases,
                         right_to_universe: vec![],
                         context_truncated: false,
+                        left_key_labels: Default::default(),
+                        right_key_labels: Default::default(),
                     },
                 });
             }
@@ -460,6 +490,8 @@ pub fn join_key_fuzzy_suggest_on(
             existing_aliases,
             right_to_universe,
             context_truncated,
+            left_key_labels: left_labs.into_iter().collect(),
+            right_key_labels: right_labs.into_iter().collect(),
         },
     })
 }
@@ -1035,6 +1067,8 @@ fn join_key_fuzzy_suggest_composite(
             existing_aliases,
             right_to_universe,
             context_truncated: false,
+            left_key_labels: Default::default(),
+            right_key_labels: Default::default(),
         },
     })
 }

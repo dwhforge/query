@@ -87,8 +87,8 @@ pub fn demo_keymap_crosswalk(fixtures: &Path) -> Result<Workspace, String> {
 
     Ok(Workspace {
         queries: vec![
-            q("pos_sales", vec![TransformationStep::LoadCsv { path: pos }]),
-            q("wms_moves", vec![TransformationStep::LoadCsv { path: wms }]),
+            q("pos_sales", vec![TransformationStep::LoadCsv { path: pos, path_kind: Default::default() }]),
+            q("wms_moves", vec![TransformationStep::LoadCsv { path: wms, path_kind: Default::default() }]),
             q(
                 "dirty_join",
                 vec![
@@ -151,14 +151,14 @@ pub fn demo_keymap_dual(fixtures: &Path) -> Result<Workspace, String> {
 
     Ok(Workspace {
         queries: vec![
-            q("dim_party", vec![TransformationStep::LoadCsv { path: dim }]),
+            q("dim_party", vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }]),
             q(
                 "pos_covers",
-                vec![TransformationStep::LoadCsv { path: covers }],
+                vec![TransformationStep::LoadCsv { path: covers, path_kind: Default::default() }],
             ),
             q(
                 "ap_invoices",
-                vec![TransformationStep::LoadCsv { path: invoices }],
+                vec![TransformationStep::LoadCsv { path: invoices, path_kind: Default::default() }],
             ),
             q(
                 "dirty_sales",
@@ -245,7 +245,7 @@ pub fn demo_keymap_codes(fixtures: &Path) -> Result<Workspace, String> {
         queries: vec![
             q(
                 "ecommerce_sales",
-                vec![TransformationStep::LoadCsv { path: sales }],
+                vec![TransformationStep::LoadCsv { path: sales, path_kind: Default::default() }],
             ),
             q(
                 "sales_canon",
@@ -284,7 +284,7 @@ pub fn demo_keymap_hop(fixtures: &Path) -> Result<Workspace, String> {
         queries: vec![
             q(
                 "store_sales",
-                vec![TransformationStep::LoadCsv { path: sales }],
+                vec![TransformationStep::LoadCsv { path: sales, path_kind: Default::default() }],
             ),
             q(
                 "with_country",
@@ -347,11 +347,11 @@ pub fn demo_keymap_offer(fixtures: &Path) -> Result<Workspace, String> {
         queries: vec![
             q(
                 "offer_events",
-                vec![TransformationStep::LoadCsv { path: events }],
+                vec![TransformationStep::LoadCsv { path: events, path_kind: Default::default() }],
             ),
             q(
                 "offer_dim",
-                vec![TransformationStep::LoadCsv { path: dim }],
+                vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }],
             ),
             q(
                 "events_with_sk",
@@ -600,11 +600,11 @@ pub fn demo_keymap_ref(fixtures: &Path) -> Result<Workspace, String> {
         queries: vec![
             q(
                 "map_channel",
-                vec![TransformationStep::LoadCsv { path: map_csv }],
+                vec![TransformationStep::LoadCsv { path: map_csv, path_kind: Default::default() }],
             ),
             q(
                 "ecommerce_sales",
-                vec![TransformationStep::LoadCsv { path: sales }],
+                vec![TransformationStep::LoadCsv { path: sales, path_kind: Default::default() }],
             ),
             q(
                 "sales_canon",
@@ -649,7 +649,7 @@ pub fn demo_keymap_mixed(fixtures: &Path) -> Result<Workspace, String> {
             q(
                 "pos_sales",
                 vec![TransformationStep::LoadParquet {
-                    path: pos_pq,
+                    path: pos_pq, path_kind: Default::default(),
                     connection_id: None,
                 }],
             ),
@@ -700,14 +700,14 @@ pub fn demo_keymap_parquet(fixtures: &Path) -> Result<Workspace, String> {
             q(
                 "pos_sales",
                 vec![TransformationStep::LoadParquet {
-                    path: pos,
+                    path: pos, path_kind: Default::default(),
                     connection_id: None,
                 }],
             ),
             q(
                 "wms_moves",
                 vec![TransformationStep::LoadParquet {
-                    path: wms,
+                    path: wms, path_kind: Default::default(),
                     connection_id: None,
                 }],
             ),

@@ -55,7 +55,7 @@ pub fn collect_load_seeds(
                     continue;
                 }
             },
-            TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadCsv { path, path_kind: _ } => {
                 match describe_file_relation(db, &format!("read_csv_auto('{}')", escape_sql_string(path)))
                 {
                     Ok(c) => c,
@@ -71,6 +71,7 @@ pub fn collect_load_seeds(
             TransformationStep::LoadParquet {
                 path,
                 connection_id,
+                ..
             } => {
                 let hive =
                     parquet_hive_partitioning(sources, path, connection_id.as_deref());

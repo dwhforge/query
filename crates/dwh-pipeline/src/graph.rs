@@ -291,18 +291,14 @@ mod tests {
                 QueryDef {
                     id: "orders".into(),
                     name: "orders".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "o.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "o.csv".into(), path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
                     id: "joined".into(),
                     name: "joined".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "c.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "c.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "orders".into(),
                             join_type: JoinType::Inner,
@@ -333,7 +329,7 @@ mod tests {
                     id: "batches".into(),
                     name: "batches".into(),
                     steps: vec![TransformationStep::LoadParquet {
-                        path: "b.parquet".into(),
+                        path: "b.parquet".into(), path_kind: Default::default(),
                         connection_id: None,
                     }],
                     execution: Default::default(),
@@ -364,7 +360,7 @@ mod tests {
                     name: "costed".into(),
                     steps: vec![
                         TransformationStep::LoadParquet {
-                            path: "a.parquet".into(),
+                            path: "a.parquet".into(), path_kind: Default::default(),
                             connection_id: None,
                         },
                         TransformationStep::Join {

@@ -841,13 +841,14 @@ fn compile_query_as_dbt_model(
     // Single Load* / FromQuery — one-shot select.
     if query.steps.len() == 1 {
         return Ok(match &query.steps[0] {
-            TransformationStep::LoadCsv { path } => format!(
+            TransformationStep::LoadCsv { path, path_kind: _ } => format!(
                 "-- source: csv\nselect * from read_csv_auto('{}')\n",
                 escape_sql_string(path)
             ),
             TransformationStep::LoadParquet {
                 path,
                 connection_id,
+                ..
             } => {
                 let hive = crate::project::parquet_hive_partitioning(
                     sources,
@@ -925,7 +926,7 @@ fn compile_query_as_dbt_model(
             None
         };
         let body = match step {
-            TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadCsv { path, path_kind: _ } => {
                 left_dbt = None;
                 format!(
                     "select * from read_csv_auto('{}')",
@@ -935,6 +936,7 @@ fn compile_query_as_dbt_model(
             TransformationStep::LoadParquet {
                 path,
                 connection_id,
+                ..
             } => {
                 left_dbt = None;
                 let hive = crate::project::parquet_hive_partitioning(
@@ -1055,18 +1057,14 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "dim.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "dim.csv".into(), path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
                     id: "fact".into(),
                     name: "fact_sales".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "fact.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "fact.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1126,9 +1124,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "q".into(),
                 name: "stg_sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: "x.csv".into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() }],
              execution: Default::default(),
 }],
             focus_query_id: "q".into(),
@@ -1147,9 +1143,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "q".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: "sales.csv".into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: "sales.csv".into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "q".into(),
@@ -1345,18 +1339,14 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "dim.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "dim.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "fact".into(),
                     name: "fact_sales".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "fact.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "fact.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1377,9 +1367,7 @@ mod tests {
         ws.queries.push(QueryDef {
             id: "extra".into(),
             name: "orphan_csv".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "extra.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "extra.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         let after = dbt_model_names(&ws).unwrap();
@@ -1395,9 +1383,7 @@ mod tests {
                 QueryDef {
                     id: "daily".into(),
                     name: "daily_pnl".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "a.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -1428,17 +1414,13 @@ mod tests {
                 QueryDef {
                     id: "a".into(),
                     name: "sales_eu".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "eu.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "eu.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "b".into(),
                     name: "sales_us".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "us.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "us.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -1476,9 +1458,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "q".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: "x.csv".into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "q".into(),
@@ -1522,9 +1502,7 @@ mod tests {
                 id: "q".into(),
                 name: "events".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "x.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: String::new(),
                         columns: vec!["ext_offer_id".into(), "day".into()],
@@ -1575,9 +1553,7 @@ mod tests {
                 id: "q".into(),
                 name: "sales".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "x.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
                         columns: vec![],
@@ -1661,9 +1637,7 @@ mod tests {
                 id: "q".into(),
                 name: "sales".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "x.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
                         columns: vec![],

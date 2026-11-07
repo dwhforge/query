@@ -1309,6 +1309,7 @@ fn ensure_source(
         name: format!("{}.{}", rel.schema, rel.name),
         kind: SourceKind::Postgres,
         path: None,
+        path_kind: Default::default(),
         connection_id: Some(connection_id.to_string()),
         connection_string: None,
         schema: Some(rel.schema.clone()),
@@ -1908,7 +1909,7 @@ mod tests {
         live.workspace.queries.push(QueryDef {
             id: "q_extra".into(),
             name: "extra".into(),
-            steps: vec![TransformationStep::LoadCsv { path: "a.csv".into() }],
+            steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         });
         let _ = live;

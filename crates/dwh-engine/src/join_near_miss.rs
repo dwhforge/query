@@ -382,9 +382,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: sales.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: sales.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Left,
@@ -397,9 +395,7 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
             ],

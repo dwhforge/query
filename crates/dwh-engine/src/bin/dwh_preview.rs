@@ -27,7 +27,7 @@ fn main() {
         let key = args[3].clone();
         let filter = args.get(4).cloned();
         let mut fact_steps = vec![
-            TransformationStep::LoadCsv { path: left },
+            TransformationStep::LoadCsv { path: left, path_kind: Default::default() },
             TransformationStep::Join {
                 right_query_id: "right".into(),
                 join_type: JoinType::Inner,
@@ -43,7 +43,7 @@ fn main() {
                 QueryDef {
                     id: "right".into(),
                     name: "right".into(),
-                    steps: vec![TransformationStep::LoadCsv { path: right }],
+                    steps: vec![TransformationStep::LoadCsv { path: right, path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
@@ -60,7 +60,10 @@ fn main() {
     } else {
         let path = args.remove(0);
         let filter = args.first().cloned();
-        let mut steps = vec![TransformationStep::LoadCsv { path }];
+        let mut steps = vec![TransformationStep::LoadCsv {
+            path,
+            path_kind: Default::default(),
+        }];
         if let Some(condition) = filter {
             steps.push(TransformationStep::Filter { condition });
         }

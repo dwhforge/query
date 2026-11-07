@@ -141,17 +141,13 @@ mod tests {
                 QueryDef {
                     id: "sales_eu".into(),
                     name: "sales_eu".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: eu.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: eu.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sales_us".into(),
                     name: "sales_us".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: us.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: us.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -234,25 +230,19 @@ mod tests {
                 QueryDef {
                     id: "dim_region".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim_r.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim_r.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "dim_channel".into(),
                     name: "dim_channel".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim_c.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim_c.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sparse_sales".into(),
                     name: "sparse_sales".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: sparse.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: sparse.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -316,9 +306,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: path.to_string_lossy().into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: path.to_string_lossy().into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "sales".into(),
@@ -357,7 +345,7 @@ mod tests {
                 id: "commercial_catalog".into(),
                 name: "commercial_catalog".into(),
                 steps: vec![TransformationStep::LoadParquet {
-                    path: path.into(),
+                    path: path.into(), path_kind: Default::default(),
                     connection_id: None,
                 }],
                 execution: Default::default(),
@@ -383,9 +371,7 @@ mod tests {
             queries: vec![QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv {
-                    path: path.to_string_lossy().into(),
-                }],
+                steps: vec![TransformationStep::LoadCsv { path: path.to_string_lossy().into(), path_kind: Default::default() }],
                 execution: Default::default(),
             }],
             focus_query_id: "sales".into(),

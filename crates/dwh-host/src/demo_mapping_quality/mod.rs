@@ -32,12 +32,14 @@ pub fn load(cache: &Path) -> Result<Workspace, String> {
                 "quality_commercial",
                 vec![Step::LoadCsv {
                     path: files.commercial.to_string_lossy().into_owned(),
+                    path_kind: Default::default(),
                 }],
             ),
             query(
                 "quality_catalog",
                 vec![Step::LoadCsv {
                     path: files.catalog.to_string_lossy().into_owned(),
+                    path_kind: Default::default(),
                 }],
             ),
             query(

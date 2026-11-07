@@ -187,9 +187,16 @@ impl JoinType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", content = "payload")]
 pub enum TransformationStep {
-    LoadCsv { path: String },
+    LoadCsv {
+        path: String,
+        /// Absolute vs project-relative ([ADR-0043](../../../docs/adr/0043-project-relative-load-paths.md)).
+        #[serde(default)]
+        path_kind: crate::file_path::FilePathKind,
+    },
     LoadParquet {
         path: String,
+        #[serde(default)]
+        path_kind: crate::file_path::FilePathKind,
         /// Project Connection id (`s3`) for remote paths — ADR-0012.
         #[serde(default)]
         connection_id: Option<String>,
@@ -212,9 +219,11 @@ pub enum TransformationStep {
     LoadDuckdb {
         #[serde(default)]
         connection_id: Option<String>,
-        /// Absolute / project-relative path to `.duckdb` when connection_id absent.
+        /// Path to `.duckdb` when connection_id absent ([ADR-0043](../../../docs/adr/0043-project-relative-load-paths.md)).
         #[serde(default)]
         path: String,
+        #[serde(default)]
+        path_kind: crate::file_path::FilePathKind,
         #[serde(default = "default_pg_schema")]
         schema: String,
         table_name: String,

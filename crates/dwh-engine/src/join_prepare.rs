@@ -145,13 +145,13 @@ fn collect_workspace_paths(workspace: &Workspace, sources: &[SourceDef]) -> Vec<
     for q in &workspace.queries {
         for step in &q.steps {
             match step {
-                TransformationStep::LoadCsv { path }
-                | TransformationStep::LoadParquet { path, .. } => {
+                TransformationStep::LoadCsv { path, path_kind: _ }
+                | TransformationStep::LoadParquet { path, path_kind: _, .. } => {
                     if !path.trim().is_empty() {
                         paths.push(path.clone());
                     }
                 }
-                TransformationStep::LoadDuckdb { path, .. } => {
+                TransformationStep::LoadDuckdb { path, path_kind: _, .. } => {
                     if !path.trim().is_empty() {
                         paths.push(path.clone());
                     }
@@ -1063,18 +1063,14 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: sample.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type,
@@ -1124,9 +1120,7 @@ mod tests {
                     id: "dim".into(),
                     name: "dim".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: dim.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::DeriveColumn {
                             name: "region_key".into(),
                             expression: "region".into(),
@@ -1141,9 +1135,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: sample.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1192,9 +1184,7 @@ mod tests {
                     id: "right".into(),
                     name: "right".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: right_path.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::DeriveColumn {
                             name: "marker".into(),
                             expression: "w".into(),
@@ -1209,9 +1199,7 @@ mod tests {
                     id: "host".into(),
                     name: "host".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: left_path.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "right".into(),
                             join_type: JoinType::Full,
@@ -1275,9 +1263,7 @@ mod tests {
                     id: "dim".into(),
                     name: "dim".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: dim.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::DeriveColumn {
                             name: "region_key".into(),
                             expression: "region".into(),
@@ -1292,9 +1278,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: sample.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1323,9 +1307,7 @@ mod tests {
                     id: "dim".into(),
                     name: "dim".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: dim.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::DeriveColumn {
                             name: "region_key".into(),
                             expression: "totally_missing_column".into(),
@@ -1340,9 +1322,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: sample.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -1436,9 +1416,7 @@ mod tests {
                     id: "dim".into(),
                     name: "dim".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: dim.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::DeriveColumn {
                             name: "region_key".into(),
                             expression: "region".into(),
@@ -1453,9 +1431,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: sample.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,

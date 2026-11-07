@@ -398,17 +398,13 @@ mod tests {
                 QueryDef {
                     id: "dim_region".into(),
                     name: "dim_region".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: dim.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: dim.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sales".into(),
                     name: "sales".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: sample.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: sample.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -483,9 +479,7 @@ mod tests {
                 id: "q".into(),
                 name: "codes_out".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "dummy.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "dummy.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "c".into(),
                         columns: vec![],

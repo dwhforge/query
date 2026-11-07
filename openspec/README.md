@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- ~~[`changes/project-relative-load-paths/`](changes/project-relative-load-paths/)~~ — **merged** → [`specs/project-relative-load-paths/`](specs/project-relative-load-paths/) ([ADR-0043](../docs/adr/0043-project-relative-load-paths.md))
+
 - ~~[`changes/join-lens-in-place-confirm/`](changes/join-lens-in-place-confirm/)~~ — **merged** → [`specs/join-lens-in-place-confirm/`](specs/join-lens-in-place-confirm/) ([ADR-0042](../docs/adr/0042-join-lens-in-place-confirm.md))
 - ~~[`changes/heavy-preview-sample/`](changes/heavy-preview-sample/)~~ — **merged** → [`specs/heavy-preview-sample/`](specs/heavy-preview-sample/) ([ADR-0041](../docs/adr/0041-heavy-preview-sample.md))
 - ~~[`changes/postgres-schema-import/`](changes/postgres-schema-import/)~~ — **merged** → [`specs/postgres-schema-import/`](specs/postgres-schema-import/) ([ADR-0040](../docs/adr/0040-postgres-schema-import.md))

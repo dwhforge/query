@@ -323,9 +323,7 @@ mod tests {
         let q = QueryDef {
             id: "q_map".into(),
             name: "map".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "x.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() }],
             execution: Default::default(),
         };
         let ws = ws_with(vec![q], vec![map.clone()]);
@@ -402,18 +400,14 @@ mod tests {
                 QueryDef {
                     id: "q_map".into(),
                     name: "map".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "m.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "m.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "q_fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "f.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "f.csv".into(), path_kind: Default::default() },
                         TransformationStep::ApplyKeyMap {
                             column: "a".into(),
                             columns: vec![],
@@ -453,9 +447,7 @@ mod tests {
             id: "q_map".into(),
             name: "map".into(),
             steps: vec![
-                TransformationStep::LoadCsv {
-                    path: "x.csv".into(),
-                },
+                TransformationStep::LoadCsv { path: "x.csv".into(), path_kind: Default::default() },
                 TransformationStep::ApplyKeyMap {
                     column: "a".into(),
                     columns: vec![],

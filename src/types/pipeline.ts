@@ -51,11 +51,18 @@ export interface ConnectionDef {
   duckdb?: DuckdbParams;
 }
 
+/** Absolute vs project-relative file locator (ADR-0043). */
+export type FilePathKind = "absolute" | "relative";
+
 export type TransformationStep =
-  | { type: "LoadCsv"; payload: { path: string } }
+  | { type: "LoadCsv"; payload: { path: string; path_kind?: FilePathKind } }
   | {
       type: "LoadParquet";
-      payload: { path: string; connection_id?: string };
+      payload: {
+        path: string;
+        path_kind?: FilePathKind;
+        connection_id?: string;
+      };
     }
   | {
       type: "LoadPostgres";
@@ -76,6 +83,7 @@ export type TransformationStep =
       payload: {
         connection_id?: string;
         path?: string;
+        path_kind?: FilePathKind;
         schema: string;
         table_name: string;
       };
@@ -315,6 +323,8 @@ export interface SourceDef {
   name: string;
   kind: SourceKind;
   path?: string;
+  /** Absolute vs project-relative when `path` is a file (ADR-0043). */
+  path_kind?: FilePathKind;
   connection_id?: string;
   /** Legacy mirror; prefer connection_id. */
   connection_string?: string;
@@ -334,7 +344,7 @@ export interface CanvasLayout {
  * Engine ≠ destination (four routes).
  */
 /** On-disk project document version (ADR-0030). Missing ⇒ 0 at load. */
-export const PROJECT_FORMAT_VERSION = 4 as const;
+export const PROJECT_FORMAT_VERSION = 5 as const;
 
 export interface Project {
   /** Document schema version (ADR-0030). */
@@ -631,6 +641,7 @@ export function syncSourcesFromQueries(
         name: fileName,
         kind: "csv",
         path: step.payload.path,
+        path_kind: step.payload.path_kind ?? "absolute",
       });
     } else if (step.type === "LoadParquet") {
       const key = `parquet:${step.payload.connection_id ?? ""}:${step.payload.path}`;
@@ -643,6 +654,7 @@ export function syncSourcesFromQueries(
         name: fileName,
         kind: "parquet",
         path: step.payload.path,
+        path_kind: step.payload.path_kind ?? "absolute",
         connection_id: step.payload.connection_id,
         // Hive is source-specific — preserve when re-syncing from queries.
         hive_partitioning: existing?.hive_partitioning || undefined,

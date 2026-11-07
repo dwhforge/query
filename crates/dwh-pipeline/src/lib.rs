@@ -7,6 +7,7 @@ pub mod dialect;
 pub mod emit;
 pub mod export_manifest;
 pub mod export_tree;
+pub mod file_path;
 pub mod graph;
 pub mod key_map_sync;
 pub mod keymap_query;
@@ -107,6 +108,10 @@ pub use pg_import::{
     relations_catalog_sql, viewdef_catalog_sql, ConfirmedBinding, ImportColumn, MappingDecision,
     MappingKeyDiagnosis,
     PgImportOutcome, PgImportPlan, PgImportRegistry, PgRelationSnapshot, PlannedRelation,
+};
+pub use file_path::{
+    looks_absolute_cross_platform, portable_relative, relativize_project_file_paths,
+    resolve_for_engine, resolve_workspace_file_paths, try_relativize, FilePathKind,
 };
 pub use project::{
     migrate_project_document, parquet_hive_partitioning, peek_format_version, CanvasLayout,

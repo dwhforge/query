@@ -220,6 +220,7 @@ import { S3SourceDialog } from "./components/S3SourceDialog";
 import { SelectColumnsEditor } from "./components/SelectColumnsEditor";
 import { SourceSchemaPanel } from "./components/SourceSchemaPanel";
 import { debounce } from "./lib/debounce";
+import { bindFilePath } from "./lib/filePath";
 import {
   cancelRunningQuery,
   describePostgresObject,
@@ -2176,13 +2177,16 @@ function App() {
         ? base.replace(/\.csv$/i, "")
         : base.replace(/\.parquet$/i, ""));
     const id = newQueryId(name, queries.map((q) => q.id));
+    const bound = connectionId
+      ? { path, path_kind: "absolute" as const }
+      : bindFilePath(path, project.root_path);
     const step: TransformationStep =
       kind === "csv"
-        ? { type: "LoadCsv", payload: { path } }
+        ? { type: "LoadCsv", payload: bound }
         : {
             type: "LoadParquet",
             payload: {
-              path,
+              ...bound,
               connection_id: connectionId,
             },
           };
@@ -2226,13 +2230,20 @@ function App() {
     let step: TransformationStep;
     let name = source.name;
     if (source.kind === "csv" && source.path) {
-      step = { type: "LoadCsv", payload: { path: source.path } };
+      step = {
+        type: "LoadCsv",
+        payload: {
+          path: source.path,
+          path_kind: source.path_kind ?? "absolute",
+        },
+      };
       name = source.name.replace(/\.csv$/i, "") || name;
     } else if (source.kind === "parquet" && source.path) {
       step = {
         type: "LoadParquet",
         payload: {
           path: source.path,
+          path_kind: source.path_kind ?? "absolute",
           connection_id: source.connection_id,
         },
       };
@@ -3296,9 +3307,10 @@ function App() {
           : [{ name: "Parquet", extensions: ["parquet"] }],
     });
     if (typeof picked !== "string") return;
+    const bound = bindFilePath(picked, project.root_path);
     const oldPath = selectedStep.payload.path;
     const oldBase = oldPath.split(/[/\\]/).pop() ?? "";
-    const newBase = picked.split(/[/\\]/).pop() ?? picked;
+    const newBase = bound.path.split(/[/\\]/).pop() ?? bound.path;
     const stepIndex = selectedStepIndex;
     const queryId = activeQueryId;
     setProject((p) => {
@@ -3309,12 +3321,12 @@ function App() {
           steps: q.steps.map((s, i) => {
             if (i !== stepIndex) return s;
             if (s.type === "LoadCsv") {
-              return { type: "LoadCsv" as const, payload: { path: picked } };
+              return { type: "LoadCsv" as const, payload: { ...bound } };
             }
             if (s.type === "LoadParquet") {
               return {
                 type: "LoadParquet" as const,
-                payload: { ...s.payload, path: picked },
+                payload: { ...s.payload, ...bound },
               };
             }
             return s;
@@ -3326,7 +3338,8 @@ function App() {
         const renameDefault = !s.name.trim() || s.name === oldBase;
         return {
           ...s,
-          path: picked,
+          path: bound.path,
+          path_kind: bound.path_kind,
           name: renameDefault ? newBase : s.name,
         };
       });
@@ -3386,11 +3399,20 @@ function App() {
         name: base,
       });
       // Keep the live Inspect node in the session; only the file omits it.
+      // Apply Save-time path relativization (ADR-0043) from the host response.
       setProject((p) => ({
         ...p,
         root_path: path,
         name: base,
+        format_version: saved.format_version ?? p.format_version,
         project_uid: saved.project_uid ?? p.project_uid,
+        sources: saved.sources ?? p.sources,
+        workspace: {
+          ...p.workspace,
+          queries: saved.workspace?.queries ?? p.workspace.queries,
+          key_maps: p.workspace.key_maps,
+          focus_query_id: p.workspace.focus_query_id,
+        },
         connections: p.connections,
       }));
       setExportMsg(`Project saved → ${path}`);
@@ -6864,15 +6886,34 @@ function App() {
                     {(selectedStep.type === "LoadCsv" ||
                       selectedStep.type === "LoadParquet") && (
                       <div className="space-y-2 rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2">
-                        <p className="text-[10px] text-slate-500">
-                          Source step (pinned at s0)
-                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-[10px] text-slate-500">
+                            Source step (pinned at s0)
+                          </p>
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+                              (selectedStep.payload.path_kind ?? "absolute") ===
+                              "relative"
+                                ? "bg-teal-500/20 text-teal-100"
+                                : "bg-slate-700/80 text-slate-300"
+                            }`}
+                            title="ADR-0043 path_kind — relative is vs the project file directory"
+                          >
+                            {selectedStep.payload.path_kind ?? "absolute"}
+                          </span>
+                        </div>
                         <p
                           className="break-all font-mono text-[11px] text-slate-300"
                           title={selectedStep.payload.path}
                         >
                           {selectedStep.payload.path}
                         </p>
+                        {!project.root_path && (
+                          <p className="text-[10px] text-amber-200/80">
+                            Save the project to store paths relative to the
+                            project file.
+                          </p>
+                        )}
                         <button
                           type="button"
                           className="w-full rounded-lg border border-teal-800/80 bg-teal-500/10 px-3 py-1.5 text-xs font-semibold text-teal-100 hover:bg-teal-500/20 disabled:opacity-40"

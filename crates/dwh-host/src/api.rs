@@ -199,13 +199,13 @@ fn demo_sales(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "dim_region".into(),
                 name: "dim_region".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim }],
+                steps: vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv { path: fact }],
+                steps: vec![TransformationStep::LoadCsv { path: fact, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -318,13 +318,13 @@ fn demo_union(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "sales_eu".into(),
                 name: "sales_eu".into(),
-                steps: vec![TransformationStep::LoadCsv { path: eu }],
+                steps: vec![TransformationStep::LoadCsv { path: eu, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sales_us".into(),
                 name: "sales_us".into(),
-                steps: vec![TransformationStep::LoadCsv { path: us }],
+                steps: vec![TransformationStep::LoadCsv { path: us, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -395,7 +395,7 @@ fn demo_sql(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "sales".into(),
                 name: "sales".into(),
-                steps: vec![TransformationStep::LoadCsv { path: fact }],
+                steps: vec![TransformationStep::LoadCsv { path: fact, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -445,19 +445,19 @@ fn demo_right_joins(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "dim_region".into(),
                 name: "dim_region".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim_r }],
+                steps: vec![TransformationStep::LoadCsv { path: dim_r, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "dim_channel".into(),
                 name: "dim_channel".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim_c }],
+                steps: vec![TransformationStep::LoadCsv { path: dim_c, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sparse_sales".into(),
                 name: "sparse_sales".into(),
-                steps: vec![TransformationStep::LoadCsv { path: sparse }],
+                steps: vec![TransformationStep::LoadCsv { path: sparse, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
@@ -621,19 +621,19 @@ fn demo_keymap(fixtures: &Path) -> Result<Workspace, String> {
             QueryDef {
                 id: "dim_company".into(),
                 name: "dim_company".into(),
-                steps: vec![TransformationStep::LoadCsv { path: dim }],
+                steps: vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "sales_daily".into(),
                 name: "sales_daily".into(),
-                steps: vec![TransformationStep::LoadCsv { path: sales }],
+                steps: vec![TransformationStep::LoadCsv { path: sales, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             QueryDef {
                 id: "res_consumption".into(),
                 name: "res_consumption".into(),
-                steps: vec![TransformationStep::LoadCsv { path: spend }],
+                steps: vec![TransformationStep::LoadCsv { path: spend, path_kind: Default::default() }],
                 execution: Default::default(),
             },
             // Case A — no map: sales names ≠ company_id → Join Lens Probe / Add to map…
@@ -1039,10 +1039,16 @@ fn lower_for_operation(
     kind: ResolveKind,
     published_fallback: Vec<String>,
 ) -> Result<LoweredOperation, String> {
-    if !cites_external(workspace) {
+    // ADR-0043: resolve relative Load/Source paths against the project file (local too).
+    let pf = project_file.filter(|s| !s.is_empty()).map(Path::new);
+    let mut local_ws = workspace.clone();
+    let mut local_sources = sources.to_vec();
+    dwh_pipeline::resolve_workspace_file_paths(pf, &mut local_ws, &mut local_sources)?;
+
+    if !cites_external(&local_ws) {
         return Ok(LoweredOperation {
-            workspace: workspace.clone(),
-            sources: sources.to_vec(),
+            workspace: local_ws,
+            sources: local_sources,
             published_query_ids: published_fallback,
             provenance_json: None,
         });
@@ -1056,8 +1062,8 @@ fn lower_for_operation(
         ),
         references,
         connection_bindings,
-        workspace,
-        sources,
+        workspace: &local_ws,
+        sources: &local_sources,
         available_connections: &available,
         kind,
     })

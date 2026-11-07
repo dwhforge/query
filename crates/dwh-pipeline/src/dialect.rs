@@ -69,7 +69,7 @@ pub fn validate_engine_execution(
                             query.name
                         ));
                     }
-                    TransformationStep::LoadParquet { path, .. }
+                    TransformationStep::LoadParquet { path, path_kind: _, .. }
                         if path.starts_with("s3://")
                             || path.starts_with("http://")
                             || path.starts_with("https://") =>
@@ -97,7 +97,7 @@ pub fn validate_engine_execution(
 pub fn workspace_needs_s3_landing(queries: &[QueryDef]) -> bool {
     queries.iter().any(|q| {
         q.steps.iter().any(|s| match s {
-            TransformationStep::LoadParquet { path, .. } | TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadParquet { path, path_kind: _, .. } | TransformationStep::LoadCsv { path, path_kind: _ } => {
                 path.starts_with("s3://")
                     || path.starts_with("http://")
                     || path.starts_with("https://")
@@ -170,9 +170,7 @@ mod tests {
         let q = QueryDef {
             id: "q".into(),
             name: "q".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "/tmp/a.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "/tmp/a.csv".into(), path_kind: Default::default() }],
             execution: QueryExecution::Target,
         };
         assert!(validate_target_execution(&q, WarehouseDialect::Postgres).is_err());
@@ -184,9 +182,7 @@ mod tests {
         let q = QueryDef {
             id: "q".into(),
             name: "q".into(),
-            steps: vec![TransformationStep::LoadCsv {
-                path: "/tmp/a.csv".into(),
-            }],
+            steps: vec![TransformationStep::LoadCsv { path: "/tmp/a.csv".into(), path_kind: Default::default() }],
             execution: QueryExecution::Local,
         };
         assert!(validate_target_execution(&q, WarehouseDialect::Postgres).is_ok());

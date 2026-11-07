@@ -29,17 +29,13 @@ mod tests {
                 QueryDef {
                     id: "sales_eu".into(),
                     name: "sales_eu".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: eu.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: eu.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "sales_us".into(),
                     name: "sales_us".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: us.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: us.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -350,9 +346,7 @@ mod tests {
                 queries: vec![QueryDef {
                     id: "q_products".into(),
                     name: "products".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "data/products.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "data/products.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 }],
                 focus_query_id: "q_products".into(),

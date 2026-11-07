@@ -306,9 +306,7 @@ mod tests {
                 queries: vec![QueryDef {
                     id: "q_main".into(),
                     name: "main".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "a.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 }],
                 focus_query_id: "q_main".into(),

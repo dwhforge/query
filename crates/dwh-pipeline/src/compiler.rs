@@ -286,13 +286,14 @@ fn compile_step(
     prev_columns: Option<&[String]>,
 ) -> Result<String, String> {
     match step {
-        TransformationStep::LoadCsv { path } => Ok(format!(
+        TransformationStep::LoadCsv { path, path_kind: _ } => Ok(format!(
             "SELECT * FROM read_csv_auto('{}')",
             escape_sql_string(path)
         )),
         TransformationStep::LoadParquet {
             path,
             connection_id,
+            ..
         } => {
             let hive = parquet_hive_partitioning(sources, path, connection_id.as_deref());
             Ok(format!(
@@ -421,18 +422,14 @@ mod tests {
                 QueryDef {
                     id: "q_map".into(),
                     name: "map".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "/tmp/map.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "/tmp/map.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
                     id: "q_fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "/tmp/fact.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "/tmp/fact.csv".into(), path_kind: Default::default() },
                         TransformationStep::ApplyKeyMap {
                             column: "alias".into(),
                             columns: vec![],
@@ -479,9 +476,7 @@ mod tests {
                 id: "q1".into(),
                 name: "q1".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "/tmp/t.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "/tmp/t.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
                         columns: vec![],
@@ -529,9 +524,7 @@ mod tests {
                 id: "q1".into(),
                 name: "q1".into(),
                 steps: vec![
-                    TransformationStep::LoadCsv {
-                        path: "/tmp/t.csv".into(),
-                    },
+                    TransformationStep::LoadCsv { path: "/tmp/t.csv".into(), path_kind: Default::default() },
                     TransformationStep::ApplyKeyMap {
                         column: "channel".into(),
                         columns: vec![],
@@ -579,9 +572,7 @@ mod tests {
     #[test]
     fn linear_load_filter_preview() {
         let steps = vec![
-            TransformationStep::LoadCsv {
-                path: "/tmp/data.csv".into(),
-            },
+            TransformationStep::LoadCsv { path: "/tmp/data.csv".into(), path_kind: Default::default() },
             TransformationStep::Filter {
                 condition: "amount > 100".into(),
             },
@@ -599,9 +590,7 @@ mod tests {
                 QueryDef {
                     id: "sales".into(),
                     name: "sales".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "sales.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "sales.csv".into(), path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
@@ -635,18 +624,14 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "dim.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "dim.csv".into(), path_kind: Default::default() }],
                  execution: Default::default(),
 },
                 QueryDef {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: "fact.csv".into(),
-                        },
+                        TransformationStep::LoadCsv { path: "fact.csv".into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Inner,
@@ -681,9 +666,7 @@ mod tests {
                 QueryDef {
                     id: "sales".into(),
                     name: "sales".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "sales.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "sales.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
                 QueryDef {
@@ -706,9 +689,7 @@ mod tests {
 
     #[test]
     fn escapes_quotes_in_path() {
-        let steps = vec![TransformationStep::LoadCsv {
-            path: "/tmp/o'Brien.csv".into(),
-        }];
+        let steps = vec![TransformationStep::LoadCsv { path: "/tmp/o'Brien.csv".into(), path_kind: Default::default() }];
         let sql = PipelineCompiler::new(&steps).to_sql(true).unwrap();
         assert!(sql.contains("read_csv_auto('/tmp/o''Brien.csv')"));
     }

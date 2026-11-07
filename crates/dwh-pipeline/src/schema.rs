@@ -307,15 +307,11 @@ mod tests {
             queries: vec![
                 q(
                     "eu",
-                    vec![TransformationStep::LoadCsv {
-                        path: "eu.csv".into(),
-                    }],
+                    vec![TransformationStep::LoadCsv { path: "eu.csv".into(), path_kind: Default::default() }],
                 ),
                 q(
                     "us",
-                    vec![TransformationStep::LoadCsv {
-                        path: "us.csv".into(),
-                    }],
+                    vec![TransformationStep::LoadCsv { path: "us.csv".into(), path_kind: Default::default() }],
                 ),
                 q(
                     "all",
@@ -376,9 +372,7 @@ mod tests {
         let ws = Workspace {
             queries: vec![q(
                 "a",
-                vec![TransformationStep::LoadCsv {
-                    path: "a.csv".into(),
-                }],
+                vec![TransformationStep::LoadCsv { path: "a.csv".into(), path_kind: Default::default() }],
             )],
             focus_query_id: "a".into(),
             key_maps: vec![],

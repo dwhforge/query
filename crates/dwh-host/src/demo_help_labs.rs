@@ -81,15 +81,15 @@ pub fn demo_recon_ship_sales(fixtures: &Path) -> Result<Workspace, String> {
         queries: vec![
             q(
                 "dim_product",
-                vec![TransformationStep::LoadCsv { path: dim }],
+                vec![TransformationStep::LoadCsv { path: dim, path_kind: Default::default() }],
             ),
             q(
                 "shipments",
-                vec![TransformationStep::LoadCsv { path: shipments }],
+                vec![TransformationStep::LoadCsv { path: shipments, path_kind: Default::default() }],
             ),
             q(
                 "sales",
-                vec![TransformationStep::LoadCsv { path: sales }],
+                vec![TransformationStep::LoadCsv { path: sales, path_kind: Default::default() }],
             ),
             // Dirty: commercial codes ≠ plant product_id
             q(
@@ -232,11 +232,11 @@ pub fn demo_name_id_match(fixtures: &Path) -> Result<Workspace, String> {
         queries: vec![
             q(
                 "crm_products",
-                vec![TransformationStep::LoadCsv { path: crm }],
+                vec![TransformationStep::LoadCsv { path: crm, path_kind: Default::default() }],
             ),
             q(
                 "erp_products",
-                vec![TransformationStep::LoadCsv { path: erp }],
+                vec![TransformationStep::LoadCsv { path: erp, path_kind: Default::default() }],
             ),
             // Ids never collide across systems — Auto compares sibling `name` labels.
             q(

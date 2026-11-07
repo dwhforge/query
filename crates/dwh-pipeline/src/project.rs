@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// On-disk project document version (ADR-0030). Independent of IPC protocol version.
-pub const PROJECT_FORMAT_VERSION: u32 = 4;
+/// v5 = explicit Load/Source `path_kind` ([ADR-0043](../../../docs/adr/0043-project-relative-load-paths.md)).
+pub const PROJECT_FORMAT_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +30,9 @@ pub struct SourceDef {
     pub kind: SourceKind,
     #[serde(default)]
     pub path: Option<String>,
+    /// Absolute vs project-relative when `path` is a file ([ADR-0043](../../../docs/adr/0043-project-relative-load-paths.md)).
+    #[serde(default)]
+    pub path_kind: crate::file_path::FilePathKind,
     #[serde(default)]
     pub connection_id: Option<String>,
     #[serde(default)]
@@ -236,6 +240,8 @@ pub fn migrate_project_document(v: &mut Value) -> Result<(), String> {
             2 => migrate_v2_to_v3(obj)?,
             // ADR-0040: import provenance is optional. Stamp so older apps refuse the file.
             3 => migrate_v3_to_v4(obj),
+            // ADR-0043: stamp path_kind on file Loads / Sources.
+            4 => migrate_v4_to_v5(obj),
             other => {
                 return Err(format!(
                     "missing migration from format_version {other} → {}",
@@ -326,6 +332,11 @@ fn migrate_v1_to_v2(_obj: &mut serde_json::Map<String, Value>) {}
 
 /// ADR-0040 — Postgres import registry is additive. Older apps must refuse v4.
 fn migrate_v3_to_v4(_obj: &mut serde_json::Map<String, Value>) {}
+
+/// ADR-0043 — stamp explicit path_kind (cross-platform heuristic).
+fn migrate_v4_to_v5(obj: &mut serde_json::Map<String, Value>) {
+    crate::file_path::stamp_path_kind_in_json(obj);
+}
 
 /// ADR-0037 — KeyMap multi-output: fold scalar To into output lists; rewrite Apply bindings.
 fn migrate_v2_to_v3(obj: &mut serde_json::Map<String, Value>) -> Result<(), String> {
@@ -786,9 +797,7 @@ mod tests {
                 queries: vec![QueryDef {
                     id: "q1".into(),
                     name: "q1".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: "/tmp/a.csv".into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: "/tmp/a.csv".into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 }],
                 focus_query_id: "q1".into(),
@@ -963,6 +972,51 @@ mod tests {
             .to_json_pretty()
             .unwrap()
             .contains(&format!("\"format_version\": {PROJECT_FORMAT_VERSION}")));
+    }
+
+    #[test]
+    fn v4_to_v5_stamps_path_kind_cross_platform() {
+        let v4 = r#"{
+            "format_version": 4,
+            "id": "p",
+            "name": "v4",
+            "connections": [],
+            "sources": [
+              { "id": "s1", "name": "a.csv", "kind": "csv", "path": "C:\\data\\a.csv" },
+              { "id": "s2", "name": "b.csv", "kind": "csv", "path": "data/b.csv" }
+            ],
+            "workspace": {
+              "queries": [
+                {
+                  "id": "q1",
+                  "name": "q1",
+                  "steps": [
+                    { "type": "LoadCsv", "payload": { "path": "/tmp/x.csv" } },
+                    { "type": "LoadCsv", "payload": { "path": "rel/y.csv" } }
+                  ]
+                }
+              ],
+              "focus_query_id": "q1",
+              "key_maps": []
+            },
+            "dbt_target": "v1"
+        }"#;
+        let p = Project::from_json(v4).unwrap();
+        assert_eq!(p.format_version, PROJECT_FORMAT_VERSION);
+        assert_eq!(p.sources[0].path_kind, crate::file_path::FilePathKind::Absolute);
+        assert_eq!(p.sources[1].path_kind, crate::file_path::FilePathKind::Relative);
+        match &p.workspace.queries[0].steps[0] {
+            crate::model::TransformationStep::LoadCsv { path_kind, .. } => {
+                assert_eq!(*path_kind, crate::file_path::FilePathKind::Absolute);
+            }
+            other => panic!("expected LoadCsv, got {other:?}"),
+        }
+        match &p.workspace.queries[0].steps[1] {
+            crate::model::TransformationStep::LoadCsv { path_kind, .. } => {
+                assert_eq!(*path_kind, crate::file_path::FilePathKind::Relative);
+            }
+            other => panic!("expected LoadCsv, got {other:?}"),
+        }
     }
 
     #[test]

@@ -67,6 +67,8 @@ pub fn refuse_unsupported_on_disk_format(path: &str) -> Result<(), String> {
 pub fn save_project_with_secrets(path: &str, project: &Project) -> Result<Project, String> {
     let mut project = project.clone();
     project.format_version = PROJECT_FORMAT_VERSION;
+    // ADR-0043: absolute Loads under the project dir → relative + path_kind.
+    dwh_pipeline::relativize_project_file_paths(Path::new(path), &mut project);
     // Mint a uid only when both memory and the file lack one (ADR-0025).
     ensure_project_uid(&mut project, Some(Path::new(path)));
     // Migrate any inline project connections into the global store first.

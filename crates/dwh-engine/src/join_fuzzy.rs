@@ -581,10 +581,10 @@ fn summarize_lineage(steps: &[TransformationStep]) -> String {
     let parts: Vec<String> = steps
         .iter()
         .map(|s| match s {
-            TransformationStep::LoadCsv { path } => {
+            TransformationStep::LoadCsv { path, path_kind: _ } => {
                 format!("LoadCsv({})", short_path(path))
             }
-            TransformationStep::LoadParquet { path, .. } => {
+            TransformationStep::LoadParquet { path, path_kind: _, .. } => {
                 format!("LoadParquet({})", short_path(path))
             }
             TransformationStep::LoadPostgres {
@@ -1100,9 +1100,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: left_path.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Left,
@@ -1115,9 +1113,7 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: right_path.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
             ],
@@ -1183,9 +1179,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: left_path.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Full,
@@ -1198,9 +1192,7 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: right_path.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
             ],
@@ -1248,9 +1240,7 @@ mod tests {
                     id: "fact".into(),
                     name: "fact".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: left_path.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "dim".into(),
                             join_type: JoinType::Left,
@@ -1263,9 +1253,7 @@ mod tests {
                 QueryDef {
                     id: "dim".into(),
                     name: "dim".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: right_path.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
             ],
@@ -1313,9 +1301,7 @@ mod tests {
                     id: "crm".into(),
                     name: "crm".into(),
                     steps: vec![
-                        TransformationStep::LoadCsv {
-                            path: left_path.to_string_lossy().into(),
-                        },
+                        TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() },
                         TransformationStep::Join {
                             right_query_id: "erp".into(),
                             join_type: JoinType::Left,
@@ -1328,9 +1314,7 @@ mod tests {
                 QueryDef {
                     id: "erp".into(),
                     name: "erp".into(),
-                    steps: vec![TransformationStep::LoadCsv {
-                        path: right_path.to_string_lossy().into(),
-                    }],
+                    steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }],
                     execution: Default::default(),
                 },
             ],

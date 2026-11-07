@@ -31,6 +31,7 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/specs/project-relative-load-paths/` — ADR-0043 relative Load paths + path_kind (merged)
 - `openspec/specs/join-lens-in-place-confirm/` — ADR-0042 Join Lens in-place confirm (merged)
 - `openspec/specs/heavy-preview-sample/` — ADR-0041 heavy preview sample + Load full (merged)
 - `openspec/specs/postgres-schema-import/` — ADR-0040 Postgres schema import (merged)

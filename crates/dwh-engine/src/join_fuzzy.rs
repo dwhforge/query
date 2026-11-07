@@ -331,21 +331,56 @@ pub fn join_key_fuzzy_suggest_on(
 
     let scanned_left = left_keys.len() as u64;
     let scanned_right = right_to_candidates.len() as u64;
-    let records = |keys: &[String]| {
-        keys.iter()
-            .map(|key| MatchRecord {
-                key: key.clone(),
-                label: key.clone(),
-            })
-            .collect::<Vec<_>>()
-    };
+    // When both sides carry a sibling name/label column, compare those labels
+    // but keep Join keys (ids) in the returned pairs — id→id seed, match by name.
+    let left_label_col = sibling_label_column(&left_columns, &left_on[key_i]);
+    let right_label_col = sibling_label_column(&right_columns, &right_on[key_i]);
+    let mut left_labs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut right_labs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let (left_records, right_records) =
+        match (left_label_col.as_deref(), right_label_col.as_deref()) {
+            (Some(ll), Some(rl)) => {
+                left_labs = load_labels_for_keys(
+                    db,
+                    &compiled,
+                    &left_cte,
+                    &left_key_cols,
+                    ll,
+                    &left_keys,
+                )?;
+                right_labs = load_labels_for_keys(
+                    db,
+                    &compiled,
+                    &right_cte,
+                    &right_key_cols,
+                    rl,
+                    &right_to_candidates,
+                )?;
+                (
+                    records_with_labels(&left_keys, &left_labs),
+                    records_with_labels(&right_to_candidates, &right_labs),
+                )
+            }
+            _ => (
+                records_key_as_label(&left_keys),
+                records_key_as_label(&right_to_candidates),
+            ),
+        };
     let mut suggestions = match_keys(
-        &records(&left_keys),
-        &records(&right_to_candidates),
+        &left_records,
+        &right_records,
         KeyMatchOptions::default(),
         MatchPolicy::JoinKeyTypos,
         CandidateSearch::Exhaustive,
     );
+    if !left_labs.is_empty() {
+        for s in &mut suggestions {
+            s.from_label = left_labs.get(&s.from_key).cloned();
+            s.to_label = right_labs.get(&s.to_key).cloned();
+        }
+    }
     // Preserve Join Lens's existing cap and score-first display order.
     suggestions.truncate(MAX_SUGGESTIONS);
     suggestions.sort_by(|a, b| {
@@ -427,6 +462,97 @@ pub fn join_key_fuzzy_suggest_on(
             context_truncated,
         },
     })
+}
+
+/// Prefer a human label column for fuzzy compare when Join ON is an id.
+fn sibling_label_column(columns: &[ColumnMetadata], key_col: &str) -> Option<String> {
+    const CANDIDATES: &[&str] = &[
+        "name",
+        "label",
+        "title",
+        "product_name",
+        "display_name",
+    ];
+    let key_l = key_col.trim().to_ascii_lowercase();
+    for want in CANDIDATES {
+        if *want == key_l {
+            continue;
+        }
+        if let Some(c) = columns
+            .iter()
+            .find(|c| c.name.trim().eq_ignore_ascii_case(want))
+        {
+            return Some(c.name.clone());
+        }
+    }
+    None
+}
+
+fn records_key_as_label(keys: &[String]) -> Vec<MatchRecord> {
+    keys.iter()
+        .map(|key| MatchRecord {
+            key: key.clone(),
+            label: key.clone(),
+        })
+        .collect()
+}
+
+fn records_with_labels(
+    keys: &[String],
+    labels: &std::collections::HashMap<String, String>,
+) -> Vec<MatchRecord> {
+    keys.iter()
+        .map(|key| MatchRecord {
+            key: key.clone(),
+            label: labels
+                .get(key)
+                .cloned()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| key.clone()),
+        })
+        .collect()
+}
+
+/// One label per key from the CTE (first non-null label wins).
+fn load_labels_for_keys(
+    db: &DbSession,
+    compiled: &CompiledCtes,
+    cte: &str,
+    key_cols: &[String],
+    label_col: &str,
+    keys: &[String],
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut out = std::collections::HashMap::new();
+    if keys.is_empty() || key_cols.is_empty() {
+        return Ok(out);
+    }
+    let key = key_expr("t", key_cols);
+    let lab = format!("CAST(t.{} AS VARCHAR)", quote_ident(label_col));
+    // Chunk IN lists to keep SQL bounded.
+    for chunk in keys.chunks(80) {
+        let vals = values_list(&chunk.to_vec());
+        let sql = compiled.wrap_select(&format!(
+            "SELECT k, lab FROM (\n\
+               SELECT {key} AS k, {lab} AS lab,\n\
+                 row_number() OVER (PARTITION BY {key} ORDER BY 1) AS __rn\n\
+               FROM {cte} t\n\
+               WHERE {key} IN (SELECT * FROM (VALUES {vals}) v(k))\n\
+                 AND {lab} IS NOT NULL AND length(trim({lab})) > 0\n\
+             ) s\n\
+             WHERE s.__rn = 1"
+        ));
+        db.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let k: String = row.get(0).map_err(|e| e.to_string())?;
+                let lab: String = row.get(1).map_err(|e| e.to_string())?;
+                out.entry(k).or_insert(lab);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(out)
 }
 
 fn key_expr(alias: &str, cols: &[String]) -> String {
@@ -1157,6 +1283,68 @@ mod tests {
             join_key_fuzzy_suggest_on(&db, &ws, &[], &[], "fact", 1, Some(0), None, None)
                 .unwrap();
         assert!(scored.disabled_reason.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fuzzy_on_id_scores_sibling_name_labels() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("dwh-fuzzy-name-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        let left_path = dir.join("crm.csv");
+        let right_path = dir.join("erp.csv");
+        fs::write(
+            &left_path,
+            "crm_id,name\nC-200,NPK 16-16-16\nC-300,Ammonia anhydrous\n",
+        )
+        .unwrap();
+        fs::write(
+            &right_path,
+            "erp_id,name\nE-NPK16,NPK 16:16:16\nE-NH3,Ammonia anh.\n",
+        )
+        .unwrap();
+        let db = DbSession::new().unwrap();
+        let ws = Workspace {
+            queries: vec![
+                QueryDef {
+                    id: "crm".into(),
+                    name: "crm".into(),
+                    steps: vec![
+                        TransformationStep::LoadCsv {
+                            path: left_path.to_string_lossy().into(),
+                        },
+                        TransformationStep::Join {
+                            right_query_id: "erp".into(),
+                            join_type: JoinType::Left,
+                            left_on: vec!["crm_id".into()],
+                            right_on: vec!["erp_id".into()],
+                        },
+                    ],
+                    execution: Default::default(),
+                },
+                QueryDef {
+                    id: "erp".into(),
+                    name: "erp".into(),
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: right_path.to_string_lossy().into(),
+                    }],
+                    execution: Default::default(),
+                },
+            ],
+            focus_query_id: "crm".into(),
+            key_maps: vec![],
+        };
+        let out = join_key_fuzzy_suggest(&db, &ws, &[], &[], "crm", 1).unwrap();
+        assert!(
+            out.suggestions.iter().any(|p| p.from_key == "C-200"
+                && p.to_key == "E-NPK16"
+                && p.from_label.as_deref() == Some("NPK 16-16-16")),
+            "expected id pair with name labels, got {:?}",
+            out.suggestions
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

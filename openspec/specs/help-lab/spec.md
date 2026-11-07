@@ -27,6 +27,14 @@ Help SHALL include offline lab `recon_ship_sales` with committed CSVs under `fix
 - **WHEN** `fixtures/examples/` has not been generated
 - **THEN** `recon_ship_sales` still loads successfully from committed lab fixtures
 
+### Requirement: Name→id match lab
+Help SHALL include offline lab `name_id_match` with two independent CSV catalogs (`crm_id`/`name`, `erp_id`/`name`), a dirty Join on ids, and a KeyMap seed whose From/To are ids with `from_name`/`to_name` attrs for editing. Join Lens Auto SHALL score sibling name labels while proposing id→id pairs.
+
+#### Scenario: Open name_id_match
+- **WHEN** the user opens `name_id_match` from Help Lab
+- **THEN** the workspace focuses `dirty_by_id`
+- **AND** KeyMap `map_crm_to_erp` has editable columns `from_name` and `to_name`
+
 ### Requirement: Flattened discovery
 EmptyHero and Help SHALL prefer Help Lab over a long equal-weight demo button row. Postgres-only labs MAY appear only under an Advanced track in the catalog.
 

@@ -2,8 +2,8 @@
 
 ## Status
 
-**Accepted** (2026-11-07) — product decision. Implementation tracked in
-`openspec/changes/join-lens-in-place-confirm/` (not started).
+**Accepted** (2026-11-07) — implemented; contract merged to
+`openspec/specs/join-lens-in-place-confirm/`.
 
 ## Context
 

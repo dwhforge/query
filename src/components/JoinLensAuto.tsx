@@ -13,6 +13,17 @@ import {
   joinKeyMapSystemPrompt,
   parseSuggestedPairs,
 } from "../lib/joinLensLlmPrompt";
+import {
+  acceptProposal,
+  acceptedProposals,
+  collectAcceptedPairs,
+  pendingProposals,
+  proposalsFromFuzzy,
+  proposalsFromLlmPairs,
+  reopenProposal,
+  skipProposal,
+  type LensConfirmProposal,
+} from "../lib/joinLensConfirm";
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
 
@@ -94,6 +105,14 @@ function AssistantBubble({ content }: { content: string }) {
   );
 }
 
+function patchProposal(
+  list: LensConfirmProposal[],
+  id: string,
+  next: LensConfirmProposal,
+): LensConfirmProposal[] {
+  return list.map((p) => (p.id === id ? next : p));
+}
+
 export function JoinLensAuto({
   workspace,
   hostQueryId,
@@ -109,22 +128,24 @@ export function JoinLensAuto({
   connections: ConnectionDef[];
   sources?: SourceDef[];
   projectRef?: ProjectRefContext;
+  /** ADR-0042: commit session-accepted pairs (KeyMap + ApplyKeyMap). */
   onAccept?: (
     fromValues: string[],
     toValues: string[],
     opts?: {
       fromParts?: string[][];
-      /** Fact columns for ApplyKeyMap (ADR-0024 selected Join keys). */
       applyColumns?: string[];
-      /** Column overwritten / written by Apply (per-column or fuzzy slot). */
       outputColumn?: string;
+      /** Sibling name labels → KeyMap attrs from_name / to_name. */
+      fromLabels?: (string | null)[];
+      toLabels?: (string | null)[];
     },
   ) => void;
 }) {
   const [report, setReport] = useState<JoinKeyFuzzySuggest | null>(null);
+  const [proposals, setProposals] = useState<LensConfirmProposal[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [picked, setPicked] = useState<Record<number, boolean>>({});
   const [llm, setLlm] = useState<LlmConfig | null>(null);
   const [showConn, setShowConn] = useState(false);
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
@@ -173,13 +194,13 @@ export function JoinLensAuto({
     setLoading(true);
     setError(null);
     setReport(null);
+    setProposals([]);
     setChat([]);
     setChatError(null);
     setChatBusy(false);
 
     async function run() {
       try {
-        // Probe join arity when entering composite mode (need left_on length).
         let result = await joinKeyFuzzySuggest(
           workspace,
           hostQueryId,
@@ -211,11 +232,7 @@ export function JoinLensAuto({
         }
         if (cancelled) return;
         setReport(result);
-        const next: Record<number, boolean> = {};
-        result.suggestions.forEach((p, i) => {
-          next[i] = !p.ambiguous;
-        });
-        setPicked(next);
+        setProposals(proposalsFromFuzzy(result.suggestions));
         const openChat =
           !result.disabled_reason &&
           result.suggestions.length === 0 &&
@@ -243,10 +260,11 @@ export function JoinLensAuto({
     compositeFuzzySlot,
   ]);
 
-  const selected = useMemo(() => {
-    if (!report) return [];
-    return report.suggestions.filter((_, i) => picked[i]);
-  }, [report, picked]);
+  const accepted = useMemo(
+    () => acceptedProposals(proposals),
+    [proposals],
+  );
+  const pending = useMemo(() => pendingProposals(proposals), [proposals]);
 
   const lastAssistant = [...chat].reverse().find((m) => m.role === "assistant");
   const chatPairs = useMemo(() => {
@@ -300,13 +318,39 @@ export function JoinLensAuto({
       ) {
         return;
       }
-      setChat([...next, { role: "assistant", content: res.content }]);
+      setChat((prev) => [...prev, { role: "assistant", content: res.content }]);
     } catch (e) {
-      if (chatGen.current !== gen) return;
-      setChatError(typeof e === "string" ? e : String(e));
+      if (chatGen.current === gen) {
+        setChatError(typeof e === "string" ? e : String(e));
+      }
     } finally {
       if (chatGen.current === gen) setChatBusy(false);
     }
+  }
+
+  /** ADR-0042: LLM queues into the same Lens batch as fuzzy; one Write commits all. */
+  function queueLlmPairs(mode: "accepted" | "pending") {
+    const added = proposalsFromLlmPairs(chatPairs, proposals).map((p) =>
+      mode === "accepted" ? acceptProposal(p) : p,
+    );
+    if (!added.length) return;
+    setProposals((prev) => [...prev, ...added]);
+  }
+
+  function commitAccepted() {
+    if (!onAccept || accepted.length === 0) return;
+    const pairs = collectAcceptedPairs(proposals);
+    onAccept(pairs.fromValues, pairs.toValues, {
+      fromParts: pairs.fromParts,
+      fromLabels: pairs.fromLabels,
+      toLabels: pairs.toLabels,
+      ...acceptApplyOpts(
+        report?.left_on ?? [],
+        keyIndex,
+        compositeMode,
+        compositeFuzzySlot,
+      ),
+    });
   }
 
   const leftoverCount =
@@ -314,182 +358,306 @@ export function JoinLensAuto({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {/* —— 1. Fuzzy matcher —— */}
       <section
-        className={`flex min-h-0 flex-col border-b border-slate-800 ${
-          chatOpen ? "max-h-[38%] shrink-0" : "flex-1"
-        }`}
-        aria-label="Fuzzy similar names"
+        className="flex min-h-0 flex-1 flex-col"
+        aria-label="Fuzzy match confirm"
       >
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-950/40 bg-amber-950/20 px-2 py-1.5">
-          <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-200/95">
-            Suggestions
-          </span>
-          <span className="text-[11px] text-slate-400">
-            {loading
-              ? "Scoring unmatched keys…"
-              : report?.disabled_reason
-                ? "Suggestions unavailable for this join"
-                : report
-                  ? `${report.suggestions.length} similar name${report.suggestions.length === 1 ? "" : "s"} · min similarity ${report.score_cutoff}`
-                  : "Similar-name proposals"}
-          </span>
-          {report?.truncated && !report.disabled_reason && (
-            <span className="text-[11px] text-amber-300/90">
-              scan capped at {report.scanned_left}+{report.scanned_right}
+        <div className="flex shrink-0 flex-col gap-1 border-b border-amber-950/40 bg-amber-950/20 px-2 py-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-100">
+              Auto
             </span>
+            <span className="text-[10px] text-slate-400">
+              {loading
+                ? "Scoring unmatched keys…"
+                : report?.disabled_reason
+                  ? report.disabled_reason
+                  : report
+                    ? `${accepted.length} ready · ${pending.length} need a click · min ${report.score_cutoff}`
+                    : "—"}
+            </span>
+          </div>
+          {!loading && !report?.disabled_reason && proposals.length > 0 && (
+            <p className="text-[11px] leading-snug text-amber-100/90">
+              {pending.length > 0 ? (
+                <>
+                  Yellow → <span className="font-semibold">Best</span> /{" "}
+                  <span className="font-semibold">Skip</span>
+                  {" · "}
+                  then one <span className="font-semibold">Write KeyMap</span>{" "}
+                  for the whole batch (fuzzy + LLM)
+                </>
+              ) : (
+                <>
+                  Batch ready — optional: add LLM leftovers into{" "}
+                  <span className="font-semibold">this same list</span>, then
+                  one <span className="font-semibold">Write KeyMap</span>
+                </>
+              )}
+            </p>
+          )}
+          {report && report.left_on.length > 1 && (
+            <div className="flex flex-wrap gap-1">
+              <span className="w-full text-[9px] text-slate-500">
+                Next step — pick how to suggest (required for multi-key Join):
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setCompositeMode(false);
+                  setKeyIndex(null);
+                }}
+                className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                  !compositeMode && keyIndex == null
+                    ? "border-amber-500/60 bg-amber-500/15 text-amber-50"
+                    : "border-slate-700 text-slate-400"
+                }`}
+              >
+                Pick column…
+              </button>
+              {report.left_on.map((col, i) => (
+                <button
+                  key={col}
+                  type="button"
+                  onClick={() => {
+                    setCompositeMode(false);
+                    setKeyIndex(i);
+                  }}
+                  className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                    !compositeMode && keyIndex === i
+                      ? "border-amber-500/60 bg-amber-500/15 text-amber-50"
+                      : "border-slate-700 text-slate-400"
+                  }`}
+                >
+                  {col}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setKeyIndex(null);
+                  setCompositeMode(true);
+                  setCompositeFuzzySlot(0);
+                }}
+                className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                  compositeMode
+                    ? "border-teal-500/60 bg-teal-500/15 text-teal-50"
+                    : "border-slate-700 text-slate-400"
+                }`}
+              >
+                Composite From
+              </button>
+              {compositeMode &&
+                report.left_on.map((col, i) => (
+                  <button
+                    key={`fuzzy-${col}`}
+                    type="button"
+                    onClick={() => setCompositeFuzzySlot(i)}
+                    className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                      compositeFuzzySlot === i
+                        ? "border-teal-500/60 bg-teal-500/15 text-teal-50"
+                        : "border-slate-700 text-slate-400"
+                    }`}
+                    title="Which From part is scored by fuzzy"
+                  >
+                    fuzzy:{col}
+                  </button>
+                ))}
+            </div>
           )}
         </div>
 
-        {report?.disabled_reason && (
-          <div className="shrink-0 space-y-2 border-b border-amber-900/50 bg-amber-950/25 px-2 py-2 text-[10px] leading-relaxed text-amber-100/90">
-            <p>{report.disabled_reason}</p>
-            {report.left_on.length > 1 && (
-              <div className="flex flex-wrap gap-1">
-                <span className="w-full text-[11px] font-medium text-amber-100">
-                  Next step — pick how to suggest (required for multi-key Join):
-                </span>
-                <span className="w-full text-[11px] text-amber-200/70">
-                  Per-column — remap which join key:
-                </span>
-                {report.left_on.map((col, i) => (
-                  <button
-                    key={`${col}-${i}`}
-                    type="button"
-                    onClick={() => {
-                      setCompositeMode(false);
-                      setKeyIndex(i);
-                    }}
-                    className="rounded border border-amber-800/80 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[11px] text-amber-50 hover:border-teal-700"
-                  >
-                    {col} ↔ {report.right_on[i] ?? "?"}
-                  </button>
-                ))}
-                <span className="mt-1 w-full text-[11px] text-amber-200/70">
-                  Or composite — match using these join keys (exact on others +
-                  fuzzy on):
-                </span>
-                {report.left_on.map((col, i) => (
-                  <button
-                    key={`comp-${col}-${i}`}
-                    type="button"
-                    onClick={() => {
-                      setKeyIndex(null);
-                      setCompositeFuzzySlot(i);
-                      setCompositeMode(true);
-                    }}
-                    className="rounded border border-teal-800/80 bg-teal-950/40 px-1.5 py-0.5 font-mono text-[11px] text-teal-50 hover:border-teal-500"
-                  >
-                    fuzzy {col}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         {error && (
-          <div className="shrink-0 border-b border-red-900/50 bg-red-950/30 px-2 py-1 text-[10px] text-red-200">
+          <div className="shrink-0 border-b border-red-900/50 bg-red-950/30 px-2 py-1.5 text-[11px] text-red-200">
             {error}
           </div>
         )}
 
         <div className="min-h-0 flex-1 overflow-auto">
           {report &&
-            !report.disabled_reason &&
-            report.suggestions.length === 0 &&
+            proposals.length === 0 &&
             !loading && (
-            <div className="space-y-1.5 border-b border-slate-800 px-2 py-2 text-[10px] text-slate-400">
-              <p>
-                No fuzzy pairs above the cutoff. Use the LLM chat below for
-                leftovers, or{" "}
-                <span className="font-semibold text-teal-200/90">No match</span>{" "}
-                for one-by-one fixes.
-              </p>
-              {report.left_on.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setKeyIndex(null);
-                    setCompositeMode(false);
-                  }}
-                  className="rounded border border-amber-800/70 px-2 py-1 text-[11px] text-amber-100 hover:border-amber-500"
-                >
-                  ← Change which join key to suggest
-                </button>
-              )}
-            </div>
-          )}
-          {report?.suggestions.map((p, i) => (
-            <label
-              key={`${p.from_key}→${p.to_key}`}
-              className="flex cursor-pointer items-start gap-2 border-b border-slate-800/70 px-2 py-1.5 text-[11px] hover:bg-slate-900/40"
+              <div className="space-y-1.5 border-b border-slate-800 px-2 py-2 text-[10px] text-slate-400">
+                <p>
+                  No fuzzy pairs above the cutoff. Use the LLM chat below for
+                  leftovers, or{" "}
+                  <span className="font-semibold text-teal-200/90">No match</span>{" "}
+                  for one-by-one fixes.
+                </p>
+                {report.left_on.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setKeyIndex(null);
+                      setCompositeMode(false);
+                    }}
+                    className="rounded border border-amber-800/70 px-2 py-1 text-[11px] text-amber-100 hover:border-amber-500"
+                  >
+                    ← Change which join key to suggest
+                  </button>
+                )}
+              </div>
+            )}
+          {proposals.map((p) => (
+            <div
+              key={p.id}
+              data-testid={`lens-confirm-${p.decision}`}
+              className={`border-b border-slate-800/70 px-2 py-1.5 text-[11px] ${
+                p.decision === "accepted"
+                  ? "bg-teal-950/20"
+                  : p.decision === "skipped"
+                    ? "bg-slate-950/40 opacity-60"
+                    : "bg-amber-950/15"
+              }`}
             >
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={!!picked[i]}
-                onChange={(e) =>
-                  setPicked((prev) => ({ ...prev, [i]: e.target.checked }))
-                }
-              />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-amber-50">
-                  {p.from_key}
+              <div className="flex items-start gap-2">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-amber-50">
+                    {p.from_key}
+                    {p.from_label ? (
+                      <span className="font-sans text-slate-400">
+                        {" "}
+                        · {p.from_label}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="block truncate font-mono text-teal-100/90">
+                    → {p.to_key}
+                    {p.to_label ? (
+                      <span className="font-sans text-slate-400">
+                        {" "}
+                        · {p.to_label}
+                      </span>
+                    ) : null}
+                    {p.alt_to_key && p.decision === "pending"
+                      ? ` · or ${p.alt_to_key}`
+                      : ""}
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    {p.source}
+                    {p.source === "fuzzy"
+                      ? ` · ${p.score.toFixed(3)} · edits ${p.edits}`
+                      : ""}
+                    {p.from_label || p.to_label ? " · by name" : ""}
+                    {p.ambiguous ? " · ambiguous" : ""}
+                    {p.decision === "accepted" ? " · accepted" : ""}
+                    {p.decision === "skipped" ? " · skipped" : ""}
+                    {p.decision === "pending" ? " · confirm" : ""}
+                    {p.why ? ` · ${p.why}` : ""}
+                  </span>
                 </span>
-                <span className="block truncate font-mono text-teal-100/90">
-                  → {p.to_key}
-                </span>
-                <span className="text-[10px] text-slate-500">
-                  fuzzy · {p.score.toFixed(3)} · edits {p.edits}
-                  {p.ambiguous
-                    ? ` · close second${p.alt_to_key ? ` (${p.alt_to_key})` : ""}, confirm`
-                    : ""}
-                </span>
-              </span>
-            </label>
+                <div className="flex shrink-0 flex-col gap-0.5">
+                  {p.decision === "pending" && (
+                    <>
+                      <button
+                        type="button"
+                        data-testid="lens-confirm-best"
+                        onClick={() =>
+                          setProposals((prev) =>
+                            patchProposal(prev, p.id, acceptProposal(p)),
+                          )
+                        }
+                        className="rounded border border-teal-700/70 px-1.5 py-0.5 text-[9px] text-teal-100 hover:bg-teal-500/15"
+                      >
+                        Best
+                      </button>
+                      {p.alt_to_key && (
+                        <button
+                          type="button"
+                          data-testid="lens-confirm-alt"
+                          onClick={() =>
+                            setProposals((prev) =>
+                              patchProposal(
+                                prev,
+                                p.id,
+                                acceptProposal(p, p.alt_to_key!),
+                              ),
+                            )
+                          }
+                          className="rounded border border-amber-800/70 px-1.5 py-0.5 text-[9px] text-amber-100 hover:bg-amber-500/10"
+                          title={p.alt_to_key}
+                        >
+                          Alt
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        data-testid="lens-confirm-skip"
+                        onClick={() =>
+                          setProposals((prev) =>
+                            patchProposal(prev, p.id, skipProposal(p)),
+                          )
+                        }
+                        className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+                      >
+                        Skip
+                      </button>
+                    </>
+                  )}
+                  {p.decision === "accepted" && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setProposals((prev) =>
+                          patchProposal(prev, p.id, skipProposal(p)),
+                        )
+                      }
+                      className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+                    >
+                      Skip
+                    </button>
+                  )}
+                  {p.decision === "skipped" && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setProposals((prev) =>
+                          patchProposal(prev, p.id, reopenProposal(p)),
+                        )
+                      }
+                      className="rounded border border-slate-700 px-1.5 py-0.5 text-[9px] text-slate-400 hover:text-slate-200"
+                    >
+                      Undo
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           ))}
         </div>
 
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-800/80 bg-[#071018]/60 px-2 py-1.5">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-amber-900/40 bg-amber-950/25 px-2 py-2">
           <button
             type="button"
-            disabled={!onAccept || selected.length === 0}
-            onClick={() =>
-              onAccept?.(
-                selected.map((p) => p.from_key),
-                selected.map((p) => p.to_key),
-                {
-                  fromParts: selected.map((p) =>
-                    p.from_parts?.length ? p.from_parts : [p.from_key],
-                  ),
-                  ...acceptApplyOpts(
-                    report?.left_on ?? [],
-                    keyIndex,
-                    compositeMode,
-                    compositeFuzzySlot,
-                  ),
-                },
-              )
-            }
-            className="rounded border border-amber-600/80 bg-amber-500/25 px-2 py-1.5 text-[11px] font-semibold text-amber-50 disabled:opacity-40"
+            data-testid="lens-apply-accepted"
+            disabled={!onAccept || accepted.length === 0}
+            onClick={commitAccepted}
+            className="rounded border-2 border-amber-500 bg-amber-500/35 px-3 py-2 text-[13px] font-bold text-amber-50 shadow-[0_0_0_1px_rgba(245,158,11,0.25)] disabled:opacity-40"
+            title="Only this button writes KeyMap + ApplyKeyMap. LLM queue is not a write."
           >
-            Add {selected.length} selected to mapping…
+            Write KeyMap · {accepted.length} pair
+            {accepted.length === 1 ? "" : "s"}
+            {pending.length > 0 ? " (yellow skipped)" : ""}
           </button>
-          {!chatOpen && (
+          <span className="max-w-[14rem] text-[10px] leading-snug text-amber-100/85">
+            {pending.length > 0
+              ? "Yellow stay out until Best / Skip."
+              : leftoverCount > 0
+                ? "Can still pull LLM leftovers into this batch before Write."
+                : "Writes KeyMap + Apply for every accepted row."}
+          </span>
+          {!chatOpen && leftoverCount > 0 && (
             <button
               type="button"
               onClick={() => setChatOpen(true)}
-              className="rounded border border-teal-800/70 px-2 py-1 text-[10px] text-teal-200/90 hover:bg-teal-500/10"
+              className="ml-auto rounded border border-teal-800/70 px-2 py-1 text-[10px] text-teal-200/90 hover:border-teal-600 hover:text-teal-50"
             >
-              Open LLM chat
-              {leftoverCount ? ` · ${leftoverCount} leftovers` : ""}
+              Add LLM leftovers · {leftoverCount}
             </button>
           )}
         </div>
       </section>
 
-      {/* —— 2. LLM chat —— */}
       {chatOpen && report && (
         <section
           className="flex min-h-0 flex-1 flex-col bg-[#06141c]"
@@ -500,8 +668,8 @@ export function JoinLensAuto({
               LLM chat
             </span>
             <span className="text-[10px] text-slate-400">
-              Leftovers after fuzzy
-              {leftoverCount ? ` · ${leftoverCount} keys` : ""}
+              Same batch as fuzzy above
+              {leftoverCount ? ` · ${leftoverCount} leftover keys` : ""}
             </span>
             <button
               type="button"
@@ -584,7 +752,7 @@ export function JoinLensAuto({
               <div className="text-[10px] leading-relaxed text-slate-500">
                 {report.leftover_left.length + report.leftover_right.length === 0
                   ? "No leftover keys. Fuzzy covered the unmatched sample, or both sides already match."
-                  : `${report.leftover_left.length} left and ${report.leftover_right.length} right keys have no fuzzy pair. Ask the model; accepted pairs still go into a mapping.`}
+                  : `${report.leftover_left.length} left and ${report.leftover_right.length} right keys have no fuzzy pair. Ask the model; queue pairs into Auto, then confirm there.`}
               </div>
             )}
             {chat.map((m, i) => (
@@ -609,14 +777,19 @@ export function JoinLensAuto({
             {chatError && (
               <div className="text-[10px] text-red-300">{chatError}</div>
             )}
+            <div className="rounded border border-teal-900/60 bg-teal-950/40 px-2 py-1.5 text-[10px] leading-snug text-teal-100/90">
+              Fuzzy + LLM share one list above. Add model pairs into that
+              batch, then one <span className="font-semibold">Write KeyMap</span>
+              .
+            </div>
             {chatPairs.length > 0 && (
-              <div className="rounded border border-amber-900/50 bg-amber-950/20 p-1.5">
-                <div className="mb-1 text-[9px] uppercase text-amber-200/80">
-                  Model pairs on the leftover lists
+              <div className="rounded border border-teal-800/70 bg-teal-950/25 p-1.5">
+                <div className="mb-1 text-[9px] uppercase tracking-wide text-teal-200/80">
+                  Model pairs → same Auto batch
                 </div>
                 {chatPairs.map((p) => (
                   <div key={`${p.from}→${p.to}`} className="mb-1 last:mb-0">
-                    <div className="truncate font-mono text-[10px] text-amber-50">
+                    <div className="truncate font-mono text-[10px] text-teal-50">
                       {p.from} → {p.to}
                     </div>
                     {p.why && (
@@ -626,25 +799,26 @@ export function JoinLensAuto({
                     )}
                   </div>
                 ))}
-                <button
-                  type="button"
-                  disabled={!onAccept}
-                  onClick={() =>
-                    onAccept?.(
-                      chatPairs.map((p) => p.from),
-                      chatPairs.map((p) => p.to),
-                      acceptApplyOpts(
-                        report.left_on,
-                        keyIndex,
-                        compositeMode,
-                        compositeFuzzySlot,
-                      ),
-                    )
-                  }
-                  className="mt-1 rounded border border-amber-600/80 px-2 py-0.5 text-[10px] text-amber-50 disabled:opacity-40"
-                >
-                  Add these to mapping…
-                </button>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    data-testid="lens-queue-llm"
+                    onClick={() => queueLlmPairs("accepted")}
+                    className="rounded border border-teal-500/80 bg-teal-500/20 px-2 py-0.5 text-[10px] font-semibold text-teal-50"
+                    title="Add as accepted into the list above; then Write KeyMap once for fuzzy + these"
+                  >
+                    Add to batch ({chatPairs.length})
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="lens-queue-llm-review"
+                    onClick={() => queueLlmPairs("pending")}
+                    className="rounded border border-slate-600 px-2 py-0.5 text-[10px] text-slate-300 hover:text-slate-100"
+                    title="Add as yellow — Best / Skip before Write includes them"
+                  >
+                    Add as yellow
+                  </button>
+                </div>
               </div>
             )}
           </div>

@@ -128,6 +128,10 @@ How to read it:
 
 Categories: A1, A3, A14.
 
+### 5b. `name_id_match` — Two catalogs, match by name → id seed
+
+Committed under `fixtures/labs/name_id_match/`. CRM `crm_id`/`name` vs ERP `erp_id`/`name`. Focus `dirty_by_id` (ids never collide). Join Lens Auto scores sibling **name** labels and proposes **id→id**. Partial seed `map_crm_to_erp` keeps `from_name`/`to_name` attrs for later edits (ADR-0028). `crm_mapped` Applies the map then joins ERP on id.
+
 ### 5. `recon_ship_sales` — Plant shipments ↔ commercial sales (ADR-0039)
 
 Committed under `fixtures/labs/recon_ship_sales/`. Commercial codes (`COM-UREA`, …) ≠ plant `product_id`. Partial KeyMap (`COM-UREA`, `COM-NPK16`); leave `COM-AMM` / `NEW-BLEND` for Join Lens.

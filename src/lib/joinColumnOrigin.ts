@@ -22,6 +22,13 @@ function fold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 }
 
+/** DuckDB / emitters rename clashing right cols to `name_1`, `name_2`, … */
+function stripNumericCollisionSuffix(folded: string): string | null {
+  const m = folded.match(/^(.*)_(0|[1-9]\d*)$/);
+  if (!m || !m[1]) return null;
+  return m[1];
+}
+
 function valuesEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a == null || b == null) return a == null && b == null;
@@ -57,6 +64,11 @@ export function classifyJoinColumnOrigins(
     const bare = f.includes("__") ? f.slice(f.lastIndexOf("__") + 2) : f;
     if (leftFolds.has(f)) return "left";
     if (rightFolds.has(f) || rightFolds.has(bare)) return "right";
+    // Collision rename: left kept `name`, right became `name_1`.
+    const stripped = stripNumericCollisionSuffix(f);
+    if (stripped && rightFolds.has(stripped) && !leftFolds.has(f)) {
+      return "right";
+    }
     return "downstream";
   });
 }
@@ -67,6 +79,23 @@ export const JOIN_ORIGIN_LABEL: Record<JoinColumnOrigin, string> = {
   right: "right",
   downstream: "calc",
 };
+
+/**
+ * Header title for a Join result column. Collision renames like `name_1`
+ * (right `name`) display as the logical right name when origin is right.
+ */
+export function joinColumnDisplayName(
+  resultName: string,
+  origin: JoinColumnOrigin | undefined,
+  rightColumns: string[] = [],
+): string {
+  if (origin !== "right") return resultName;
+  const f = fold(resultName);
+  const stripped = stripNumericCollisionSuffix(f);
+  if (!stripped) return resultName;
+  const match = rightColumns.find((c) => fold(c) === stripped);
+  return match ?? resultName;
+}
 
 type PinCheck = { sideIdx: number; value: unknown; isKey: boolean };
 
@@ -136,6 +165,10 @@ export function pinSideRowsToResult(args: {
     let sideIdx = sideByFold.get(f);
     if (sideIdx === undefined && f.includes("__")) {
       sideIdx = sideByFold.get(f.slice(f.lastIndexOf("__") + 2));
+    }
+    if (sideIdx === undefined) {
+      const stripped = stripNumericCollisionSuffix(f);
+      if (stripped) sideIdx = sideByFold.get(stripped);
     }
     if (sideIdx === undefined) continue;
     addCheck(sideIdx, i, false);

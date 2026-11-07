@@ -561,6 +561,9 @@ export type FuzzyPair = {
   ambiguous: boolean;
   alt_to_key?: string | null;
   alt_score?: number | null;
+  /** Sibling name/label when Join ON was an id (name_id_match lab / ADR-0028). */
+  from_label?: string | null;
+  to_label?: string | null;
   /** Composite From tuple when Suggest ran in composite-map mode (ADR-0024). */
   from_parts?: string[];
 };

@@ -1,7 +1,8 @@
 //! Help Lab catalog + offline reconciliation flagship ([ADR-0039](../../../docs/adr/0039-help-lab-catalog.md)).
 
 use dwh_pipeline::{
-    parse_key_map_seed_csv, KeyMapDef, QueryDef, TransformationStep, Workspace,
+    parse_key_map_seed_csv, parse_key_map_seed_csv_full, KeyMapDef, QueryDef,
+    TransformationStep, Workspace,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -209,6 +210,82 @@ pub fn demo_recon_ship_sales(fixtures: &Path) -> Result<Workspace, String> {
     })
 }
 
+/// Two independent catalogs (crm_id/name ↔ erp_id/name). Match by name in Join Lens;
+/// durable seed is id→id with name attrs for editing ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
+pub fn demo_name_id_match(fixtures: &Path) -> Result<Workspace, String> {
+    let crm = lab_csv(fixtures, "name_id_match/crm_products.csv")?;
+    let erp = lab_csv(fixtures, "name_id_match/erp_products.csv")?;
+    let seed_body =
+        fs::read_to_string(labs_dir(fixtures).join("name_id_match/map_crm_to_erp_seed.csv"))
+            .map_err(|e| format!("read map_crm_to_erp_seed.csv: {e}"))?;
+    let entries = parse_key_map_seed_csv_full(
+        &seed_body,
+        &["from".into()],
+        "to",
+        &["from_name".into(), "to_name".into()],
+    )?;
+    let mut map = KeyMapDef::new("map_crm_to_erp", "CRM id → ERP id (matched by name)");
+    map.editable_columns = vec!["from_name".into(), "to_name".into()];
+    map.entries = entries.clone();
+
+    Ok(Workspace {
+        queries: vec![
+            q(
+                "crm_products",
+                vec![TransformationStep::LoadCsv { path: crm }],
+            ),
+            q(
+                "erp_products",
+                vec![TransformationStep::LoadCsv { path: erp }],
+            ),
+            // Ids never collide across systems — Auto compares sibling `name` labels.
+            q(
+                "dirty_by_id",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "crm_products".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "erp_products".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["crm_id".into()],
+                        right_on: vec!["erp_id".into()],
+                    },
+                ],
+            ),
+            q(
+                "crm_mapped",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "crm_products".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: "crm_id".into(),
+                        columns: vec![],
+                        output_column: None,
+                        output_bindings: vec![],
+                        as_of_column: None,
+                        map_id: map.id.clone().into(),
+                        entries: entries.clone(),
+                    },
+                    TransformationStep::RenameColumn {
+                        from: "crm_id".into(),
+                        to: "erp_id".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "erp_products".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["erp_id".into()],
+                        right_on: vec!["erp_id".into()],
+                    },
+                ],
+            ),
+        ],
+        focus_query_id: "dirty_by_id".into(),
+        key_maps: vec![map],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +313,23 @@ mod tests {
         assert!(ws.key_maps[0].entries.len() >= 2);
         assert!(ws.query("recon_by_month").is_some());
         assert!(ws.query("sales_mapped").is_some());
+    }
+
+    #[test]
+    fn name_id_match_builds_with_name_attrs() {
+        let cards = load_help_lab_catalog(&fixtures()).expect("catalog");
+        assert!(cards.iter().any(|c| c.id == "name_id_match"));
+        let ws = demo_name_id_match(&fixtures()).expect("name_id_match");
+        assert_eq!(ws.focus_query_id, "dirty_by_id");
+        let map = &ws.key_maps[0];
+        assert_eq!(map.id, "map_crm_to_erp");
+        assert_eq!(
+            map.editable_columns,
+            vec!["from_name".to_string(), "to_name".to_string()]
+        );
+        assert!(!map.entries.is_empty());
+        assert!(map.entries[0].attrs.contains_key("from_name"));
+        assert!(ws.query("crm_mapped").is_some());
+        assert!(ws.query("dirty_by_id").is_some());
     }
 }

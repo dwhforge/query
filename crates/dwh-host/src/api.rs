@@ -806,6 +806,9 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "recon_ship_sales" | "recon" | "ship_sales" => {
             help_labs::demo_recon_ship_sales(&fixtures)
         }
+        "name_id_match" | "name_id" | "crm_erp_names" => {
+            help_labs::demo_name_id_match(&fixtures)
+        }
         "keymap_crosswalk" | "crosswalk" => labs::demo_keymap_crosswalk(&fixtures),
         "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
         "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
@@ -821,7 +824,7 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "keymap_parquet" | "parquet" => labs::demo_keymap_parquet(&fixtures),
         other => Err(format!(
             "Unknown demo '{other}'. Open Help Lab for the catalog, or use: sales | union | sql | \
-             right | keymap | recon_ship_sales | keymap_crosswalk | …"
+             right | keymap | recon_ship_sales | name_id_match | keymap_crosswalk | …"
         )),
     }
 }

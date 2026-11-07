@@ -498,6 +498,13 @@ export type JoinLensProps = {
       outputColumn?: string;
       /** ADR-0037: named output cells from one target row (not positional toValues). */
       cellPatches?: import("../lib/keyMap").LensOutputCell[][];
+      /**
+       * ADR-0042 Auto Apply accepted: merge KeyMap + ApplyKeyMap in place
+       * (no KeyMap tab hop).
+       */
+      applyAcceptedInPlace?: boolean;
+      fromLabels?: (string | null)[];
+      toLabels?: (string | null)[];
     },
   ) => void;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
@@ -2113,7 +2120,7 @@ function JoinLensImpl({
           <button
             type="button"
             onClick={() => switchMode("auto")}
-            title="Action: propose renames for unmatched keys, then add to a mapping"
+            title="Batch-match unmatched keys by name/similarity, then Apply accepted"
             className={`rounded border px-2 py-1 text-[11px] font-medium ${
               sideMode === "auto"
                 ? "border-amber-600/80 bg-amber-500/20 text-amber-50"
@@ -2128,14 +2135,14 @@ function JoinLensImpl({
               sideMode === "linked"
                 ? "Which left/right rows built this result row?"
                 : sideMode === "auto"
-                  ? "Propose renames for unmatched keys → add selected to a mapping"
+                  ? "Fuzzy + LLM into one batch, then Write KeyMap once"
                   : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
               ? "Where this result came from"
               : sideMode === "auto"
-                ? "Batch suggestions — pick pairs, then add to a mapping"
+                ? "One batch → Write KeyMap"
                 : "Values that didn’t join"}
           </span>
         </div>
@@ -2145,22 +2152,21 @@ function JoinLensImpl({
             <div className="flex items-start justify-between gap-2">
               <ol className="list-decimal space-y-1 pl-3.5">
                 <li>
-                  <span className="font-semibold text-teal-200">This row</span> —
-                  see which left/right rows made the selected result
-                </li>
-                <li>
-                  <span className="font-semibold text-teal-200">No match</span> —
-                  list values that didn’t find a partner; pick left (+ right) →{" "}
-                  <span className="font-semibold text-amber-200">
-                    Save mapping…
-                  </span>
-                </li>
-                <li>
-                  Then{" "}
                   <span className="font-semibold text-amber-200">
                     Suggest all…
                   </span>{" "}
-                  for batch rename ideas (action, not a third investigate mode)
+                  — fuzzy + optional LLM into one batch →{" "}
+                  <span className="font-semibold text-amber-200">
+                    Write KeyMap
+                  </span>
+                </li>
+                <li>
+                  <span className="font-semibold text-teal-200">No match</span> —
+                  one key at a time if you prefer manual pick
+                </li>
+                <li>
+                  <span className="font-semibold text-teal-200">This row</span> —
+                  see which left/right rows made a result row
                 </li>
               </ol>
               <button
@@ -2191,13 +2197,18 @@ function JoinLensImpl({
             onAccept={
               onMapKey
                 ? (fromValues, toValues, opts) => {
+                    // ADR-0042: parent Apply accepted path merges KeyMap + ApplyKeyMap
+                    // without requiring a KeyMap tab hop.
                     onMapKey("left", fromValues, {
                       toValues,
                       fromParts: opts?.fromParts,
                       applyColumns: opts?.applyColumns,
                       outputColumn: opts?.outputColumn,
+                      applyAcceptedInPlace: true,
+                      fromLabels: opts?.fromLabels,
+                      toLabels: opts?.toLabels,
                     });
-                    const toast = `Opened mapping · ${fromValues.length} suggestion${fromValues.length === 1 ? "" : "s"}`;
+                    const toast = `Applied ${fromValues.length} accepted alias${fromValues.length === 1 ? "" : "es"}`;
                     setMapToast(toast);
                     window.setTimeout(() => {
                       setMapToast((cur) => (cur === toast ? null : cur));

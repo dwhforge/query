@@ -18,6 +18,24 @@
     "featured": true
   },
   {
+    "id": "name_id_match",
+    "track": "start",
+    "title": "Two lists · match by name → id seed",
+    "tagline": "CRM and ERP catalogs share names, not ids. Auto matches on name; the seed stores id→id with name attrs for later edits.",
+    "teaches": [
+      "Join on id fails across systems; Join Lens Auto scores sibling name columns",
+      "Apply accepted writes crm_id → erp_id (not the display names)",
+      "Edit the map later via from_name / to_name attrs — Apply still joins on ids"
+    ],
+    "youKeep": [
+      "KeyMap seed map_crm_to_erp (from,to,from_name,to_name)",
+      "dirty_by_id + crm_mapped queries",
+      "A pattern you can re-export as dbt seed"
+    ],
+    "requires": "offline",
+    "featured": true
+  },
+  {
     "id": "keymap",
     "track": "start",
     "title": "F&B company aliases",

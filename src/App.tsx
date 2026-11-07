@@ -3270,6 +3270,75 @@ function App() {
     );
   }
 
+  /** Rebind LoadCsv / local LoadParquet to another file (Sources catalog had no path edit). */
+  async function changeSelectedLoadFile() {
+    if (
+      !activeQueryId ||
+      selectedStepIndex === null ||
+      !selectedStep ||
+      (selectedStep.type !== "LoadCsv" && selectedStep.type !== "LoadParquet")
+    ) {
+      return;
+    }
+    if (
+      selectedStep.type === "LoadParquet" &&
+      selectedStep.payload.connection_id
+    ) {
+      setError("Remote Parquet path is set via the S3 / connection picker.");
+      return;
+    }
+    const kind = selectedStep.type === "LoadCsv" ? "csv" : "parquet";
+    const picked = await open({
+      multiple: false,
+      filters:
+        kind === "csv"
+          ? [{ name: "CSV", extensions: ["csv"] }]
+          : [{ name: "Parquet", extensions: ["parquet"] }],
+    });
+    if (typeof picked !== "string") return;
+    const oldPath = selectedStep.payload.path;
+    const oldBase = oldPath.split(/[/\\]/).pop() ?? "";
+    const newBase = picked.split(/[/\\]/).pop() ?? picked;
+    const stepIndex = selectedStepIndex;
+    const queryId = activeQueryId;
+    setProject((p) => {
+      const nextQueries = p.workspace.queries.map((q) => {
+        if (q.id !== queryId) return q;
+        return {
+          ...q,
+          steps: q.steps.map((s, i) => {
+            if (i !== stepIndex) return s;
+            if (s.type === "LoadCsv") {
+              return { type: "LoadCsv" as const, payload: { path: picked } };
+            }
+            if (s.type === "LoadParquet") {
+              return {
+                type: "LoadParquet" as const,
+                payload: { ...s.payload, path: picked },
+              };
+            }
+            return s;
+          }),
+        };
+      });
+      const nextSources = p.sources.map((s) => {
+        if (s.kind !== kind || s.path !== oldPath) return s;
+        const renameDefault = !s.name.trim() || s.name === oldBase;
+        return {
+          ...s,
+          path: picked,
+          name: renameDefault ? newBase : s.name,
+        };
+      });
+      return {
+        ...p,
+        sources: syncSourcesFromQueries(nextSources, nextQueries),
+        workspace: { ...p.workspace, queries: nextQueries },
+      };
+    });
+    setError(null);
+  }
+
   function appendStep(step: TransformationStep) {
     updateActiveSteps((steps) => {
       const next = [...steps, step];
@@ -3928,6 +3997,172 @@ function App() {
     }
   }
 
+  /**
+   * ADR-0042: Apply accepted from Join Lens Auto — merge into KeyMap + ApplyKeyMap
+   * without opening the KeyMap tab (confirm stays in Lens).
+   */
+  function handleApplyAcceptedFromLens(
+    fromValues: string[],
+    toValues: string[],
+    opts?: {
+      fromParts?: string[][];
+      applyColumns?: string[];
+      outputColumn?: string;
+      fromLabels?: (string | null)[];
+      toLabels?: (string | null)[];
+    },
+  ) {
+    if (!joinLensTarget || fromValues.length === 0) return;
+    if (frozenRemap) {
+      if (toValues.length) {
+        setFrozenRemap((prev) =>
+          prev ? stageFrozenRemapChanges(prev, fromValues, toValues) : prev,
+        );
+      }
+      return;
+    }
+    const {
+      leftOn: lensLeftOn,
+      rightOn: lensRightOn,
+      hostQueryId,
+      joinStepIndex,
+      rightQueryId,
+      joinType,
+    } = joinLensTarget;
+    const planned = planMapFillFromLens({
+      probeSide: "left",
+      fromValues,
+      lensLeftOn,
+      lensRightOn,
+      hostQueryId,
+      joinStepIndex,
+      rightQueryId,
+      joinType,
+      toValues,
+      fromParts: opts?.fromParts,
+      applyColumns: opts?.applyColumns,
+      outputColumn: opts?.outputColumn,
+    });
+    const { joinCtx, fromParts } = planned;
+    const maps = project.workspace.key_maps ?? [];
+    const applyLeftOn = joinCtx.applyLeftOn ?? [
+      joinCtx.leftOn[0] ?? "key",
+    ];
+    const preferredId = findApplyKeyMapIdForJoin(
+      project.workspace,
+      joinCtx,
+    );
+    const preferred = preferredId
+      ? maps.find((m) => m.id === preferredId)
+      : undefined;
+    const wantNameAttrs =
+      (opts?.fromLabels?.some((s) => (s ?? "").trim()) ?? false) ||
+      (opts?.toLabels?.some((s) => (s ?? "").trim()) ?? false);
+    let base =
+      preferred ??
+      (() => {
+        const arity = applyLeftOn.length;
+        const from_columns = arity > 1 ? applyLeftOn : ["from"];
+        return {
+          ...emptyKeyMap("join aliases"),
+          from_columns,
+          from_column: from_columns[0],
+          editable_columns: wantNameAttrs
+            ? ["from_name", "to_name"]
+            : [],
+        };
+      })();
+    // Prefer an existing ApplyKeyMap; otherwise a fresh seed — no map-picker hop.
+    if (!preferred && maps.length > 0) {
+      const colHint = (joinCtx.leftOn[0] ?? joinCtx.rightOn[0] ?? "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "");
+      const hinted =
+        colHint.length >= 3
+          ? maps.find((m) => {
+              const hay = `${m.id} ${m.name}`.toLowerCase();
+              return hay.includes(colHint);
+            })
+          : undefined;
+      if (hinted) base = hinted;
+    }
+    if (wantNameAttrs) {
+      const editable = new Set(base.editable_columns ?? []);
+      editable.add("from_name");
+      editable.add("to_name");
+      base = { ...base, editable_columns: [...editable] };
+    }
+    let merged = mergeFromValuesIntoMap({
+      map: base,
+      fromValues,
+      joinCtx,
+      toValues,
+      fromParts,
+    });
+    if (wantNameAttrs) {
+      merged = {
+        ...merged,
+        entries: merged.entries.map((e) => {
+          const i = fromValues.findIndex((f, idx) => {
+            const parts = fromParts?.[idx] ?? [f];
+            const ep = e.from_parts?.length ? e.from_parts : [e.from];
+            return (
+              JSON.stringify(parts.map((p) => p.trim())) ===
+              JSON.stringify(ep.map((p) => p.trim()))
+            );
+          });
+          if (i < 0) return e;
+          const attrs = { ...(e.attrs ?? {}) };
+          const fl = opts?.fromLabels?.[i]?.trim();
+          const tl = opts?.toLabels?.[i]?.trim();
+          if (fl) attrs.from_name = fl;
+          if (tl) attrs.to_name = tl;
+          return { ...e, attrs };
+        }),
+      };
+    }
+    const withMap = upsertKeyMapIntoProject(project, merged);
+    const liveMap =
+      (withMap.workspace.key_maps ?? []).find((m) => m.id === merged.id) ??
+      merged;
+    const plan = resolveApplyPlan(
+      liveMap,
+      joinCtx,
+      "left",
+      undefined,
+      withMap.workspace,
+    );
+    if ("error" in plan) {
+      setProject(() => withMap);
+      setError(plan.error);
+      return;
+    }
+    const fold = applyKeyMapOntoProject(withMap, intentFromApplyPlan(plan));
+    setProject(() => fold.project);
+    if (fold.result.status === "ok") {
+      setExportMsg(
+        `Applied ${fromValues.length} accepted alias${fromValues.length === 1 ? "" : "es"} · ${fold.result.mapId}`,
+      );
+      patchKeyMapTab(fold.result.mapId, (s) => {
+        const nextMap =
+          (fold.project.workspace.key_maps ?? []).find(
+            (m) => m.id === fold.result.mapId,
+          ) ?? s.map;
+        return { ...s, map: nextMap, joinCtx };
+      });
+    } else if (fold.result.status === "stale") {
+      setError(
+        fold.result.reason ||
+          "KeyMap changed while applying — review Auto and Apply accepted again.",
+      );
+    } else {
+      setError(
+        fold.result.reason?.trim() ||
+          "Join changed while applying — mapping rows were saved; re-open Apply.",
+      );
+    }
+  }
+
   function handleMapKeyFromLens(
     side: "left" | "right",
     fromValues: string[],
@@ -3937,9 +4172,26 @@ function App() {
       applyColumns?: string[];
       outputColumn?: string;
       cellPatches?: import("./lib/keyMap").LensOutputCell[][];
+      applyAcceptedInPlace?: boolean;
+      fromLabels?: (string | null)[];
+      toLabels?: (string | null)[];
     },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
+    if (
+      opts?.applyAcceptedInPlace &&
+      opts.toValues?.length &&
+      opts.toValues.some((t) => t.trim())
+    ) {
+      handleApplyAcceptedFromLens(fromValues, opts.toValues, {
+        fromParts: opts.fromParts,
+        applyColumns: opts.applyColumns,
+        outputColumn: opts.outputColumn,
+        fromLabels: opts.fromLabels,
+        toLabels: opts.toLabels,
+      });
+      return;
+    }
     // Check Inspect mode: stage only — do not open/mutate the live map until Confirm.
     if (frozenRemap) {
       if (opts?.toValues?.length) {
@@ -6610,10 +6862,40 @@ function App() {
                 ) : (
                   <div className="mb-3 space-y-2">
                     {(selectedStep.type === "LoadCsv" ||
-                      selectedStep.type === "LoadParquet" ||
-                      selectedStep.type === "LoadPostgres") && (
+                      selectedStep.type === "LoadParquet") && (
+                      <div className="space-y-2 rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2">
+                        <p className="text-[10px] text-slate-500">
+                          Source step (pinned at s0)
+                        </p>
+                        <p
+                          className="break-all font-mono text-[11px] text-slate-300"
+                          title={selectedStep.payload.path}
+                        >
+                          {selectedStep.payload.path}
+                        </p>
+                        <button
+                          type="button"
+                          className="w-full rounded-lg border border-teal-800/80 bg-teal-500/10 px-3 py-1.5 text-xs font-semibold text-teal-100 hover:bg-teal-500/20 disabled:opacity-40"
+                          disabled={
+                            selectedStep.type === "LoadParquet" &&
+                            !!selectedStep.payload.connection_id
+                          }
+                          title={
+                            selectedStep.type === "LoadParquet" &&
+                            selectedStep.payload.connection_id
+                              ? "Remote Parquet — use S3 / connection picker"
+                              : "Pick another file for this Load step"
+                          }
+                          onClick={() => void changeSelectedLoadFile()}
+                        >
+                          Change file…
+                        </button>
+                      </div>
+                    )}
+                    {selectedStep.type === "LoadPostgres" && (
                       <p className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2 font-mono text-[11px] text-slate-400">
-                        Source step (pinned at s0). Change via Sources catalog.
+                        Source step (pinned at s0). Table comes from the Postgres
+                        import / picker.
                       </p>
                     )}
                     {selectedStep.type === "FromQuery" && (

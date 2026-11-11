@@ -77,6 +77,25 @@ export const FALLBACK_LAB_CATALOG: HelpLabCard[] = [
     featured: false,
   },
   {
+    id: "name_region_match",
+    track: "start",
+    title: "Vendors · name + region both soft",
+    tagline:
+      "ComputerParts LLC US≠DE (exact same name). Nestlé / Danone need LLM synonyms on name and region. Mart: vendor_name, region, SUM(qty).",
+    teaches: [
+      "Exact same vendor_name in different regions are different companies (ComputerParts LLC US ≠ DE)",
+      "Brand synonyms (NW bottled water, Danone Eau, EU/RF/Russia) need Matching/LLM on both fields",
+      "Name-only Join fans shared names across regions; mapped mart keeps region in the grain",
+    ],
+    youKeep: [
+      "KeyMap seed map_pos_to_vendor (vendor_label,region,vendor_id)",
+      "invoices_mapped + by_vendor_region (vendor_name, region, SUM(qty))",
+      "Two Matching practice sets: exact same-name cross-region + LLM synonyms",
+    ],
+    requires: "offline",
+    featured: true,
+  },
+  {
     id: "mapping_quality",
     track: "quality",
     title: "Mapping quality · 100K",

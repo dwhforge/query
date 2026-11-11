@@ -1,0 +1,10 @@
+vendor_id,vendor_name,region,category
+V10,ComputerParts LLC,US,Hardware
+V11,ComputerParts LLC,DE,Hardware
+V20,Office Supply Co,US,Office
+V21,Office Supply Co,UK,Office
+V30,Nestlé Waters,Europe,Beverages
+V31,Nestlé Waters,RUS,Beverages
+V40,Danone Waters,Europe,Dairy
+V41,Danone Waters,RUS,Dairy
+V50,Global Widgets Inc,APAC,Industrial

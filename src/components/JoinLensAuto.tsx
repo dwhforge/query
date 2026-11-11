@@ -455,7 +455,7 @@ export function JoinLensAuto({
         <div className="flex shrink-0 flex-col gap-1 border-b border-amber-950/40 bg-amber-950/20 px-2 py-1.5">
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-100">
-              Auto
+              Quick match
             </span>
             <span className="text-[10px] text-slate-400">
               {loading

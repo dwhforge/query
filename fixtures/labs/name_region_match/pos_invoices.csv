@@ -1,0 +1,27 @@
+invoice_id,vendor_label,region,qty
+i1,ComputerParts LLC,US,8
+i1b,ComputerParts LLC,US,5
+i2,ComputerParts LLC,DE,6
+i2b,ComputerParts LLC,DE,4
+i3,KomputerParts LLC,United States,9
+i4,Computer Parts LLC,USA,3
+i5,CPC LLC,Germany,2
+i6,KomputerParts LLC,Federal Republic of Germany,7
+i7,Office Supply Co,US,7
+i7b,Office Supply Co,US,3
+i8,Office Supply Co,UK,5
+i9,Office Supplies Company,United Kingdom,4
+i10,Nestlé Waters,Europe,8
+i10b,Nestlé Waters,Europe,5
+i11,Nestlé Waters,RUS,6
+i12,Nestle Waters International,EU,12
+i13,NW bottled water,Russian Federation,9
+i14,Nestlé Water Div.,Russia,3
+i15,Nestle Waters Corp,EEA,2
+i16,Danone Waters,Europe,7
+i16b,Danone Waters,Europe,3
+i17,Danone Waters,RUS,5
+i18,Danone Water Division,Western Europe,4
+i19,Danone Eau,RF,4
+i20,Global Widgets Inc,APAC,1
+i21,Global Widgets,Asia Pacific,1

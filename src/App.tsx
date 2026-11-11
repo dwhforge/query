@@ -99,6 +99,13 @@ import {
 import { JoinLens } from "./components/JoinLens";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { KeyMapEditor } from "./components/KeyMapEditor";
+import { MatchingWorkspace } from "./components/MatchingWorkspace";
+import { buildLensMatchingPlan } from "./app/matching/planDefaults";
+import {
+  emptyMatchingSession,
+  newMatchingSessionId,
+  type MatchingTabSession,
+} from "./app/matching/types";
 import { MappingQualityOverview } from "./components/mapping-quality/MappingQualityOverview";
 import { MappingCheckSetupDialog } from "./components/MappingCheckSetupDialog";
 import {
@@ -799,6 +806,20 @@ function App() {
   const lastCheckRunFingerprint = useRef<string | null>(null);
   /** Open KeyMap editor tabs (VS Code–style, beside Pipeline canvas). */
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
+  /** ADR-0044 Matching workspace tabs (in-process draft only). */
+  const [matchingTabs, setMatchingTabs] = useState<MatchingTabSession[]>([]);
+  const matchingTabKey = (id: string) => `matching:${id}`;
+  const matchingDirty = matchingTabs.some((t) => t.hasUnsavedDecisions);
+
+  useEffect(() => {
+    if (!matchingDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [matchingDirty]);
   /** Live snapshots for post-await Confirm revalidation. */
   const projectLiveRef = useRef(project);
   projectLiveRef.current = project;
@@ -2673,6 +2694,14 @@ function App() {
   }
 
   async function handleLoadDemo(id: DemoId | string) {
+    if (
+      matchingTabs.some((t) => t.hasUnsavedDecisions) &&
+      !window.confirm(
+        "Matching has unsaved decisions. Switch project anyway? Matching drafts will be lost.",
+      )
+    ) {
+      return;
+    }
     try {
       const ws = await loadDemoWorkspace(id);
       const projectName = `demo_${id}`;
@@ -2734,6 +2763,7 @@ function App() {
         setFrozenRemap(null);
       }
       setKeyMapTabs([]);
+      setMatchingTabs([]);
       setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
       setActiveQueryId(ws.focus_query_id);
       setSelectedStepIndex(
@@ -5880,6 +5910,59 @@ function App() {
                   ◈ Mapping quality
                 </button>
               )}
+              {matchingTabs.map((tab) => {
+                const key = matchingTabKey(tab.id);
+                const on = centerTab === key;
+                return (
+                  <div
+                    key={key}
+                    className={`group flex shrink-0 items-stretch border-r border-[var(--line)] ${
+                      on ? "bg-[#0a1520]" : "hover:bg-slate-900/50"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={on}
+                      onClick={() => setCenterTab(key)}
+                      className={`max-w-[16rem] truncate px-3 py-2 text-left text-[12px] ${
+                        on
+                          ? "text-amber-100"
+                          : "text-slate-500 group-hover:text-slate-300"
+                      }`}
+                      title={tab.title}
+                    >
+                      {tab.title}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Close ${tab.title}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (
+                          tab.hasUnsavedDecisions &&
+                          !window.confirm(
+                            "Matching has unsaved decisions. Close this tab? The draft will be lost.",
+                          )
+                        ) {
+                          return;
+                        }
+                        setMatchingTabs((tabs) =>
+                          tabs.filter((t) => t.id !== tab.id),
+                        );
+                        if (centerTab === key) setCenterTab("canvas");
+                      }}
+                      className={`px-1.5 text-[14px] leading-none ${
+                        on
+                          ? "text-slate-500 hover:text-slate-200"
+                          : "text-slate-700 opacity-0 group-hover:opacity-100 hover:text-slate-300"
+                      }`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
               {keyMapTabs.map((tab) => {
                 const on = centerTab === tab.map.id;
                 return (
@@ -6085,6 +6168,100 @@ function App() {
                 />
               </div>
             )}
+            {matchingTabs.map((tab) => {
+              const key = matchingTabKey(tab.id);
+              const on = centerTab === key;
+              return (
+                <div
+                  key={key}
+                  className={on ? "flex min-h-0 flex-1 flex-col" : "hidden"}
+                  aria-hidden={!on}
+                >
+                  <MatchingWorkspace
+                    session={tab}
+                    onChange={(next) =>
+                      setMatchingTabs((tabs) =>
+                        tabs.map((t) => (t.id === next.id ? next : t)),
+                      )
+                    }
+                    onOpenLens={() => {
+                      setCenterTab("canvas");
+                      focusJoinLensLayout();
+                    }}
+                    writeAllowed={
+                      !tab.targetMapId ||
+                      importWriteRefusal(project.pg_import, tab.targetMapId) ==
+                        null
+                    }
+                    writeRefusalReason={
+                      tab.targetMapId
+                        ? importWriteRefusal(
+                            project.pg_import,
+                            tab.targetMapId,
+                          )
+                        : null
+                    }
+                    onSaveToMap={async ({ upserts, session: nextSession }) => {
+                      const mapId = nextSession.targetMapId;
+                      if (!mapId || !upserts.length) return;
+                      const map =
+                        project.workspace.key_maps?.find((m) => m.id === mapId) ??
+                        keyMapTabs.find((t) => t.map.id === mapId)?.map;
+                      if (!map) {
+                        setError("Matching Save: target Mapping not found");
+                        return;
+                      }
+                      const fromValues = upserts.map(
+                        (u) => u.fromParts[0] ?? "",
+                      );
+                      const toValues = upserts.map(
+                        (u) => u.outputValues[0] ?? "",
+                      );
+                      const arity = Math.max(
+                        ...upserts.map((u) => u.fromParts.length),
+                        map.from_columns?.length ?? 1,
+                        1,
+                      );
+                      const stubJoinCtx = {
+                        hostQueryId: "",
+                        joinStepIndex: 0,
+                        rightQueryId: "",
+                        leftOn: map.from_columns?.length
+                          ? [...map.from_columns]
+                          : Array.from({ length: arity }, (_, i) =>
+                              i === 0 ? (map.from_column ?? "from") : `from_${i}`,
+                            ),
+                        rightOn: ["to"],
+                        joinType: "left" as const,
+                      };
+                      const cellPatches = upserts.map((u) =>
+                        (map.output_columns?.length
+                          ? map.output_columns
+                          : ["to"]
+                        ).map((column, i) => ({
+                          column,
+                          value: u.outputValues[i] ?? "",
+                        })),
+                      );
+                      const merged = mergeFromValuesIntoMap({
+                        map,
+                        fromValues,
+                        toValues,
+                        fromParts: upserts.map((u) => u.fromParts),
+                        cellPatches,
+                        joinCtx: stubJoinCtx,
+                      });
+                      await saveKeyMapToProject(merged);
+                      setMatchingTabs((tabs) =>
+                        tabs.map((t) =>
+                          t.id === nextSession.id ? nextSession : t,
+                        ),
+                      );
+                    }}
+                  />
+                </div>
+              );
+            })}
             {keyMapTabs.map((keyMapEditor) => (
               <div
                 key={keyMapEditor.map.id}
@@ -6224,6 +6401,26 @@ function App() {
                       mapId: keyMapEditor.map.id,
                     })
                   }
+                  onOpenMatching={() => {
+                    const id = newMatchingSessionId();
+                    const map = keyMapEditor.map;
+                    const session = emptyMatchingSession({
+                      id,
+                      title: `Matching: ${map.name || map.id}`,
+                      targetMapId: map.id,
+                      entry: "mapping",
+                      scope: "full",
+                      queryOptions: (project.workspace.queries ?? []).map(
+                        (q) => q.id,
+                      ),
+                      instructionText: "",
+                      plan: null,
+                      hasUnsavedDecisions: false,
+                      chatCollapsed: false,
+                    });
+                    setMatchingTabs((tabs) => [...tabs, session]);
+                    setCenterTab(matchingTabKey(id));
+                  }}
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
                   importNotice={(() => {
                     const rel = project.pg_import?.relations.find(
@@ -6667,6 +6864,47 @@ function App() {
                         onMapKey={handleMapKeyFromLens}
                         onPrepareBusy={setLensPrepareBusy}
                         onRunDiagnostics={runJoinDiagnostics}
+                        onOpenMatching={(opts) => {
+                          const id = newMatchingSessionId();
+                          const sourceRef =
+                            opts.leftSourceQueryId || opts.hostQueryId;
+                          const title = `Matching: ${sourceRef} → ${opts.rightQueryId}`;
+                          const queryOptions = (
+                            project.workspace.queries ?? []
+                          ).map((q) => q.id);
+                          const plan = buildLensMatchingPlan({
+                            leftOn: opts.leftOn,
+                            rightOn: opts.rightOn,
+                            sourceRef,
+                            targetRef: opts.rightQueryId,
+                            sourceColumns: opts.sourceColumns,
+                            targetColumns: opts.targetColumns,
+                            scope: opts.scope,
+                          });
+                          const session = emptyMatchingSession({
+                            id,
+                            title,
+                            entry: "lens",
+                            scope: opts.scope,
+                            lensCtx: {
+                              hostQueryId: opts.hostQueryId,
+                              joinStepIndex: opts.joinStepIndex,
+                              leftOn: opts.leftOn,
+                              rightOn: opts.rightOn,
+                              rightQueryId: opts.rightQueryId,
+                              leftSourceQueryId: opts.leftSourceQueryId,
+                              sourceColumns: opts.sourceColumns,
+                              targetColumns: opts.targetColumns,
+                            },
+                            queryOptions,
+                            instructionText: "",
+                            plan,
+                            hasUnsavedDecisions: false,
+                            chatCollapsed: false,
+                          });
+                          setMatchingTabs((tabs) => [...tabs, session]);
+                          setCenterTab(matchingTabKey(id));
+                        }}
                       />
                     ) : preview ? (
                       <PreviewTable

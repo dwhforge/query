@@ -35,6 +35,21 @@ Help SHALL include offline lab `name_id_match` with two independent CSV catalogs
 - **THEN** the workspace focuses `dirty_by_id`
 - **AND** KeyMap `map_crm_to_erp` has editable columns `from_name` and `to_name`
 
+### Requirement: Name+region soft-match lab
+Help SHALL include offline lab `name_region_match` with POS invoices (`vendor_label`/`region`/`qty`) vs vendor master (`vendor_name`/`region`/`category`/`vendor_id`) covering **two** example families: (1) the **exact same** vendor name in multiple regions as distinct companies (e.g. `ComputerParts LLC` US vs DE); (2) brand names with English LLM synonyms on name **and** region (e.g. `Nestlé Waters` / `Danone Waters` with `NW bottled water`, `EU`/`RF`/`Russia`). It SHALL include a dirty dual-key Join, a name-only Join that fans shared names across regions, and a composite KeyMap seed covering only exact pairs so Matching / LLM must complete synonym rows. The lab SHALL include mart query `by_vendor_region` with grain `vendor_name`, `region` and measure `SUM(qty)`.
+
+#### Scenario: Open name_region_match
+- **WHEN** the user opens `name_region_match` from Help Lab
+- **THEN** the workspace focuses `dirty_exact_pair`
+- **AND** KeyMap `map_pos_to_vendor` has composite From columns `vendor_label` and `region`
+- **AND** queries `dirty_name_only`, `invoices_mapped`, and `by_vendor_region` are present
+
+#### Scenario: Same name different regions stay separate
+- **WHEN** the user previews `by_vendor_region`
+- **THEN** columns are `vendor_name`, `region`, `qty`
+- **AND** `ComputerParts LLC` appears once for US and once for DE
+- **AND** `Nestlé Waters` appears once for Europe and once for RUS
+
 ### Requirement: Flattened discovery
 EmptyHero and Help SHALL prefer Help Lab over a long equal-weight demo button row. Postgres-only labs MAY appear only under an Advanced track in the catalog.
 

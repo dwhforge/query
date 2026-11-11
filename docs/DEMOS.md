@@ -132,6 +132,35 @@ Categories: A1, A3, A14.
 
 Committed under `fixtures/labs/name_id_match/`. CRM `crm_id`/`name` vs ERP `erp_id`/`name`. Focus `dirty_by_id` (ids never collide). Join Lens Auto scores sibling **name** labels and proposes **id→id**. Partial seed `map_crm_to_erp` keeps `from_name`/`to_name` attrs for later edits (ADR-0028). `crm_mapped` Applies the map then joins ERP on id.
 
+### 5c. `name_region_match` — Name + region soft match (two example families)
+
+Committed under `fixtures/labs/name_region_match/`. POS `vendor_label`/`region`/`qty` vs vendor master `vendor_name`/`region`/`category`/`vendor_id`.
+
+**Family A — exact same name, different country = different company**
+
+| Canonical | Regions (distinct vendors) | Invoice variants |
+|-----------|----------------------------|------------------|
+| ComputerParts LLC | US = V10, DE = V11 | KomputerParts LLC, Computer Parts LLC, CPC LLC + United States / USA / Germany / Federal Republic of Germany |
+| Office Supply Co | US = V20, UK = V21 | Office Supplies Company + United Kingdom |
+
+**Family B — brand names, LLM synonyms on name and region**
+
+| Canonical | Regions | Invoice variants |
+|-----------|---------|------------------|
+| Nestlé Waters | Europe = V30, RUS = V31 | Nestle Waters International, NW bottled water, Nestlé Water Div. + EU / EEA / Russian Federation / Russia |
+| Danone Waters | Europe = V40, RUS = V41 | Danone Water Division, Danone Eau + Western Europe / RF |
+| Global Widgets Inc | APAC = V50 | Global Widgets + Asia Pacific |
+
+| Query (UI) | Role |
+|------------|------|
+| `pos_invoices`, `dim_vendor` | sources |
+| `dirty_exact_pair` ★focus | LEFT Join on label=name **and** region=region — synonym rows unmatched |
+| `dirty_name_only` | Join on name only — ComputerParts / Nestlé / Danone fan across regions |
+| `invoices_mapped` | Apply composite KeyMap → join vendor; keeps `qty` + `category` |
+| `by_vendor_region` | **mart:** `vendor_name`, `region`, `SUM(qty)` — same name stays split by region |
+
+Seed `map_pos_to_vendor` covers clean exact pairs only; synonym rows are for Matching (ADR-0044).
+
 ### 5. `recon_ship_sales` — Plant shipments ↔ commercial sales (ADR-0039)
 
 Committed under `fixtures/labs/recon_ship_sales/`. Commercial codes (`COM-UREA`, …) ≠ plant `product_id`. Partial KeyMap (`COM-UREA`, `COM-NPK16`); leave `COM-AMM` / `NEW-BLEND` for Join Lens.

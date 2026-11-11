@@ -809,6 +809,9 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "name_id_match" | "name_id" | "crm_erp_names" => {
             help_labs::demo_name_id_match(&fixtures)
         }
+        "name_region_match" | "name_region" | "pos_vendor_region" | "matching_region" => {
+            help_labs::demo_name_region_match(&fixtures)
+        }
         "keymap_crosswalk" | "crosswalk" => labs::demo_keymap_crosswalk(&fixtures),
         "keymap_dual" | "dual" => labs::demo_keymap_dual(&fixtures),
         "keymap_codes" | "codes" => labs::demo_keymap_codes(&fixtures),
@@ -824,7 +827,7 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
         "keymap_parquet" | "parquet" => labs::demo_keymap_parquet(&fixtures),
         other => Err(format!(
             "Unknown demo '{other}'. Open Help Lab for the catalog, or use: sales | union | sql | \
-             right | keymap | recon_ship_sales | name_id_match | keymap_crosswalk | …"
+             right | keymap | recon_ship_sales | name_id_match | name_region_match | keymap_crosswalk | …"
         )),
     }
 }
@@ -1862,6 +1865,28 @@ impl HostState {
                 let settings = settings_io::load_settings()?;
                 let content = crate::llm::complete_chat(&settings.llm, &a.messages)?;
                 Ok(serde_json::json!({ "content": content }))
+            }
+            // ADR-0044 Matching gates — pure validation/merge; no DuckDB lock.
+            "matching_caps" => commands::matching::matching_caps(),
+            "matching_retrieve" => {
+                let a: dwh_engine::MatchingRetrieveRequest =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                commands::matching::matching_retrieve_cmd(a)
+            }
+            "matching_validate_llm_intake" => {
+                let a: commands::matching::MatchingLlmIntakeArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                commands::matching::matching_validate_llm_intake(a)
+            }
+            "matching_accept_draft" => {
+                let a: commands::matching::MatchingDraftAcceptArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                commands::matching::matching_accept_draft(a)
+            }
+            "matching_plan_commit" => {
+                let a: commands::matching::MatchingPlanCommitArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                commands::matching::matching_plan_commit(a)
             }
             _ => self.dispatch_locked(cmd, args),
         }

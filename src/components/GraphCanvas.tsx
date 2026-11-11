@@ -115,10 +115,10 @@ const LabeledEdge = memo(function LabeledEdge({
   const kind = data?.labelKind ?? data?.kind ?? "join";
   const tone =
     kind === "join"
-      ? "border-teal-500/40 bg-slate-950 text-teal-200"
+      ? "border-teal-500/35 bg-slate-950/55 text-teal-200"
       : kind === "append"
-        ? "border-slate-600 bg-slate-950 text-slate-300"
-        : "border-violet-500/40 bg-slate-950 text-violet-200";
+        ? "border-slate-600/70 bg-slate-950/55 text-slate-300"
+        : "border-violet-500/35 bg-slate-950/55 text-violet-200";
 
   return (
     <>
@@ -126,7 +126,7 @@ const LabeledEdge = memo(function LabeledEdge({
       {text ? (
         <EdgeLabelRenderer>
           <div
-            className={`nodrag nopan pointer-events-none absolute z-[1] max-w-[220px] rounded-md border px-2 py-0.5 text-center font-mono text-[11px] font-semibold leading-tight tracking-tight shadow-md ${tone}`}
+            className={`nodrag nopan pointer-events-none absolute z-[1] max-w-[220px] rounded-md border px-2 py-0.5 text-center font-mono text-[11px] font-semibold leading-tight tracking-tight shadow-md backdrop-blur-[2px] ${tone}`}
             style={{
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
             }}

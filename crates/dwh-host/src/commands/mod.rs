@@ -2,5 +2,6 @@
 //! `api.rs` dispatches; bodies live here.
 
 pub mod keymap;
+pub mod matching;
 pub mod pg_import;
 pub mod project;

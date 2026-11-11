@@ -31,6 +31,7 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
+- `openspec/specs/matching-workspace/` — ADR-0044 Matching workspace (merged); change notes in `openspec/changes/matching-workspace/`; Lens **Quick match** ≠ Matching **Contextual matching**; English UI.
 - `openspec/specs/project-relative-load-paths/` — ADR-0043 relative Load paths + path_kind (merged)
 - `openspec/specs/join-lens-in-place-confirm/` — ADR-0042 Join Lens in-place confirm (merged)
 - `openspec/specs/heavy-preview-sample/` — ADR-0041 heavy preview sample + Load full (merged)

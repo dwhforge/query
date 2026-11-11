@@ -12,6 +12,7 @@ mod key_map_delta;
 mod key_map_fuzzy;
 mod key_map_write;
 mod key_match;
+mod matching;
 #[cfg(test)]
 mod key_match_bench;
 mod load_seeds;
@@ -53,6 +54,19 @@ pub use join_prepare::{
 };
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
+pub use matching::{
+    accept_draft_decision, bulk_saveable, classify_merge, commit_blocked_reason,
+    detect_proposal_conflicts, gate_commit_write_policy, map_key_token, map_row_exists,
+    matching_retrieve, plan_bulk_confirm, validate_llm_intake, LlmIntakeRequest,
+    MatchingAmbiguityPolicy, MatchingCandidate, MatchingDecision, MatchingDecisionKind,
+    MatchingFieldRole, MatchingMapRowSnapshot, MatchingMergeItem, MatchingMergeOutcome,
+    MatchingPlan, MatchingPlanComparison, MatchingProposal, MatchingProposalState,
+    MatchingProvenance, MatchingRetrieveRequest, MatchingRetrieveResult, MatchingRunMetrics,
+    MatchingRunMode, MatchingScopeKind, MatchingSourceRow, MatchingTargetRow,
+    MatchingValidateError, MaterializedDecision, LLM_CANDIDATES_PER_KEY, LLM_RETRIES_PER_REQUEST,
+    LOCAL_TARGET_UNIVERSE_ROWS, MASS_RUN_UNIQUE_KEYS, MAX_LLM_CALLS_PER_RUN,
+    PARALLEL_LLM_REQUESTS, RETRIEVAL_SHORTLIST_PER_KEY, TRIAL_UNIQUE_KEYS,
+};
 pub use key_map_delta::{
     validate_mapping_delta, KeyMapDirtyBaseline, KeyMapDirtyDelta, ValidatedMappingDelta,
 };

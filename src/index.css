@@ -92,6 +92,12 @@ select option {
   animation: op-progress-slide 1.15s ease-in-out infinite;
 }
 
+@keyframes matching-llm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .anim-rise {
   animation: rise 0.45s ease-out both;
 }

@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [`changes/matching-workspace/`](changes/matching-workspace/) — Matching tab (ADR-0044); **contract merged** → [`specs/matching-workspace/`](specs/matching-workspace/); see `changes/matching-workspace/report.md` for tested scope / Electron E2E gap
+
 - ~~[`changes/project-relative-load-paths/`](changes/project-relative-load-paths/)~~ — **merged** → [`specs/project-relative-load-paths/`](specs/project-relative-load-paths/) ([ADR-0043](../docs/adr/0043-project-relative-load-paths.md))
 
 - ~~[`changes/join-lens-in-place-confirm/`](changes/join-lens-in-place-confirm/)~~ — **merged** → [`specs/join-lens-in-place-confirm/`](specs/join-lens-in-place-confirm/) ([ADR-0042](../docs/adr/0042-join-lens-in-place-confirm.md))

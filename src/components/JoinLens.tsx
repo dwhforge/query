@@ -41,6 +41,7 @@ import {
   mapEntryFromLabel,
   wiredMapKeyLabels,
 } from "../lib/joinMapEffect";
+import { resolveLeftSourceQueryId } from "../app/matching/planDefaults";
 import { workspaceFocusingObject } from "../lib/projectRefs";
 import { FindRightDialog } from "./FindRightDialog";
 import { JoinLensAuto } from "./JoinLensAuto";
@@ -518,6 +519,21 @@ export type JoinLensProps = {
   onPrepareBusy?: (busy: boolean) => void;
   /** Run Join diagnostics (Probe lists unmatched samples). */
   onRunDiagnostics?: () => void;
+  /**
+   * ADR-0044: open Matching for contextual multi-field review.
+   * Does not auto-start a run. Scope must be labelled (selected / cohort / full).
+   */
+  onOpenMatching?: (opts: {
+    scope: "selected" | "cohort" | "full";
+    hostQueryId: string;
+    joinStepIndex: number;
+    leftOn: string[];
+    rightOn: string[];
+    rightQueryId: string;
+    leftSourceQueryId?: string;
+    sourceColumns?: string[];
+    targetColumns?: string[];
+  }) => void;
 };
 
 function JoinLensImpl({
@@ -536,6 +552,7 @@ function JoinLensImpl({
   joinDiag,
   joinDiagLoading = false,
   forceProbeNonce = 0,
+  onOpenMatching,
   autoPrepareNonce = 0,
   focusResultHint = null,
   onApplyNearMiss,
@@ -2156,29 +2173,62 @@ function JoinLensImpl({
           <button
             type="button"
             onClick={() => switchMode("auto")}
-            title="Batch-match unmatched keys by name/similarity, then Apply accepted"
+            title="Using current Lens fields and rules — fast batch, no separate contextual plan"
             className={`rounded border px-2 py-1 text-[11px] font-medium ${
               sideMode === "auto"
                 ? "border-amber-600/80 bg-amber-500/20 text-amber-50"
                 : "border-slate-700 text-slate-400 hover:border-amber-800/70 hover:text-amber-100"
             }`}
           >
-            Suggest all…
+            Quick match
           </button>
+          {onOpenMatching && (
+            <button
+              type="button"
+              data-testid="lens-open-matching"
+              onClick={() =>
+                onOpenMatching({
+                  scope: selectedProbeSide != null ? "selected" : "cohort",
+                  hostQueryId,
+                  joinStepIndex,
+                  leftOn,
+                  rightOn,
+                  rightQueryId,
+                  leftSourceQueryId: resolveLeftSourceQueryId(
+                    workspace,
+                    hostQueryId,
+                    joinStepIndex,
+                  ),
+                  sourceColumns: (parentLeftCols.length
+                    ? parentLeftCols
+                    : probeLeftCols
+                  ).map((c) => c.name),
+                  targetColumns: (parentRightCols.length
+                    ? parentRightCols
+                    : probeRightCols
+                  ).map((c) => c.name),
+                })
+              }
+              title="Multiple fields, extra constraints, and comparing alternatives"
+              className="rounded border border-slate-700 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-teal-700/70 hover:text-teal-100"
+            >
+              Contextual matching…
+            </button>
+          )}
           <span
             className="min-w-0 flex-1 text-[11px] leading-snug text-slate-400"
             title={
               sideMode === "linked"
                 ? "Which left/right rows built this result row?"
                 : sideMode === "auto"
-                  ? "Fuzzy + LLM into one batch, then Write Mapping once"
+                  ? "Using current Lens fields and rules"
                   : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
               ? "Where this result came from"
               : sideMode === "auto"
-                ? "One batch → Write Mapping"
+                ? "Current Lens fields → Write Mapping"
                 : "Values that didn’t join"}
           </span>
         </div>
@@ -2189,20 +2239,22 @@ function JoinLensImpl({
               <ol className="list-decimal space-y-1 pl-3.5">
                 <li>
                   <span className="font-semibold text-amber-200">
-                    Suggest all…
+                    Quick match
                   </span>{" "}
-                  — fuzzy + optional LLM into one batch →{" "}
+                  — current Lens fields, one batch →{" "}
                   <span className="font-semibold text-amber-200">
                     Write Mapping
                   </span>
                 </li>
                 <li>
-                  <span className="font-semibold text-teal-200">No match</span> —
-                  one key at a time if you prefer manual pick
+                  <span className="font-semibold text-teal-200">
+                    Contextual matching…
+                  </span>{" "}
+                  — multiple fields, constraints, and alternatives (Matching tab)
                 </li>
                 <li>
-                  <span className="font-semibold text-teal-200">This row</span> —
-                  see which left/right rows made a result row
+                  <span className="font-semibold text-teal-200">No match</span> —
+                  one key at a time if you prefer manual pick
                 </li>
               </ol>
               <button

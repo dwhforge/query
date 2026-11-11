@@ -210,6 +210,143 @@ pub fn demo_recon_ship_sales(fixtures: &Path) -> Result<Workspace, String> {
     })
 }
 
+/// POS invoices ↔ vendor master — two example families:
+/// 1) Exact same name, different country = different company (`ComputerParts
+///    LLC` US≠DE; `Office Supply Co` US≠UK).
+/// 2) Brand names with English LLM synonyms on name **and** region (`Nestlé
+///    Waters` / `Danone Waters`; `NW bottled water`, `EU`/`RF`/`Russia`).
+/// Mart `by_vendor_region`: vendor_name, region, SUM(qty).
+pub fn demo_name_region_match(fixtures: &Path) -> Result<Workspace, String> {
+    let invoices = lab_csv(fixtures, "name_region_match/pos_invoices.csv")?;
+    let dim_vendor = lab_csv(fixtures, "name_region_match/dim_vendor.csv")?;
+    let seed_body = fs::read_to_string(
+        labs_dir(fixtures).join("name_region_match/map_pos_to_vendor_seed.csv"),
+    )
+    .map_err(|e| format!("read map_pos_to_vendor_seed.csv: {e}"))?;
+    let entries = dwh_pipeline::parse_key_map_seed_csv_cols(
+        &seed_body,
+        &["vendor_label".into(), "region".into()],
+        "vendor_id",
+    )?;
+    let mut map = KeyMapDef::new(
+        "map_pos_to_vendor",
+        "POS vendor_label+region → vendor_id (same name ≠ same company across regions)",
+    );
+    map.from_column = "vendor_label".into();
+    map.from_columns = vec!["vendor_label".into(), "region".into()];
+    map.to_column = "vendor_id".into();
+    map.output_columns = vec!["vendor_id".into()];
+    map.entries = entries.clone();
+
+    Ok(Workspace {
+        queries: vec![
+            q(
+                "pos_invoices",
+                vec![TransformationStep::LoadCsv {
+                    path: invoices,
+                    path_kind: Default::default(),
+                }],
+            ),
+            q(
+                "dim_vendor",
+                vec![TransformationStep::LoadCsv {
+                    path: dim_vendor,
+                    path_kind: Default::default(),
+                }],
+            ),
+            // Exact dual-key Join — synonym rows (KomputerParts, USA, NW bottled water, RF) fail.
+            q(
+                "dirty_exact_pair",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "pos_invoices".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_vendor".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["vendor_label".into(), "region".into()],
+                        right_on: vec!["vendor_name".into(), "region".into()],
+                    },
+                ],
+            ),
+            // Name-only Join fans ComputerParts / Nestlé / Danone across regions.
+            q(
+                "dirty_name_only",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "pos_invoices".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_vendor".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["vendor_label".into()],
+                        right_on: vec!["vendor_name".into()],
+                    },
+                ],
+            ),
+            q(
+                "invoices_mapped",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "pos_invoices".into(),
+                    },
+                    TransformationStep::ApplyKeyMap {
+                        column: "vendor_label".into(),
+                        columns: vec!["vendor_label".into(), "region".into()],
+                        output_column: Some("vendor_id".into()),
+                        output_bindings: vec![],
+                        as_of_column: None,
+                        map_id: map.id.clone().into(),
+                        entries: entries.clone(),
+                    },
+                    // Keep invoice region distinct so dim `region` is the grain key.
+                    TransformationStep::RenameColumn {
+                        from: "region".into(),
+                        to: "invoice_region".into(),
+                    },
+                    TransformationStep::Join {
+                        right_query_id: "dim_vendor".into(),
+                        join_type: dwh_pipeline::JoinType::Left,
+                        left_on: vec!["vendor_id".into()],
+                        right_on: vec!["vendor_id".into()],
+                    },
+                    TransformationStep::SelectColumns {
+                        columns: vec![
+                            "invoice_id".into(),
+                            "vendor_id".into(),
+                            "vendor_name".into(),
+                            "region".into(),
+                            "qty".into(),
+                            "category".into(),
+                            "vendor_label".into(),
+                            "invoice_region".into(),
+                        ],
+                    },
+                ],
+            ),
+            // Target mart: same vendor_name in Europe vs RUS stay separate rows.
+            q(
+                "by_vendor_region",
+                vec![
+                    TransformationStep::FromQuery {
+                        query_id: "invoices_mapped".into(),
+                    },
+                    TransformationStep::GroupBy {
+                        dimensions: vec!["vendor_name".into(), "region".into()],
+                        aggregates: vec!["sum(qty) as qty".into()],
+                    },
+                    TransformationStep::SortBy {
+                        column: "vendor_name".into(),
+                        descending: false,
+                    },
+                ],
+            ),
+        ],
+        focus_query_id: "dirty_exact_pair".into(),
+        key_maps: vec![map],
+    })
+}
+
 /// Two independent catalogs (crm_id/name ↔ erp_id/name). Match by name in Join Lens;
 /// durable seed is id→id with name attrs for editing ([ADR-0028](../../../docs/adr/0028-keymap-stewardship-shapes.md)).
 pub fn demo_name_id_match(fixtures: &Path) -> Result<Workspace, String> {
@@ -331,5 +468,62 @@ mod tests {
         assert!(map.entries[0].attrs.contains_key("from_name"));
         assert!(ws.query("crm_mapped").is_some());
         assert!(ws.query("dirty_by_id").is_some());
+    }
+
+    #[test]
+    fn name_region_match_builds_composite_map() {
+        let cards = load_help_lab_catalog(&fixtures()).expect("catalog");
+        assert!(cards.iter().any(|c| c.id == "name_region_match"));
+        let ws = demo_name_region_match(&fixtures()).expect("name_region_match");
+        assert_eq!(ws.focus_query_id, "dirty_exact_pair");
+        let map = &ws.key_maps[0];
+        assert_eq!(map.id, "map_pos_to_vendor");
+        assert_eq!(
+            map.from_columns,
+            vec!["vendor_label".to_string(), "region".to_string()]
+        );
+        assert_eq!(map.entries.len(), 9);
+        assert!(ws.query("dirty_exact_pair").is_some());
+        assert!(ws.query("dirty_name_only").is_some());
+        assert!(ws.query("invoices_mapped").is_some());
+        assert!(ws.query("by_vendor_region").is_some());
+
+        let mut preview_ws = ws.clone();
+        preview_ws.focus_query_id = "by_vendor_region".into();
+        let db = dwh_engine::DbSession::new().expect("duckdb");
+        let out = dwh_engine::preview_workspace(&db, &preview_ws, &[], &[]).expect("preview");
+        let names: Vec<_> = out.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["vendor_name", "region", "qty"]);
+
+        let regions_for = |want: &str| -> Vec<String> {
+            out.rows
+                .iter()
+                .filter_map(|row| {
+                    let name = row.first().and_then(|v| v.as_str())?;
+                    if name != want {
+                        return None;
+                    }
+                    row.get(1).and_then(|v| v.as_str()).map(str::to_string)
+                })
+                .collect()
+        };
+
+        let computer_parts = regions_for("ComputerParts LLC");
+        assert_eq!(
+            computer_parts.len(),
+            2,
+            "ComputerParts LLC US≠DE must stay separate: {computer_parts:?}"
+        );
+        assert!(computer_parts.iter().any(|r| r == "US"));
+        assert!(computer_parts.iter().any(|r| r == "DE"));
+
+        let nestle = regions_for("Nestlé Waters");
+        assert_eq!(
+            nestle.len(),
+            2,
+            "Nestlé Waters Europe≠RUS must stay separate: {nestle:?}"
+        );
+        assert!(nestle.iter().any(|r| r == "Europe"));
+        assert!(nestle.iter().any(|r| r == "RUS"));
     }
 }

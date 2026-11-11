@@ -1265,3 +1265,97 @@ export function keyMapFuzzySuggest(
     workspace, connections, left: source(left), right: source(right), options,
   });
 }
+
+/** ADR-0044 Matching caps — prefer over hardcoding; SoT in dwh-engine matching/caps.rs */
+export type MatchingCaps = {
+  trialUniqueKeys: number;
+  massRunUniqueKeys: number;
+  retrievalShortlistPerKey: number;
+  llmCandidatesPerKey: number;
+  localTargetUniverseRows: number;
+  parallelLlmRequests: number;
+  llmRetriesPerRequest: number;
+  maxLlmCallsPerRun: number;
+};
+
+export function matchingCaps(): Promise<MatchingCaps> {
+  return invoke<MatchingCaps>("matching_caps", {});
+}
+
+export type MatchingRetrieveResult = {
+  candidates: {
+    candidateId: string;
+    sessionId: string;
+    targetId: string;
+    outputValues: string[];
+    evidenceRevision: number;
+  }[];
+  proposals: {
+    proposalId: string;
+    sessionId: string;
+    mapKey: string[];
+    affectedSourceRows: number;
+    proposedCandidateId?: string | null;
+    alternativeCandidateIds: string[];
+    state: string;
+    provenance: string;
+    semanticPlanRevision: number;
+    evidenceRevision: number;
+    searchIncomplete?: boolean;
+  }[];
+  metrics: {
+    mode: string;
+    keysRequested: number;
+    keysProcessed: number;
+    keysUnprocessed: number;
+    candidatesScored: number;
+    llmCalls: number;
+    llmRetries: number;
+    durationMs: number;
+    stopReason?: string | null;
+    keyCap: number;
+    shortlistPerKey: number;
+    llmPerKey: number;
+    maxLlmCalls: number;
+    localUniverse: number;
+  };
+  llmCandidateIdsByProposal: Record<string, string[]>;
+};
+
+export function matchingRetrieve(
+  args: Record<string, unknown>,
+): Promise<MatchingRetrieveResult> {
+  return invoke<MatchingRetrieveResult>("matching_retrieve", args);
+}
+
+export function matchingValidateLlmIntake(args: Record<string, unknown>): Promise<unknown> {
+  return invoke("matching_validate_llm_intake", args);
+}
+
+export function matchingAcceptDraft(args: Record<string, unknown>): Promise<{
+  accepted: boolean;
+  materialized?: {
+    mapKey: string[];
+    candidateId: string;
+    targetId: string;
+    outputValues: string[];
+    proposalId: string;
+    affectedSourceRows: number;
+  } | null;
+}> {
+  return invoke("matching_accept_draft", args);
+}
+
+export function matchingPlanCommit(args: Record<string, unknown>): Promise<{
+  ok: boolean;
+  blockedReason?: string | null;
+  items: {
+    mapKey: string[];
+    outcome: string;
+    affectedSourceRows: number;
+    proposedOutputs?: string[] | null;
+    liveOutputs?: string[] | null;
+  }[];
+}> {
+  return invoke("matching_plan_commit", args);
+}

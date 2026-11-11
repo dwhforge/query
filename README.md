@@ -41,7 +41,7 @@ Built for small data teams, solo engineers, and consultants working with Postgre
 | Build reusable transformations | Connected queries, applied steps, joins, append, filters, grouping, sorting, and calculated columns |
 | Handle everyday calculations | Ready-made operations for common calculations, with an SQL mode for custom expressions |
 | Understand a failed match | Join Lens with key investigation and unmatched-row samples |
-| Fix inconsistent identifiers | Editable From → To KeyMaps, reusable across queries and exported as dbt seeds |
+| Fix inconsistent identifiers | Editable From → To Mappings, reusable across queries and exported as dbt seeds |
 | Choose what to deliver | Mark output queries **Publish to destination** |
 | Execute the exported project | **Export → Parse → Build**, with build progress and logs |
 
@@ -67,7 +67,7 @@ Custom SQL follows the **execution engine’s dialect**. See [export routes and 
 The bundled **Key mapping** demo follows two feeds across **15 companies and 60 days**: sales and spending use different names for the same businesses.
 
 1. **Open the problem.** Load **Help → Load demo → Key mapping** and inspect `dirty_join` to see names that do not match the company dimension.
-2. **Investigate and map.** Use Join Lens and the KeyMap editor to connect source aliases to canonical company IDs. Reuse the mapping across both feeds.
+2. **Investigate and map.** Use Join Lens and the Mapping editor to connect source aliases to canonical company IDs. Reuse the mapping across both feeds.
 3. **Inspect the result.** Follow the daily combined data into the monthly rollup; inspect intermediate rows and generated model SQL.
 4. **Choose the outputs.** Set execution to **DuckDB**, destination to **PostgreSQL**, select your connection, and mark the daily and monthly queries **Publish to destination**.
 5. **Build the tables.** Choose **File → Export dbt…**, then **File → Build export…**. Inspect the published tables in PostgreSQL.
@@ -89,7 +89,7 @@ my_pipeline/
 │   ├── intermediate/     # Shared transformations
 │   ├── marts/            # Published outputs
 │   └── sources.yml
-├── seeds/               # Seed-backed KeyMaps
+├── seeds/               # Seed-backed Mappings
 └── macros/              # Route-specific helpers, when needed
 ```
 
@@ -146,7 +146,7 @@ The desktop app connects directly to the files, databases, and storage you confi
 
 **Early development.** The current focus is the complete edit → preview → export → build loop on DuckDB and PostgreSQL.
 
-- **Available:** visual multi-query authoring, step previews, Join Lens, KeyMaps, ready-made calculated operations, dbt export, publish controls, and build execution.
+- **Available:** visual multi-query authoring, step previews, Join Lens, Mappings, ready-made calculated operations, dbt export, publish controls, and build execution.
 - **Current dbt runtime:** Core **1.x**. dbt **2.0 compatibility is planned**, not yet supported.
 - **Current boundary:** the workspace generates its dbt project. Importing and round-tripping arbitrary existing dbt repositories is not supported.
 - **Later:** incremental and snapshot configuration, broader testing/profiling surfaces, and richer dbt project integration.

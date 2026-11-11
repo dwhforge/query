@@ -113,6 +113,8 @@ export type KeyMapEditorProps = {
   ) => void;
   /** Create a Join-anchored mapping quality check for this KeyMap (ADR-0035). */
   onMappingCheck?: () => void;
+  /** ADR-0044: open Matching workspace bound to this map. */
+  onOpenMatching?: () => void;
   onClose?: () => void;
   onSave?: () => void;
   onDelete?: () => void;
@@ -176,6 +178,7 @@ export function KeyMapEditor({
   saveInFlight = false,
   onApply,
   onMappingCheck,
+  onOpenMatching,
   onClose,
   onSave,
   onDelete,
@@ -1913,6 +1916,17 @@ export function KeyMapEditor({
             title="Open mapping quality overview for a Join that applies this Mapping"
           >
             Mapping check…
+          </button>
+        )}
+        {onOpenMatching && (
+          <button
+            type="button"
+            data-testid="keymap-open-matching"
+            onClick={onOpenMatching}
+            className="rounded-md border border-amber-800/50 bg-amber-500/10 px-2.5 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-500/20"
+            title="Contextual matching with a plan, alternatives, and review"
+          >
+            Open matching…
           </button>
         )}
         {onClose && (

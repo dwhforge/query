@@ -6,7 +6,7 @@
     <title>DWHForge Query — Build visually. Verify on real data. Ship dbt.</title>
     <meta
       name="description"
-      content="Local desktop workbench: create KeyMaps from queries, investigate joins, export a runnable dbt project. Compute stays local; optional LLM assist sends limited key context to your chosen endpoint."
+      content="Local desktop workbench: create Mappings from queries, investigate joins, export a runnable dbt project. Compute stays local; optional LLM assist sends limited key context to your chosen endpoint."
     />
     <meta property="og:title" content="DWHForge Query" />
     <meta
@@ -150,7 +150,7 @@
               <div class="feature-body">
                 <h3>Investigate joins where you build them</h3>
                 <p>
-                  Create a KeyMap from two local queries, diagnose misses in Join
+                  Create a Mapping from two local queries, diagnose misses in Join
                   Lens, clean near-miss keys, and edit From→To (including
                   composite keys)—stored as a seed, warehouse table, or existing
                   dbt model.
@@ -242,7 +242,7 @@
                 <p>
                   Pick two local queries, source key(s) and a target column, then
                   optionally restore columns dropped by a last Fields step.
-                  Review the plan and commit all-or-nothing into a seed KeyMap—the
+                  Review the plan and commit all-or-nothing into a seed Mapping—the
                   existing editor opens for stewardship. Create does not Apply,
                   Join, Check, export, or warehouse-Save.
                   <br /><br />
@@ -359,8 +359,8 @@
               <div class="feature-body">
                 <h3>Optional LLM assist</h3>
                 <p>
-                  Configure an OpenAI-compatible endpoint in
-                  <strong>File → Options…</strong> (or
+                  Connect an OpenAI-compatible endpoint in Join Lens
+                  <strong>Auto → Connect LLM</strong> (saved to
                   <code>~/.dwhforge-query/settings.json</code>). Use
                   <strong>Suggest all…</strong> for similar-name proposals you
                   Accept into a mapping, then chat about leftovers.
@@ -443,7 +443,7 @@
                   <p>
                     Join Lens shows why a row missed; accept the mapping yourself
                     (manual, fuzzy, or LLM suggest)—never automatic join ON.
-                    Create a KeyMap from two queries when aliases need a
+                    Create a Mapping from two queries when aliases need a
                     dictionary first.
                   </p>
                 </div>
@@ -558,8 +558,8 @@
             <li>
               <strong style="color: var(--fg)">Edit the mapping.</strong> Fill
               From→To (including non-lexical leftovers like tickers, or a
-              composite From). Optional: connect an LLM in Options for Suggest
-              all… / chat on hard aliases—then Accept into the map.
+              composite From). Optional: connect an LLM in Join Lens Auto for
+              Suggest all… / chat on hard aliases—then Accept into the map.
               <strong>Apply to left</strong> on sales and spend with one shared
               mapping.
             </li>

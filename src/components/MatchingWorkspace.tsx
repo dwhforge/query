@@ -558,19 +558,13 @@ export function MatchingWorkspace({
     const ac = llmAbortRef.current;
     if (!ac) return;
     ac.abort();
-    setLlmProgress((prev) =>
-      prev
-        ? {
-            ...prev,
-            label: "Cancelling…",
-            detail: "Stopping — UI unlocks now; ignore late model replies",
-          }
-        : {
-            percent: prev?.percent ?? 0,
-            label: "Cancelling…",
-            detail: "Stopping…",
-          },
-    );
+    setLlmProgress((prev) => ({
+      percent: prev?.percent ?? 0,
+      label: "Cancelling…",
+      detail: prev
+        ? "Stopping — UI unlocks now; ignore late model replies"
+        : "Stopping…",
+    }));
   }
 
   async function onCommit() {
@@ -595,12 +589,14 @@ export function MatchingWorkspace({
         reviewFilter: leftover ? "needs_decision" : "saved",
         pageIndex: 0,
         selectedProposalId:
-          leftover
+          (leftover
             ? result.session.proposals.find(
                 (p) => p.state === "proposed" || p.state === "ambiguous",
               )?.proposalId
             : result.session.proposals.find((p) => p.state === "saved")
-                ?.proposalId ?? result.session.selectedProposalId,
+                ?.proposalId) ??
+          result.session.selectedProposalId ??
+          null,
       });
       if (onSaveToMap && result.upserts.length) {
         await onSaveToMap({

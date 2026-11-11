@@ -275,12 +275,6 @@ export async function widenAllowlistWithLlmAliases(
   stats: ExpandStats;
   cancelled?: boolean;
 }> {
-  const emptyStats: ExpandStats = {
-    valuesSent: 0,
-    aliasRows: 0,
-    keysWidened: 0,
-    candidatesAdded: 0,
-  };
   const values = collectExpandValues(session);
   const det = widenAllowlistDeterministic(session, targets);
 

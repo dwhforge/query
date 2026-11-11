@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Documentation — DWHForge Query</title>
+    <meta
+      name="description"
+      content="Guides for DWHForge Query: getting started, export &amp; run, demos, architecture, and ADRs."
+    />
+    <link rel="canonical" href="https://dwhforge.github.io/query/docs.html" />
+        <link
+      rel="preload"
+      href="fonts/orbitron-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="fonts/syne-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="fonts.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+    </div>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="./">DWHForge <span>Query</span></a>
+        <button
+          class="nav-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="site-nav"
+        >
+          Menu
+        </button>
+        <nav class="nav" id="site-nav">
+          <a href="./#features">Features</a>
+          <a href="./#mapping">Mappings</a>
+          <a href="./#workflow">Workflow</a>
+          <a href="docs.html" aria-current="page">Docs</a>
+          <a class="nav-cta" href="download.html">Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="page-hero wrap">
+        <p class="section-kicker">Documentation</p>
+        <h1>Guides and design canon</h1>
+        <p>
+          Product docs live in the repository so they stay versioned with the
+          code. Start here, then dive into ADRs when you need the “why.”
+        </p>
+      </div>
+
+      <section style="padding-top: 0">
+        <div class="wrap split split-2">
+          <div>
+            <p class="section-kicker">Start here</p>
+            <ul class="doc-links">
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/GETTING_STARTED.md"
+                >
+                  <strong>Getting started</strong>
+                  <span
+                    >Install, first launch, in-app Install for me / Options dbt
+                    venv, Export → Parse → Build.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/export-and-run.md"
+                >
+                  <strong>Export and run</strong>
+                  <span
+                    >dbt project layout, engine vs destination, materialization
+                    routes.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/DEMOS.md"
+                >
+                  <strong>Demos</strong>
+                  <span>Bundled sample workspaces you can load from Help.</span>
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/keymap-workflows.md"
+                >
+                  <strong>Mapping workflows</strong>
+                  <span
+                    >Join Lens This row / No match, Clean up join keys, From→To
+                    editor (incl. composite), Apply to left/right; seed, Postgres
+                    table, or dbt ref storage.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/mapping-quality-lab.md"
+                >
+                  <strong>Mapping quality lab</strong>
+                  <span
+                    >100K offline overview aggregates, Inspect → Join Lens,
+                    MappingCheck / CheckRun closed loop (ADR-0026 / 0027).</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0034-keymap-authoring-context.md"
+                >
+                  <strong>ADR-0034 — Query-based Mapping create</strong>
+                  <span
+                    >Create a seed map from two local queries + optional last-Fields
+                    restore; typed authoring_context; all-or-nothing commit into
+                    the editor.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0020-join-key-mapping.md"
+                >
+                  <strong>ADR-0020 — Join key mapping</strong>
+                  <span
+                    >Why mapping is a first-class tool: suggest → accept → seed /
+                    warehouse SoT; no automatic fuzzy Join ON.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0024-keymap-composite.md"
+                >
+                  <strong>ADR-0024 — Composite From</strong>
+                  <span
+                    >Tuple keys (offer id + day) and multi-key Join Auto; no glued
+                    From strings.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0019-join-lens-ai-narrator.md"
+                >
+                  <strong>ADR-0019 — Join Lens AI / LLM</strong>
+                  <span
+                    >Optional OpenAI-compatible assist: facts first, model as
+                    narrator; bounded key/schema context may leave the machine
+                    if the endpoint is remote.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/adr/0025-project-references.md"
+                >
+                  <strong>ADR-0025 — Project references</strong>
+                  <span
+                    >Reuse queries and mappings from another saved project;
+                    explicit update; one self-contained dbt export (no Mesh).</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a href="./#mapping">
+                  <strong>Site: mapping toolkit</strong>
+                  <span
+                    >Product overview: create from queries, Join Lens, composite
+                    keys, quality overview, storage modes, optional LLM.</span
+                  >
+                </a>
+              </li>
+            </ul>
+          </div>
+          <div>
+            <p class="section-kicker">Deeper</p>
+            <ul class="doc-links">
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/DESIGN.md"
+                >
+                  <strong>Product design</strong>
+                  <span>North star, horizons, UX gates, surfaces.</span>
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/ARCHITECTURE.md"
+                >
+                  <strong>Architecture</strong>
+                  <span>Electron + Rust host + DuckDB; project and export path.</span>
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/SPEC.md"
+                >
+                  <strong>Product IR / SPEC</strong>
+                  <span>Intermediate representation and contract-level detail.</span>
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/tree/main/docs/adr"
+                >
+                  <strong>Architecture Decision Records</strong>
+                  <span
+                    >Accepted decisions—positioning, joins, persistence,
+                    licensing constraints.</span
+                  >
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/dwhforge/query/blob/main/docs/COMPETITIVE.md"
+                >
+                  <strong>Competitive landscape</strong>
+                  <span>Where we sit vs Duckle, PQ, dbt Canvas, and peers.</span>
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="demo-band" style="margin-top: 1rem">
+        <div class="wrap">
+          <p class="section-kicker">Quick path</p>
+          <h2 class="section-title">After you download</h2>
+          <ol class="steps" style="max-width: 40rem; margin-top: 1.5rem">
+            <li>
+              <div>
+                <h3>Open a demo</h3>
+                <p>Help → Load demo → Key mapping (or another bundled demo).</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Set engine and destination</h3>
+                <p>
+                  Project menu: execution dialect + where published models
+                  materialize.
+                </p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Publish, export, build</h3>
+                <p>
+                  Mark marts → File → Export dbt… → File → Build export…. Green
+                  parse ≠ correct data; inspect results.
+                </p>
+              </div>
+            </li>
+          </ol>
+          <div class="cta-row" style="margin-top: 1.75rem">
+            <a class="btn btn-primary" href="download.html">Download</a>
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/dwhforge/query/blob/main/docs/GETTING_STARTED.md"
+              >Full getting started</a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-grid">
+        <div>
+          <a class="brand" href="./">DWHForge <span>Query</span></a>
+          <p>
+            Local-first visual transforms that export real dbt. Licensed under
+            Business Source License 1.1.
+          </p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul>
+            <li><a href="download.html">Download</a></li>
+            <li><a href="docs.html" aria-current="page">Documentation</a></li>
+            <li>
+              <a href="https://github.com/dwhforge/query/releases">Releases</a>
+            </li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Source</h4>
+          <ul>
+            <li><a href="https://github.com/dwhforge/query">GitHub</a></li>
+            <li>
+              <a href="https://github.com/dwhforge/query/blob/main/LICENSE"
+                >License (BSL 1.1)</a
+              >
+            </li>
+            <li>
+              <a href="https://github.com/dwhforge/query/issues">Issues</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div class="wrap footer-bottom">
+        <span>© 2026 DWHForge</span>
+        <span>https://dwhforge.github.io/query/</span>
+      </div>
+    </footer>
+
+    <script src="site.js"></script>
+  </body>
+</html>

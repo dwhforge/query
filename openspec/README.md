@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [Flagship task card](changes/recon-lab-task/proposal.md) — PR-02 implemented; merged into [Help Lab](specs/help-lab/spec.md), [ADR-0046](../docs/adr/0046-flagship-lab-assistance.md); see [evidence](changes/recon-lab-task/report.md).
+
 - [Safe Help Lab switch](changes/safe-help-lab-switch/proposal.md) — **implemented; contract merged** → [Help Lab](specs/help-lab/spec.md) ([ADR-0045](../docs/adr/0045-safe-help-lab-switch.md)). Save / Discard / Cancel and independent lab save identity; see [delivery report](changes/safe-help-lab-switch/report.md) for actual tests and broader-suite failures.
 
 - [`changes/matching-workspace/`](changes/matching-workspace/) — Matching tab (ADR-0044); **contract merged** → [`specs/matching-workspace/`](specs/matching-workspace/); see `changes/matching-workspace/report.md` for tested scope / Electron E2E gap

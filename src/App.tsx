@@ -9,6 +9,8 @@ import {
 } from "react";
 import { labProject, projectFingerprint, replaceProject, type SwitchDecision } from "./app/projectLifecycle";
 import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
+import { LabTaskCard } from "./components/LabTaskCard";
+import { ownsLabTask, reconJoinTarget, startLabTask, type LabTaskSession } from "./help/reconLab";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -399,6 +401,8 @@ function App() {
   const mapWritesInFlight = useRef(0);
   const projectSwitchInFlight = useRef(false);
   const [switchChoice, setSwitchChoice] = useState<((decision: SwitchDecision) => void) | null>(null);
+  const [labTask, setLabTask] = useState<LabTaskSession | null>(null);
+  const activeLabTask = ownsLabTask(labTask, project.project_uid) ? labTask : null;
   const setProject = useCallback((update: SetStateAction<Project>) => {
     dispatchProject({
       type: "set",
@@ -2704,6 +2708,7 @@ function App() {
       return next;
     }, (next) => {
       applyLoadedProject(next);
+      setLabTask(startLabTask(id, next.project_uid));
       // A loaded lab is a new unsaved document, not a saved baseline.
       savedProjectFingerprint.current = null;
       setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
@@ -3355,6 +3360,18 @@ function App() {
     loadStepIntoEditor(step);
   }
 
+  function showReconLabStart() {
+    if (!activeLabTask) return;
+    const target = reconJoinTarget(project.workspace);
+    if (!target) return;
+    selectQuery(target.queryId);
+    setSelectedStepIndex(target.stepIndex);
+    loadStepIntoEditor(project.workspace.queries.find((q) => q.id === target.queryId)?.steps[target.stepIndex]);
+    setBottomTab("data");
+    setJoinLensOn(true);
+    setDiagView(null);
+  }
+
   function projectWithoutEphemeralInspect(p: typeof project) {
     const workspace = stripQualityInspectionQueries(p.workspace);
     const positions = { ...(p.canvas?.positions ?? {}) };
@@ -3541,6 +3558,7 @@ function App() {
   }
 
   function applyLoadedProject(loaded: Project, pathHint?: string) {
+    setLabTask(null);
     const withConnections: Project = migrateProject({
       ...loaded,
       connections: loaded.connections ?? [],
@@ -6040,6 +6058,16 @@ function App() {
                 );
               })}
             </div>
+
+            {activeLabTask && centerTab === "canvas" && (activeLabTask.visible ? (
+              <LabTaskCard canStart={reconJoinTarget(project.workspace) !== null}
+                onStart={showReconLabStart}
+                onDismiss={() => setLabTask((task) => task ? { ...task, visible: false } : null)} />
+            ) : (
+              <button type="button" data-testid="lab-task-reopen"
+                onClick={() => setLabTask((task) => task ? { ...task, visible: true } : null)}
+                className="mx-3 mt-1 self-start rounded px-2 py-1 text-xs text-teal-300 hover:bg-teal-500/10">Lab task</button>
+            ))}
 
             {(error || exportMsg) && (
               <div className="shrink-0 space-y-1 px-3 pb-1 pt-2">

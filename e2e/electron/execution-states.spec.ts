@@ -91,6 +91,80 @@ test.describe("execution confidence", () => {
     await expect(page.getByTestId("preview-scope")).toHaveText("Sample · LIMIT 50");
   });
 
+  test("held preview error cannot replace a newer successful input", async () => {
+    const { page } = session;
+    await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    const original = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+    await page.evaluate(() => (window as any).__dwhE2eArmPreviewHold());
+    try {
+      await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({ ...p,
+        workspace: { ...p.workspace, queries: p.workspace.queries.map((q: any) => q.id === "supplier_products"
+          ? { ...q, steps: [{ type: "LoadCsv", payload: { path: "/missing-pr04a-stale.csv", path_kind: "absolute" } }] } : q) },
+      })));
+      await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+      await page.evaluate((original: any) => (window as any).__dwhE2ePatchProject(() => original), original);
+      await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    } finally {
+      await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold());
+    }
+    await page.evaluate(() => (window as any).__dwhE2eWaitPreviewSettled());
+    await expect(page.getByText(/missing-pr04a-stale/)).toHaveCount(0);
+    await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    await expect(page.getByTestId("preview-recompute")).toBeEnabled();
+  });
+
+  test("same-target semantic selection supersedes held preview and repeated recompute still runs", async () => {
+    const { page } = session;
+    await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    const original = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+    await page.evaluate(() => (window as any).__dwhE2eArmPreviewHold());
+    try {
+      await page.getByTestId("preview-recompute").click();
+      await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+      await page.getByText("supplier_products", { exact: true }).first().click();
+      await expect(page.getByTestId("preview-recompute")).toBeEnabled();
+      await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    } finally {
+      await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold());
+    }
+    await page.evaluate(() => (window as any).__dwhE2eWaitPreviewSettled());
+    for (let i = 0; i < 2; i++) {
+      await page.evaluate(() => (window as any).__dwhE2eArmPreviewHold());
+      try {
+        await page.getByTestId("preview-recompute").click();
+        await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+        await expect(page.getByText("Computing preview…", { exact: true })).toBeVisible();
+        await expect(page.getByRole("row")).toHaveCount(0);
+      } finally {
+        await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold());
+      }
+      await page.evaluate(() => (window as any).__dwhE2eWaitPreviewSettled());
+      await expect(page.getByTestId("preview-recompute")).toBeEnabled();
+      await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    }
+    expect(await page.evaluate(() => (window as any).__dwhE2eGetProject())).toEqual(original);
+  });
+
+  test("preview tab ABA refuses a held result without changing selection or export focus", async () => {
+    const { page } = session;
+    await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    const original = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+    await page.evaluate(() => (window as any).__dwhE2eArmPreviewHold());
+    try {
+      await page.getByTestId("preview-recompute").click();
+      await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+      await page.getByRole("tab", { name: "Help Lab", exact: true }).click();
+      await page.getByRole("tab", { name: "Pipeline canvas", exact: true }).click();
+      await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    } finally {
+      await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold());
+    }
+    await page.evaluate(() => (window as any).__dwhE2eWaitPreviewSettled());
+    await expect(page.getByTestId("preview-context")).toHaveText("supplier_products · final output");
+    await expect(page.getByTestId("preview-recompute")).toBeEnabled();
+    expect(await page.evaluate(() => (window as any).__dwhE2eGetProject())).toEqual(original);
+  });
+
   test("an older held reply cannot overwrite a newer query result", async () => {
     const { page } = session;
     await expect(page.getByRole("row")).toHaveCount(2);

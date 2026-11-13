@@ -17,7 +17,7 @@ import {
 import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
 import { LabTaskCard } from "./components/LabTaskCard";
 import { LabHint } from "./components/LabHint";
-import { previewScopeLabel, previewStateMessage, type PreviewPhase } from "./help/previewState";
+import { previewScopeLabel, previewStateMessage } from "./help/previewState";
 import { ownsLabTask, reconComparisonTargets, reconHintPhase, reconJoinTarget, type LabTaskSession, type ReconView } from "./help/reconLab";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
@@ -141,12 +141,9 @@ import {
   type FrozenRemapPreview,
 } from "./lib/mappingCheck";
 import {
-  HeavyPreviewCache,
-  heavyPreviewCacheKey,
   isHeavyPreviewFocus,
   PREVIEW_SAMPLE_LIMIT,
   workspaceForPreviewTransport,
-  type HeavyPreviewMode,
 } from "./lib/previewTransport";
 import type {
   MappingCheck,
@@ -204,11 +201,7 @@ import {
   type KeyMapTabSession,
 } from "./app/keyMap";
 import { isHostCancelled } from "./lib/hostRpc";
-import {
-  createRequestGen,
-  isCurrentRequest,
-  nextRequestGen,
-} from "./lib/requestGen";
+import { useQueryPreview } from "./app/queryPreview/useQueryPreview";
 import {
   applyNormalizeToWorkspace,
   deleteKeyMapFromWorkspace,
@@ -319,7 +312,6 @@ import {
   type ExecutionEngine,
   type JoinType,
   type ColumnMetadata,
-  type PreviewResult,
   parquetSourceName,
   type Project,
   type QueryDef,
@@ -921,24 +913,12 @@ function App() {
   const [deriveOpValue, setDeriveOpValue] = useState("");
   const [customSql, setCustomSql] = useState("select * from {{prev_step}}");
   const [sqlCopied, setSqlCopied] = useState(false);
-  const [previewResult, setPreview] = useState<PreviewResult | null>(null);
-  const [previewSnapshot, setPreviewSnapshot] = useState<{
-    workspace: Workspace; connections: ConnectionDef[]; sources: SourceDef[]; projectFile?: string;
-  } | null>(null);
-  const [previewPhase, setPreviewPhase] = useState<PreviewPhase>("idle");
-  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Sample (LIMIT 50) vs explicit full preview for heavy focuses (ADR-0041). */
-  const [previewMode, setPreviewMode] = useState<HeavyPreviewMode>("sample");
-  const heavyPreviewCacheRef = useRef(new HeavyPreviewCache());
   const [modelPreview, setModelPreview] = useState<PreviewDbtModel | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
   const [queryError, setError] = useState<string | null>(null);
   // Project failures must survive unrelated preview completion (ADR-0045).
   const [projectLifecycleError, setProjectLifecycleError] = useState<string | null>(null);
   const error = projectLifecycleError ?? queryError;
-  const [loading, setLoading] = useState(false);
-  /** Monotonic id so a slow preview for node A cannot overwrite node B (ADR-0031). */
-  const previewReqGenRef = useRef(createRequestGen());
   const querySessionGenerationRef = useRef(0);
   /** Bottom dock: sample rows vs generated model SQL (H0 projection; H1 editable later). */
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
@@ -1069,24 +1049,6 @@ function App() {
     selectedStepIndex,
   ]);
 
-  const preview = previewSnapshot?.workspace === dataWorkspace &&
-    previewSnapshot?.connections === connections && previewSnapshot?.sources === sources &&
-    previewSnapshot?.projectFile === project.root_path ? previewResult : null;
-  const currentPreviewInputRef = useRef(dataWorkspace);
-  currentPreviewInputRef.current = dataWorkspace;
-  useEffect(() => {
-    nextRequestGen(previewReqGenRef.current);
-    setPreview(null);
-    setPreviewSnapshot(null);
-    setLoading(false);
-    setPreviewMode("sample");
-    setPreviewPhase(dataWorkspace ? "queued" : "idle");
-  }, [dataWorkspace, connections, sources, project.root_path, project.project_uid]);
-  useEffect(() => {
-    // Edits invalidate cheap session keys, including changes away from sampled map rows.
-    heavyPreviewCacheRef.current.clear();
-  }, [project.workspace, connections, sources, project.root_path, project.project_uid]);
-
   const setQueries = useCallback(
     (updater: (prev: QueryDef[]) => QueryDef[]) => {
       setProject((p) => {
@@ -1131,81 +1093,6 @@ function App() {
     [],
   );
 
-  const runPreview = useCallback(
-    async (
-      ws: Workspace,
-      conns: ConnectionDef[],
-      srcs: SourceDef[] = [],
-      projectRef = projectRefContext(project),
-      mode: HeavyPreviewMode = "sample",
-    ) => {
-      // v1: always structural DuckDB preview (ADR-0014). Native "Run on warehouse" = later.
-      if (ws !== currentPreviewInputRef.current) return;
-      const reqId = nextRequestGen(previewReqGenRef.current);
-      setPreviewSnapshot({ workspace: ws, connections: conns, sources: srcs, projectFile: projectRef.projectFile });
-      setPreviewMode(mode);
-      setPreview(null);
-      setPreviewPhase("running");
-      const focus = ws.focus_query_id;
-      const heavy = Boolean(focus && isHeavyPreviewFocus(ws, focus));
-      if (heavy && focus) {
-        const cached = heavyPreviewCacheRef.current.get(
-          heavyPreviewCacheKey(ws, focus, mode),
-        );
-        if (cached) {
-          setPreview(cached);
-          setPreviewMode(mode);
-          setPreviewPhase("ready");
-          setError(null);
-          setLoading(false);
-          return;
-        }
-      }
-      setLoading(true);
-      try {
-        // Drop unused seed KeyMap rows from IPC (95k lab map on a CSV click).
-        // Needed maps keep full entries — we do not permanently shrink lab data.
-        const transport = workspaceForPreviewTransport(ws);
-        const result = await previewWorkspace(
-          transport,
-          conns,
-          srcs,
-          projectRef,
-          mode === "full"
-            ? { fullPreview: true }
-            : { rowLimit: PREVIEW_SAMPLE_LIMIT },
-        );
-        if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
-        if (heavy && focus) {
-          heavyPreviewCacheRef.current.set(
-            heavyPreviewCacheKey(ws, focus, mode),
-            result,
-          );
-        }
-        setPreview(result);
-        setPreviewMode(mode);
-        setPreviewPhase("ready");
-        setError(null);
-      } catch (e) {
-        if (!isCurrentRequest(previewReqGenRef.current, reqId)) return;
-        const msg = typeof e === "string" ? e : String(e);
-        // Preempted by a newer preview / prepare — keep UI quiet.
-        if (isHostCancelled(e)) {
-          setPreviewPhase("cancelled");
-          return;
-        }
-        setPreview(null);
-        setPreviewPhase("error");
-        setError(msg);
-      } finally {
-        if (isCurrentRequest(previewReqGenRef.current, reqId)) {
-          setLoading(false);
-        }
-      }
-    },
-    [project],
-  );
-
   const centerTabRef = useRef(centerTab);
   centerTabRef.current = centerTab;
 
@@ -1221,46 +1108,13 @@ function App() {
     Boolean(mapPickPending) ||
     Boolean(addRefPending);
 
-  useEffect(() => {
-    // Don't fight the modal for main-thread / DuckDB while a dialog has focus.
-    // Mapping quality overview owns preview while its tab is open (same preemptible lane).
-    if (
-      overlayOpen ||
-      centerTab.kind !== "query" ||
-      !dataWorkspace
-    ) {
-      return;
-    }
-    // Heavy focuses still auto-sample (LIMIT 50). Full is on demand (ADR-0041).
-    // Unused seed maps are stripped in workspaceForPreviewTransport.
-    previewTimerRef.current = setTimeout(() => {
-      previewTimerRef.current = null;
-      void runPreview(dataWorkspace, connections, sources, projectRefContext(projectRef.current), "sample");
-    }, 150);
-    return () => {
-      if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-      previewTimerRef.current = null;
-      nextRequestGen(previewReqGenRef.current);
-    };
-  }, [
-    dataWorkspace,
-    connections,
-    sources,
-    runPreview,
-    overlayOpen,
-    centerTab,
-    activeQueryId,
-    focusQueryId,
-    project.workspace,
-  ]);
-
-  // Free the preview lane when the quality overview takes over.
-  useEffect(() => {
-    if (centerTab.kind !== "quality") return;
-    nextRequestGen(previewReqGenRef.current);
-    setLoading(false);
-    cancelHeavyQuery();
-  }, [centerTab]);
+  const queryPreview = useQueryPreview({
+    project, workspace: dataWorkspace,
+    enabled: !overlayOpen && centerTab.kind === "query",
+    surface: tabKey(centerTab), clientError: setError,
+  });
+  const { preview, phase: previewPhase, mode: previewMode, loading } = queryPreview;
+  const previewController = queryPreview.controller;
 
   // Join Lens Load sides after Inspect — keep the global bar in sync.
   useEffect(() => {
@@ -1452,8 +1306,7 @@ function App() {
     setJoinPrepareLoading(true);
     setJoinDiagError(null);
     void cancelRunningQuery().catch(() => {});
-    nextRequestGen(previewReqGenRef.current);
-    setLoading(false);
+    previewController.preempt();
     setOpProgress({
       kind: "prepare",
       phase: "Queued…",
@@ -1522,8 +1375,7 @@ function App() {
     setJoinDiagLoading(true);
     setJoinDiagError(null);
     void cancelRunningQuery().catch(() => {});
-    nextRequestGen(previewReqGenRef.current);
-    setLoading(false);
+    previewController.preempt();
     setOpProgress({
       kind: "prepare",
       phase: "Diagnostics — materializing sides…",
@@ -1572,24 +1424,12 @@ function App() {
   }
 
   function cancelHeavyQuery() {
-    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-    previewTimerRef.current = null;
-    if (loading || previewPhase === "queued" || previewPhase === "running") {
-      nextRequestGen(previewReqGenRef.current);
-      setLoading(false);
-      setPreview(null);
-      setPreviewPhase("cancelled");
-    }
-    void cancelRunningQuery().catch(() => {});
+    previewController.cancel();
   }
 
   function recomputeCurrentPreview() {
-    if (!dataWorkspace) return;
-    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-    previewTimerRef.current = null;
-    heavyPreviewCacheRef.current.clear();
     setDiagView(null);
-    void runPreview(dataWorkspace, connections, sources, projectRefContext(project), previewMode);
+    void previewController.refresh();
   }
 
   // Model tab: dbt SQL for the selected query (instant, no DuckDB).
@@ -1764,6 +1604,7 @@ function App() {
 
   function applyQueryDestination(destination: QueryDestination) {
     const { query, stepIndex, step, view, lens, focusLens } = destination;
+    queryPreview.navigationChanged();
     // Invalidate synchronously, before an already-resolved async reply can publish.
     queryContextRef.current = transitionQueryContext(queryContextRef.current, {
       projectUid: projectRef.current.project_uid, queryId: query.id, stepIndex,
@@ -3525,18 +3366,15 @@ function App() {
     }),
     reset: (next, labId) => resetProjectSession({
       setLabTask, setKeyMapTabs, setMatchingTabs, setSelectedKeyMapId, setWorkbenchTabs,
-      setSelectedStepIndex, setActiveQueryId, setPreview, setPreviewSnapshot, setPreviewPhase,
-      setPreviewMode, setLoading, setModelPreview, setModelError, setError, setDiagView, setJoinDiag,
+      setSelectedStepIndex, setActiveQueryId,
+      setModelPreview, setModelError, setError, setDiagView, setJoinDiag,
       setJoinDiagError, setJoinDiagLoading, setFrozenRemap, setCheckDeltaNote, setCheckAllowNote,
       setJoinPrepareLoading, setLensPrepareBusy, setJoinPrepareLabel, setOpProgress,
       setSelectedExternalKey, setSelectedSourceId, setCheckSetup, setMapPickPending,
       setMapSwitchOffer, setLensFocusHint,
-      invalidatePreview: () => {
+      resetPreview: () => {
         querySessionGenerationRef.current++;
-        nextRequestGen(previewReqGenRef.current);
-        if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-        previewTimerRef.current = null;
-        heavyPreviewCacheRef.current = new HeavyPreviewCache();
+        previewController.reset();
       },
       clearCheckFingerprint: () => { lastCheckRunFingerprint.current = null; },
     }, next, labId),
@@ -6191,7 +6029,7 @@ function App() {
                       applyQueryDestination({ query: plan.sampleQuery, stepIndex,
                         step: plan.sampleQuery.steps[stepIndex], view: "data", lens: true, focusLens: true });
                       setDiagView(null);
-                      setPreview(null);
+                      previewController.preempt();
                       setLensFocusHint(
                         focusValue
                           ? { column: plan.sampleColumn, value: focusValue }
@@ -6746,13 +6584,7 @@ function App() {
                           disabled={loading || !dataWorkspace}
                           onClick={() => {
                             if (!dataWorkspace) return;
-                            void runPreview(
-                              dataWorkspace,
-                              connections,
-                              sources,
-                              projectRefContext(project),
-                              "full",
-                            );
+                            void previewController.run("full");
                           }}
                           className="rounded border border-teal-800/60 px-2 py-0.5 text-[10px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
                           title="Run preview without an output row LIMIT"
@@ -6766,13 +6598,7 @@ function App() {
                           disabled={loading || !dataWorkspace}
                           onClick={() => {
                             if (!dataWorkspace) return;
-                            void runPreview(
-                              dataWorkspace,
-                              connections,
-                              sources,
-                              projectRefContext(project),
-                              "sample",
-                            );
+                            void previewController.run("sample");
                           }}
                           className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-40"
                         >

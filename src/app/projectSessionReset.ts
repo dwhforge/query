@@ -11,12 +11,7 @@ export interface ProjectSessionResetPorts {
   setWorkbenchTabs(update: (tabs: WorkbenchTabs) => WorkbenchTabs): void;
   setSelectedStepIndex(value: number | null): void;
   setActiveQueryId(value: string | null): void;
-  invalidatePreview(): void;
-  setPreview(value: null): void;
-  setPreviewSnapshot(value: null): void;
-  setPreviewPhase(value: "idle"): void;
-  setPreviewMode(value: "sample"): void;
-  setLoading(value: false): void;
+  resetPreview(): void;
   setModelPreview(value: null): void;
   setModelError(value: null): void;
   setError(value: null): void;
@@ -42,7 +37,7 @@ export interface ProjectSessionResetPorts {
 
 /** Only called by committed replacement. Cancellation never enters this path. */
 export function resetProjectSession(ports: ProjectSessionResetPorts, project: Project, labId?: string) {
-  ports.invalidatePreview();
+  ports.resetPreview();
   ports.setLabTask(labId ? startLabTask(labId, project.project_uid) : null);
   ports.setKeyMapTabs([]);
   ports.setMatchingTabs([]);
@@ -54,11 +49,6 @@ export function resetProjectSession(ports: ProjectSessionResetPorts, project: Pr
   const focused = project.workspace.queries.find((q) => q.id === project.workspace.focus_query_id);
   ports.setSelectedStepIndex(focused?.steps.length ? focused.steps.length - 1 : null);
   ports.setActiveQueryId(project.workspace.focus_query_id || null);
-  ports.setPreview(null);
-  ports.setPreviewSnapshot(null);
-  ports.setPreviewPhase("idle");
-  ports.setPreviewMode("sample");
-  ports.setLoading(false);
   ports.setModelPreview(null);
   ports.setModelError(null);
   ports.setError(null);

@@ -20,6 +20,10 @@ openspec/
 
 Active changes:
 
+- [Query preview controller](changes/query-preview-controller/proposal.md) — PR-04A;
+  [merged contract](specs/query-preview/spec.md),
+  [delivery evidence and PR-04B handoff](changes/query-preview-controller/report.md).
+
 - [Query context and semantic navigation](changes/query-context-navigation/proposal.md) — PR-03 complete;
   [merged contract](specs/query-navigation/spec.md),
   [delivery evidence and PR-04 handoff](changes/query-context-navigation/report.md).

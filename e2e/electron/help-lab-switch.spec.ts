@@ -193,6 +193,24 @@ test.describe("safe Help Lab project replacement", () => {
     await fileMenu(page, /^Open…/);
     await switchDialog(page).getByRole("button", { name: "Discard", exact: true }).click();
     await expect(page.getByText(/No such file|os error 2/i).first()).toBeVisible();
+    // A completed preview must not erase an unrelated project-load failure.
+    const recompute = page.getByTestId("preview-recompute");
+    // Check enabled, arm and dispatch atomically: a prior toBeEnabled assertion
+    // can race a scheduled preview render and .click() on disabled does nothing.
+    await expect.poll(() => recompute.evaluate((button: HTMLElement) => {
+      if ((button as HTMLButtonElement).disabled) return false;
+      (window as any).__dwhE2eArmPreviewHold();
+      (button as HTMLButtonElement).click();
+      return true;
+    })).toBe(true);
+    try {
+      await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+    } finally {
+      await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold());
+    }
+    await page.evaluate(() => (window as any).__dwhE2eWaitPreviewSettled());
+    await expect(recompute).toBeEnabled();
+    await expect(page.getByText(/No such file|os error 2/i).first()).toBeVisible();
     expect(await currentProject(page)).toEqual(before);
   });
 

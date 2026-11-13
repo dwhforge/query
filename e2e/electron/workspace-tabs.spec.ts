@@ -4,7 +4,10 @@ import { launchIsolatedSession, closeIsolatedSession } from "./helpers/launch.mj
 import { emptyMatchingSession } from "../../src/app/matching/types";
 
 let session: Awaited<ReturnType<typeof launchIsolatedSession>>;
-test.beforeEach(async () => { session = await launchIsolatedSession(); });
+test.beforeEach(async () => {
+  session = await launchIsolatedSession();
+  session.page.on("pageerror", (error: Error) => console.error("Renderer error:", error.stack ?? error.message));
+});
 test.afterEach(async () => {
   // Explicit test-only discard: retained dirty Matching must not block beforeunload.
   if (session?.page && !session.page.isClosed()) {

@@ -7,12 +7,18 @@ import {
   useState,
   type SetStateAction,
 } from "react";
-import { labProject, projectFingerprint, replaceProject, type SwitchDecision } from "./app/projectLifecycle";
+import { type SwitchDecision } from "./app/projectLifecycle";
+import { ProjectController, type ProjectControllerPorts } from "./app/projectController";
+import { resetProjectSession } from "./app/projectSessionReset";
+import {
+  captureJoinTarget, createQueryNavigation, isCurrentQueryContext, joinTargetUnavailable,
+  transitionQueryContext, type QueryContext, type QueryDestination,
+} from "./app/queryNavigation";
 import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
 import { LabTaskCard } from "./components/LabTaskCard";
 import { LabHint } from "./components/LabHint";
 import { previewScopeLabel, previewStateMessage, type PreviewPhase } from "./help/previewState";
-import { ownsLabTask, reconComparisonTargets, reconHintPhase, reconJoinTarget, startLabTask, type LabTaskSession, type ReconView } from "./help/reconLab";
+import { ownsLabTask, reconComparisonTargets, reconHintPhase, reconJoinTarget, type LabTaskSession, type ReconView } from "./help/reconLab";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -83,7 +89,7 @@ import { HelpDialog } from "./components/HelpDialog";
 import { HelpLab } from "./components/HelpLab";
 import {
   QUERY_TAB, HELP_TAB, QUALITY_WORKSPACE_TAB, mappingTab, matchingTab,
-  tabKey, sameTab, initialTabs, openTab, activateTab, closeTab, resetProjectTabs,
+  tabKey, sameTab, initialTabs, openTab, activateTab, closeTab,
   type WorkspaceTab,
 } from "./app/workbench/tabs";
 import { OptionsDialog } from "./components/OptionsDialog";
@@ -121,7 +127,6 @@ import {
 import { MappingQualityOverview } from "./components/mapping-quality/MappingQualityOverview";
 import { MappingCheckSetupDialog } from "./components/MappingCheckSetupDialog";
 import {
-  QUALITY_INSPECTION,
   isFullQualityJoin,
   isMappingQualityLab,
   isQualityInspectionQuery,
@@ -129,7 +134,6 @@ import {
   upsertQualityInspection,
 } from "./lib/mappingQuality";
 import {
-  ensureLabCheck,
   keyMapRevision,
   labMappingCheck,
   normalizeAttrsProjection,
@@ -399,13 +403,8 @@ function App() {
   const project = projectBag.project;
   const projectRef = useRef(project);
   projectRef.current = project;
-  const savedProjectFingerprint = useRef<string | null | undefined>(undefined);
-  if (savedProjectFingerprint.current === undefined) {
-    savedProjectFingerprint.current = projectFingerprint(project);
-  }
-  const projectSaveInFlight = useRef(false);
+  const lifecycleRef = useRef<ProjectController | null>(null);
   const mapWritesInFlight = useRef(0);
-  const projectSwitchInFlight = useRef(false);
   const [switchChoice, setSwitchChoice] = useState<((decision: SwitchDecision) => void) | null>(null);
   const [labTask, setLabTask] = useState<LabTaskSession | null>(null);
   const activeLabTask = ownsLabTask(labTask, project.project_uid) ? labTask : null;
@@ -476,6 +475,11 @@ function App() {
   }
 
   function focusJoinLensLayout() {
+    if (!activeQueryId) return;
+    queryNavigation.openQuery(activeQueryId, { stepIndex: selectedStepIndex, view: "data", lens: true, focusLens: true });
+  }
+
+  function applyJoinLensLayout() {
     setExplorerCollapsedPersist(true);
     setInspectorCollapsedPersist(true);
     setJoinLensOn(true);
@@ -487,19 +491,14 @@ function App() {
   /** Canvas from the quality lab without scheduling the 100K join preview/IPC. */
   function openMappingQualityCanvas() {
     if (isFullQualityJoin(activeQueryId)) {
-      setActiveQueryId("quality_catalog");
-      setSelectedStepIndex(0);
-      setJoinLensOn(false);
-      setPreview(null);
+      queryNavigation.openQuery("quality_catalog", { stepIndex: 0, lens: false });
     } else if (isQualityInspectionQuery(activeQueryId)) {
       // Re-entering canvas with an Inspect cohort: keep Join selected so DATA
       // mounts Join Lens instead of an empty post-Filter PreviewTable.
       const q = queries.find((x) => x.id === activeQueryId);
       const joinIdx = q?.steps.findIndex((s) => s.type === "Join") ?? -1;
       if (joinIdx >= 0) {
-        setSelectedStepIndex(joinIdx);
-        setJoinLensOn(true);
-        setBottomTab("data");
+        queryNavigation.openQuery(q!.id, { stepIndex: joinIdx, lens: true, view: "data" });
       }
     }
     setCenterTab(QUERY_TAB);
@@ -535,6 +534,7 @@ function App() {
     mode?: "create" | "edit";
     checkId?: string;
   }) {
+    const context = queryContextRef.current!;
     const keyMaps = project.workspace.key_maps ?? [];
     const map =
       (opts?.mapId
@@ -605,6 +605,7 @@ function App() {
         rightQueryId,
         hostHit.joinStepIndex,
       );
+      if (!contextIsCurrent(context)) return;
       const leftColumns = cols.left.map((c) => c.name);
       const rightColumns = cols.right.map((c) => c.name);
       const inferred = inferCheckAttrsFromJoin({
@@ -648,7 +649,7 @@ function App() {
       });
       setError(null);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      if (contextIsCurrent(context)) setError(typeof e === "string" ? e : String(e));
     }
   }
 
@@ -931,12 +932,29 @@ function App() {
   const heavyPreviewCacheRef = useRef(new HeavyPreviewCache());
   const [modelPreview, setModelPreview] = useState<PreviewDbtModel | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [queryError, setError] = useState<string | null>(null);
+  // Project failures must survive unrelated preview completion (ADR-0045).
+  const [projectLifecycleError, setProjectLifecycleError] = useState<string | null>(null);
+  const error = projectLifecycleError ?? queryError;
   const [loading, setLoading] = useState(false);
   /** Monotonic id so a slow preview for node A cannot overwrite node B (ADR-0031). */
   const previewReqGenRef = useRef(createRequestGen());
+  const querySessionGenerationRef = useRef(0);
   /** Bottom dock: sample rows vs generated model SQL (H0 projection; H1 editable later). */
   const [bottomTab, setBottomTab] = useState<"data" | "model">("data");
+  const queryContextRef = useRef<QueryContext | null>(null);
+  const queryContext = transitionQueryContext(queryContextRef.current, {
+    projectUid: project.project_uid, queryId: activeQueryId, stepIndex: selectedStepIndex,
+    view: `${tabKey(centerTab)}:${bottomTab}`, mode: joinLensOn ? "lens" : "preview",
+    workspace: project.workspace,
+    connections: project.connections, sources: project.sources, projectFile: project.root_path,
+  });
+  queryContextRef.current = queryContext;
+  const contextIsCurrent = (captured: QueryContext) =>
+    isCurrentQueryContext(captured, queryContextRef.current!) &&
+    captured.projectUid === projectRef.current.project_uid && captured.workspace === projectRef.current.workspace &&
+    captured.connections === projectRef.current.connections && captured.sources === projectRef.current.sources &&
+    captured.projectFile === projectRef.current.root_path;
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportFiles, setExportFiles] = useState<string[]>([]);
   const [opProgress, setOpProgress] = useState<OpProgressState | null>(null);
@@ -1305,16 +1323,17 @@ function App() {
       return;
     }
     let cancelled = false;
+    const context = queryContextRef.current!;
     const t = window.setTimeout(() => {
       setJoinColsLoading(true);
       void fetchJoinSideColumns(hostId, rightId, selectedStepIndex)
         .then((cols) => {
-          if (cancelled) return;
+          if (cancelled || !contextIsCurrent(context)) return;
           setJoinLeftColumns(cols.left);
           setJoinRightColumns(cols.right);
         })
         .finally(() => {
-          if (!cancelled) setJoinColsLoading(false);
+          if (!cancelled && contextIsCurrent(context)) setJoinColsLoading(false);
         });
     }, 150);
     return () => {
@@ -1326,6 +1345,7 @@ function App() {
     activeQueryId,
     selectedStepIndex,
     joinRightId,
+    queryContext.revision,
     activeQuery,
     project.workspace,
     connections,
@@ -1347,7 +1367,7 @@ function App() {
     ) {
       return "";
     }
-    return `${activeQueryId}#${selectedStepIndex}:${step.payload.left_on.join(",")}|${step.payload.right_on.join(",")}`;
+    return `${queryContext.revision}:${activeQueryId}#${selectedStepIndex}`;
   })();
   useEffect(() => {
     setJoinDiag((cur) => (cur == null ? cur : null));
@@ -1355,7 +1375,14 @@ function App() {
     setJoinDiagLoading((cur) => (cur ? false : cur));
     setDiagView((cur) => (cur == null ? cur : null));
     setJoinPrepareLabel((cur) => (cur == null ? cur : null));
-  }, [joinDiagIdentity]);
+    setJoinPrepareLoading(false);
+    setLensPrepareBusy(false);
+    setJoinLeftColumns([]);
+    setJoinRightColumns([]);
+    setJoinColsLoading(false);
+    setCheckSetup(null);
+    setOpProgress((cur) => cur?.kind === "prepare" ? null : cur);
+  }, [queryContext.revision]);
 
   useEffect(() => {
     if (!joinDiagIdentity) return;
@@ -1368,6 +1395,8 @@ function App() {
   }, [joinDiagIdentity, sources, activeQueryId]);
 
   function refreshJoinPrepareStatus() {
+    const session = querySessionGenerationRef.current;
+    const context = queryContextRef.current!;
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -1389,6 +1418,7 @@ function App() {
       projectRefContext(project),
     )
       .then((s) => {
+        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
         if (s.prepared) {
           setJoinPrepareLabel(formatJoinPrepareStatusHint(s));
         } else if (s.stale) {
@@ -1397,10 +1427,12 @@ function App() {
           setJoinPrepareLabel(null);
         }
       })
-      .catch(() => setJoinPrepareLabel(null));
+      .catch(() => { if (session === querySessionGenerationRef.current && contextIsCurrent(context)) setJoinPrepareLabel(null); });
   }
 
   function runPrepareJoinInputs() {
+    const session = querySessionGenerationRef.current;
+    const context = queryContextRef.current!;
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -1430,6 +1462,7 @@ function App() {
     const poll = window.setInterval(() => {
       void joinPrepareProgress()
         .then((p) => {
+          if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
           if (!p.active && p.fraction <= 0) return;
           setOpProgress({
             kind: "prepare",
@@ -1449,11 +1482,13 @@ function App() {
       projectRefContext(project),
     )
       .then((r) => {
+        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
         setJoinPrepareLabel(formatJoinPrepareHint(r));
         setJoinPrepareLoading(false);
         setOpProgress(null);
       })
       .catch((e) => {
+        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
         setJoinPrepareLoading(false);
         setOpProgress(null);
         if (isHostCancelled(e)) return;
@@ -1466,6 +1501,8 @@ function App() {
   }
 
   function runJoinDiagnostics() {
+    const session = querySessionGenerationRef.current;
+    const context = queryContextRef.current!;
     const step =
       selectedStepIndex != null && activeQuery
         ? activeQuery.steps[selectedStepIndex]
@@ -1495,6 +1532,7 @@ function App() {
     const poll = window.setInterval(() => {
       void joinPrepareProgress()
         .then((p) => {
+          if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
           if (!p.active && p.fraction <= 0) return;
           setOpProgress({
             kind: "prepare",
@@ -1513,12 +1551,14 @@ function App() {
       projectRefContext(project),
     )
       .then((d) => {
+        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
         setJoinDiag(d);
         setJoinDiagLoading(false);
         setOpProgress(null);
         refreshJoinPrepareStatus();
       })
       .catch((e) => {
+        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
         setJoinDiag(null);
         setJoinDiagLoading(false);
         setOpProgress(null);
@@ -1563,6 +1603,10 @@ function App() {
     }
     let cancelled = false;
     // Same IPC slim as data preview — emit does not need inline seed rows.
+    setModelPreview(null);
+    setModelError(null);
+    const session = querySessionGenerationRef.current;
+    const context = queryContextRef.current!;
     const modelWs = workspaceForPreviewTransport({
       ...project.workspace,
       focus_query_id: id,
@@ -1576,13 +1620,13 @@ function App() {
       projectRefContext(project),
     )
       .then((m) => {
-        if (!cancelled) {
+        if (!cancelled && session === querySessionGenerationRef.current && contextIsCurrent(context)) {
           setModelPreview(m);
           setModelError(null);
         }
       })
       .catch((e) => {
-        if (!cancelled) {
+        if (!cancelled && session === querySessionGenerationRef.current && contextIsCurrent(context)) {
           setModelPreview(null);
           const msg = typeof e === "string" ? e : String(e);
           // Stale dwh-host without the new command — full restart, not HMR.
@@ -1599,6 +1643,7 @@ function App() {
   }, [
     project.workspace,
     project.target_dialect,
+    queryContext.revision,
     activeQueryId,
     focusQueryId,
     queries.length,
@@ -1717,29 +1762,57 @@ function App() {
     }
   }, []);
 
-  const selectQuery = useCallback(
-    (id: string) => {
-      setCenterTab(QUERY_TAB);
-      setSelectedKeyMapId(null);
-      setSelectedExternalKey(null);
-      setActiveQueryId(id);
-      const q = queries.find((x) => x.id === id);
-      syncInspectorFromQuery(q);
-      if (!q || q.steps.length === 0) {
-        setSelectedStepIndex(null);
+  function applyQueryDestination(destination: QueryDestination) {
+    const { query, stepIndex, step, view, lens, focusLens } = destination;
+    // Invalidate synchronously, before an already-resolved async reply can publish.
+    queryContextRef.current = transitionQueryContext(queryContextRef.current, {
+      projectUid: projectRef.current.project_uid, queryId: query.id, stepIndex,
+      view: `${tabKey(QUERY_TAB)}:${view ?? bottomTab}`, mode: (lens ?? joinLensOn) ? "lens" : "preview",
+      workspace: projectRef.current.workspace,
+      connections: projectRef.current.connections, sources: projectRef.current.sources, projectFile: projectRef.current.root_path,
+    }, true);
+    setCenterTab(QUERY_TAB);
+    setSelectedKeyMapId(null);
+    setSelectedExternalKey(null);
+    setActiveQueryId(query.id);
+    setSelectedStepIndex(stepIndex);
+    syncInspectorFromQuery(query);
+    loadStepIntoEditor(step);
+    if (!isQualityInspectionQuery(query.id)) setLensFocusHint(null);
+    if (view) setBottomTab(view);
+    if (lens !== undefined) setJoinLensOn(lens);
+    if (focusLens) applyJoinLensLayout();
+  }
+
+  const queryNavigation = createQueryNavigation({
+    project: () => projectRef.current,
+    select: applyQueryDestination,
+    openMapping: (id) => {
+      // Navigation must not merge a persisted map over the mounted editor draft.
+      if (keyMapTabsLiveRef.current.some((tab) => tab.map.id === id)) {
+        setCenterTab(mappingTab(id));
         return;
       }
-      // Ephemeral check cohort: land on Join so Join Lens mounts (Filter/Sort
-      // alone shows PreviewTable — often empty after a tight cohort predicate).
-      const joinIdx = isQualityInspectionQuery(id)
-        ? q.steps.findIndex((s) => s.type === "Join")
-        : -1;
-      const idx = joinIdx >= 0 ? joinIdx : q.steps.length - 1;
-      setSelectedStepIndex(idx);
-      loadStepIntoEditor(q.steps[idx]);
+      const map = projectRef.current.workspace.key_maps?.find((m) => m.id === id);
+      if (map) openKeyMapEditor(map);
     },
-    [queries, syncInspectorFromQuery, loadStepIntoEditor],
-  );
+    openMatching: (id) => setCenterTab(matchingTab(id)),
+  });
+
+  function openMatchingSession(session: MatchingTabSession) {
+    const lensCtx = session.lensCtx;
+    const bound = lensCtx && lensCtx.navigationTarget === undefined ? { ...session, lensCtx: {
+      ...lensCtx, navigationTarget: captureJoinTarget(projectRef.current, lensCtx.hostQueryId, lensCtx.joinStepIndex),
+    } } : session;
+    setMatchingTabs((tabs) => [...tabs.filter((t) => t.id !== bound.id), bound]);
+    queryNavigation.openMatching(bound.id);
+  }
+
+  function selectQuery(id: string) {
+    const q = projectRef.current.workspace.queries.find((q) => q.id === id);
+    const joinIdx = isQualityInspectionQuery(id) ? q?.steps.findIndex((s) => s.type === "Join") ?? -1 : -1;
+    queryNavigation.openQuery(id, joinIdx >= 0 ? { stepIndex: joinIdx } : undefined);
+  }
 
   const externalBoundaries = useMemo(
     () => collectExternalBoundaries(project),
@@ -2764,19 +2837,7 @@ function App() {
   }
 
   async function handleLoadDemo(id: DemoId | string) {
-    await requestProjectReplacement(async () => {
-      const workspace = await loadDemoWorkspace(id);
-      const next = labProject(id, workspace, projectRef.current, appSettings);
-      if (id === "mapping_quality") next.mapping_checks = ensureLabCheck([]);
-      return next;
-    }, (next) => {
-      applyLoadedProject(next);
-      setLabTask(startLabTask(id, next.project_uid));
-      // A loaded lab is a new unsaved document, not a saved baseline.
-      savedProjectFingerprint.current = null;
-      setCenterTab(id === "mapping_quality" ? QUALITY_WORKSPACE_TAB : QUERY_TAB);
-      setExportMsg(null);
-    });
+    await lifecycle.loadLab(id);
   }
 
   function updateActiveSteps(
@@ -2881,6 +2942,7 @@ function App() {
     label: string,
   ) {
     if (!joinDiag || !activeQueryId) return;
+    const context = queryContextRef.current!;
     const highlightKeys = highlightKeysForDiag(kind);
     const sampleLimit = joinDiag.sample_limit;
 
@@ -2953,6 +3015,7 @@ function App() {
         sources,
         projectRefContext(project),
       );
+      if (!contextIsCurrent(context)) return;
       const total =
         kind === "left"
           ? joinDiag.left_count
@@ -2969,7 +3032,7 @@ function App() {
       });
       setBottomTab("data");
     } catch (e) {
-      setJoinDiagError(typeof e === "string" ? e : String(e));
+      if (contextIsCurrent(context)) setJoinDiagError(typeof e === "string" ? e : String(e));
     }
   }
 
@@ -3025,6 +3088,7 @@ function App() {
     rightQueryId: string,
     hostQueryId: string,
   ) {
+    const context = queryContextRef.current!;
     // Prefer complete pairs already in the inspector; else schema-suggest; never fake "id".
     let pairs = joinKeyDraftRef.current;
     if (!joinPairsComplete(pairs)) {
@@ -3036,10 +3100,12 @@ function App() {
           rightQueryId,
           upto,
         );
+        if (!contextIsCurrent(context)) return;
         setJoinLeftColumns(cols.left);
         setJoinRightColumns(cols.right);
         pairs = suggestJoinPairs(cols.left, cols.right);
       } catch {
+        if (!contextIsCurrent(context)) return;
         pairs = [emptyJoinKeyPair()];
       }
     }
@@ -3048,9 +3114,7 @@ function App() {
 
   function selectEdgeOnCanvas(edge: GraphEdgeInfo) {
     const host = queries.find((q) => q.id === edge.hostQueryId);
-    setActiveQueryId(edge.hostQueryId);
     if (edge.kind === "join") {
-      setJoinRightId(edge.otherQueryId);
       const idx =
         edge.stepIndex != null &&
         host?.steps[edge.stepIndex]?.type === "Join"
@@ -3062,19 +3126,12 @@ function App() {
             ) ?? -1);
       const j = idx >= 0 ? host?.steps[idx] : undefined;
       if (j && j.type === "Join") {
-        setJoinKeyPairsBoth(
-          pairsFromOn(j.payload.left_on, j.payload.right_on),
-        );
-        setJoinType(j.payload.join_type);
-        setSelectedStepIndex(idx);
-        loadStepIntoEditor(j);
+        queryNavigation.openQuery(edge.hostQueryId, { stepIndex: idx });
       }
     } else if (edge.kind === "append") {
-      setAppendOtherId(edge.otherQueryId);
       const idx = host?.steps.findIndex((s) => s.type === "Append") ?? -1;
       if (idx >= 0 && host) {
-        setSelectedStepIndex(idx);
-        loadStepIntoEditor(host.steps[idx]);
+        queryNavigation.openQuery(edge.hostQueryId, { stepIndex: idx });
       }
     } else if (edge.kind === "from") {
       const idx =
@@ -3084,8 +3141,7 @@ function App() {
             targetKey(s.payload.query_id) === edge.otherQueryId,
         ) ?? -1;
       if (idx >= 0 && host) {
-        setSelectedStepIndex(idx);
-        loadStepIntoEditor(host.steps[idx]);
+        queryNavigation.openQuery(edge.hostQueryId, { stepIndex: idx });
       }
     }
   }
@@ -3418,9 +3474,7 @@ function App() {
   }
 
   function selectStepAt(index: number) {
-    setSelectedStepIndex(index);
-    const step = activeQuery?.steps[index];
-    loadStepIntoEditor(step);
+    if (activeQueryId) queryNavigation.openQuery(activeQueryId, { stepIndex: index });
   }
 
   function showReconLabStart() {
@@ -3428,12 +3482,7 @@ function App() {
     const target = reconJoinTarget(project.workspace);
     if (!target) return;
     setLabTask((task) => task ? { ...task, hints: true, completed: false } : null);
-    selectQuery(target.queryId);
-    setSelectedStepIndex(target.stepIndex);
-    loadStepIntoEditor(project.workspace.queries.find((q) => q.id === target.queryId)?.steps[target.stepIndex]);
-    setBottomTab("data");
-    setJoinLensOn(true);
-    setDiagView(null);
+    queryNavigation.inspectJoin(captureJoinTarget(projectRef.current, target.queryId, target.stepIndex));
   }
 
   function navigateReconView(view: ReconView) {
@@ -3441,265 +3490,68 @@ function App() {
     const target = reconComparisonTargets(project.workspace).find((item) => item.view === view);
     if (!target?.available) return;
     dismissLabHints();
-    selectQuery(target.queryId);
-    setSelectedStepIndex(target.stepIndex);
-    loadStepIntoEditor(project.workspace.queries.find((q) => q.id === target.queryId)?.steps[target.stepIndex]);
-    setBottomTab("data");
-    setJoinLensOn(view !== "monthly");
-    setDiagView(null);
+    queryNavigation.openQuery(target.queryId, { stepIndex: target.stepIndex, view: "data", lens: view !== "monthly" });
   }
 
-  function projectWithoutEphemeralInspect(p: typeof project) {
-    const workspace = stripQualityInspectionQueries(p.workspace);
-    const positions = { ...(p.canvas?.positions ?? {}) };
-    for (const id of Object.keys(positions)) {
-      if (isQualityInspectionQuery(id)) delete positions[id];
-    }
-    const outputs = (p.outputs ?? []).filter(
-      (id) => !isQualityInspectionQuery(id),
-    );
-    return {
-      ...p,
-      workspace,
-      canvas: { ...p.canvas, positions },
-      outputs,
-    };
-  }
-
-  function documentFingerprint(p: Project) {
-    return projectFingerprint(projectWithoutEphemeralInspect(p));
-  }
-
-  function hasUnsavedEditorDrafts() {
-    return matchingTabsLiveRef.current.some((t) => t.hasUnsavedDecisions) ||
-      keyMapTabsLiveRef.current.some((t) => t.localDraft || dirtyDeltaHasChanges(t.dirtyDelta ?? null));
-  }
-
-  function replacementState() {
-    return {
-      token: `${projectRef.current.root_path ?? ""}:${documentFingerprint(projectRef.current)}`,
-      drafts: JSON.stringify([
-        keyMapTabsLiveRef.current.map((t) => [t.map, t.localDraft, t.dirtyDelta]),
-        matchingTabsLiveRef.current,
-      ]),
-      busy: projectSaveInFlight.current || mapWritesInFlight.current > 0 || confirmRemapInFlightRef.current ||
-        keyMapTabsLiveRef.current.some((t) => t.saveInFlight || t.saveApi?.isSaving()),
-    };
-  }
-
-  async function requestProjectReplacement(load: () => Promise<Project>, commit: (next: Project) => void) {
-    if (projectSwitchInFlight.current) return;
-    projectSwitchInFlight.current = true;
-    try {
-      await replaceProject({
-        read: replacementState,
-        dirty: () => hasUnsavedEditorDrafts() ||
-          savedProjectFingerprint.current !== documentFingerprint(projectRef.current),
-        choose: () => new Promise<SwitchDecision>((resolve) => {
-          setSwitchChoice(() => (decision: SwitchDecision) => {
-            setSwitchChoice(null);
-            resolve(decision);
-          });
-        }),
-        save: async () => {
-          if (hasUnsavedEditorDrafts()) {
-            setError("Save Mapping and Matching drafts in their editors first, then retry opening the project. The current project is still open.");
-            return false;
-          }
-          return handleSaveProject();
-        },
-        load,
-        commit,
+  const lifecyclePorts: ProjectControllerPorts = {
+    project: () => projectRef.current,
+    update: (updater) => {
+      projectRef.current = updater(projectRef.current);
+      setProject(updater);
+    },
+    drafts: () => ({
+      mappings: keyMapTabsLiveRef.current,
+      matching: matchingTabsLiveRef.current,
+      mutationBusy: mapWritesInFlight.current > 0 || confirmRemapInFlightRef.current,
+    }),
+    choose: () => new Promise<SwitchDecision>((resolve) => {
+      setSwitchChoice(() => (decision: SwitchDecision) => {
+        setSwitchChoice(null);
+        resolve(decision);
       });
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    } finally {
-      projectSwitchInFlight.current = false;
-    }
-  }
-
-  async function openProjectPath(path: string, pruneFailedRecent = false) {
-    await requestProjectReplacement(async () => {
-      try {
-        return await loadProject(path, { remember: true });
-      } catch (e) {
-        // Keep ADR-0021 missing-recent pruning, but never prune on Cancel/Save failure.
-        if (pruneFailedRecent) {
-          await persistAppSettings({ ...appSettings,
-            recent_projects: (appSettings.recent_projects ?? []).filter((p) => p !== path),
-          }).catch(() => {});
-        }
-        throw e;
-      }
-    }, (loaded) => {
-      applyLoadedProject(loaded, path);
-      setExportMsg(`Opened ${path}`);
-      void rememberRecentProject(path).catch((e) => setError(String(e)));
-    });
-  }
-
-  async function writeProjectTo(path: string, snapshot = projectRef.current, comparisonSnapshot = snapshot): Promise<boolean> {
-    try {
-      const base =
-        path
-          .split(/[/\\]/)
-          .pop()
-          ?.replace(/\.dwhproj\.json$/i, "")
-          .replace(/\.json$/i, "") ?? snapshot.name;
-      const persisted = projectWithoutEphemeralInspect(snapshot);
-      const saved = await saveProject(path, {
-        ...persisted,
-        root_path: path,
-        name: base,
-      });
-      const savedState: Project = {
-        ...snapshot,
-        connections: projectRef.current.connections,
-        root_path: path,
-        name: base,
-        format_version: saved.format_version ?? snapshot.format_version,
-        project_uid: saved.project_uid ?? snapshot.project_uid,
-        sources: saved.sources ?? snapshot.sources,
-        workspace: {
-          ...snapshot.workspace,
-          queries: [
-            ...(saved.workspace?.queries ?? persisted.workspace.queries),
-            ...snapshot.workspace.queries.filter((q) => isQualityInspectionQuery(q.id)),
-          ],
-        },
-      };
-      const unchanged = documentFingerprint(projectRef.current) === documentFingerprint(comparisonSnapshot);
-      // Record the bytes actually saved, not edits made while the write awaited IPC.
-      savedProjectFingerprint.current = documentFingerprint(savedState);
-      if (unchanged) {
-        projectRef.current = savedState;
-        setProject(savedState);
-      }
-      setExportMsg(`Project saved → ${path}`);
-      setError(unchanged ? null : "Project saved, but newer edits remain unsaved. The current project is still open.");
-      await rememberRecentProject(path).catch((e) => setError(String(e)));
-      return unchanged;
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-      return false;
-    }
-  }
-
-  async function handleSaveProject(): Promise<boolean> {
-    if (projectSaveInFlight.current) return false;
-    projectSaveInFlight.current = true;
-    try {
-      let path = projectRef.current.root_path;
-      if (!path) {
-        const picked = await save({
-          defaultPath: `${projectRef.current.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
-          filters: [{ name: "DWH Project", extensions: ["json"] }],
-        });
-        if (typeof picked !== "string") return false;
-        path = picked;
-      }
-      return await writeProjectTo(path);
-    } catch (e) {
-      setError(String(e));
-      return false;
-    } finally {
-      projectSaveInFlight.current = false;
-    }
-  }
-
-  async function handleSaveProjectAs() {
-    if (projectSaveInFlight.current) return;
-    projectSaveInFlight.current = true;
-    try {
-      const picked = await save({
-        defaultPath:
-          projectRef.current.root_path?.split(/[/\\]/).pop() ??
-          `${projectRef.current.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
-        filters: [{ name: "DWH Project", extensions: ["json"] }],
-      });
-      if (typeof picked !== "string") return;
-      const current = projectRef.current;
-      // ADR-0025: a copy is a new identity.
-      const normalize = (path: string) => {
-        const slashes = path.replace(/\\/g, "/");
-        return /^[A-Za-z]:\//.test(slashes) ? slashes.toLowerCase() : slashes;
-      };
-      const sameFile = current.root_path && normalize(current.root_path) === normalize(picked);
-      const forked = sameFile ? current : { ...current, project_uid: crypto.randomUUID() };
-      await writeProjectTo(picked, forked, current);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      projectSaveInFlight.current = false;
-    }
-  }
-
-  function applyLoadedProject(loaded: Project, pathHint?: string) {
-    setLabTask(null);
-    const withConnections: Project = migrateProject({
-      ...loaded,
-      connections: loaded.connections ?? [],
-      sources: loaded.sources ?? [],
-      root_path: loaded.root_path ?? pathHint,
-    });
-    savedProjectFingerprint.current = documentFingerprint(withConnections);
-    projectRef.current = withConnections;
-    setProject(withConnections);
-    setKeyMapTabs([]);
-    setMatchingTabs([]);
-    setSelectedKeyMapId(null);
-    setWorkbenchTabs((state) => resetProjectTabs(state, true));
-    const focused = withConnections.workspace.queries.find(
-      (q) => q.id === withConnections.workspace.focus_query_id,
-    );
-    setSelectedStepIndex(focused?.steps.length ? focused.steps.length - 1 : null);
-    nextRequestGen(previewReqGenRef.current);
-    setPreview(null);
-    setLoading(false);
-    setDiagView(null);
-    setJoinDiag(null);
-    setJoinDiagError(null);
-    setFrozenRemap(null);
-    setCheckDeltaNote(null);
-    setCheckAllowNote(null);
-    lastCheckRunFingerprint.current = null;
-    setActiveQueryId(withConnections.workspace.focus_query_id || null);
-    void refreshExportTree(withConnections.last_dbt_export_path);
-    setError(null);
-    // After first export, seeds/map_*.csv is SoT (ADR-0020).
-    const exportPath = withConnections.last_dbt_export_path;
-    if (exportPath) {
-      const baselineMapIds = new Set(
-        (withConnections.workspace.key_maps ?? []).map((m) => m.id),
-      );
-      void syncKeyMapsFromExport(withConnections.workspace, exportPath)
-        .then((synced) => {
-          setProject((p) => {
-            if (p.project_uid !== withConnections.project_uid || p.last_dbt_export_path !== exportPath) return p;
-            // Don't clobber maps the user deleted while sync was in flight.
-            const stillPresent = new Set(
-              (p.workspace.key_maps ?? []).map((m) => m.id),
-            );
-            const removedDuringSync = [...baselineMapIds].filter(
-              (id) => !stillPresent.has(id),
-            );
-            if (removedDuringSync.length === 0) {
-              return { ...p, workspace: synced.workspace };
-            }
-            const key_maps = (synced.workspace.key_maps ?? []).filter(
-              (m) => !removedDuringSync.includes(m.id),
-            );
-            return {
-              ...p,
-              workspace: { ...synced.workspace, key_maps },
-            };
-          });
-        })
-        .catch(() => {
-          /* export tree missing — keep project maps */
-        });
-    }
-  }
+    }),
+    pickSave: async (defaultPath) => {
+      const picked = await save({ defaultPath, filters: [{ name: "DWH Project", extensions: ["json"] }] });
+      return typeof picked === "string" ? picked : null;
+    },
+    save: saveProject,
+    load: (path) => loadProject(path, { remember: true }),
+    loadLab: loadDemoWorkspace,
+    defaults: () => appSettings,
+    newUid: () => crypto.randomUUID(),
+    remember: rememberRecentProject,
+    pruneRecent: (path) => persistAppSettings({ ...appSettings,
+      recent_projects: (appSettings.recent_projects ?? []).filter((p) => p !== path),
+    }),
+    reset: (next, labId) => resetProjectSession({
+      setLabTask, setKeyMapTabs, setMatchingTabs, setSelectedKeyMapId, setWorkbenchTabs,
+      setSelectedStepIndex, setActiveQueryId, setPreview, setPreviewSnapshot, setPreviewPhase,
+      setPreviewMode, setLoading, setModelPreview, setModelError, setError, setDiagView, setJoinDiag,
+      setJoinDiagError, setJoinDiagLoading, setFrozenRemap, setCheckDeltaNote, setCheckAllowNote,
+      setJoinPrepareLoading, setLensPrepareBusy, setJoinPrepareLabel, setOpProgress,
+      setSelectedExternalKey, setSelectedSourceId, setCheckSetup, setMapPickPending,
+      setMapSwitchOffer, setLensFocusHint,
+      invalidatePreview: () => {
+        querySessionGenerationRef.current++;
+        nextRequestGen(previewReqGenRef.current);
+        if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = null;
+        heavyPreviewCacheRef.current = new HeavyPreviewCache();
+      },
+      clearCheckFingerprint: () => { lastCheckRunFingerprint.current = null; },
+    }, next, labId),
+    refreshExport: refreshExportTree,
+    syncMaps: syncKeyMapsFromExport,
+    error: setProjectLifecycleError,
+    message: setExportMsg,
+  };
+  if (!lifecycleRef.current) lifecycleRef.current = new ProjectController(lifecyclePorts);
+  else lifecycleRef.current.setPorts(lifecyclePorts);
+  const lifecycle = lifecycleRef.current;
+  const openProjectPath = (path: string, pruneFailedRecent = false) => lifecycle.open(path, pruneFailedRecent);
+  const handleSaveProject = () => lifecycle.save();
+  const handleSaveProjectAs = () => lifecycle.save(true);
+  const applyLoadedProject = (loaded: Project, pathHint?: string) => lifecycle.applyLoaded(loaded, pathHint);
 
   function openKeyMapEditor(
     map: KeyMapDef,
@@ -4615,13 +4467,11 @@ function App() {
         };
         w.__dwhE2eGetProject = () => projectRef.current;
         w.__dwhE2eOpenMatchingSession = (session) => {
-          setMatchingTabs((tabs) => [...tabs.filter((s) => s.id !== session.id), session]);
-          setCenterTab(matchingTab(session.id));
+          openMatchingSession(session);
         };
         w.__dwhE2eGetMatchingSessions = () => matchingTabsLiveRef.current;
         w.__dwhE2eOpenMapping = (mapId) => {
-          const map = projectRef.current.workspace.key_maps?.find((m) => m.id === mapId);
-          if (map) openKeyMapEditor(map);
+          queryNavigation.openMapping(mapId);
         };
         w.__dwhE2eGetMappingDrafts = () => keyMapTabsLiveRef.current.map((t) => ({
           map: t.map, dirty: Boolean(t.localDraft) || dirtyDeltaHasChanges(t.dirtyDelta ?? null),
@@ -4675,6 +4525,7 @@ function App() {
   // Load app settings + global connections, then restore last project.
   useEffect(() => {
     let cancelled = false;
+    const startupSnapshot = lifecycle.snapshot();
     void (async () => {
       let settings: AppSettings = {
         default_target_dialect: "duckdb",
@@ -4718,6 +4569,9 @@ function App() {
         if (path) {
           const loaded = await loadProject(path, { remember: true });
           if (cancelled) return;
+          if (!lifecycle.unchangedSince(startupSnapshot)) return;
+          // Connections come from app settings, not the remembered document.
+          projectRef.current = { ...projectRef.current, connections: globalConns };
           applyLoadedProject(loaded, path);
           setExportMsg(`Restored ${path}`);
           const nextRecent = pushRecentProject(settings.recent_projects, path);
@@ -4733,12 +4587,13 @@ function App() {
       } catch {
         // Missing/corrupt session — fall through to Untitled.
       }
-      if (!cancelled && !restored) {
+      if (!cancelled && !restored && lifecycle.unchangedSince(startupSnapshot)) {
         const initial = {
           ...emptyProject("Untitled", settings),
           connections: globalConns,
         };
-        savedProjectFingerprint.current = documentFingerprint(initial);
+        lifecycle.markClean(initial);
+        projectRef.current = initial;
         setProject(initial);
       }
       // ADR-0023: offer dbt setup when CLI missing and not dismissed.
@@ -5344,7 +5199,7 @@ function App() {
   return (
     <div className="flex h-screen flex-col text-slate-100">
       {switchChoice && <ProjectSwitchDialog name={project.name}
-        hasDrafts={hasUnsavedEditorDrafts()} onChoose={switchChoice} />}
+        hasDrafts={lifecycle.hasUnsavedEditorDrafts()} onChoose={switchChoice} />}
       <AppMenu
         projectName={project.name}
         projectPath={project.root_path}
@@ -5991,7 +5846,7 @@ function App() {
                 onRenameSource={renameSource}
                 onSelectKeyMap={(map) => {
                   setSelectedKeyMapId(map.id);
-                  openKeyMapEditor(map);
+                  queryNavigation.openMapping(map.id);
                 }}
                 onAddKeyMap={handleAddKeyMap}
                 onCreateKeyMapFromData={() => setMappingCreateOpen(true)}
@@ -6205,7 +6060,7 @@ function App() {
                 {error && (
                   <ErrorBanner
                     message={error}
-                    onDismiss={() => setError(null)}
+                    onDismiss={() => { setProjectLifecycleError(null); setError(null); }}
                   />
                 )}
                 {exportMsg && (
@@ -6324,18 +6179,17 @@ function App() {
                       setQueries((qs) =>
                         upsertQualityInspection(qs, plan.sampleQuery),
                       );
-                      setActiveQueryId(QUALITY_INSPECTION);
                       // JoinLens mounts only when the selected step is Join
                       // (preview rows + joinCtx). Last step is Filter/Sort — that
                       // left DATA as an empty PreviewTable after Inspect.
                       const joinStepIdx = plan.sampleQuery.steps.findIndex(
                         (s) => s.type === "Join",
                       );
-                      setSelectedStepIndex(
-                        joinStepIdx >= 0
-                          ? joinStepIdx
-                          : Math.max(0, plan.sampleQuery.steps.length - 1),
-                      );
+                      const stepIndex = joinStepIdx >= 0 ? joinStepIdx : Math.max(0, plan.sampleQuery.steps.length - 1);
+                      // The inspection query is being authored in this same event;
+                      // apply that exact destination, never the previous active query.
+                      applyQueryDestination({ query: plan.sampleQuery, stepIndex,
+                        step: plan.sampleQuery.steps[stepIndex], view: "data", lens: true, focusLens: true });
                       setDiagView(null);
                       setPreview(null);
                       setLensFocusHint(
@@ -6350,7 +6204,6 @@ function App() {
                         phase: plan.progressPhase,
                         percent: 15,
                       });
-                      focusJoinLensLayout();
                       setAutoPrepareNonce((n) => n + 1);
                     } catch (reason) {
                       setError(String(reason));
@@ -6372,17 +6225,16 @@ function App() {
                     session={tab}
                     onOpenDemo={() => {
                       const demo = createMatchingDemoSession();
-                      setMatchingTabs((tabs) => [...tabs, demo]);
-                      setCenterTab(matchingTab(demo.id));
+                      openMatchingSession(demo);
                     }}
                     onChange={(next) =>
                       setMatchingTabs((tabs) =>
                         tabs.map((t) => (t.id === next.id ? next : t)),
                       )
                     }
+                    lensUnavailableReason={joinTargetUnavailable(project, tab.lensCtx?.navigationTarget)}
                     onOpenLens={() => {
-                      setCenterTab(QUERY_TAB);
-                      focusJoinLensLayout();
+                      queryNavigation.inspectJoin(tab.lensCtx?.navigationTarget, { focusLens: true });
                     }}
                     writeAllowed={
                       !tab.targetMapId ||
@@ -6599,8 +6451,7 @@ function App() {
                       hasUnsavedDecisions: false,
                       chatCollapsed: false,
                     });
-                    setMatchingTabs((tabs) => [...tabs, session]);
-                    setCenterTab(matchingTab(id));
+                    openMatchingSession(session);
                   }}
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
                   importNotice={(() => {
@@ -7081,8 +6932,7 @@ function App() {
                             hasUnsavedDecisions: false,
                             chatCollapsed: false,
                           });
-                          setMatchingTabs((tabs) => [...tabs, session]);
-                          setCenterTab(matchingTab(id));
+                          openMatchingSession(session);
                         }}
                       />
                     ) : preview ? (

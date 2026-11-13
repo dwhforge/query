@@ -428,28 +428,32 @@ export function KeyMapEditor({
     setDirtyTick((n) => n + 1);
   }
 
+  // Parent callbacks are adapters and can change on any navigation render.
+  // Register once per mounted map; Save methods must still use current handlers.
+  const saveCallbacksRef = useRef({ onSaveApi, onDirtyChange, afterSaveSettle });
+  saveCallbacksRef.current = { onSaveApi, onDirtyChange, afterSaveSettle };
+  const hasSaveApiOwner = Boolean(onSaveApi);
   useEffect(() => {
-    if (!onSaveApi) return;
-    onSaveApi({
+    if (!hasSaveApiOwner) return;
+    saveCallbacksRef.current.onSaveApi?.({
       captureSave: () => {
         const cap = storeRef.current.captureSave();
         if (!cap) return null;
-        onDirtyChange?.(cap.delta);
+        saveCallbacksRef.current.onDirtyChange?.(cap.delta);
         setDirtyTick((n) => n + 1);
         return { token: cap.token, delta: cap.delta };
       },
       confirmSave: (token: number) => {
         storeRef.current.confirmSave(token);
-        afterSaveSettle();
+        saveCallbacksRef.current.afterSaveSettle();
       },
       abortSave: (token: number) => {
         storeRef.current.abortSave(token);
-        afterSaveSettle();
+        saveCallbacksRef.current.afterSaveSettle();
       },
       isSaving: () => storeRef.current.isSaveInFlight(),
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable API registration
-  }, [onSaveApi, map.id]);
+  }, [hasSaveApiOwner, map.id]);
 
   // Legacy path when Save succeeds without saveApi (editor not mounted).
   useEffect(() => {

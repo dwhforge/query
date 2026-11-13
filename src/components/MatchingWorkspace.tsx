@@ -47,6 +47,7 @@ type Props = {
   session: MatchingTabSession;
   onChange: (next: MatchingTabSession) => void;
   onOpenLens?: () => void;
+  lensUnavailableReason?: string | null;
   onOpenDemo?: () => void;
   /** Persist upserts into the bound Mapping via existing Save path. */
   onSaveToMap?: (args: {
@@ -305,6 +306,7 @@ export function MatchingWorkspace({
   session,
   onChange,
   onOpenLens,
+  lensUnavailableReason,
   onOpenDemo,
   onSaveToMap,
   writeAllowed = true,
@@ -679,10 +681,16 @@ export function MatchingWorkspace({
             <button
               type="button"
               onClick={onOpenLens}
+              disabled={Boolean(lensUnavailableReason)}
+              title={lensUnavailableReason ?? "Inspect the original Join"}
+              data-testid="matching-open-lens"
               className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-teal-700 hover:text-teal-100"
             >
               Open Mapping in Lens
             </button>
+          )}
+          {!isDemo && lensUnavailableReason && (
+            <span className="text-[11px] text-slate-400" data-testid="matching-lens-unavailable">{lensUnavailableReason}</span>
           )}
           <button
             type="button"

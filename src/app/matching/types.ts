@@ -1,4 +1,5 @@
 /** Matching workspace session (ADR-0044) — in-process only until persistence ADR. */
+import type { JoinNavigationTarget } from "../queryNavigation";
 
 export type MatchingScopeKind = "selected" | "cohort" | "full";
 
@@ -133,6 +134,8 @@ export type MatchingTabSession = {
   entry: "lens" | "mapping" | "query";
   scope: MatchingScopeKind;
   lensCtx?: {
+    /** Captured once on entry, never rebound to the current canvas selection. */
+    navigationTarget?: JoinNavigationTarget | null;
     hostQueryId: string;
     joinStepIndex: number;
     leftOn: string[];

@@ -20,6 +20,14 @@ openspec/
 
 Active changes:
 
+- [Query context and semantic navigation](changes/query-context-navigation/proposal.md) — PR-03 complete;
+  [merged contract](specs/query-navigation/spec.md),
+  [delivery evidence and PR-04 handoff](changes/query-context-navigation/report.md).
+
+- [Query project lifecycle controller](changes/project-lifecycle-controller/proposal.md) — PR-02 complete;
+  [merged contract](specs/project-lifecycle/spec.md),
+  [delivery evidence and PR-03 notes](changes/project-lifecycle-controller/report.md).
+
 - [Typed workspace tabs](changes/typed-workspace-tabs/proposal.md) — PR-01 complete;
   [merged contract](specs/workspace-tabs/spec.md),
   [delivery evidence and PR-02 notes](changes/typed-workspace-tabs/report.md).

@@ -127,3 +127,31 @@ export function e2eClaimPreviewHold(cmd: string) {
 export function e2eReleasePreviewHold() { previewHold?.release(); }
 export function e2eWaitPreviewStarted() { return previewHold?.started ?? Promise.reject(new Error("no preview hold")); }
 export function e2eWaitPreviewSettled() { return previewHold?.settled ?? Promise.resolve(); }
+
+// PR-04B: one-shot Join response holds. Never hold or alter mutation commands.
+type JoinCommand = "prepare_join_inputs" | "join_diagnostics" | "join_prepare_status" | "join_prepare_progress";
+type JoinHold = PreviewHold & { result?: unknown; error?: string };
+const joinHolds = new Map<JoinCommand, JoinHold>();
+export const e2eJoinHolds = {
+  arm(command: JoinCommand, replacement?: { result?: unknown; error?: string }) {
+    if (!isE2eBuild()) throw new Error("not an E2E build");
+    if (!["prepare_join_inputs", "join_diagnostics", "join_prepare_status", "join_prepare_progress"].includes(command)) throw new Error("not a Join read command");
+    let release!: () => void, start!: () => void, settle!: () => void;
+    const pending = new Promise<void>((r) => { release = r; });
+    const started = new Promise<void>((r) => { start = r; });
+    const settled = new Promise<void>((r) => { settle = r; });
+    joinHolds.set(command, { pending, release, start, started, settle, settled, claimed: false, ...replacement });
+  },
+  release(command: JoinCommand) { joinHolds.get(command)?.release(); },
+  started(command: JoinCommand) { return joinHolds.get(command)?.started ?? Promise.reject(new Error("no Join hold")); },
+  settled(command: JoinCommand) {
+    const hold = joinHolds.get(command);
+    return hold?.claimed ? hold.settled : Promise.resolve();
+  },
+};
+export function e2eClaimJoinHold(command: string) {
+  const hold = joinHolds.get(command as JoinCommand);
+  if (!hold || hold.claimed) return null;
+  hold.claimed = true;
+  return hold;
+}

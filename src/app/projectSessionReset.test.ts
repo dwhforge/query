@@ -11,8 +11,8 @@ for (const labId of [undefined, "recon_ship_sales", "mapping_quality", "other"])
   const oldRequest = nextRequestGen(generation);
   const ports = Object.fromEntries([
     "setLabTask", "setKeyMapTabs", "setMatchingTabs", "setSelectedKeyMapId", "setSelectedStepIndex",
-    "setActiveQueryId", "setModelPreview", "setModelError", "setError", "setDiagView", "setJoinDiag", "setJoinDiagError",
-    "setJoinDiagLoading", "setJoinPrepareLoading", "setLensPrepareBusy", "setJoinPrepareLabel", "setOpProgress",
+    "setActiveQueryId", "setModelPreview", "setModelError", "setError",
+    "setOpProgress",
     "setFrozenRemap", "setCheckDeltaNote", "setCheckAllowNote",
     "setSelectedExternalKey", "setSelectedSourceId", "setCheckSetup", "setMapPickPending",
     "setMapSwitchOffer", "setLensFocusHint",
@@ -20,6 +20,8 @@ for (const labId of [undefined, "recon_ship_sales", "mapping_quality", "other"])
   ports.setWorkbenchTabs = (fn) => { tabs = fn(tabs); };
   let resets = 0;
   ports.resetPreview = () => { resets++; nextRequestGen(generation); };
+  let joinResets = 0;
+  ports.resetJoin = () => { joinResets++; };
   ports.clearCheckFingerprint = () => { values.checkFingerprint = null; };
   const project = emptyProject("loaded");
   resetProjectSession(ports, project, labId);
@@ -29,17 +31,14 @@ for (const labId of [undefined, "recon_ship_sales", "mapping_quality", "other"])
   assert.deepEqual(values.setKeyMapTabs, []);
   assert.deepEqual(values.setMatchingTabs, []);
   assert.equal(resets, 1);
-  assert.equal(values.setJoinDiagLoading, false);
-  assert.equal(values.setJoinPrepareLoading, false);
-  assert.equal(values.setLensPrepareBusy, false);
-  assert.equal(values.setJoinPrepareLabel, null);
+  assert.equal(joinResets, 1);
   assert.equal(values.setOpProgress, null);
   assert.equal(values.setError, null);
   assert.equal(values.setActiveQueryId, project.workspace.focus_query_id || null);
   assert.equal(values.setSelectedStepIndex, null);
   if (labId === "recon_ship_sales") assert.equal((values.setLabTask as { projectUid: string }).projectUid, project.project_uid);
   else assert.equal(values.setLabTask, null);
-  for (const key of ["setModelPreview", "setModelError", "setDiagView", "setJoinDiag", "setJoinDiagError", "setFrozenRemap", "setCheckDeltaNote", "setCheckAllowNote", "checkFingerprint", "setSelectedExternalKey", "setSelectedSourceId", "setCheckSetup", "setMapPickPending", "setMapSwitchOffer", "setLensFocusHint"]) {
+  for (const key of ["setModelPreview", "setModelError", "setFrozenRemap", "setCheckDeltaNote", "setCheckAllowNote", "checkFingerprint", "setSelectedExternalKey", "setSelectedSourceId", "setCheckSetup", "setMapPickPending", "setMapSwitchOffer", "setLensFocusHint"]) {
     assert.equal(values[key], null, key);
   }
 }

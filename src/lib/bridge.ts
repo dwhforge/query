@@ -62,21 +62,30 @@ async function invoke<T>(
   const e2e = String(import.meta.env.DWH_E2E ?? "") === "1";
   let e2eBridge: typeof import("./e2eBridge") | null = null;
   let previewHold: ReturnType<typeof import("./e2eBridge").e2eClaimPreviewHold> = null;
+  let joinHold: ReturnType<typeof import("./e2eBridge").e2eClaimJoinHold> = null;
   if (e2e) {
     e2eBridge = await import("./e2eBridge");
     await e2eBridge.e2eMaybeHoldDescribe(cmd);
     previewHold = e2eBridge.e2eClaimPreviewHold(cmd);
+    joinHold = e2eBridge.e2eClaimJoinHold(cmd);
     await previewHold?.pending;
   }
   try {
-    return await bridge()
-      .invoke<InvokeReply<T> | T>(cmd, args)
-      .then((reply) => unpackInvokeReply(reply));
+    const reply = await bridge().invoke<InvokeReply<T> | T>(cmd, args);
+    if (joinHold) {
+      // Hold a real host response, not the host lane itself.
+      joinHold.start();
+      await joinHold.pending;
+      if (joinHold.error) throw new Error(joinHold.error);
+      if ("result" in joinHold) return joinHold.result as T;
+    }
+    return unpackInvokeReply(reply);
   } catch (e: unknown) {
     throw normalizeHostReject(e);
   } finally {
     e2eBridge?.e2eNotifyDescribeSettled(cmd);
     previewHold?.settle();
+    joinHold?.settle();
   }
 }
 

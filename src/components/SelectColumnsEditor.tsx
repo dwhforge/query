@@ -1,4 +1,5 @@
-import { memo, useRef, useState } from "react";
+import { memo, useState } from "react";
+import { chooseColumns, editColumnText, toggleColumn } from "./query/columnDraft";
 
 type Props = {
   initialColumns: string[];
@@ -11,13 +12,11 @@ function SelectColumnsEditorImpl({
   choices,
   onApply,
 }: Props) {
-  const [selected, setSelected] = useState<string[]>(() => [...initialColumns]);
-  const textRef = useRef<HTMLInputElement>(null);
+  const [draft, setDraft] = useState(() => chooseColumns(initialColumns));
+  const selected = draft.selected;
 
   function toggle(name: string) {
-    setSelected((prev) =>
-      prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name],
-    );
+    setDraft(prev => toggleColumn(prev, name));
   }
 
   return (
@@ -28,14 +27,14 @@ function SelectColumnsEditorImpl({
             <button
               type="button"
               className="flex-1 rounded border border-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:border-teal-800 hover:text-teal-200"
-              onClick={() => setSelected([...choices])}
+              onClick={() => setDraft(chooseColumns(choices))}
             >
               Select all
             </button>
             <button
               type="button"
               className="flex-1 rounded border border-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:border-slate-600 hover:text-slate-200"
-              onClick={() => setSelected([])}
+              onClick={() => setDraft(chooseColumns([]))}
             >
               Clear
             </button>
@@ -61,28 +60,16 @@ function SelectColumnsEditorImpl({
         </>
       )}
       <input
-        key={selected.join(",")}
-        ref={textRef}
         type="text"
-        defaultValue={selected.join(", ")}
+        value={draft.text}
+        onChange={event => setDraft(editColumnText(event.target.value))}
         placeholder="date, region, amount"
         className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
       />
       <button
         type="button"
         className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-        onClick={() => {
-          const typed = textRef.current?.value;
-          const columns =
-            typed !== undefined && typed !== selected.join(", ")
-              ? typed
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
-              : [...selected];
-          setSelected(columns);
-          onApply(columns);
-        }}
+        onClick={() => onApply([...selected])}
       >
         Apply
       </button>

@@ -20,6 +20,14 @@ openspec/
 
 Active changes:
 
+- [Query workspace / local Inspector editors](changes/query-workspace-inspector/proposal.md) — PR-05 complete; combined-suite reliability gap recorded;
+  [merged contract](specs/query-workspace/spec.md),
+  [responsibilities, validation and PR-06 tooling handoff](changes/query-workspace-inspector/report.md).
+
+- [Join diagnostics / prepare controller](changes/join-diagnostics-controller/proposal.md) — PR-04B complete;
+  [merged contract](specs/join-diagnostics/spec.md),
+  [delivery evidence and PR-05 handoff](changes/join-diagnostics-controller/report.md).
+
 - [Query preview controller](changes/query-preview-controller/proposal.md) — PR-04A;
   [merged contract](specs/query-preview/spec.md),
   [delivery evidence and PR-04B handoff](changes/query-preview-controller/report.md).

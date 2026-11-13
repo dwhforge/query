@@ -155,3 +155,118 @@ test("Show me from the same Join dismisses a diagnostic sample and restores its 
   await expect(page.getByTestId("join-lens-no-match")).toBeVisible();
   await expect(page.getByTestId("preview-context")).toHaveText("dirty_recon · through s1 Join");
 });
+
+const joinPanel = (page: Page) => page.getByText("Join diagnostics", { exact: true }).locator("../..");
+type JoinCommand = "prepare_join_inputs" | "join_diagnostics" | "join_prepare_status" | "join_prepare_progress";
+async function armJoin(page: Page, command: JoinCommand, replacement?: { result?: unknown; error?: string }) {
+  await page.evaluate(({ command, replacement }) => (window as any).__dwhE2eJoinHolds.arm(command, replacement), { command, replacement });
+}
+async function startedJoin(page: Page, command: JoinCommand) {
+  await page.evaluate((command) => (window as any).__dwhE2eJoinHolds.started(command), command);
+}
+async function releaseJoin(page: Page, command: JoinCommand) {
+  await page.evaluate((command) => (window as any).__dwhE2eJoinHolds.release(command), command);
+  await page.evaluate((command) => (window as any).__dwhE2eJoinHolds.settled(command), command);
+}
+
+test("Join numeric progress stops on cancel and rejects an outstanding poll after cleanup", async () => {
+  const { page } = session;
+  await openLab(page);
+  await armJoin(page, "prepare_join_inputs");
+  await armJoin(page, "join_prepare_progress", { result: { active: true, fraction: 0.42, stage: "left", message: "Held Join numeric progress" } });
+  try {
+    await joinPanel(page).getByRole("button", { name: /^(Load|Reload) sides$/ }).click();
+    await startedJoin(page, "prepare_join_inputs");
+    await startedJoin(page, "join_prepare_progress");
+    await releaseJoin(page, "join_prepare_progress");
+    await expect(page.getByRole("status").filter({ hasText: "Held Join numeric progress" })).toContainText("42%");
+    await armJoin(page, "join_prepare_progress", { result: { active: true, fraction: 0.83, stage: "left", message: "Late Join poll must stay hidden" } });
+    await startedJoin(page, "join_prepare_progress");
+    await joinPanel(page).getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(joinPanel(page).getByText("preparing…", { exact: true })).toHaveCount(0);
+  } finally {
+    await releaseJoin(page, "join_prepare_progress");
+    await releaseJoin(page, "prepare_join_inputs");
+  }
+  await expect(page.getByText("Late Join poll must stay hidden", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: "Load join sides" })).toHaveCount(0);
+  await expect(joinPanel(page).getByRole("button", { name: "Find gaps", exact: true })).toBeEnabled();
+});
+
+test("superseded Join prepare cannot finish newer diagnostics on same-target re-entry", async () => {
+  const { page } = session;
+  await openLab(page);
+  await armJoin(page, "prepare_join_inputs", { error: "Superseded prepare error must stay hidden" });
+  try {
+    await joinPanel(page).getByRole("button", { name: /^(Load|Reload) sides$/ }).click();
+    await startedJoin(page, "prepare_join_inputs");
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await armJoin(page, "join_diagnostics");
+    await joinPanel(page).getByRole("button", { name: "Find gaps", exact: true }).click();
+    await startedJoin(page, "join_diagnostics");
+    await releaseJoin(page, "prepare_join_inputs");
+    await expect(joinPanel(page).getByText("computing…", { exact: true })).toBeVisible();
+    await expect(joinPanel(page).getByText("Superseded prepare error must stay hidden", { exact: true })).toHaveCount(0);
+  } finally {
+    await releaseJoin(page, "prepare_join_inputs");
+    await releaseJoin(page, "join_diagnostics");
+  }
+  await expect(joinPanel(page).getByRole("button", { name: /^Left input rows/ })).toBeVisible();
+  await expect(page.getByTestId("preview-context")).toHaveText("dirty_recon · through s1 Join");
+});
+
+test("held Join diagnostics error is refused after rapid query and step changes", async () => {
+  const { page } = session;
+  await openLab(page);
+  await armJoin(page, "join_diagnostics", { error: "Old Join diagnostics error must stay hidden" });
+  try {
+    await page.getByRole("button", { name: "Find gaps", exact: true }).click();
+    await startedJoin(page, "join_diagnostics");
+    await page.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
+    await page.getByRole("button", { name: "Inspect monthly reconciliation", exact: true }).click();
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+  } finally { await releaseJoin(page, "join_diagnostics"); }
+  await expect(page.getByText("Old Join diagnostics error must stay hidden", { exact: true })).toHaveCount(0);
+  await expect(joinPanel(page).getByRole("button", { name: /^Left input rows/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Find gaps", exact: true }).click();
+  await expect(joinPanel(page).getByRole("button", { name: /^Left input rows/ })).toBeVisible();
+});
+
+test("Join prepared status cannot leak through committed project replacement", async () => {
+  const { page } = session;
+  await openLab(page);
+  const before = await page.evaluate(() => (window as any).__dwhE2eGetProject().project_uid);
+  await armJoin(page, "join_prepare_status", { result: { prepared: true, stale: false, left_rows: 7777777, right_rows: 7777777 } });
+  try {
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await startedJoin(page, "join_prepare_status");
+    // Same real lab route, new project identity, committed replacement reset.
+    await page.getByRole("tab", { name: "Help Lab", exact: true }).click();
+    const title = JSON.parse(fs.readFileSync("fixtures/labs/catalog.json", "utf8")).find((c: any) => c.id === "recon_ship_sales").title;
+    await page.locator("article").filter({ has: page.getByRole("heading", { name: title, exact: true }) })
+      .getByRole("button", { name: "Open lab", exact: true }).click();
+    await page.getByRole("dialog", { name: "Save changes before switching projects?" })
+      .getByRole("button", { name: "Discard", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__dwhE2eGetProject().project_uid)).not.toBe(before);
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+  } finally { await releaseJoin(page, "join_prepare_status"); }
+  await expect(joinPanel(page)).not.toContainText("7,777,777");
+  await expect(joinPanel(page).getByRole("button", { name: "Find gaps", exact: true })).toBeEnabled();
+});
+
+test("newer diagnostic sample intent wins when an earlier sample arrives late", async () => {
+  const { page } = session;
+  await openLab(page);
+  await page.getByRole("button", { name: "Find gaps", exact: true }).click();
+  await expect(joinPanel(page).getByRole("button", { name: /^Left input rows/ })).toBeVisible();
+  await page.evaluate(() => (window as any).__dwhE2eArmPreviewHold());
+  try {
+    await joinPanel(page).getByRole("button", { name: /^Left input rows/ }).click();
+    await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+    await joinPanel(page).getByRole("button", { name: /^Right input rows/ }).click();
+    await expect(page.getByText("Right input (join side)", { exact: true })).toBeVisible();
+  } finally { await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold()); }
+  await page.evaluate(() => (window as any).__dwhE2eWaitPreviewSettled());
+  await expect(page.getByText("Right input (join side)", { exact: true })).toBeVisible();
+  await expect(page.getByText("Left input (before Join)", { exact: true })).toHaveCount(0);
+});

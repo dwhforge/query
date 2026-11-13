@@ -1,3 +1,5 @@
+import { QueryWorkspace } from "./components/query/QueryWorkspace";
+import type { JoinDraftReader } from "./components/query/QueryStepEditor";
 import {
   useCallback,
   useEffect,
@@ -9,6 +11,8 @@ import {
 } from "react";
 import { type SwitchDecision } from "./app/projectLifecycle";
 import { ProjectController, type ProjectControllerPorts } from "./app/projectController";
+import { useJoinDiagnostics } from "./app/joinDiagnostics/useJoinDiagnostics";
+import type { JoinInput } from "./app/joinDiagnostics/controller";
 import { resetProjectSession } from "./app/projectSessionReset";
 import {
   captureJoinTarget, createQueryNavigation, isCurrentQueryContext, joinTargetUnavailable,
@@ -17,7 +21,7 @@ import {
 import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
 import { LabTaskCard } from "./components/LabTaskCard";
 import { LabHint } from "./components/LabHint";
-import { previewScopeLabel, previewStateMessage } from "./help/previewState";
+import { previewScopeLabel } from "./help/previewState";
 import { ownsLabTask, reconComparisonTargets, reconHintPhase, reconJoinTarget, type LabTaskSession, type ReconView } from "./help/reconLab";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
@@ -113,7 +117,7 @@ import {
   type JoinDiagKind,
 } from "./components/JoinDiagnosticsPanel";
 import { JoinLens } from "./components/JoinLens";
-import { JoinKeyEditor } from "./components/JoinKeyEditor";
+
 import { KeyMapEditor } from "./components/KeyMapEditor";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
 import { createMatchingDemoSession } from "./app/matching/executionPolicy";
@@ -142,7 +146,6 @@ import {
 } from "./lib/mappingCheck";
 import {
   isHeavyPreviewFocus,
-  PREVIEW_SAMPLE_LIMIT,
   workspaceForPreviewTransport,
 } from "./lib/previewTransport";
 import type {
@@ -200,7 +203,6 @@ import {
   type KeyMapApplyResult,
   type KeyMapTabSession,
 } from "./app/keyMap";
-import { isHostCancelled } from "./lib/hostRpc";
 import { useQueryPreview } from "./app/queryPreview/useQueryPreview";
 import {
   applyNormalizeToWorkspace,
@@ -214,37 +216,28 @@ import { PanelResizeHandle } from "./components/PanelResizeHandle";
 import {
   emptyJoinKeyPair,
   joinPairsComplete,
-  pairsFromOn,
   pairsToOn,
   suggestJoinPairs,
   type JoinKeyPair,
 } from "./lib/joinKeys";
 import {
-  GraphCanvas,
   type CanvasPositions,
   type GraphEdgeInfo,
 } from "./components/GraphCanvas";
-import { History } from "./components/History";
+
 import {
   PostgresPicker,
   type PostgresSelection,
 } from "./components/PostgresPicker";
 import { PgImportWizard } from "./components/PgImportWizard";
-import { PreviewTable } from "./components/PreviewTable";
+
 import { S3SourceDialog } from "./components/S3SourceDialog";
-import { SelectColumnsEditor } from "./components/SelectColumnsEditor";
-import { SourceSchemaPanel } from "./components/SourceSchemaPanel";
+
 import { bindFilePath } from "./lib/filePath";
 import {
-  cancelRunningQuery,
   describePostgresObject,
   describeWorkspace,
   exportDbt,
-  joinDiagnostics,
-  formatJoinPrepareHint,
-  formatJoinPrepareStatusHint,
-  joinPrepareProgress,
-  joinPrepareStatus,
   listExportTree,
   dbtSetupStatus,
   getAppSettings,
@@ -254,7 +247,6 @@ import {
   copyReferencedObject,
   loadProject,
   loadDemoWorkspace,
-  prepareJoinInputs,
   previewDbtModel,
   previewWorkspace,
   projectRefContext,
@@ -276,7 +268,6 @@ import {
   parseExport,
   buildExport,
   type AppSettings,
-  type JoinDiagSample,
   type JoinDiagnostics,
   type KeyMapSaveResult,
   type NearMissHypothesis,
@@ -289,33 +280,26 @@ import {
   migrateProject,
   newQueryId,
   newSourceId,
-  isPublishedOutput,
   projectDestination,
   projectDialect,
   projectEngine,
-  queryExecution,
   routeLabel,
   externalTarget,
   isExternalTarget,
   newId,
   targetKey,
   togglePublishedOutput,
-  type ObjectTarget,
   type ProjectReference,
   syncSourcesFromQueries,
   type ConnectionDef,
   type ConnectionKind,
   type DestinationKind,
-  type DeriveMode,
-  type DeriveOp,
-  type DeriveOpId,
   type ExecutionEngine,
   type JoinType,
   type ColumnMetadata,
   parquetSourceName,
   type Project,
   type QueryDef,
-  type QueryExecution,
   type SourceDef,
   type KeyMapDef,
   type NormalizeOp,
@@ -739,64 +723,10 @@ function App() {
     ownerPath: string;
     alias: string;
   } | null>(null);
+  const joinDraftReader = useRef<JoinDraftReader | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(
     null,
   );
-  const [filterCondition, setFilterCondition] = useState("");
-  const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
-  /** Schema before the selected SelectColumns step (full upstream column list). */
-  const [upstreamColumnNames, setUpstreamColumnNames] = useState<string[]>([]);
-  const [groupDims, setGroupDims] = useState("");
-  const [groupAggs, setGroupAggs] = useState("count(*) as n");
-  const [joinRightId, setJoinRightId] = useState("");
-  /** Join key pairs (IR `left_on` / `right_on`). */
-  const [joinKeyPairs, setJoinKeyPairs] = useState<JoinKeyPair[]>([
-    emptyJoinKeyPair(),
-  ]);
-  /** Live Join key draft (JoinKeyEditor) — avoids App setState on every keystroke. */
-  const joinKeyDraftRef = useRef<JoinKeyPair[]>(joinKeyPairs);
-  const [joinType, setJoinType] = useState<JoinType>("inner");
-  /** Inspector text drafts — read on Apply; typing must not re-render App. */
-  const filterInputRef = useRef<HTMLInputElement>(null);
-  const customSqlRef = useRef<HTMLTextAreaElement>(null);
-  const groupDimsRef = useRef<HTMLInputElement>(null);
-  const groupAggsRef = useRef<HTMLInputElement>(null);
-  const sortColRef = useRef<HTMLInputElement>(null);
-  const limitNRef = useRef<HTMLInputElement>(null);
-  const renameFromRef = useRef<HTMLInputElement>(null);
-  const renameToRef = useRef<HTMLInputElement>(null);
-  const deriveNameRef = useRef<HTMLInputElement>(null);
-  const deriveExprRef = useRef<HTMLInputElement>(null);
-
-  const setJoinKeyPairsBoth = useCallback((pairs: JoinKeyPair[]) => {
-    joinKeyDraftRef.current = pairs;
-    setJoinKeyPairs(pairs);
-  }, []);
-  const [joinLeftColumns, setJoinLeftColumns] = useState<ColumnMetadata[]>([]);
-  const [joinRightColumns, setJoinRightColumns] = useState<ColumnMetadata[]>(
-    [],
-  );
-  const [joinColsLoading, setJoinColsLoading] = useState(false);
-  const [joinDiag, setJoinDiag] = useState<JoinDiagnostics | null>(null);
-  const [joinDiagLoading, setJoinDiagLoading] = useState(false);
-  const [joinDiagError, setJoinDiagError] = useState<string | null>(null);
-  const [joinPrepareLoading, setJoinPrepareLoading] = useState(false);
-  /** Prepare started from Join Lens (separate from panel Prepare). */
-  const [lensPrepareBusy, setLensPrepareBusy] = useState(false);
-  const [joinPrepareLabel, setJoinPrepareLabel] = useState<string | null>(
-    null,
-  );
-  /** Overrides Data tab when user opens a Join diagnostic sample. */
-  const [diagView, setDiagView] = useState<{
-    label: string;
-    columns: ColumnMetadata[];
-    rows: unknown[][];
-    totalCount: number;
-    sampleLimit: number;
-    highlightKeys: string[];
-    /** When set, banner can open KeyMap with these unmatched key values. */
-    mapSide?: "left" | "right";
-  } | null>(null);
   /** Join Lens mode on Data (where-provenance docks). Default on when Join selected. */
   const [joinLensOn, setJoinLensOn] = useState(true);
   /** Bump to switch Join Lens into Probe (from Data diag banner). */
@@ -808,8 +738,6 @@ function App() {
     column: string;
     value: string;
   } | null>(null);
-  /** Inspect clicked — keep progress until Join Lens prepare takes over. */
-  const qualityHandoffRef = useRef(false);
   /** ADR-0027 frozen batch remap (session). */
   const [frozenRemap, setFrozenRemap] = useState<FrozenRemapPreview | null>(
     null,
@@ -896,22 +824,6 @@ function App() {
       }
     };
   }, [centerTab]);
-  /** FromQuery parent id (child / derived query root). */
-  const [fromQueryId, setFromQueryId] = useState("");
-  const [appendOtherId, setAppendOtherId] = useState("");
-  const [sortCol, setSortCol] = useState("");
-  const [sortDesc, setSortDesc] = useState(true);
-  const [limitN, setLimitN] = useState("10");
-  const [renameFrom, setRenameFrom] = useState("");
-  const [renameTo, setRenameTo] = useState("");
-  const [deriveName, setDeriveName] = useState("");
-  const [deriveExpr, setDeriveExpr] = useState("");
-  const [deriveMode, setDeriveMode] = useState<DeriveMode>("sql");
-  const [deriveOpId, setDeriveOpId] = useState<DeriveOpId>("month_start");
-  const [deriveOpCol, setDeriveOpCol] = useState("");
-  const [deriveOpColB, setDeriveOpColB] = useState("");
-  const [deriveOpValue, setDeriveOpValue] = useState("");
-  const [customSql, setCustomSql] = useState("select * from {{prev_step}}");
   const [sqlCopied, setSqlCopied] = useState(false);
   const [modelPreview, setModelPreview] = useState<PreviewDbtModel | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -937,7 +849,7 @@ function App() {
     captured.projectFile === projectRef.current.root_path;
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [exportFiles, setExportFiles] = useState<string[]>([]);
-  const [opProgress, setOpProgress] = useState<OpProgressState | null>(null);
+  const [otherProgress, setOpProgress] = useState<OpProgressState | null>(null);
   /** Add to map… — choose which KeyMap when several exist. */
   const [mapPickPending, setMapPickPending] = useState<{
     fromValues: string[];
@@ -1116,319 +1028,30 @@ function App() {
   const { preview, phase: previewPhase, mode: previewMode, loading } = queryPreview;
   const previewController = queryPreview.controller;
 
-  // Join Lens Load sides after Inspect — keep the global bar in sync.
-  useEffect(() => {
-    if (!lensPrepareBusy) {
-      if (qualityHandoffRef.current) return;
-      setOpProgress((cur) =>
-        cur?.kind === "prepare" || cur?.kind === "quality" ? null : cur,
-      );
-      return;
-    }
-    qualityHandoffRef.current = false;
-    setOpProgress({
-      kind: "prepare",
-      phase: "Loading join sides for sample…",
-      percent: 8,
-    });
-    const poll = window.setInterval(() => {
-      void joinPrepareProgress()
-        .then((p) => {
-          if (!p.active && p.fraction <= 0) return;
-          setOpProgress({
-            kind: "prepare",
-            phase: p.message || p.stage || "Loading join sides…",
-            percent: Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
-          });
-        })
-        .catch(() => {});
-    }, 250);
-    return () => window.clearInterval(poll);
-  }, [lensPrepareBusy]);
+  const joinSession = useJoinDiagnostics({
+    project, context: queryContext, skipStatus: isFullQualityJoin(activeQueryId),
+    isCurrent: contextIsCurrent, preemptPreview: () => previewController.preempt(),
+    sampleWorkspace: diagnosticWorkspace, showData: () => setBottomTab("data"),
+  });
+  const joinController = joinSession.controller;
+  const { diag: joinDiag, error: joinDiagError, diagnosticsLoading: joinDiagLoading,
+    prepareLoading: joinPrepareLoading, lensBusy: lensPrepareBusy,
+    prepareLabel: joinPrepareLabel, sample: diagView } = joinSession;
+  const opProgress = joinSession.progress ?? otherProgress;
+  const runPrepareJoinInputs = () => { void joinController.run("prepare"); };
+  const runJoinDiagnostics = () => { void joinController.run("diagnostics"); };
+  const openJoinDiagnostic = joinController.openSample;
 
   // Schema-aware Join: column lists from truncated preview (left before Join, full right).
-  useEffect(() => {
-    if (
-      overlayOpen ||
-      centerTab.kind === "quality" ||
-      centerTab.kind === "help_lab"
-    ) {
-      return;
-    }
-    const step =
-      selectedStepIndex != null && activeQuery
-        ? activeQuery.steps[selectedStepIndex]
-        : undefined;
-    if (step?.type !== "Join") {
-      return;
-    }
-    const hostId = activeQueryId;
-    // Skip full lab Join — describe/prepare would ship the 95k-row map on every tab switch.
-    if (isFullQualityJoin(hostId)) {
-      setJoinLeftColumns((c) => (c.length === 0 ? c : []));
-      setJoinRightColumns((c) => (c.length === 0 ? c : []));
-      setJoinColsLoading((v) => (v ? false : v));
-      return;
-    }
-    const rightId = joinRightId || targetKey(step.payload.right_query_id);
-    if (!hostId || !rightId) {
-      setJoinLeftColumns((c) => (c.length === 0 ? c : []));
-      setJoinRightColumns((c) => (c.length === 0 ? c : []));
-      return;
-    }
-    let cancelled = false;
-    const context = queryContextRef.current!;
-    const t = window.setTimeout(() => {
-      setJoinColsLoading(true);
-      void fetchJoinSideColumns(hostId, rightId, selectedStepIndex)
-        .then((cols) => {
-          if (cancelled || !contextIsCurrent(context)) return;
-          setJoinLeftColumns(cols.left);
-          setJoinRightColumns(cols.right);
-        })
-        .finally(() => {
-          if (!cancelled && contextIsCurrent(context)) setJoinColsLoading(false);
-        });
-    }, 150);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchJoinSideColumns closes over workspace
-  }, [
-    activeQueryId,
-    selectedStepIndex,
-    joinRightId,
-    queryContext.revision,
-    activeQuery,
-    project.workspace,
-    connections,
-    overlayOpen,
-    centerTab,
-  ]);
-
-  // Clear stale diagnostics when leaving Join / changing keys — do not auto-run
-  // full-input scans (explicit "Run diagnostics" in the panel).
-  const joinDiagIdentity = (() => {
-    const step =
-      selectedStepIndex != null && activeQuery
-        ? activeQuery.steps[selectedStepIndex]
-        : undefined;
-    if (
-      !activeQueryId ||
-      selectedStepIndex === null ||
-      step?.type !== "Join"
-    ) {
-      return "";
-    }
-    return `${queryContext.revision}:${activeQueryId}#${selectedStepIndex}`;
-  })();
-  useEffect(() => {
-    setJoinDiag((cur) => (cur == null ? cur : null));
-    setJoinDiagError((cur) => (cur == null ? cur : null));
-    setJoinDiagLoading((cur) => (cur ? false : cur));
-    setDiagView((cur) => (cur == null ? cur : null));
-    setJoinPrepareLabel((cur) => (cur == null ? cur : null));
-    setJoinPrepareLoading(false);
-    setLensPrepareBusy(false);
-    setJoinLeftColumns([]);
-    setJoinRightColumns([]);
-    setJoinColsLoading(false);
-    setCheckSetup(null);
-    setOpProgress((cur) => cur?.kind === "prepare" ? null : cur);
-  }, [queryContext.revision]);
-
-  useEffect(() => {
-    if (!joinDiagIdentity) return;
-    if (isFullQualityJoin(activeQueryId)) {
-      setJoinPrepareLabel(null);
-      return;
-    }
-    refreshJoinPrepareStatus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [joinDiagIdentity, sources, activeQueryId]);
-
-  function refreshJoinPrepareStatus() {
-    const session = querySessionGenerationRef.current;
-    const context = queryContextRef.current!;
-    const step =
-      selectedStepIndex != null && activeQuery
-        ? activeQuery.steps[selectedStepIndex]
-        : undefined;
-    if (
-      !activeQueryId ||
-      selectedStepIndex === null ||
-      step?.type !== "Join"
-    ) {
-      setJoinPrepareLabel(null);
-      return;
-    }
-    void joinPrepareStatus(
-      project.workspace,
-      activeQueryId,
-      selectedStepIndex,
-      sources,
-      connections,
-      projectRefContext(project),
-    )
-      .then((s) => {
-        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-        if (s.prepared) {
-          setJoinPrepareLabel(formatJoinPrepareStatusHint(s));
-        } else if (s.stale) {
-          setJoinPrepareLabel("Loaded sides are outdated — Reload sides after graph/source changes");
-        } else {
-          setJoinPrepareLabel(null);
-        }
-      })
-      .catch(() => { if (session === querySessionGenerationRef.current && contextIsCurrent(context)) setJoinPrepareLabel(null); });
-  }
-
-  function runPrepareJoinInputs() {
-    const session = querySessionGenerationRef.current;
-    const context = queryContextRef.current!;
-    const step =
-      selectedStepIndex != null && activeQuery
-        ? activeQuery.steps[selectedStepIndex]
-        : undefined;
-    if (
-      !activeQueryId ||
-      selectedStepIndex === null ||
-      step?.type !== "Join"
-    ) {
-      return;
-    }
-    const { left_on, right_on } = step.payload;
-    if (left_on.length === 0 || left_on.length !== right_on.length) {
-      setJoinDiagError("Set join keys and Apply before preparing inputs.");
-      return;
-    }
-    setJoinPrepareLoading(true);
-    setJoinDiagError(null);
-    void cancelRunningQuery().catch(() => {});
-    previewController.preempt();
-    setOpProgress({
-      kind: "prepare",
-      phase: "Queued…",
-      percent: 1,
-    });
-    const poll = window.setInterval(() => {
-      void joinPrepareProgress()
-        .then((p) => {
-          if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-          if (!p.active && p.fraction <= 0) return;
-          setOpProgress({
-            kind: "prepare",
-            phase: p.message || p.stage || "Preparing…",
-            percent: Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
-          });
-        })
-        .catch(() => {});
-    }, 250);
-    void prepareJoinInputs(
-      project.workspace,
-      activeQueryId,
-      selectedStepIndex,
-      connections,
-      sources,
-      !!joinPrepareLabel,
-      projectRefContext(project),
-    )
-      .then((r) => {
-        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-        setJoinPrepareLabel(formatJoinPrepareHint(r));
-        setJoinPrepareLoading(false);
-        setOpProgress(null);
-      })
-      .catch((e) => {
-        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-        setJoinPrepareLoading(false);
-        setOpProgress(null);
-        if (isHostCancelled(e)) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        setJoinDiagError(msg);
-      })
-      .finally(() => {
-        window.clearInterval(poll);
-      });
-  }
-
-  function runJoinDiagnostics() {
-    const session = querySessionGenerationRef.current;
-    const context = queryContextRef.current!;
-    const step =
-      selectedStepIndex != null && activeQuery
-        ? activeQuery.steps[selectedStepIndex]
-        : undefined;
-    if (
-      !activeQueryId ||
-      selectedStepIndex === null ||
-      step?.type !== "Join"
-    ) {
-      return;
-    }
-    const { left_on, right_on } = step.payload;
-    if (left_on.length === 0 || left_on.length !== right_on.length) {
-      setJoinDiagError("Set join keys and Apply before running diagnostics.");
-      return;
-    }
-    setJoinDiagLoading(true);
-    setJoinDiagError(null);
-    void cancelRunningQuery().catch(() => {});
-    previewController.preempt();
-    setOpProgress({
-      kind: "prepare",
-      phase: "Diagnostics — materializing sides…",
-      percent: 5,
-    });
-    const poll = window.setInterval(() => {
-      void joinPrepareProgress()
-        .then((p) => {
-          if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-          if (!p.active && p.fraction <= 0) return;
-          setOpProgress({
-            kind: "prepare",
-            phase: p.message || p.stage || "Diagnostics…",
-            percent: Math.round(Math.min(1, Math.max(0, p.fraction)) * 100),
-          });
-        })
-        .catch(() => {});
-    }, 250);
-    void joinDiagnostics(
-      project.workspace,
-      activeQueryId,
-      selectedStepIndex,
-      connections,
-      sources,
-      projectRefContext(project),
-    )
-      .then((d) => {
-        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-        setJoinDiag(d);
-        setJoinDiagLoading(false);
-        setOpProgress(null);
-        refreshJoinPrepareStatus();
-      })
-      .catch((e) => {
-        if (session !== querySessionGenerationRef.current || !contextIsCurrent(context)) return;
-        setJoinDiag(null);
-        setJoinDiagLoading(false);
-        setOpProgress(null);
-        if (isHostCancelled(e)) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        setJoinDiagError(msg);
-      })
-      .finally(() => {
-        window.clearInterval(poll);
-      });
-  }
+  useEffect(() => { setCheckSetup(null); }, [queryContext.revision]);
 
   function cancelHeavyQuery() {
+    joinController.cancel(false);
     previewController.cancel();
   }
 
   function recomputeCurrentPreview() {
-    setDiagView(null);
+    joinController.clearSample();
     void previewController.refresh();
   }
 
@@ -1491,119 +1114,8 @@ function App() {
     overlayOpen,
   ]);
 
-  const syncInspectorFromQuery = useCallback(
-    (q: QueryDef | undefined) => {
-      if (!q) {
-        setFilterCondition("");
-        setSelectedColumns([]);
-        setGroupDims("");
-        setGroupAggs("count(*) as n");
-        setJoinRightId("");
-        setJoinKeyPairsBoth([emptyJoinKeyPair()]);
-        setJoinType("inner");
-        setFromQueryId("");
-        return;
-      }
-      const f = q.steps.find((s) => s.type === "Filter");
-      setFilterCondition(f && f.type === "Filter" ? f.payload.condition : "");
-      const sc = q.steps.find((s) => s.type === "SelectColumns");
-      setSelectedColumns(
-        sc && sc.type === "SelectColumns" ? [...sc.payload.columns] : [],
-      );
-      const g = q.steps.find((s) => s.type === "GroupBy");
-      if (g && g.type === "GroupBy") {
-        setGroupDims(g.payload.dimensions.join(", "));
-        setGroupAggs(g.payload.aggregates.join(", "));
-      } else {
-        setGroupDims("");
-        setGroupAggs("count(*) as n");
-      }
-      const j = q.steps.find((s) => s.type === "Join");
-      if (j && j.type === "Join") {
-        setJoinRightId(targetKey(j.payload.right_query_id));
-        setJoinKeyPairsBoth(
-          pairsFromOn(j.payload.left_on, j.payload.right_on),
-        );
-        setJoinType(j.payload.join_type);
-      } else {
-        setJoinRightId("");
-        setJoinKeyPairsBoth([emptyJoinKeyPair()]);
-        setJoinType("inner");
-      }
-      const fq = q.steps.find((s) => s.type === "FromQuery");
-      setFromQueryId(
-        fq && fq.type === "FromQuery" ? targetKey(fq.payload.query_id) : "",
-      );
-      const a = q.steps.find((s) => s.type === "Append");
-      if (a && a.type === "Append") {
-        const first = a.payload.other_query_ids[0];
-        setAppendOtherId(first ? targetKey(first) : "");
-      } else {
-        setAppendOtherId("");
-      }
-    },
-    [],
-  );
-
-  const loadStepIntoEditor = useCallback((step: TransformationStep | undefined) => {
-    if (!step) return;
-    switch (step.type) {
-      case "Filter":
-        setFilterCondition(step.payload.condition);
-        break;
-      case "SelectColumns":
-        setSelectedColumns([...step.payload.columns]);
-        break;
-      case "GroupBy":
-        setGroupDims(step.payload.dimensions.join(", "));
-        setGroupAggs(step.payload.aggregates.join(", "));
-        break;
-      case "Join":
-        setJoinRightId(targetKey(step.payload.right_query_id));
-        setJoinKeyPairsBoth(
-          pairsFromOn(step.payload.left_on, step.payload.right_on),
-        );
-        setJoinType(step.payload.join_type);
-        break;
-      case "FromQuery":
-        setFromQueryId(targetKey(step.payload.query_id));
-        break;
-      case "Append": {
-        const first = step.payload.other_query_ids[0];
-        setAppendOtherId(first ? targetKey(first) : "");
-        break;
-      }
-      case "SortBy":
-        setSortCol(step.payload.column);
-        setSortDesc(step.payload.descending);
-        break;
-      case "Limit":
-        setLimitN(String(step.payload.n));
-        break;
-      case "RenameColumn":
-        setRenameFrom(step.payload.from);
-        setRenameTo(step.payload.to);
-        break;
-      case "DeriveColumn":
-        setDeriveName(step.payload.name);
-        setDeriveExpr(step.payload.expression ?? "");
-        setDeriveMode(step.payload.mode ?? (step.payload.op ? "op" : "sql"));
-        setDeriveOpId(step.payload.op?.id ?? "month_start");
-        setDeriveOpCol(step.payload.op?.column ?? "");
-        setDeriveOpColB(step.payload.op?.column_b ?? "");
-        setDeriveOpValue(step.payload.op?.value ?? "");
-        break;
-      case "SqlModel":
-      case "CustomSql":
-        setCustomSql(step.payload.raw_sql);
-        break;
-      default:
-        break;
-    }
-  }, []);
-
   function applyQueryDestination(destination: QueryDestination) {
-    const { query, stepIndex, step, view, lens, focusLens } = destination;
+    const { query, stepIndex, view, lens, focusLens } = destination;
     queryPreview.navigationChanged();
     // Invalidate synchronously, before an already-resolved async reply can publish.
     queryContextRef.current = transitionQueryContext(queryContextRef.current, {
@@ -1617,8 +1129,6 @@ function App() {
     setSelectedExternalKey(null);
     setActiveQueryId(query.id);
     setSelectedStepIndex(stepIndex);
-    syncInspectorFromQuery(query);
-    loadStepIntoEditor(step);
     if (!isQualityInspectionQuery(query.id)) setLensFocusHint(null);
     if (view) setBottomTab(view);
     if (lens !== undefined) setJoinLensOn(lens);
@@ -1716,10 +1226,6 @@ function App() {
       cancelled = true;
     };
   }, [project.root_path, project.references]);
-
-  function objectTargetFromPicker(value: string): ObjectTarget {
-    return parseTargetKey(value) ?? value;
-  }
 
   async function handleAddReference() {
     let path = project.root_path;
@@ -2001,13 +1507,10 @@ function App() {
     setActiveQueryId(joinCtx.hostQueryId);
     setBottomTab("data");
     setJoinLensOn(true);
-    setDiagView(null);
+    joinController.clearSample();
     const idx = resolveJoinStepFromCtx(ws, joinCtx);
     if (idx != null) {
       setSelectedStepIndex(idx);
-      const q = ws.queries.find((x) => x.id === joinCtx.hostQueryId);
-      const step = q?.steps[idx];
-      if (step) loadStepIntoEditor(step);
     }
     // Re-enter No match (map was opened from Lens unmatched / Suggest flow).
     setForceProbeNonce((n) => n + 1);
@@ -2098,36 +1601,13 @@ function App() {
   const selectedStepIndexRef = useRef(selectedStepIndex);
   selectedStepIndexRef.current = selectedStepIndex;
 
-  // Keep forms in sync when steps change; clamp selected step index.
-  // Do not call other setStates inside the setSelectedStepIndex updater —
-  // that re-enters React and can hit "Maximum update depth" on graph clicks.
-  // Fingerprint the active query steps so a new `queries` array identity with
-  // identical IR does not re-seed Join key drafts every App render.
-  const inspectorSyncKey = useMemo(() => {
-    if (!activeQueryId) return "";
-    const q = queries.find((x) => x.id === activeQueryId);
-    if (!q) return `${activeQueryId}:missing`;
-    return `${activeQueryId}:${q.steps.length}:${JSON.stringify(q.steps)}`;
-  }, [activeQueryId, queries]);
-
+  // Selection bounds only. Draft hydration belongs to the identity-scoped editor.
   useEffect(() => {
-    if (!activeQueryId) {
-      setSelectedStepIndex((cur) => (cur == null ? cur : null));
-      return;
-    }
-    const q = queries.find((x) => x.id === activeQueryId);
-    syncInspectorFromQuery(q);
-    if (!q || q.steps.length === 0) {
-      setSelectedStepIndex((cur) => (cur == null ? cur : null));
-      return;
-    }
+    const q = queries.find(q => q.id === activeQueryId);
     const prev = selectedStepIndexRef.current;
-    const next =
-      prev === null || prev >= q.steps.length ? q.steps.length - 1 : prev;
+    const next = !q?.steps.length ? null : prev === null || prev >= q.steps.length ? q.steps.length - 1 : prev;
     if (next !== prev) setSelectedStepIndex(next);
-    loadStepIntoEditor(q.steps[next]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- inspectorSyncKey
-  }, [inspectorSyncKey, syncInspectorFromQuery, loadStepIntoEditor]);
+  }, [activeQueryId, queries]);
 
   async function loadPostgresSchema(source: SourceDef) {
     if (source.kind !== "postgres") {
@@ -2258,7 +1738,6 @@ function App() {
       };
     });
     setActiveQueryId(id);
-    setFilterCondition("");
   }
 
   async function addCsvQuery() {
@@ -2331,7 +1810,6 @@ function App() {
     });
     setActiveQueryId(id);
     setSelectedSourceId(source.id);
-    setFilterCondition("");
     setError(null);
   }
 
@@ -2370,8 +1848,6 @@ function App() {
     });
     setActiveQueryId(id);
     setSelectedStepIndex(0);
-    setCustomSql("select 1 as n");
-    setFilterCondition("");
     setError(null);
   }
 
@@ -2566,7 +2042,6 @@ function App() {
     });
     setActiveQueryId(id);
     setShowPgPicker(false);
-    setFilterCondition("");
     setError(null);
   }
 
@@ -2696,7 +2171,7 @@ function App() {
     hostQueryId: string,
     rightQueryId: string,
     pairs: JoinKeyPair[],
-    type: JoinType = joinType,
+    type: JoinType = "inner",
   ) {
     const { left_on, right_on } = pairsToOn(pairs);
     // Allow empty keys so canvas can open the Join for picking (never invent "id").
@@ -2738,143 +2213,30 @@ function App() {
         return { ...q, steps };
       }),
     );
-    setJoinRightId(rightQueryId);
-    setJoinKeyPairsBoth(
-      left_on.length > 0
-        ? pairsFromOn(left_on, right_on)
-        : [emptyJoinKeyPair()],
-    );
-    setJoinType(type);
     setActiveQueryId(hostQueryId);
     const idx = joinIndex;
     const step = joinStep;
     queueMicrotask(() => {
       if (idx >= 0 && step) {
         setSelectedStepIndex(idx);
-        loadStepIntoEditor(step);
       }
     });
     setError(null);
   }
 
-  function highlightKeysForDiag(kind: JoinDiagKind): string[] {
-    if (!joinDiag) return [];
-    // Only highlight keys that exist on that side — mixing left_on+right_on
-    // marks the wrong columns after the SideCard / sample format change.
-    switch (kind) {
-      case "left":
-      case "unmatched_left":
-        return joinDiag.left_on;
-      case "right":
-      case "unmatched_right":
-      case "right_dups":
-        return joinDiag.right_on;
-      case "fanout":
-        return [...joinDiag.left_on, ...joinDiag.right_on];
-      case "output":
-      default:
-        return joinDiag.left_on;
+  /** Domain projection only; request/sample ownership lives in Join controller. */
+  function diagnosticWorkspace(input: JoinInput, diag: JoinDiagnostics, kind: JoinDiagKind): Workspace {
+    const ws = input.project.workspace;
+    const hostId = input.context.queryId!;
+    const host = ws.queries.find((q) => q.id === hostId);
+    if (kind === "right") {
+      const step = host?.steps[diag.join_step_index];
+      return workspaceFocusingObject(ws, step?.type === "Join" ? step.payload.right_query_id : diag.right_query_id);
     }
-  }
-
-  async function openJoinDiagnostic(
-    kind: JoinDiagKind,
-    sample: JoinDiagSample | null,
-    label: string,
-  ) {
-    if (!joinDiag || !activeQueryId) return;
-    const context = queryContextRef.current!;
-    const highlightKeys = highlightKeysForDiag(kind);
-    const sampleLimit = joinDiag.sample_limit;
-
-    if (sample) {
-      setDiagView({
-        label,
-        columns: sample.columns,
-        rows: sample.rows,
-        totalCount: sample.total_count,
-        sampleLimit,
-        highlightKeys,
-        mapSide:
-          kind === "unmatched_left"
-            ? "left"
-            : kind === "unmatched_right"
-              ? "right"
-              : undefined,
-      });
-      setBottomTab("data");
-      return;
-    }
-
-    // left / right / output — preview truncated workspace (LIMIT 50 via preview).
-    try {
-      let ws: Workspace;
-      if (kind === "left") {
-        const leftSteps = (
-          project.workspace.queries.find((q) => q.id === activeQueryId)
-            ?.steps ?? []
-        ).slice(0, joinDiag.join_step_index);
-        if (leftSteps.length === 0) {
-          setJoinDiagError("Join has no left input (need a step before Join)");
-          return;
-        }
-        ws = {
-          ...project.workspace,
-          focus_query_id: activeQueryId,
-          queries: project.workspace.queries.map((q) =>
-            q.id === activeQueryId ? { ...q, steps: leftSteps } : q,
-          ),
-        };
-      } else if (kind === "right") {
-        const joinStep =
-          activeQuery?.steps[joinDiag.join_step_index] ??
-          project.workspace.queries.find((q) => q.id === activeQueryId)
-            ?.steps[joinDiag.join_step_index];
-        const rightTarget =
-          joinStep?.type === "Join"
-            ? joinStep.payload.right_query_id
-            : joinDiag.right_query_id;
-        ws = workspaceFocusingObject(project.workspace, rightTarget);
-      } else {
-        // output = host through Join inclusive
-        ws = {
-          ...project.workspace,
-          focus_query_id: activeQueryId,
-          queries: project.workspace.queries.map((q) =>
-            q.id === activeQueryId
-              ? {
-                  ...q,
-                  steps: q.steps.slice(0, joinDiag.join_step_index + 1),
-                }
-              : q,
-          ),
-        };
-      }
-      const result = await previewWorkspace(
-        ws,
-        connections,
-        sources,
-        projectRefContext(project),
-      );
-      if (!contextIsCurrent(context)) return;
-      const total =
-        kind === "left"
-          ? joinDiag.left_count
-          : kind === "right"
-            ? joinDiag.right_count
-            : joinDiag.output_count;
-      setDiagView({
-        label,
-        columns: result.columns,
-        rows: result.rows,
-        totalCount: total,
-        sampleLimit,
-        highlightKeys,
-      });
-      setBottomTab("data");
-    } catch (e) {
-      if (contextIsCurrent(context)) setJoinDiagError(typeof e === "string" ? e : String(e));
-    }
+    const steps = host?.steps.slice(0, diag.join_step_index + (kind === "left" ? 0 : 1)) ?? [];
+    if (!steps.length) throw new Error("Join has no left input (need a step before Join)");
+    return { ...ws, focus_query_id: hostId,
+      queries: ws.queries.map((q) => q.id === hostId ? { ...q, steps } : q) };
   }
 
   async function fetchJoinSideColumns(
@@ -2931,7 +2293,8 @@ function App() {
   ) {
     const context = queryContextRef.current!;
     // Prefer complete pairs already in the inspector; else schema-suggest; never fake "id".
-    let pairs = joinKeyDraftRef.current;
+    const draft = joinDraftReader.current?.read();
+    let pairs = draft?.queryId === hostQueryId ? draft.pairs : [emptyJoinKeyPair()];
     if (!joinPairsComplete(pairs)) {
       try {
         const host = queries.find((q) => q.id === hostQueryId);
@@ -2942,15 +2305,13 @@ function App() {
           upto,
         );
         if (!contextIsCurrent(context)) return;
-        setJoinLeftColumns(cols.left);
-        setJoinRightColumns(cols.right);
         pairs = suggestJoinPairs(cols.left, cols.right);
       } catch {
         if (!contextIsCurrent(context)) return;
         pairs = [emptyJoinKeyPair()];
       }
     }
-    applyJoinTo(hostQueryId, rightQueryId, pairs, joinType);
+    applyJoinTo(hostQueryId, rightQueryId, pairs, draft?.queryId === hostQueryId ? draft.type : "inner");
   }
 
   function selectEdgeOnCanvas(edge: GraphEdgeInfo) {
@@ -3069,11 +2430,6 @@ function App() {
         };
       }),
     );
-    if (edge.kind === "join") {
-      setJoinRightId("");
-    } else if (appendOtherId === edge.otherQueryId) {
-      setAppendOtherId("");
-    }
     setError(null);
   }
 
@@ -3107,11 +2463,6 @@ function App() {
     });
     setActiveQueryId(id);
     setSelectedStepIndex(0);
-    loadStepIntoEditor({
-      type: "FromQuery",
-      payload: { query_id: fromQueryId },
-    });
-    setFilterCondition("");
     setError(null);
   }
 
@@ -3167,8 +2518,6 @@ function App() {
     if (activeQueryId === queryId) {
       setActiveQueryId(scrubbed[0]?.id ?? null);
     }
-    if (joinRightId === queryId) setJoinRightId("");
-    if (appendOtherId === queryId) setAppendOtherId("");
     setError(null);
   }
 
@@ -3309,7 +2658,6 @@ function App() {
     updateActiveSteps((steps) => {
       const next = [...steps, step];
       setSelectedStepIndex(next.length - 1);
-      loadStepIntoEditor(step);
       return next;
     });
   }
@@ -3367,9 +2715,9 @@ function App() {
     reset: (next, labId) => resetProjectSession({
       setLabTask, setKeyMapTabs, setMatchingTabs, setSelectedKeyMapId, setWorkbenchTabs,
       setSelectedStepIndex, setActiveQueryId,
-      setModelPreview, setModelError, setError, setDiagView, setJoinDiag,
-      setJoinDiagError, setJoinDiagLoading, setFrozenRemap, setCheckDeltaNote, setCheckAllowNote,
-      setJoinPrepareLoading, setLensPrepareBusy, setJoinPrepareLabel, setOpProgress,
+      setModelPreview, setModelError, setError,
+      setFrozenRemap, setCheckDeltaNote, setCheckAllowNote, setOpProgress,
+      resetJoin: joinController.reset,
       setSelectedExternalKey, setSelectedSourceId, setCheckSetup, setMapPickPending,
       setMapSwitchOffer, setLensFocusHint,
       resetPreview: () => {
@@ -4262,6 +3610,7 @@ function App() {
         e2eReleasePreviewHold,
         e2eWaitPreviewStarted,
         e2eWaitPreviewSettled,
+        e2eJoinHolds,
       }) => {
         if (cancelled) return;
         function openPath(path: string) {
@@ -4298,6 +3647,7 @@ function App() {
           __dwhE2eReleasePreviewHold?: () => void;
           __dwhE2eWaitPreviewStarted?: () => Promise<void>;
           __dwhE2eWaitPreviewSettled?: () => Promise<void>;
+          __dwhE2eJoinHolds?: typeof e2eJoinHolds;
         };
         w.__dwhE2eOpenProject = openPath;
         w.__dwhE2ePatchProject = (updater) => {
@@ -4328,6 +3678,7 @@ function App() {
         w.__dwhE2eReleasePreviewHold = e2eReleasePreviewHold;
         w.__dwhE2eWaitPreviewStarted = e2eWaitPreviewStarted;
         w.__dwhE2eWaitPreviewSettled = e2eWaitPreviewSettled;
+        w.__dwhE2eJoinHolds = e2eJoinHolds;
         (
           window as unknown as { __dwhE2eCleanup?: () => void }
         ).__dwhE2eCleanup = () => {
@@ -4348,6 +3699,7 @@ function App() {
           delete w.__dwhE2eReleasePreviewHold;
           delete w.__dwhE2eWaitPreviewStarted;
           delete w.__dwhE2eWaitPreviewSettled;
+          delete w.__dwhE2eJoinHolds;
         };
       },
     );
@@ -4732,83 +4084,8 @@ function App() {
     ],
   );
 
-  /** Columns to pick from — prefer live preview of the active/focus query. */
-  // When editing SelectColumns, load columns from the query truncated *before* that step
-  // so the picker still lists fields that the step currently drops.
-  useEffect(() => {
-    if (
-      !activeQueryId ||
-      selectedStepIndex === null ||
-      selectedStep?.type !== "SelectColumns"
-    ) {
-      setUpstreamColumnNames((cur) => (cur.length === 0 ? cur : []));
-      return;
-    }
-    let cancelled = false;
-    const hostId = activeQueryId;
-    const upto = selectedStepIndex;
-    const upstreamSteps =
-      activeQuery?.steps.slice(0, upto) ?? [];
-    if (upstreamSteps.length === 0) {
-      setUpstreamColumnNames((cur) => (cur.length === 0 ? cur : []));
-      return;
-    }
-    const leftWs: Workspace = {
-      ...project.workspace,
-      focus_query_id: hostId,
-      queries: project.workspace.queries.map((q) =>
-        q.id === hostId ? { ...q, steps: upstreamSteps } : q,
-      ),
-    };
-    void previewWorkspace(
-      leftWs,
-      connections,
-      sources,
-      projectRefContext(project),
-    )
-      .then((res) => {
-        if (!cancelled) {
-          setUpstreamColumnNames(res.columns.map((c) => c.name));
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setUpstreamColumnNames([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeQueryId,
-    activeQuery,
-    selectedStepIndex,
-    selectedStep?.type,
-    project.workspace,
-    connections,
-  ]);
-
-  const columnChoices = useMemo(() => {
-    const fromUpstream =
-      selectedStep?.type === "SelectColumns" && upstreamColumnNames.length > 0
-        ? upstreamColumnNames
-        : [];
-    const fromPreview =
-      preview && preview.columns.length > 0
-        ? preview.columns.map((c) => c.name)
-        : [];
-    const fromStep =
-      selectedStep?.type === "SelectColumns"
-        ? selectedStep.payload.columns
-        : [];
-    // Prefer upstream-of-SelectColumns when editing that step; else live preview.
-    const base =
-      fromUpstream.length > 0 ? fromUpstream : fromPreview;
-    return [...new Set([...base, ...fromStep, ...selectedColumns])];
-  }, [
-    preview,
-    selectedStep,
-    selectedColumns,
-    upstreamColumnNames,
-  ]);
+  const columnChoices = [...new Set([...(preview?.columns.map(c => c.name) ?? []),
+    ...(selectedStep?.type === "SelectColumns" ? selectedStep.payload.columns : [])])];
 
   function addAvailableStep(kind: string) {
     if (!activeQuery) return;
@@ -4848,8 +4125,9 @@ function App() {
           return;
         }
         {
-          const { left_on, right_on } = joinPairsComplete(joinKeyPairs)
-            ? pairsToOn(joinKeyPairs)
+          const pairs = joinDraftReader.current?.read()?.pairs ?? [];
+          const { left_on, right_on } = joinPairsComplete(pairs)
+            ? pairsToOn(pairs)
             : { left_on: [] as string[], right_on: [] as string[] };
           appendStep({
             type: "Join",
@@ -4860,10 +4138,6 @@ function App() {
               right_on,
             },
           });
-          setJoinRightId(peer);
-          if (left_on.length === 0) {
-            setJoinKeyPairsBoth([emptyJoinKeyPair()]);
-          }
         }
         break;
       case "Append":
@@ -5002,23 +4276,6 @@ function App() {
     { id: "ApplyKeyMap", label: "Apply Mapping" },
     { id: "CustomSql", label: "Custom SQL" },
   ];
-
-  function stepEditorTitle(step: TransformationStep): string {
-    switch (step.type) {
-      case "SqlModel":
-        return "SQL model";
-      case "CustomSql":
-        return "Custom SQL";
-      case "DeriveColumn":
-        return "Derived/Calculated";
-      case "NormalizeKey":
-        return "NormalizeKey";
-      case "ApplyKeyMap":
-        return "Apply Mapping";
-      default:
-        return step.type;
-    }
-  }
 
   const canCopySql =
     bottomTab === "model" ? Boolean(modelPreview?.sql) : Boolean(preview?.sql);
@@ -5515,7 +4772,6 @@ function App() {
             const step = query?.steps[idx];
             if (step) {
               setSelectedStepIndex(idx);
-              loadStepIntoEditor(step);
             }
             if (outcome.open_join_lens) {
               setJoinLensOn(true);
@@ -5738,9 +4994,8 @@ function App() {
             }
           />
 
-          {/* Canvas / KeyMap workspace tabs */}
-          <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div
+          <QueryWorkspace active={centerTab.kind === "query"}
+            shellTools={<>            <div
               role="tablist"
               aria-label="Workspace"
               className="flex shrink-0 items-stretch gap-0 overflow-x-auto border-b border-[var(--line)] bg-[#060d14]"
@@ -6028,7 +5283,7 @@ function App() {
                       // apply that exact destination, never the previous active query.
                       applyQueryDestination({ query: plan.sampleQuery, stepIndex,
                         step: plan.sampleQuery.steps[stepIndex], view: "data", lens: true, focusLens: true });
-                      setDiagView(null);
+                      joinController.clearSample();
                       previewController.preempt();
                       setLensFocusHint(
                         focusValue
@@ -6036,7 +5291,6 @@ function App() {
                           : null,
                       );
                       if (plan.frozenRemap) setFrozenRemap(plan.frozenRemap);
-                      qualityHandoffRef.current = true;
                       setOpProgress({
                         kind: "quality",
                         phase: plan.progressPhase,
@@ -6403,42 +5657,28 @@ function App() {
               </div>
             ))}
 
-            {/* Keep mounted while a Mapping tab is active so Join Lens (mode, scroll,
-                selection, chat) survives open/close of the map editor. */}
-            <div
-              ref={canvasDockStackRef}
-              className={
-                centerTab.kind === "query"
-                  ? "flex min-h-0 flex-1 flex-col overflow-hidden"
-                  : "hidden"
-              }
-              aria-hidden={centerTab.kind !== "query"}
-            >
-            <div className="min-h-0 flex-1 overflow-hidden px-3 pb-1 pt-2">
-              <GraphCanvas
-                queries={queries}
-                activeQueryId={activeQueryId}
-                focusQueryId={focusQueryId}
-                positions={project.canvas?.positions}
-                onPositionsChange={persistCanvasPositions}
-                onSelect={selectQuery}
-                onSetFocus={setFocusQueryId}
-                onConnectJoin={connectJoinOnCanvas}
-                onSelectEdge={selectEdgeOnCanvas}
-                onRemoveEdge={removeEdgeOnCanvas}
-                onRemoveQuery={removeQueryOnCanvas}
-                onDeriveQuery={deriveQueryFrom}
-                externalBoundaries={externalBoundaries}
-                selectedExternalKey={selectedExternalKey}
-                onSelectExternal={selectExternalBoundary}
-                onDeriveExternal={deriveFromExternalKey}
-              />
-            </div>
-            <PanelResizeHandle
-              orientation="horizontal"
-              aria-label="Resize data panel"
-              title="Drag to resize · double-click to maximize Join Lens / Data (collapse graph)"
-              onDelta={(dy) => {
+</>}
+            pipeline={{ queries: queries,
+                activeQueryId: activeQueryId,
+                focusQueryId: focusQueryId,
+                positions: project.canvas?.positions,
+                onPositionsChange: persistCanvasPositions,
+                onSelect: selectQuery,
+                onSetFocus: setFocusQueryId,
+                onConnectJoin: connectJoinOnCanvas,
+                onSelectEdge: selectEdgeOnCanvas,
+                onRemoveEdge: removeEdgeOnCanvas,
+                onRemoveQuery: removeQueryOnCanvas,
+                onDeriveQuery: deriveQueryFrom,
+                externalBoundaries: externalBoundaries,
+                selectedExternalKey: selectedExternalKey,
+                onSelectExternal: selectExternalBoundary,
+                onDeriveExternal: deriveFromExternalKey, }}
+            dock={{ stackRef: canvasDockStackRef, height: bottomDockHeight, splitter: {
+              orientation: "horizontal",
+              "aria-label": "Resize data panel",
+              title: "Drag to resize · double-click to maximize Join Lens / Data (collapse graph)",
+              onDelta: (dy) => {
                 dockDraggingRef.current = true;
                 const stackH =
                   canvasDockStackRef.current?.clientHeight ?? 0;
@@ -6455,8 +5695,8 @@ function App() {
                   dockHeightRafRef.current = 0;
                   setBottomDockHeight(bottomDockHeightRef.current);
                 });
-              }}
-              onDoubleClick={() => {
+              },
+              onDoubleClick: () => {
                 const stackH =
                   canvasDockStackRef.current?.clientHeight ?? 0;
                 if (stackH <= 0) return;
@@ -6482,8 +5722,8 @@ function App() {
                   }
                   return next;
                 });
-              }}
-              onDragEnd={() => {
+              },
+              onDragEnd: () => {
                 dockDraggingRef.current = false;
                 if (dockHeightRafRef.current) {
                   cancelAnimationFrame(dockHeightRafRef.current);
@@ -6498,200 +5738,23 @@ function App() {
                 } catch {
                   /* ignore */
                 }
-              }}
-            />
-            <div
-              className="flex shrink-0 flex-col overflow-hidden border-t border-[var(--line)] bg-[#060d14]"
-              style={{ height: bottomDockHeight }}
-            >
-              <div className="flex items-center justify-between gap-3 px-4 pt-2">
-                <div className="flex items-end gap-3">
-                  <div
-                    role="tablist"
-                    aria-label="Result dock"
-                    className="flex gap-1"
-                  >
-                    {(
-                      [
-                        { id: "data" as const, label: "Data" },
-                        { id: "model" as const, label: "Model" },
-                      ] as const
-                    ).map((tab) => {
-                      const on = bottomTab === tab.id;
-                      return (
-                        <button
-                          key={tab.id}
-                          type="button"
-                          role="tab"
-                          aria-selected={on}
-                          onClick={() => setBottomTab(tab.id)}
-                          className={`border-b-2 px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] transition ${
-                            on
-                              ? "border-teal-400 text-teal-200"
-                              : "border-transparent text-slate-500 hover:text-slate-300"
-                          }`}
-                        >
-                          {tab.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <span data-testid="preview-context" className="hidden pb-1.5 text-[10px] text-slate-500 sm:inline">
-                    {bottomTab === "data" ? previewScopeLabel(dataWorkspace, activeQueryId || focusQueryId, selectedStepIndex)
-                      : `${activeQuery?.name ?? "Select a query"} · final model`}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 pb-1.5">
-                  {bottomTab === "data" && !diagView && dataWorkspace && <>
-                    <span data-testid="preview-scope" className="text-[10px] text-slate-400" title="Sample rows are not full-input proof">
-                      {previewMode === "full" ? "Full preview" : `Sample · LIMIT ${PREVIEW_SAMPLE_LIMIT}`}
-                    </span>
-                    <button type="button" data-testid="preview-recompute" disabled={loading}
-                      onClick={recomputeCurrentPreview}
-                      className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:border-teal-700 disabled:opacity-40">Recompute</button>
-                  </>}
-                  {joinLensTarget && bottomTab === "data" && !diagView && (
-                    <div className="flex flex-wrap items-center gap-2"><button
-                      type="button"
-                      data-ui-anchor="join-lens-toggle"
-                      aria-pressed={joinLensOn}
-                      onClick={() => setJoinLensOn((v) => !v)}
-                      className={`${showLensToggleHint ? "recon-hint-target" : ""} rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                        joinLensOn
-                          ? "border-teal-500/50 bg-teal-500/15 text-teal-200"
-                          : "border-slate-700 text-slate-500 hover:text-slate-300"
-                      }`}
-                      title="Show left/right source rows linked to the focused result row"
-                    >
-                      Join Lens
-                    </button>
-                    {showLensToggleHint && <LabHint onDismiss={dismissLabHints}>Open Join Lens</LabHint>}</div>
-                  )}
-                  {bottomTab === "data" &&
-                    !diagView &&
-                    !(joinLensOn && joinLensTarget) &&
-                    isHeavyPreviewFocus(
-                      project.workspace,
-                      dataWorkspace?.focus_query_id ||
-                        activeQueryId ||
-                        focusQueryId,
-                    ) && (
-                    <>
-                      {previewMode === "sample" ? (
-                        <button
-                          type="button"
-                          data-testid="preview-load-full"
-                          disabled={loading || !dataWorkspace}
-                          onClick={() => {
-                            if (!dataWorkspace) return;
-                            void previewController.run("full");
-                          }}
-                          className="rounded border border-teal-800/60 px-2 py-0.5 text-[10px] text-teal-200/90 hover:bg-teal-500/10 disabled:opacity-40"
-                          title="Run preview without an output row LIMIT"
-                        >
-                          Load full
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          data-testid="preview-load-sample"
-                          disabled={loading || !dataWorkspace}
-                          onClick={() => {
-                            if (!dataWorkspace) return;
-                            void previewController.run("sample");
-                          }}
-                          className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-                        >
-                          Sample
-                        </button>
-                      )}
-                    </>
-                  )}
-                  {(loading ||
-                    joinDiagLoading ||
-                    joinPrepareLoading ||
-                    lensPrepareBusy) && (
-                    <button
-                      type="button"
-                      onClick={cancelHeavyQuery}
-                      className="rounded border border-amber-800/70 px-2 py-0.5 text-[10px] text-amber-200/90 hover:bg-amber-500/10"
-                    >
-                      Cancel
-                    </button>
-                  )}
-                  <span className="text-xs text-slate-500">
-                    {bottomTab === "data"
-                      ? diagView
-                        ? `diag · ${diagView.rows.length}/${diagView.totalCount} · ${diagView.columns.length} cols`
-                        : joinPrepareLoading || lensPrepareBusy
-                          ? "loading join sides…"
-                          : joinDiagLoading
-                            ? "finding gaps…"
-                            : loading
-                              ? previewMode === "full"
-                                ? "computing full preview…"
-                                : "computing… (LIMIT on output only)"
-                              : preview
-                                ? `${preview.rows.length} rows · ${preview.columns.length} cols`
-                                : "—"
-                      : modelPreview
-                        ? `${modelPreview.model_name}.sql · dbt`
-                        : "—"}
-                  </span>
-                </div>
-              </div>
-              {diagView && bottomTab === "data" && (
-                <div className="space-y-1 px-4 pb-2">
-                  <div className="flex items-start justify-between gap-2 rounded-lg border border-teal-900/40 bg-teal-950/20 px-3 py-2 text-[11px] text-teal-100/90">
-                    <span>
-                      <span className="font-semibold">{diagView.label}</span>
-                      {" · "}
-                      sample {diagView.rows.length}
-                      {diagView.totalCount > diagView.rows.length
-                        ? ` of ${diagView.totalCount}`
-                        : ""}
-                      {` (limit ${diagView.sampleLimit})`}
-                      {" · "}
-                      clean sample ≠ full-input proof
-                    </span>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {diagView.mapSide && joinLensTarget && (
-                        <button
-                          type="button"
-                          className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300 hover:border-teal-800 hover:text-teal-200"
-                          title="Open Join Lens → No match to fix values without a partner"
-                          onClick={() => {
-                            setDiagView(null);
-                            setJoinLensOn(true);
-                            setForceProbeNonce((n) => n + 1);
-                          }}
-                        >
-                          Open No match
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="text-teal-300/80 hover:text-teal-100"
-                        onClick={() => setDiagView(null)}
-                      >
-                        Back to preview
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
-                <div className="h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line)] bg-slate-950/40">
-                  {bottomTab === "data" ? (
-                    diagView ? (
-                      <PreviewTable
-                        columns={diagView.columns}
-                        rows={diagView.rows}
-                        highlightKeys={diagView.highlightKeys}
-                      />
-                    ) : preview &&
-                      joinLensOn &&
-                      joinLensTarget ? (
+              },
+             },
+              result: {
+                tab: bottomTab, selectTab: setBottomTab,
+                contextLabel: previewScopeLabel(dataWorkspace, activeQueryId || focusQueryId, selectedStepIndex),
+                modelContextLabel: `${activeQuery?.name ?? "Select a query"} · final model`,
+                preview: { result: preview, phase: previewPhase, mode: previewMode, loading,
+                  available: !!dataWorkspace, heavy: isHeavyPreviewFocus(project.workspace, dataWorkspace?.focus_query_id || activeQueryId || focusQueryId),
+                  refresh: recomputeCurrentPreview, run: mode => { if (dataWorkspace) void previewController.run(mode); } },
+                join: { sample: diagView, prepareLoading: joinPrepareLoading, diagnosticsLoading: joinDiagLoading,
+                  lensBusy: lensPrepareBusy, available: !!joinLensTarget, lensOn: joinLensOn,
+                  toggleLens: () => setJoinLensOn(v => !v), clearSample: joinController.clearSample,
+                  openNoMatch: () => { joinController.clearSample(); setJoinLensOn(true); setForceProbeNonce(n => n + 1); } },
+                model: { result: modelPreview, error: modelError, copied: sqlCopied, copy: () => { void copySql(); } },
+                cancel: cancelHeavyQuery,
+                lensHint: showLensToggleHint ? <LabHint onDismiss={dismissLabHints}>Open Join Lens</LabHint> : undefined,
+                lens: preview && joinLensTarget ? (
                       <JoinLens
                         onModeChange={activeLabTask ? observeLabLensMode : undefined}
                         noMatchAccessory={showNoMatchHint ? <LabHint onDismiss={dismissLabHints}>Open No match</LabHint> : undefined}
@@ -6718,7 +5781,10 @@ function App() {
                         focusResultHint={lensFocusHint}
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
-                        onPrepareBusy={setLensPrepareBusy}
+                        onPrepareBusy={(busy) => {
+                          joinSession.onPrepareBusy(busy);
+                          if (busy && contextIsCurrent(queryContext)) setOpProgress((cur) => cur?.kind === "quality" ? null : cur);
+                        }}
                         onRunDiagnostics={runJoinDiagnostics}
                         onOpenMatching={(opts) => {
                           const id = newMatchingSessionId();
@@ -6761,52 +5827,9 @@ function App() {
                           openMatchingSession(session);
                         }}
                       />
-                    ) : preview ? (
-                      <PreviewTable
-                        columns={preview.columns}
-                        rows={preview.rows}
-                      />
-                    ) : (
-                      <div role="status" data-testid="preview-state" className="flex h-full items-center justify-center p-4 text-center text-sm text-slate-400">
-                        {previewStateMessage(previewPhase)}
-                      </div>
-                    )
-                  ) : (
-                    <div className="flex h-full flex-col">
-                      <div className="flex items-center justify-between border-b border-slate-800 px-3 py-1.5">
-                        <span className="truncate font-mono text-[11px] text-teal-300/90">
-                          {modelPreview
-                            ? `models/…/${modelPreview.model_name}.sql`
-                            : "Generated model"}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => void copySql()}
-                          disabled={!modelPreview?.sql}
-                          className="text-[11px] text-teal-400 hover:text-teal-300 disabled:opacity-40"
-                        >
-                          {sqlCopied ? "Copied" : "Copy"}
-                        </button>
-                      </div>
-                      {modelPreview?.sql ? (
-                        <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-                          {modelPreview.sql}
-                        </pre>
-                      ) : (
-                        <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-slate-500">
-                          {modelError ?? "Select a query to see its dbt model"}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-            </div>
-          </section>
-
-          {centerTab.kind !== "quality" && <>
-          <PanelResizeHandle
+                ) : null,
+              } }}
+            inspector={{ hidden: inspectorCollapsed, available: centerTab.kind !== "quality", resize: <>          <PanelResizeHandle
             collapsedRail={inspectorCollapsed}
             aria-label={
               inspectorCollapsed ? "Show inspector" : "Resize inspector"
@@ -6849,576 +5872,20 @@ function App() {
             onDoubleClick={() =>
               setInspectorCollapsedPersist(!inspectorCollapsed)
             }
-          />
-
-          {/* Inspector — fully collapsible like a VS Code side bar */}
-          {!inspectorCollapsed && (
-          <aside
-            className="flex min-h-0 shrink-0 flex-col overflow-hidden bg-[#050b12]"
-            style={{ width: inspectorWidth }}
-          >
-            <div className="shrink-0 border-b border-[var(--line)] px-4 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="truncate text-sm font-semibold text-slate-100">
-                  {activeQuery?.name ?? "Select a query"}
-                </h2>
-                {activeQuery && activeQuery.id !== focusQueryId && (
-                  <button
-                    type="button"
-                    onClick={() => setFocusQueryId(activeQuery.id)}
-                    className="shrink-0 text-[10px] uppercase tracking-wide text-teal-400"
-                  >
-                    Set focus
-                  </button>
-                )}
-              </div>
-              {activeQuery && (
-                <label
-                  className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-slate-300"
-                  title="Export as mart_* and materialize to destination (Postgres when duckdb→postgres)"
-                >
-                  <input
-                    type="checkbox"
-                    className="rounded border-slate-600"
-                    checked={isPublishedOutput(project, activeQuery.id)}
-                    onChange={() =>
-                      setProject((p) => togglePublishedOutput(p, activeQuery.id))
-                    }
-                  />
-                  Publish to destination
-                </label>
-              )}
-              {activeQuery && (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] uppercase tracking-wide text-slate-500">
-                    Preview
-                  </span>
-                  {(["local", "target"] as QueryExecution[]).map((ex) => {
-                    const on = queryExecution(activeQuery) === ex;
-                    return (
-                      <button
-                        key={ex}
-                        type="button"
-                        title={
-                          ex === "local"
-                            ? "All steps in DuckDB (default; ≈ dbt-on-duckdb when export→duckdb)"
-                            : `All steps on project warehouse (${projectDialect(project)}); does not spread to other queries`
-                        }
-                        onClick={() =>
-                          setQueries((prev) =>
-                            prev.map((q) =>
-                              q.id === activeQuery.id
-                                ? { ...q, execution: ex }
-                                : q,
-                            ),
-                          )
-                        }
-                        className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
-                          on
-                            ? "border-teal-600/60 bg-teal-950/40 text-teal-200"
-                            : "border-slate-700 text-slate-400 hover:border-slate-500"
-                        }`}
-                      >
-                        {ex}
-                      </button>
-                    );
-                  })}
-                  <span className="font-mono text-[10px] text-slate-600">
-                    export → {projectDialect(project)}
-                  </span>
-                </div>
-              )}
-            </div>
-            {selectedSource?.kind === "postgres" && (
-              <div className="max-h-28 shrink-0 overflow-auto border-b border-[var(--line)] px-4 py-2">
-                <SourceSchemaPanel
-                  source={selectedSource}
-                  columns={sourceColumns}
-                  loading={sourceSchemaLoading}
-                  error={sourceSchemaError}
-                />
-              </div>
-            )}
-            <div className="flex min-h-0 flex-1 flex-col">
-              {selectedExternalKey ? (
-                <div className="flex min-h-0 flex-1 flex-col overflow-auto px-3 py-2">
-                  <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-sky-500">
-                    External · read-only
-                  </h3>
-                  {(() => {
-                    const b = externalBoundaries.find(
-                      (x) => x.key === selectedExternalKey,
-                    );
-                    const target = parseTargetKey(selectedExternalKey);
-                    if (!b || !target || !isExternalTarget(target)) {
-                      return (
-                        <p className="text-sm text-slate-600">
-                          External object unavailable.
-                        </p>
-                      );
-                    }
-                    return (
-                      <div className="space-y-3 text-sm text-slate-300">
-                        <div>
-                          <div className="text-[10px] uppercase tracking-wide text-slate-500">
-                            Reference
-                          </div>
-                          <div className="font-semibold text-sky-200">
-                            {b.alias}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] uppercase tracking-wide text-slate-500">
-                            Object
-                          </div>
-                          <div className="font-mono text-xs">
-                            {b.kind} · {b.objectId}
-                          </div>
-                        </div>
-                        <p className="text-[11px] text-slate-500">
-                          Definition is owned by the referenced project. Edit it
-                          there, then Update the reference.
-                        </p>
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-sky-500/15 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/25"
-                          onClick={() => deriveFromExternalKey(selectedExternalKey)}
-                        >
-                          Use in new query
-                        </button>
-                        <button
-                          type="button"
-                          className="w-full rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-sky-700 hover:text-sky-200"
-                          onClick={() =>
-                            void createLocalCopyOfExternal(selectedExternalKey)
-                          }
-                        >
-                          Create local copy
-                        </button>
-                      </div>
-                    );
-                  })()}
-                </div>
-              ) : (
-              <>
-              <div className="flex min-h-0 flex-[1_1_50%] flex-col border-b border-[var(--line)] px-3 py-2">
-                <History
-                  stepAccessory={showJoinHint && labStartTarget ? { index: labStartTarget.stepIndex,
-                    content: <LabHint onDismiss={dismissLabHints}>Inspect this Join — the SKU codes use different identifiers</LabHint> } : undefined}
-                  steps={activeQuery?.steps ?? []}
-                  queryNames={{
-                    ...Object.fromEntries(
-                      queries.map((q) => [q.id, q.name]),
-                    ),
-                    ...Object.fromEntries(
-                      externalBoundaries.map((b) => [b.key, b.label]),
-                    ),
-                  }}
-                  selectedIndex={selectedStepIndex}
-                  onSelect={selectStepAt}
-                  onRemoveAt={removeStepAt}
-                  onMove={moveStepAt}
-                />
-              </div>
-              <div className="flex min-h-0 flex-[1_1_50%] flex-col overflow-auto px-3 py-2">
-                <h3 className="mb-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                  {selectedStep
-                    ? `Edit · s${selectedStepIndex} ${stepEditorTitle(selectedStep)}`
-                    : "Step editor"}
-                </h3>
-                {!activeQuery ? (
-                  <p className="text-sm text-slate-600">Select a query.</p>
-                ) : selectedStepIndex === null || !selectedStep ? (
-                  <p className="mb-3 text-[11px] text-slate-500">
-                    Select a step above, or add one below.
-                  </p>
-                ) : (
-                  <div className="mb-3 space-y-2">
-                    {(selectedStep.type === "LoadCsv" ||
-                      selectedStep.type === "LoadParquet") && (
-                      <div className="space-y-2 rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-[10px] text-slate-500">
-                            Source step (pinned at s0)
-                          </p>
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
-                              (selectedStep.payload.path_kind ?? "absolute") ===
-                              "relative"
-                                ? "bg-teal-500/20 text-teal-100"
-                                : "bg-slate-700/80 text-slate-300"
-                            }`}
-                            title="ADR-0043 path_kind — relative is vs the project file directory"
-                          >
-                            {selectedStep.payload.path_kind ?? "absolute"}
-                          </span>
-                        </div>
-                        <p
-                          className="break-all font-mono text-[11px] text-slate-300"
-                          title={selectedStep.payload.path}
-                        >
-                          {selectedStep.payload.path}
-                        </p>
-                        {!project.root_path && (
-                          <p className="text-[10px] text-amber-200/80">
-                            Save the project to store paths relative to the
-                            project file.
-                          </p>
-                        )}
-                        <button
-                          type="button"
-                          className="w-full rounded-lg border border-teal-800/80 bg-teal-500/10 px-3 py-1.5 text-xs font-semibold text-teal-100 hover:bg-teal-500/20 disabled:opacity-40"
-                          disabled={
-                            selectedStep.type === "LoadParquet" &&
-                            !!selectedStep.payload.connection_id
-                          }
-                          title={
-                            selectedStep.type === "LoadParquet" &&
-                            selectedStep.payload.connection_id
-                              ? "Remote Parquet — use S3 / connection picker"
-                              : "Pick another file for this Load step"
-                          }
-                          onClick={() => void changeSelectedLoadFile()}
-                        >
-                          Change file…
-                        </button>
-                      </div>
-                    )}
-                    {selectedStep.type === "LoadPostgres" && (
-                      <p className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-2 font-mono text-[11px] text-slate-400">
-                        Source step (pinned at s0). Table comes from the Postgres
-                        import / picker.
-                      </p>
-                    )}
-                    {selectedStep.type === "FromQuery" && (
-                      <>
-                        <p className="text-[10px] text-slate-500">
-                          Child query root — dbt <span className="font-mono">ref</span>{" "}
-                          to parent (pinned at s0).
-                        </p>
-                        <select
-                          value={fromQueryId}
-                          onChange={(e) => setFromQueryId(e.target.value)}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                        >
-                          <option value="">parent query…</option>
-                          <optgroup label="This project">
-                            {otherQueries.map((q) => (
-                              <option key={q.id} value={q.id}>
-                                {q.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                          {Object.entries(refCatalogs).map(([rid, cat]) =>
-                            cat.queries.length > 0 ? (
-                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
-                                {cat.queries.map((q) => (
-                                  <option
-                                    key={`${rid}:${q.id}`}
-                                    value={targetKey(
-                                      externalTarget(rid, "query", q.id),
-                                    )}
-                                  >
-                                    {cat.alias}.{q.name}
-                                  </option>
-                                ))}
-                              </optgroup>
-                            ) : null,
-                          )}
-                        </select>
-                        <button
-                          type="button"
-                          disabled={!fromQueryId}
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                          onClick={() => {
-                            if (selectedStepIndex === null || !fromQueryId)
-                              return;
-                            replaceStepAt(selectedStepIndex, {
-                              type: "FromQuery",
-                              payload: {
-                                query_id: objectTargetFromPicker(fromQueryId),
-                              },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "SqlModel" && (
-                      <>
-                        <p className="text-[10px] text-slate-500">
-                          Root model SQL (prod dialect). Preview runs in-app;
-                          export is this body.
-                        </p>
-                        <textarea
-                          key={`sqlmodel-${selectedStepIndex}`}
-                          ref={customSqlRef}
-                          defaultValue={customSql}
-                          rows={8}
-                          spellCheck={false}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const raw =
-                              customSqlRef.current?.value.trim() ??
-                              customSql.trim();
-                            setCustomSql(raw);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "SqlModel",
-                              payload: { raw_sql: raw },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "Filter" && (
-                      <>
-                        <input
-                          key={`filter-${selectedStepIndex}-${filterCondition}`}
-                          ref={filterInputRef}
-                          type="text"
-                          defaultValue={filterCondition}
-                          onKeyDown={(e) => {
-                            if (
-                              e.key === "Enter" &&
-                              selectedStepIndex !== null
-                            ) {
-                              const condition = e.currentTarget.value.trim();
-                              setFilterCondition(condition);
-                              replaceStepAt(selectedStepIndex, {
-                                type: "Filter",
-                                payload: { condition },
-                              });
-                            }
-                          }}
-                          placeholder="amount > 1000"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const condition =
-                              filterInputRef.current?.value.trim() ??
-                              filterCondition.trim();
-                            setFilterCondition(condition);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "Filter",
-                              payload: { condition },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "SelectColumns" &&
-                      selectedStepIndex !== null && (
-                        <SelectColumnsEditor
-                          key={`sc-${selectedStepIndex}-${selectedColumns.join(",")}`}
-                          initialColumns={selectedColumns}
-                          choices={columnChoices}
-                          onApply={(columns) => {
-                            setSelectedColumns(columns);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "SelectColumns",
-                              payload: { columns },
-                            });
-                          }}
-                        />
-                      )}
-                    {selectedStep.type === "GroupBy" && (
-                      <>
-                        <input
-                          key={`gdims-${selectedStepIndex}-${groupDims}`}
-                          ref={groupDimsRef}
-                          type="text"
-                          defaultValue={groupDims}
-                          placeholder="dimensions: region"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                        />
-                        <input
-                          key={`gaggs-${selectedStepIndex}-${groupAggs}`}
-                          ref={groupAggsRef}
-                          type="text"
-                          defaultValue={groupAggs}
-                          placeholder="sum(qty) as qty"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const dimsRaw =
-                              groupDimsRef.current?.value ?? groupDims;
-                            const aggsRaw =
-                              groupAggsRef.current?.value ?? groupAggs;
-                            const dimensions = dimsRaw
-                              .split(",")
-                              .map((s) => s.trim())
-                              .filter(Boolean);
-                            const aggregates = aggsRaw
-                              .split(",")
-                              .map((s) => s.trim())
-                              .filter(Boolean);
-                            if (!dimensions.length || !aggregates.length) return;
-                            setGroupDims(dimsRaw);
-                            setGroupAggs(aggsRaw);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "GroupBy",
-                              payload: { dimensions, aggregates },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "Join" && (
-                      <>
-                        <p className="text-[10px] text-slate-500">
-                          Join another query into this one (canvas drag or
-                          edit here).
-                        </p>
-                        <label className="block text-[10px] uppercase tracking-wide text-slate-500">
-                          Right query
-                        </label>
-                        <select
-                          value={joinRightId}
-                          onChange={(e) => setJoinRightId(e.target.value)}
-                          disabled={
-                            otherQueries.length === 0 &&
-                            Object.values(refCatalogs).every(
-                              (c) => c.queries.length === 0,
-                            )
-                          }
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-teal-700"
-                        >
-                          <option value="">right query…</option>
-                          <optgroup label="This project">
-                            {otherQueries.map((q) => (
-                              <option key={q.id} value={q.id}>
-                                {q.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                          {Object.entries(refCatalogs).map(([rid, cat]) =>
-                            cat.queries.length > 0 ? (
-                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
-                                {cat.queries.map((q) => (
-                                  <option
-                                    key={`${rid}:${q.id}`}
-                                    value={targetKey(
-                                      externalTarget(rid, "query", q.id),
-                                    )}
-                                  >
-                                    {cat.alias}.{q.name}
-                                  </option>
-                                ))}
-                              </optgroup>
-                            ) : null,
-                          )}
-                        </select>
-                        {otherQueries.length === 0 &&
-                          Object.values(refCatalogs).every(
-                            (c) => c.queries.length === 0,
-                          ) && (
-                          <p className="text-[11px] text-amber-500/90">
-                            Need another query (local or referenced) to join.
-                          </p>
-                        )}
-                        <label className="block text-[10px] uppercase tracking-wide text-slate-500">
-                          Type
-                        </label>
-                        <select
-                          value={joinType}
-                          onChange={(e) =>
-                            setJoinType(e.target.value as JoinType)
-                          }
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
-                        >
-                          <option value="inner">inner</option>
-                          <option value="left">left</option>
-                          <option value="right">right</option>
-                          <option value="full">full</option>
-                        </select>
-                        <JoinKeyEditor
-                          key={`jk-${selectedStepIndex}-${joinRightId}`}
-                          initialPairs={joinKeyPairs}
-                          onDraftChange={(p) => {
-                            joinKeyDraftRef.current = p;
-                          }}
-                          leftColumns={joinLeftColumns}
-                          rightColumns={joinRightColumns}
-                          leftLoading={joinColsLoading}
-                          rightLoading={joinColsLoading}
-                        />
-                        <button
-                          type="button"
-                          disabled={!joinRightId}
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const draft = joinKeyDraftRef.current;
-                            if (!joinPairsComplete(draft)) return;
-                            const { left_on, right_on } = pairsToOn(draft);
-                            setJoinKeyPairsBoth(draft);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "Join",
-                              payload: {
-                                right_query_id:
-                                  objectTargetFromPicker(joinRightId),
-                                join_type: joinType,
-                                left_on,
-                                right_on,
-                              },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                        {activeQueryId &&
-                          selectedStepIndex != null &&
-                          (() => {
-                            const hosts = (
-                              project.workspace.key_maps ?? []
-                            ).flatMap((m) =>
-                              findJoinHostsForMap(queries, m.id)
-                                .filter(
-                                  (h) =>
-                                    h.host.id === activeQueryId &&
-                                    h.joinStepIndex === selectedStepIndex,
-                                )
-                                .map((h) => ({ map: m, host: h })),
-                            );
-                            const hit = hosts[0];
-                            if (!hit) return null;
-                            return (
-                              <button
-                                type="button"
-                                className="w-full rounded-lg border border-teal-800/40 bg-teal-950/40 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/15"
-                                onClick={() =>
-                                  void openMappingCheckSetup({
-                                    mode: "create",
-                                    mapId: hit.map.id,
-                                    hostQueryId: activeQueryId,
-                                    joinStepIndex: selectedStepIndex,
-                                  })
-                                }
-                              >
-                                Mapping check… ({hit.map.name})
-                              </button>
-                            );
-                          })()}
+          /></>,
+              props: { project: project,
+session: querySessionGenerationRef.current,
+query: activeQuery ?? null,
+index: selectedStepIndex,
+width: inspectorWidth,
+externalKey: selectedExternalKey,
+boundaries: externalBoundaries,
+columns: columnChoices,
+availableSteps: availableSteps,
+source: { selected: selectedSource ?? null, columns: sourceColumns, loading: sourceSchemaLoading, error: sourceSchemaError },
+historyAccessory: showJoinHint && labStartTarget ? { index: labStartTarget.stepIndex,
+              content: <LabHint onDismiss={dismissLabHints}>Inspect this Join — the SKU codes use different identifiers</LabHint> } : undefined,
+editor: { schemaEnabled: !overlayOpen && centerTab.kind !== "quality" && centerTab.kind !== "help_lab" && !isFullQualityJoin(activeQueryId), diagnostics: <>
                         <JoinDiagnosticsPanel
                           loading={joinDiagLoading}
                           error={joinDiagError}
@@ -7432,648 +5899,21 @@ function App() {
                             void openJoinDiagnostic(kind, sample, label)
                           }
                         />
-                      </>
-                    )}
-                    {selectedStep.type === "Append" && (
-                      <>
-                        <select
-                          value={appendOtherId}
-                          onChange={(e) => setAppendOtherId(e.target.value)}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
-                        >
-                          <option value="">other query…</option>
-                          <optgroup label="This project">
-                            {otherQueries.map((q) => (
-                              <option key={q.id} value={q.id}>
-                                {q.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                          {Object.entries(refCatalogs).map(([rid, cat]) =>
-                            cat.queries.length > 0 ? (
-                              <optgroup key={rid} label={`Ref · ${cat.alias}`}>
-                                {cat.queries.map((q) => (
-                                  <option
-                                    key={`${rid}:${q.id}`}
-                                    value={targetKey(
-                                      externalTarget(rid, "query", q.id),
-                                    )}
-                                  >
-                                    {cat.alias}.{q.name}
-                                  </option>
-                                ))}
-                              </optgroup>
-                            ) : null,
-                          )}
-                        </select>
-                        <button
-                          type="button"
-                          disabled={!appendOtherId}
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-40"
-                          onClick={() => {
-                            if (selectedStepIndex === null || !appendOtherId)
-                              return;
-                            replaceStepAt(selectedStepIndex, {
-                              type: "Append",
-                              payload: {
-                                other_query_ids: [
-                                  objectTargetFromPicker(appendOtherId),
-                                ],
-                              },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "SortBy" && (
-                      <>
-                        <div className="flex gap-1">
-                          <input
-                            key={`sort-${selectedStepIndex}-${sortCol}`}
-                            ref={sortColRef}
-                            list="inspector-cols"
-                            defaultValue={sortCol}
-                            placeholder="column"
-                            className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                          />
-                          <label className="flex items-center gap-1 rounded-lg border border-slate-700 px-2 text-[11px] text-slate-300">
-                            <input
-                              type="checkbox"
-                              checked={sortDesc}
-                              onChange={(e) => setSortDesc(e.target.checked)}
-                            />
-                            desc
-                          </label>
-                        </div>
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const column =
-                              sortColRef.current?.value.trim() ??
-                              sortCol.trim();
-                            if (!column) return;
-                            setSortCol(column);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "SortBy",
-                              payload: {
-                                column,
-                                descending: sortDesc,
-                              },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "Limit" && (
-                      <>
-                        <input
-                          key={`limit-${selectedStepIndex}-${limitN}`}
-                          ref={limitNRef}
-                          type="number"
-                          min={1}
-                          defaultValue={limitN}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const raw =
-                              limitNRef.current?.value ?? limitN;
-                            const n = Number.parseInt(raw, 10);
-                            if (!Number.isFinite(n) || n < 1) return;
-                            setLimitN(String(n));
-                            replaceStepAt(selectedStepIndex, {
-                              type: "Limit",
-                              payload: { n },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "RenameColumn" && (
-                      <>
-                        <input
-                          key={`ren-from-${selectedStepIndex}-${renameFrom}`}
-                          ref={renameFromRef}
-                          defaultValue={renameFrom}
-                          placeholder="from"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                        />
-                        <input
-                          key={`ren-to-${selectedStepIndex}-${renameTo}`}
-                          ref={renameToRef}
-                          defaultValue={renameTo}
-                          placeholder="to"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const from =
-                              renameFromRef.current?.value.trim() ??
-                              renameFrom.trim();
-                            const to =
-                              renameToRef.current?.value.trim() ??
-                              renameTo.trim();
-                            if (!from || !to) return;
-                            setRenameFrom(from);
-                            setRenameTo(to);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "RenameColumn",
-                              payload: { from, to },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "DeriveColumn" && (
-                      <>
-                        <input
-                          key={`der-name-${selectedStepIndex}-${deriveName}`}
-                          ref={deriveNameRef}
-                          defaultValue={deriveName}
-                          placeholder="column name"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                        />
-                        <label className="block text-[10px] text-slate-500">
-                          Mode
-                          <select
-                            value={deriveMode}
-                            onChange={(e) =>
-                              setDeriveMode(e.target.value as DeriveMode)
-                            }
-                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
-                          >
-                            <option value="op">Ready-made operation</option>
-                            <option value="sql">SQL expression</option>
-                          </select>
-                        </label>
-                        {deriveMode === "op" ? (
-                          <>
-                            <select
-                              value={deriveOpId}
-                              onChange={(e) =>
-                                setDeriveOpId(e.target.value as DeriveOpId)
-                              }
-                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
-                            >
-                              <option value="month_start">
-                                Month start (DATE)
-                              </option>
-                              <option value="year_month">
-                                Year-month text (YYYY-MM)
-                              </option>
-                              <option value="coalesce_null">
-                                Replace NULL
-                              </option>
-                              <option value="cast">Cast type</option>
-                              <option value="col_diff">
-                                Difference of two columns
-                              </option>
-                              <option value="trim_case">
-                                Trim / lower / upper
-                              </option>
-                            </select>
-                            <input
-                              value={deriveOpCol}
-                              onChange={(e) => setDeriveOpCol(e.target.value)}
-                              placeholder="column"
-                              list="derive-cols"
-                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                            />
-                            <datalist id="derive-cols">
-                              {columnChoices.map((c) => (
-                                <option key={c} value={c} />
-                              ))}
-                            </datalist>
-                            {deriveOpId === "col_diff" && (
-                              <input
-                                value={deriveOpColB}
-                                onChange={(e) =>
-                                  setDeriveOpColB(e.target.value)
-                                }
-                                placeholder="column_b"
-                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                              />
-                            )}
-                            {(deriveOpId === "coalesce_null" ||
-                              deriveOpId === "cast") && (
-                              <input
-                                value={deriveOpValue}
-                                onChange={(e) =>
-                                  setDeriveOpValue(e.target.value)
-                                }
-                                placeholder={
-                                  deriveOpId === "cast"
-                                    ? "type (varchar, date…)"
-                                    : "replacement"
-                                }
-                                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                              />
-                            )}
-                            <p className="text-[10px] text-slate-500">
-                              Regenerates for {projectEngine(project)} on
-                              export/preview. Edit as SQL to unlock free text.
-                            </p>
-                            <button
-                              type="button"
-                              className="w-full rounded-lg border border-slate-700 px-3 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
-                              onClick={() => setDeriveMode("sql")}
-                            >
-                              Edit as SQL…
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <input
-                              key={`der-expr-${selectedStepIndex}-${deriveExpr}`}
-                              ref={deriveExprRef}
-                              defaultValue={deriveExpr}
-                              placeholder="SQL expression"
-                              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                            />
-                            <p className="text-[10px] text-amber-400/80">
-                              Preview engine: {projectEngine(project)}.
-                              Arbitrary SQL for another dialect is not
-                              validated locally.
-                            </p>
-                          </>
-                        )}
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const name =
-                              deriveNameRef.current?.value.trim() ??
-                              deriveName.trim();
-                            if (!name) return;
-                            if (deriveMode === "op") {
-                              if (!deriveOpCol.trim()) return;
-                              const op: DeriveOp = {
-                                id: deriveOpId,
-                                column: deriveOpCol.trim(),
-                                column_b: deriveOpColB.trim() || undefined,
-                                value: deriveOpValue.trim() || undefined,
-                                case_mode:
-                                  deriveOpId === "trim_case"
-                                    ? "trim_lower"
-                                    : undefined,
-                              };
-                              setDeriveName(name);
-                              replaceStepAt(selectedStepIndex, {
-                                type: "DeriveColumn",
-                                payload: {
-                                  name,
-                                  mode: "op",
-                                  op,
-                                  expression: "",
-                                  sql_dialect: projectEngine(project),
-                                },
-                              });
-                            } else {
-                              const expression =
-                                deriveExprRef.current?.value.trim() ??
-                                deriveExpr.trim();
-                              if (!expression) return;
-                              setDeriveName(name);
-                              setDeriveExpr(expression);
-                              replaceStepAt(selectedStepIndex, {
-                                type: "DeriveColumn",
-                                payload: {
-                                  name,
-                                  mode: "sql",
-                                  expression,
-                                  sql_dialect: projectEngine(project),
-                                },
-                              });
-                            }
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "CustomSql" && (
-                      <>
-                        <p className="text-[10px] text-slate-500">
-                          Mid-chain snippet. Use {"{{prev_step}}"} for prior CTE;
-                          optional {"{{query:id}}"}.
-                        </p>
-                        <textarea
-                          key={`customsql-${selectedStepIndex}`}
-                          ref={customSqlRef}
-                          defaultValue={customSql}
-                          rows={5}
-                          spellCheck={false}
-                          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] text-slate-100"
-                        />
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            if (selectedStepIndex === null) return;
-                            const raw =
-                              customSqlRef.current?.value.trim() ??
-                              customSql.trim();
-                            setCustomSql(raw);
-                            replaceStepAt(selectedStepIndex, {
-                              type: "CustomSql",
-                              payload: { raw_sql: raw },
-                            });
-                          }}
-                        >
-                          Apply
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "NormalizeKey" &&
-                      selectedStepIndex !== null && (
-                      <>
-                        <p className="text-[10px] text-slate-500">
-                          Deterministic key cleanup before Join (overwrite in
-                          place).
-                        </p>
-                        <label className="block text-[10px] text-slate-500">
-                          Columns (comma-separated)
-                          <input
-                            list="inspector-cols"
-                            defaultValue={selectedStep.payload.columns.join(", ")}
-                            key={`nk-cols-${selectedStepIndex}-${selectedStep.payload.columns.join(",")}`}
-                            id="normalize-cols-input"
-                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                          />
-                        </label>
-                        <div className="flex flex-wrap gap-2 text-[11px] text-slate-300">
-                          {(
-                            [
-                              "trim",
-                              "lower",
-                              "upper",
-                              "collapse_space",
-                              "ltrim_zeros",
-                            ] as NormalizeOp[]
-                          ).map((op) => {
-                            const on = selectedStep.payload.ops.includes(op);
-                            return (
-                              <label
-                                key={op}
-                                className="flex items-center gap-1 rounded border border-slate-700 px-1.5 py-0.5"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={on}
-                                  onChange={() => {
-                                    const ops = on
-                                      ? selectedStep.payload.ops.filter(
-                                          (o) => o !== op,
-                                        )
-                                      : [...selectedStep.payload.ops, op];
-                                    if (ops.length === 0) return;
-                                    replaceStepAt(selectedStepIndex, {
-                                      type: "NormalizeKey",
-                                      payload: {
-                                        columns: selectedStep.payload.columns,
-                                        ops,
-                                      },
-                                    });
-                                  }}
-                                />
-                                {op}
-                              </label>
-                            );
-                          })}
-                        </div>
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            const el = document.getElementById(
-                              "normalize-cols-input",
-                            ) as HTMLInputElement | null;
-                            const columns = (el?.value ?? "")
-                              .split(",")
-                              .map((s) => s.trim())
-                              .filter(Boolean);
-                            if (!columns.length) return;
-                            replaceStepAt(selectedStepIndex, {
-                              type: "NormalizeKey",
-                              payload: {
-                                columns,
-                                ops: selectedStep.payload.ops,
-                              },
-                            });
-                          }}
-                        >
-                          Apply columns
-                        </button>
-                      </>
-                    )}
-                    {selectedStep.type === "ApplyKeyMap" &&
-                      selectedStepIndex !== null && (
-                      <>
-                        <p className="text-[10px] text-slate-500">
-                          Remap values via From→To table (dbt seed after export).
-                        </p>
-                        <label className="block text-[10px] text-slate-500">
-                          Column
-                          <input
-                            list="inspector-cols"
-                            defaultValue={selectedStep.payload.column}
-                            key={`akm-col-${selectedStepIndex}-${selectedStep.payload.column}`}
-                            id="apply-keymap-col"
-                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                          />
-                        </label>
-                        {(() => {
-                          const mid = targetKey(selectedStep.payload.map_id);
-                          const km = (project.workspace.key_maps ?? []).find(
-                            (m) => m.id === mid,
-                          );
-                          if (km?.time_mode !== "range_scd") return null;
-                          return (
-                            <label className="block text-[10px] text-slate-500">
-                              As-of (fact event time) — required for SCD
-                              <input
-                                list="inspector-cols"
-                                defaultValue={
-                                  selectedStep.payload.as_of_column ?? ""
-                                }
-                                key={`akm-asof-${selectedStepIndex}-${selectedStep.payload.as_of_column ?? ""}`}
-                                id="apply-keymap-asof"
-                                placeholder="event_date"
-                                className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-xs text-slate-100"
-                              />
-                            </label>
-                          );
-                        })()}
-                        <label className="block text-[10px] text-slate-500">
-                          KeyMap
-                          <select
-                            value={targetKey(selectedStep.payload.map_id)}
-                            onChange={(e) => {
-                              const map_id = objectTargetFromPicker(
-                                e.target.value,
-                              );
-                              const localId =
-                                typeof map_id === "string" ? map_id : null;
-                              const map = localId
-                                ? (project.workspace.key_maps ?? []).find(
-                                    (m) => m.id === localId,
-                                  )
-                                : undefined;
-                              replaceStepAt(selectedStepIndex, {
-                                type: "ApplyKeyMap",
-                                payload: {
-                                  column: selectedStep.payload.column,
-                                  as_of_column:
-                                    selectedStep.payload.as_of_column,
-                                  map_id,
-                                  entries: map?.entries ?? [],
-                                },
-                              });
-                            }}
-                            className="mt-0.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
-                          >
-                            {(project.workspace.key_maps ?? []).length === 0 &&
-                              Object.values(refCatalogs).every(
-                                (c) => c.maps.length === 0,
-                              ) && (
-                              <option value={targetKey(selectedStep.payload.map_id)}>
-                                {targetKey(selectedStep.payload.map_id)}
-                              </option>
-                            )}
-                            <optgroup label="This project">
-                              {(project.workspace.key_maps ?? []).map((m) => (
-                                <option key={m.id} value={m.id}>
-                                  {m.name} ({m.entries.length} rows)
-                                </option>
-                              ))}
-                            </optgroup>
-                            {Object.entries(refCatalogs).map(([rid, cat]) =>
-                              cat.maps.length > 0 ? (
-                                <optgroup key={rid} label={`Ref · ${cat.alias}`}>
-                                  {cat.maps.map((m) => (
-                                    <option
-                                      key={`${rid}:${m.id}`}
-                                      value={targetKey(
-                                        externalTarget(rid, "mapping", m.id),
-                                      )}
-                                    >
-                                      {cat.alias}.{m.name}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                              ) : null,
-                            )}
-                          </select>
-                        </label>
-                        <p className="font-mono text-[10px] text-slate-500">
-                          {(selectedStep.payload.entries ?? []).length} entries
-                          in step snapshot
-                          {(selectedStep.payload.entries ?? [])
-                            .slice(0, 3)
-                            .map((e) => ` · ${e.from}→${e.to}`)
-                            .join("")}
-                          {(selectedStep.payload.entries?.length ?? 0) > 3
-                            ? "…"
-                            : ""}
-                        </p>
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500/15 px-3 py-1.5 text-xs font-semibold text-teal-200 hover:bg-teal-500/25"
-                          onClick={() => {
-                            const el = document.getElementById(
-                              "apply-keymap-col",
-                            ) as HTMLInputElement | null;
-                            const asOfEl = document.getElementById(
-                              "apply-keymap-asof",
-                            ) as HTMLInputElement | null;
-                            const column =
-                              el?.value.trim() || selectedStep.payload.column;
-                            const as_of_column =
-                              asOfEl?.value.trim() ||
-                              selectedStep.payload.as_of_column;
-                            replaceStepAt(selectedStepIndex, {
-                              type: "ApplyKeyMap",
-                              payload: {
-                                ...selectedStep.payload,
-                                column,
-                                as_of_column: as_of_column || undefined,
-                              },
-                            });
-                          }}
-                        >
-                          Apply column
-                        </button>
-                        <button
-                          type="button"
-                          className="w-full rounded-lg bg-teal-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-teal-400"
-                          onClick={() => {
-                            const maps = project.workspace.key_maps ?? [];
-                            const mid = targetKey(selectedStep.payload.map_id);
-                            const map =
-                              maps.find((m) => m.id === mid) ?? {
-                                id: mid,
-                                name: mid,
-                                entries: selectedStep.payload.entries ?? [],
-                              };
-                            openKeyMapEditor(map, {
-                              suggestedFrom: [],
-                            });
-                          }}
-                        >
-                          Edit From→To map…
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
-                <datalist id="inspector-cols">
-                  {columnChoices.map((c) => (
-                    <option key={c} value={c} />
-                  ))}
-                </datalist>
-                <div className="mt-auto shrink-0 border-t border-slate-800 pt-2">
-                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    Add step
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {availableSteps.map((s) => (
-                      <button
-                        key={s.id}
-                        type="button"
-                        disabled={!activeQuery}
-                        title={`Add ${s.label}`}
-                        className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-teal-600/60 hover:bg-teal-500/10 hover:text-teal-200 disabled:opacity-40"
-                        onClick={() => addAvailableStep(s.id)}
-                      >
-                        + {s.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-              </>
-              )}
-            </div>
-          </aside>
-          )}
-          </>}
+</>, project, columns: columnChoices, refCatalogs, commit: replaceStepAt,
+              changeLoadFile: changeSelectedLoadFile, openMap: openKeyMapEditor, openCheck: openMappingCheckSetup,
+              loadJoinColumns: fetchJoinSideColumns, joinDraftReader,
+              loadUpstreamColumns: async () => {
+                if (!activeQuery || selectedStepIndex === null) return [];
+                const steps = activeQuery.steps.slice(0, selectedStepIndex);
+                if (!steps.length) return [];
+                const ws = { ...project.workspace, focus_query_id: activeQuery.id,
+                  queries: queries.map(q => q.id === activeQuery.id ? { ...q, steps } : q) };
+                return (await previewWorkspace(ws, connections, sources, projectRefContext(project))).columns.map(c => c.name);
+              } },
+commands: { focus: setFocusQueryId, togglePublished: id => setProject(p => togglePublishedOutput(p, id)),
+              execution: (id, execution) => setQueries(prev => prev.map(q => q.id === id ? { ...q, execution } : q)),
+              select: selectStepAt, remove: removeStepAt, move: moveStepAt, add: addAvailableStep,
+              deriveExternal: deriveFromExternalKey, copyExternal: createLocalCopyOfExternal }, } }} />
         </div>
       )}
     </div>

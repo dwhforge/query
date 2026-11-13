@@ -49,7 +49,7 @@ test.describe("flagship Help Lab journey", () => {
     await openLab(page, "name_id_match", true);
     await expect(page.getByTestId("lab-task-card")).toBeHidden();
     await expect(page.getByTestId("lab-task-reopen")).toBeHidden();
-    await page.evaluate((p) => (window as any).__dwhE2eOpenProject(p), projectPath);
+    await page.evaluate((p: string) => (window as any).__dwhE2eOpenProject(p), projectPath);
     await expect(page.getByRole("heading", { name: "supplier_products", exact: true })).toBeVisible();
     await expect(page.getByTestId("lab-task-card")).toBeHidden();
   });
@@ -120,5 +120,37 @@ test.describe("flagship Help Lab journey", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("lab-hint")).toHaveCount(0);
     await expect(page.getByRole("tab", { name: "Model", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("comparison links show the actual original, prepared example and monthly previews", async ({}, info) => {
+    const { page } = session;
+    await openLab(page);
+    const nav = page.getByRole("navigation", { name: "Lab comparison views" });
+    await nav.getByRole("button", { name: "Inspect original join", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "dirty_recon", exact: true })).toBeVisible();
+    await expect(page.getByTestId("join-lens-no-match")).toBeVisible();
+    await nav.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "sales_mapped", exact: true })).toBeVisible();
+    await expect(page.getByTestId("lab-task-card")).toContainText("partially prepared mapped example");
+    // Existing Lens may render side tables too: a nonempty center preview is checked after turning it off.
+    await page.getByRole("button", { name: "Join Lens", exact: true }).click();
+    await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    await nav.getByRole("button", { name: "Inspect monthly reconciliation", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "recon_by_month", exact: true })).toBeVisible();
+    await expect(page.getByText("qty_gap_t", { exact: true }).first()).toBeAttached();
+    await expect.poll(() => page.getByRole("row").count()).toBeGreaterThan(0);
+    await expect(page.getByTestId("lab-task-card")).toContainText("not full-input proof");
+    await page.screenshot({ path: info.outputPath("monthly-comparison.png") });
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+  });
+
+  test("comparison actions disable deleted targets instead of inventing results", async () => {
+    const { page } = session;
+    await openLab(page);
+    await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({ ...p,
+      workspace: { ...p.workspace, queries: p.workspace.queries.filter((q: any) => q.id !== "sales_mapped") },
+    })));
+    await expect(page.getByRole("button", { name: "Inspect mapped example", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Inspect original join", exact: true })).toBeEnabled();
   });
 });

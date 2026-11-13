@@ -11,7 +11,7 @@ import { labProject, projectFingerprint, replaceProject, type SwitchDecision } f
 import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
 import { LabTaskCard } from "./components/LabTaskCard";
 import { LabHint } from "./components/LabHint";
-import { ownsLabTask, reconHintPhase, reconJoinTarget, startLabTask, type LabTaskSession } from "./help/reconLab";
+import { ownsLabTask, reconComparisonTargets, reconHintPhase, reconJoinTarget, startLabTask, type LabTaskSession, type ReconView } from "./help/reconLab";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -3384,6 +3384,19 @@ function App() {
     setDiagView(null);
   }
 
+  function navigateReconView(view: ReconView) {
+    if (!activeLabTask) return;
+    const target = reconComparisonTargets(project.workspace).find((item) => item.view === view);
+    if (!target?.available) return;
+    dismissLabHints();
+    selectQuery(target.queryId);
+    setSelectedStepIndex(target.stepIndex);
+    loadStepIntoEditor(project.workspace.queries.find((q) => q.id === target.queryId)?.steps[target.stepIndex]);
+    setBottomTab("data");
+    setJoinLensOn(view !== "monthly");
+    setDiagView(null);
+  }
+
   function projectWithoutEphemeralInspect(p: typeof project) {
     const workspace = stripQualityInspectionQueries(p.workspace);
     const positions = { ...(p.canvas?.positions ?? {}) };
@@ -6089,6 +6102,7 @@ function App() {
 
             {activeLabTask && centerTab === "canvas" && (activeLabTask.visible ? (
               <LabTaskCard canStart={reconJoinTarget(project.workspace) !== null}
+                targets={reconComparisonTargets(project.workspace)} onNavigate={navigateReconView}
                 onStart={showReconLabStart}
                 onDismiss={() => setLabTask((task) => task ? { ...task, visible: false, hints: false } : null)} />
             ) : (

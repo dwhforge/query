@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ownsLabTask, reconHintPhase, reconJoinTarget, startLabTask } from "./reconLab";
+import { ownsLabTask, reconComparisonTargets, reconHintPhase, reconJoinTarget, startLabTask } from "./reconLab";
 import type { Workspace } from "../types/pipeline";
 
 assert.equal(startLabTask("sales", "p"), null);
@@ -24,4 +24,9 @@ assert.equal(reconHintPhase({ ...task!, hints: true }, workspace, "dirty_recon",
 assert.equal(reconHintPhase({ ...task!, hints: true, completed: true }, workspace, "dirty_recon", 2), "done");
 assert.equal(reconHintPhase({ ...task!, hints: true, completed: true }, workspace, "elsewhere", null), "done");
 assert.equal(reconHintPhase({ ...task!, visible: false, hints: true }, workspace, "dirty_recon", 2), "off");
+const targets = reconComparisonTargets(workspace);
+assert.deepEqual(targets.map((t) => t.available), [true, false, false]);
+assert.equal(targets[0].stepIndex, 2);
+assert.equal(reconComparisonTargets({ ...workspace, queries: [...workspace.queries,
+  { ...workspace.queries[0], id: "recon_by_month" }] })[2].stepIndex, 2);
 console.log("reconLab task tests passed");

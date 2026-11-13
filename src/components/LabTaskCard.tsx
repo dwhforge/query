@@ -1,9 +1,11 @@
-import { RECON_TASK } from "../help/reconLab";
+import { RECON_TASK, type reconComparisonTargets, type ReconView } from "../help/reconLab";
 
-export function LabTaskCard({ canStart, onStart, onDismiss }: {
+export function LabTaskCard({ canStart, onStart, onDismiss, targets, onNavigate }: {
   canStart: boolean;
   onStart: () => void;
   onDismiss: () => void;
+  targets: ReturnType<typeof reconComparisonTargets>;
+  onNavigate: (view: ReconView) => void;
 }) {
   return <section data-testid="lab-task-card" aria-labelledby="lab-task-title"
     className="mx-3 my-2 max-h-[28vh] shrink-0 overflow-auto rounded-lg border border-teal-800/60 bg-teal-950/20 px-4 py-3">
@@ -21,5 +23,13 @@ export function LabTaskCard({ canStart, onStart, onDismiss }: {
       </button>
       {!canStart && <span className="text-xs text-slate-400">The original Join is no longer available in this edited lab.</span>}
     </div>
+    <nav aria-label="Lab comparison views" className="mt-2 flex flex-wrap gap-2">
+      {targets.map((target) => <button key={target.view} type="button" disabled={!target.available}
+        onClick={() => onNavigate(target.view)} title={target.available ? target.queryId : "This query/step is no longer available"}
+        className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-teal-700 hover:text-teal-100 disabled:opacity-40">
+        {target.label}
+      </button>)}
+    </nav>
+    <p className="mt-2 text-[10px] leading-relaxed text-slate-400">These links open sample previews, not full-input proof. After editing a map, recompute the relevant preview before comparing results.</p>
   </section>;
 }

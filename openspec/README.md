@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [Flagship comparison navigation](changes/recon-lab-comparison/proposal.md) — PR-03 implemented; [Help Lab SoT](specs/help-lab/spec.md), [evidence](changes/recon-lab-comparison/report.md); prepared example ≠ user success.
+
 - [Flagship micro-hints](changes/recon-lab-hints/proposal.md) — PR-02H implemented; merged into [Help Lab](specs/help-lab/spec.md); [evidence](changes/recon-lab-hints/report.md). Opt-in, two semantic goals, no timer/framework.
 
 - [Flagship task card](changes/recon-lab-task/proposal.md) — PR-02 implemented; merged into [Help Lab](specs/help-lab/spec.md), [ADR-0046](../docs/adr/0046-flagship-lab-assistance.md); see [evidence](changes/recon-lab-task/report.md).

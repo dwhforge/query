@@ -29,3 +29,16 @@ export function reconHintPhase(task: LabTaskSession | null, workspace: Workspace
   return target && activeQueryId === target.queryId && selectedStepIndex === target.stepIndex
     ? "open_no_match" : "find_join";
 }
+
+export type ReconView = "original" | "mapped" | "monthly";
+export function reconComparisonTargets(workspace: Workspace) {
+  return ([
+    { view: "original", queryId: "dirty_recon", label: "Inspect original join" },
+    { view: "mapped", queryId: "sales_mapped", label: "Inspect mapped example" },
+    { view: "monthly", queryId: "recon_by_month", label: "Inspect monthly reconciliation" },
+  ] as const).map((item) => {
+    const query = workspace.queries.find((q) => q.id === item.queryId);
+    const stepIndex = item.view === "original" ? reconJoinTarget(workspace)?.stepIndex ?? -1 : (query?.steps.length ?? 0) - 1;
+    return { ...item, stepIndex, available: !!query && stepIndex >= 0 };
+  });
+}

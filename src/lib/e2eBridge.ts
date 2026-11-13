@@ -102,3 +102,28 @@ export function e2eNotifyDescribeSettled(cmd: string): void {
   hold.settleWaiters = [];
   describeHold = null;
 }
+
+// Test-only one-shot hold for structural preview; later previews are not blocked.
+type PreviewHold = {
+  pending: Promise<void>; release: () => void; claimed: boolean;
+  started: Promise<void>; start: () => void;
+  settled: Promise<void>; settle: () => void;
+};
+let previewHold: PreviewHold | null = null;
+export function e2eArmPreviewHold() {
+  if (!isE2eBuild()) throw new Error("not an E2E build");
+  let release!: () => void, start!: () => void, settle!: () => void;
+  const pending = new Promise<void>((r) => { release = r; });
+  const started = new Promise<void>((r) => { start = r; });
+  const settled = new Promise<void>((r) => { settle = r; });
+  previewHold = { pending, release, claimed: false, started, start, settled, settle };
+}
+export function e2eClaimPreviewHold(cmd: string) {
+  if (cmd !== "preview_workspace" || !previewHold || previewHold.claimed) return null;
+  previewHold.claimed = true;
+  previewHold.start();
+  return previewHold;
+}
+export function e2eReleasePreviewHold() { previewHold?.release(); }
+export function e2eWaitPreviewStarted() { return previewHold?.started ?? Promise.reject(new Error("no preview hold")); }
+export function e2eWaitPreviewSettled() { return previewHold?.settled ?? Promise.resolve(); }

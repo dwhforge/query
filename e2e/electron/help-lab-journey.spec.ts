@@ -153,4 +153,43 @@ test.describe("flagship Help Lab journey", () => {
     await expect(page.getByRole("button", { name: "Inspect mapped example", exact: true })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Inspect original join", exact: true })).toBeEnabled();
   });
+
+  test("editing the existing partial map changes the recomputed example, without claiming full repair", async () => {
+    const { page } = session;
+    await openLab(page);
+    await page.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
+    await page.getByRole("button", { name: "Join Lens", exact: true }).click();
+    await expect(page.getByRole("row").filter({ hasText: "COM-AMM" })).toHaveCount(2);
+    const project = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+    const map = project.workspace.key_maps.find((m: any) => m.id === "map_sku");
+    await page.getByTestId(`pg-keymap-${map.name}`).click();
+    await page.getByRole("button", { name: "Add row", exact: true }).click();
+    await page.locator('input[data-col="from"]').last().fill("COM-AMM");
+    await page.locator('input[data-col="to"]').last().fill("AMM-A");
+    await page.getByRole("button", { name: "Save map", exact: true }).click();
+    await page.getByRole("tab", { name: "Pipeline canvas", exact: true }).click();
+    await page.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
+    await page.getByRole("button", { name: "Join Lens", exact: true }).click();
+    await page.getByTestId("preview-recompute").click();
+    await expect(page.getByRole("row").filter({ hasText: "AMM-A" })).toHaveCount(2);
+    await expect(page.getByRole("row").filter({ hasText: "COM-AMM" })).toHaveCount(0);
+    await expect(page.getByTestId("lab-task-card")).toContainText("not a verified fix");
+    await page.getByRole("button", { name: "Inspect monthly reconciliation", exact: true }).click();
+    await expect(page.getByText("qty_gap_t", { exact: true }).first()).toBeAttached();
+  });
+
+  test("offline flagship No match is real inspectable evidence", async ({}, info) => {
+    const { page } = session;
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await openLab(page);
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await page.getByTestId("join-lens-no-match").click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    const explanation = page.getByRole("button", { name: "Got it", exact: true });
+    if (await explanation.isVisible()) await explanation.click();
+    await expect(page.getByText("COM-AMM", { exact: true }).first()).toBeVisible();
+    await expect(page.getByTestId("preview-scope")).toHaveText("Sample · LIMIT 50");
+    await page.screenshot({ path: info.outputPath("flagship-join-lens.png") });
+    if (process.env.DWH_CAPTURE_EVIDENCE === "1") await page.screenshot({ path: "docs/stabilization/flagship-join-lens.png" });
+  });
 });

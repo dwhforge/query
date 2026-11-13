@@ -264,6 +264,7 @@ function PreviewTableImpl({
             )),
           )}
         </div>
+        {rows.length === 0 && <p role="status" className="px-4 py-8 text-sm text-slate-400">No rows returned for this preview.</p>}
         <div
           style={{
             height: `${virtualizer.getTotalSize()}px`,

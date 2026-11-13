@@ -61,9 +61,12 @@ async function invoke<T>(
 ): Promise<T> {
   const e2e = String(import.meta.env.DWH_E2E ?? "") === "1";
   let e2eBridge: typeof import("./e2eBridge") | null = null;
+  let previewHold: ReturnType<typeof import("./e2eBridge").e2eClaimPreviewHold> = null;
   if (e2e) {
     e2eBridge = await import("./e2eBridge");
     await e2eBridge.e2eMaybeHoldDescribe(cmd);
+    previewHold = e2eBridge.e2eClaimPreviewHold(cmd);
+    await previewHold?.pending;
   }
   try {
     return await bridge()
@@ -73,6 +76,7 @@ async function invoke<T>(
     throw normalizeHostReject(e);
   } finally {
     e2eBridge?.e2eNotifyDescribeSettled(cmd);
+    previewHold?.settle();
   }
 }
 

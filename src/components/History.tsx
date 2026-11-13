@@ -156,6 +156,7 @@ export function History({
                 className={stepAccessory?.index === index ? "recon-hint-target rounded-md" : undefined}>
                 <div
                   role="button"
+                  aria-current={selected ? "step" : undefined}
                   tabIndex={0}
                   onClick={() => onSelect(index)}
                   onKeyDown={(e) => {

@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [Execution confidence](changes/execution-confidence/proposal.md) — PR-04 reproduced preview-state fixes; merged into [execution lifecycle](specs/execution-lifecycle/spec.md); [audit/evidence](changes/execution-confidence/report.md).
+
 - [Flagship comparison navigation](changes/recon-lab-comparison/proposal.md) — PR-03 implemented; [Help Lab SoT](specs/help-lab/spec.md), [evidence](changes/recon-lab-comparison/report.md); prepared example ≠ user success.
 
 - [Flagship micro-hints](changes/recon-lab-hints/proposal.md) — PR-02H implemented; merged into [Help Lab](specs/help-lab/spec.md); [evidence](changes/recon-lab-hints/report.md). Opt-in, two semantic goals, no timer/framework.

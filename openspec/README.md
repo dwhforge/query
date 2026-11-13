@@ -20,6 +20,11 @@ openspec/
 
 Active changes:
 
+- [Matching Save acknowledgement](changes/matching-save-ack/proposal.md) — PR-00A;
+  explicit persistence outcomes and retryable drafts, with requirements merged
+  into [Matching workspace](specs/matching-workspace/spec.md);
+  [delivery evidence and limits](changes/matching-save-ack/report.md).
+
 - [Execution confidence](changes/execution-confidence/proposal.md) — PR-04 reproduced preview-state fixes; merged into [execution lifecycle](specs/execution-lifecycle/spec.md); [audit/evidence](changes/execution-confidence/report.md).
 
 - [Flagship comparison navigation](changes/recon-lab-comparison/proposal.md) — PR-03 implemented; [Help Lab SoT](specs/help-lab/spec.md), [evidence](changes/recon-lab-comparison/report.md); prepared example ≠ user success.

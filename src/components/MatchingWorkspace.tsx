@@ -33,7 +33,7 @@ import {
   widenAllowlistWithLlmAliases,
 } from "../app/matching/semanticExpand";
 import { loadFixtureTrial } from "../app/matching/runTrial";
-import { commitMatchingSession } from "../app/matching/commitSave";
+import type { MatchingSaveResult } from "../app/matching/persistSave";
 import type {
   MatchingFieldRole,
   MatchingPlanDraft,
@@ -48,9 +48,8 @@ type Props = {
   onOpenLens?: () => void;
   /** Persist upserts into the bound Mapping via existing Save path. */
   onSaveToMap?: (args: {
-    upserts: { fromParts: string[]; outputValues: string[] }[];
     session: MatchingTabSession;
-  }) => Promise<void> | void;
+  }) => Promise<MatchingSaveResult>;
   writeAllowed?: boolean;
   writeRefusalReason?: string | null;
 };
@@ -572,12 +571,14 @@ export function MatchingWorkspace({
     setError(null);
     setCommitMsg(null);
     try {
-      const result = await commitMatchingSession(session, {
-        writeAllowed,
-        writeRefusalReason: writeRefusalReason ?? undefined,
-      });
-      if (!result.ok) {
-        setError(`Save blocked: ${result.reason}`);
+      if (!writeAllowed || !onSaveToMap) {
+        setError(writeRefusalReason ?? "Mapping Save is unavailable. Confirmed decisions remain in draft.");
+        return;
+      }
+      const result = await onSaveToMap({ session });
+      if (result.status !== "saved" && result.status !== "no_changes") {
+        if (result.session) onChange(result.session);
+        setError(`Save ${result.status}: ${result.message} Confirmed decisions remain in draft; retry when ready.`);
         return;
       }
       const leftover = result.session.proposals.filter(
@@ -598,16 +599,8 @@ export function MatchingWorkspace({
           result.session.selectedProposalId ??
           null,
       });
-      if (onSaveToMap && result.upserts.length) {
-        await onSaveToMap({
-          upserts: result.upserts,
-          session: result.session,
-        });
-      }
       setCommitMsg(
-        leftover
-          ? `Saved ${result.upserts.length} into Mapping. ${leftover} still open. Tab Saved in Mapping lists the written keys — keep it on while deciding the rest.`
-          : `Saved ${result.upserts.length} into Mapping. Open Saved in Mapping (this tab) or the Mapping editor.`,
+        `${result.message}${leftover ? ` ${leftover} still open.` : ""}`,
       );
       setShowFinal(true);
     } catch (e) {
@@ -625,7 +618,8 @@ export function MatchingWorkspace({
         data-testid="matching-session-banner"
       >
         Suggestions here are temporary until you write them to the Mapping.
-        Restarting the app clears this draft. Mapping rows you already saved stay.
+        Restarting the app clears this draft. After writing to Mapping, save the
+        project file to keep local Mapping changes.
       </div>
 
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 px-3 py-2">

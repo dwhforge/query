@@ -107,6 +107,7 @@ import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { KeyMapEditor } from "./components/KeyMapEditor";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
 import { buildLensMatchingPlan } from "./app/matching/planDefaults";
+import { matchingSaveRevision, persistMatchingSession } from "./app/matching/persistSave";
 import {
   emptyMatchingSession,
   newMatchingSessionId,
@@ -3756,6 +3757,8 @@ function App() {
     opts?: {
       /** When set (e.g. check Confirm), prefer this over editor capture/tab delta. */
       dirtyDelta?: import("./lib/bridge").KeyMapDirtyDelta | null;
+      /** Matching owns its delta, not edits made in the Mapping editor during IPC. */
+      preserveEditorDraft?: boolean;
     },
   ): Promise<KeyMapSaveResult> {
     if ((map.storage?.kind ?? "seed") === "source") {
@@ -3874,6 +3877,10 @@ function App() {
             return { ...s, saveInFlight: false };
           }
           settle.kind = "apply";
+          if (opts?.preserveEditorDraft &&
+            (s.localDraft || dirtyDeltaHasChanges(s.dirtyDelta) || s.saveApi?.isSaving())) {
+            return { ...s, contentHash: r.content_hash, saveInFlight: false };
+          }
           if (tab?.saveApi && saveToken != null) {
             return {
               ...s,
@@ -4571,6 +4578,8 @@ function App() {
           __dwhE2ePatchProject?: (updater: (p: Project) => Project) => void;
           __dwhE2eSaveProject?: (path: string) => Promise<void>;
           __dwhE2eGetProject?: () => Project;
+          __dwhE2eOpenMatchingSession?: (session: MatchingTabSession) => void;
+          __dwhE2eGetMatchingSessions?: () => MatchingTabSession[];
           __dwhE2eArmDescribeHold?: () => void;
           __dwhE2eReleaseDescribeHold?: () => void;
           __dwhE2eWaitDescribeStarted?: () => Promise<void>;
@@ -4585,6 +4594,11 @@ function App() {
           setProject((p) => updater(p));
         };
         w.__dwhE2eGetProject = () => projectRef.current;
+        w.__dwhE2eOpenMatchingSession = (session) => {
+          setMatchingTabs((tabs) => [...tabs.filter((s) => s.id !== session.id), session]);
+          setCenterTab(`matching:${session.id}`);
+        };
+        w.__dwhE2eGetMatchingSessions = () => matchingTabsLiveRef.current;
         w.__dwhE2eSaveProject = async (path: string) => {
           const toSave = { ...projectRef.current, root_path: path };
           await saveProject(path, toSave);
@@ -4607,6 +4621,8 @@ function App() {
           delete w.__dwhE2ePatchProject;
           delete w.__dwhE2eSaveProject;
           delete w.__dwhE2eGetProject;
+          delete w.__dwhE2eOpenMatchingSession;
+          delete w.__dwhE2eGetMatchingSessions;
           delete w.__dwhE2eArmDescribeHold;
           delete w.__dwhE2eReleaseDescribeHold;
           delete w.__dwhE2eWaitDescribeStarted;
@@ -6357,62 +6373,47 @@ function App() {
                           )
                         : null
                     }
-                    onSaveToMap={async ({ upserts, session: nextSession }) => {
-                      const mapId = nextSession.targetMapId;
-                      if (!mapId || !upserts.length) return;
-                      const map =
-                        project.workspace.key_maps?.find((m) => m.id === mapId) ??
-                        keyMapTabs.find((t) => t.map.id === mapId)?.map;
-                      if (!map) {
-                        setError("Matching Save: target Mapping not found");
-                        return;
+                    onSaveToMap={async ({ session }) => {
+                      if (mapWritesInFlight.current) {
+                        return { status: "refused", message: "A Mapping write is already in progress. Retry after it finishes." };
                       }
-                      const fromValues = upserts.map(
-                        (u) => u.fromParts[0] ?? "",
-                      );
-                      const toValues = upserts.map(
-                        (u) => u.outputValues[0] ?? "",
-                      );
-                      const arity = Math.max(
-                        ...upserts.map((u) => u.fromParts.length),
-                        map.from_columns?.length ?? 1,
-                        1,
-                      );
-                      const stubJoinCtx = {
-                        hostQueryId: "",
-                        joinStepIndex: 0,
-                        rightQueryId: "",
-                        leftOn: map.from_columns?.length
-                          ? [...map.from_columns]
-                          : Array.from({ length: arity }, (_, i) =>
-                              i === 0 ? (map.from_column ?? "from") : `from_${i}`,
-                            ),
-                        rightOn: ["to"],
-                        joinType: "left" as const,
-                      };
-                      const cellPatches = upserts.map((u) =>
-                        (map.output_columns?.length
-                          ? map.output_columns
-                          : ["to"]
-                        ).map((column, i) => ({
-                          column,
-                          value: u.outputValues[i] ?? "",
-                        })),
-                      );
-                      const merged = mergeFromValuesIntoMap({
-                        map,
-                        fromValues,
-                        toValues,
-                        fromParts: upserts.map((u) => u.fromParts),
-                        cellPatches,
-                        joinCtx: stubJoinCtx,
-                      });
-                      await saveKeyMapToProject(merged);
-                      setMatchingTabs((tabs) =>
-                        tabs.map((t) =>
-                          t.id === nextSession.id ? nextSession : t,
-                        ),
-                      );
+                      const ownerUid = projectRef.current.project_uid;
+                      const revision = matchingSaveRevision(session);
+                      const isSessionCurrent = () =>
+                        projectRef.current.project_uid === ownerUid &&
+                        matchingTabsLiveRef.current.some((s) => s.id === session.id && matchingSaveRevision(s) === revision);
+                      let ownWriteStarted = false;
+                      // Cover baseline reads/planning as well as the existing persistent write.
+                      mapWritesInFlight.current += 1;
+                      try {
+                        return await persistMatchingSession(session, {
+                          isSessionCurrent,
+                          context: () => {
+                            const current = projectRef.current;
+                            const editor = keyMapTabsLiveRef.current.find((t) => t.map.id === session.targetMapId);
+                            return {
+                              owner: JSON.stringify([current.project_uid, current.root_path, current.last_dbt_export_path, current.connections, current.pg_import]),
+                              map: current.workspace.key_maps?.find((m) => m.id === session.targetMapId),
+                              externalSeed: !!current.last_dbt_export_path,
+                              refusal: (session.targetMapId ? importWriteRefusal(current.pg_import, session.targetMapId) : null) ??
+                                (editor?.localDraft || dirtyDeltaHasChanges(editor?.dirtyDelta) || (editor?.saveInFlight && !ownWriteStarted) || editor?.saveApi?.isSaving()
+                                  ? "Save or discard the Mapping editor draft first." : null),
+                            };
+                          },
+                          readSource: async (map, keys) => {
+                            const current = projectRef.current;
+                            const resolved = resolveKeyMapConnection(current, map, current.connections, true);
+                            if (!resolved.ok) throw new Error(resolved.error);
+                            return (await readKeyMap(map, resolved.dsn, { fromExact: keys })).entries;
+                          },
+                          saveMap: (map, dirtyDelta) => {
+                            ownWriteStarted = true;
+                            return saveKeyMapToProject(map, { dirtyDelta, preserveEditorDraft: true });
+                          },
+                        });
+                      } finally {
+                        mapWritesInFlight.current -= 1;
+                      }
                     }}
                   />
                 </div>

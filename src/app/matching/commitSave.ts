@@ -2,11 +2,9 @@
 import { matchingAcceptDraft, matchingPlanCommit } from "../../lib/bridge";
 import {
   buildFinalDiff,
-  materializedFromSession,
   summarizeFinalDiff,
 } from "./reviewLogic";
 import type { MatchingPlanDraft, MatchingTabSession } from "./types";
-import { mapKeyToken } from "./types";
 
 function planToWire(plan: MatchingPlanDraft) {
   return {
@@ -32,6 +30,8 @@ export type MatchingCommitResult =
   | {
       ok: true;
       upserts: { fromParts: string[]; outputValues: string[] }[];
+      /** Validated keys including already_matches; not a persistence receipt. */
+      acceptedKeys: string[][];
       session: MatchingTabSession;
       summary: ReturnType<typeof summarizeFinalDiff>;
     }
@@ -44,6 +44,7 @@ export type MatchingCommitResult =
 export async function commitMatchingSession(
   session: MatchingTabSession,
   opts: { writeAllowed: boolean; writeRefusalReason?: string },
+  gates = { acceptDraft: matchingAcceptDraft, planCommit: matchingPlanCommit },
 ): Promise<MatchingCommitResult> {
   if (!session.plan) {
     return { ok: false, reason: "plan_missing", session };
@@ -73,11 +74,14 @@ export async function commitMatchingSession(
   // Host draft-accept each confirming decision (forged-payload gate).
   const materialized = [];
   for (const d of session.decisions) {
+    // Previously acknowledged rows are checked against live storage by persistence;
+    // Saved proposals are deliberately not selectable at the host draft gate.
+    if (session.proposals.find((p) => p.proposalId === d.proposalId)?.state === "saved") continue;
     if (d.kind !== "confirm_proposed" && d.kind !== "choose_alternative") {
       continue;
     }
     try {
-      const res = await matchingAcceptDraft({
+      const res = await gates.acceptDraft({
         sessionId: session.id,
         plan,
         proposals,
@@ -90,7 +94,10 @@ export async function commitMatchingSession(
           expectedSemanticRevision: d.expectedSemanticRevision,
         },
       });
-      if (res.materialized) materialized.push(res.materialized);
+      if (!res.accepted || !res.materialized) {
+        return { ok: false, reason: "decision_not_materialized", session };
+      }
+      materialized.push(res.materialized);
     } catch (e) {
       return {
         ok: false,
@@ -100,12 +107,8 @@ export async function commitMatchingSession(
     }
   }
 
-  // Prefer host-materialized; fall back to local materialization for fixture-only.
-  const decisions =
-    materialized.length > 0 ? materialized : materializedFromSession(session);
-
-  const commit = await matchingPlanCommit({
-    decisions,
+  const commit = await gates.planCommit({
+    decisions: materialized,
     baseline: session.mapBaseline,
     live: session.mapLive,
     explicitReplaceKeys: session.explicitReplaceKeys.map((t) => t.split("\0")),
@@ -128,25 +131,13 @@ export async function commitMatchingSession(
       outputValues: i.proposedOutputs ?? [],
     }));
 
-  // AlreadyMatches → no-op rows; still mark saved
-  const savedKeys = new Set(
+  const acceptedKeys =
     commit.items
       .filter((i) =>
         ["add", "replace", "already_matches"].includes(i.outcome),
       )
-      .map((i) => mapKeyToken(i.mapKey)),
-  );
+      .map((i) => i.mapKey);
 
-  const next: MatchingTabSession = {
-    ...session,
-    proposals: session.proposals.map((p) =>
-      savedKeys.has(mapKeyToken(p.mapKey))
-        ? { ...p, state: "saved" as const }
-        : p,
-    ),
-    hasUnsavedDecisions: false,
-  };
-
-  const summary = summarizeFinalDiff(buildFinalDiff(next));
-  return { ok: true, upserts, session: next, summary };
+  const summary = summarizeFinalDiff(buildFinalDiff(session));
+  return { ok: true, upserts, acceptedKeys, session, summary };
 }

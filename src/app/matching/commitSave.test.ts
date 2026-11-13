@@ -7,6 +7,7 @@ import {
   summarizeFinalDiff,
 } from "./reviewLogic";
 import { emptyMatchingSession, mapKeyToken } from "./types";
+import { commitMatchingSession } from "./commitSave";
 
 {
   let s = emptyMatchingSession({
@@ -39,6 +40,25 @@ import { emptyMatchingSession, mapKeyToken } from "./types";
   const sum = summarizeFinalDiff(diff);
   assert.ok(sum.adds >= 1);
   assert.ok(sum.unresolved >= 1);
+
+  const materialized = mat[0]!;
+  const planned = await commitMatchingSession(s, { writeAllowed: true }, {
+    acceptDraft: async () => ({ accepted: true, materialized }),
+    planCommit: async () => ({ ok: true, items: [{
+      mapKey: materialized.mapKey, outcome: "add",
+      affectedSourceRows: 24, proposedOutputs: ["2"],
+    }] }),
+  });
+  assert.equal(planned.ok, true);
+  assert.strictEqual(planned.session, s, "planning must not settle the draft");
+  assert.equal(s.hasUnsavedDecisions, true);
+  assert.equal(s.proposals.find((p) => p.proposalId === materialized.proposalId)?.state, "confirmed_in_draft");
+
+  const rejected = await commitMatchingSession(s, { writeAllowed: true }, {
+    acceptDraft: async () => ({ accepted: false, materialized: null }),
+    planCommit: async () => { throw new Error("must not use local fallback"); },
+  });
+  assert.equal(rejected.ok, false);
 }
 
 console.log("matching commitSave materialize ok");

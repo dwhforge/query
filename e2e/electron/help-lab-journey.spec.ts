@@ -84,6 +84,9 @@ test.describe("flagship Help Lab journey", () => {
     await expect(page.getByTestId("join-lens-no-match")).toHaveAttribute("aria-pressed", "true");
     await page.getByRole("button", { name: "This row", exact: true }).click();
     await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await page.getByRole("tab", { name: "Help Lab", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("tab", { name: "Pipeline canvas", exact: true })).toHaveAttribute("aria-selected", "true");
   });
 
   test("alternative path, Got it, Escape and another lab do not revive hints", async () => {

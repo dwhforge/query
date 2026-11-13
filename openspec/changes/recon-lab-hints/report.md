@@ -22,3 +22,8 @@ Images: [targeted No match hint](../../../docs/stabilization/recon-no-match-hint
 [narrow fallback](../../../docs/stabilization/recon-hint-narrow.png).
 The existing Lens first-use explanation remains independent. Completion means
 the user reached No match, never that mappings or reconciliation are correct.
+
+Final batch audit follow-up: an Electron reproducer found that a completed hint
+run still consumed Escape on the Help Lab tab. The keyboard guard now applies
+only to an incomplete active run and observes completion changes. The journey
+regression checks that ordinary Escape navigation resumes after No match.

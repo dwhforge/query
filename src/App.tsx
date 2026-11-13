@@ -4879,7 +4879,7 @@ function App() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (switchChoice) return;
-      if (e.key === "Escape" && activeLabTask?.hints) {
+      if (e.key === "Escape" && activeLabTask?.hints && !activeLabTask.completed) {
         e.preventDefault();
         dismissLabHints();
         return;
@@ -4940,7 +4940,7 @@ function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs, switchChoice, activeLabTask?.hints]);
+  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs, switchChoice, activeLabTask?.hints, activeLabTask?.completed]);
 
   // Fix addCsvQuery focus race: simplify by combining into one setProject
   // (handlers above already mostly OK)

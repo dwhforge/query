@@ -2,22 +2,27 @@
 
 # DWHForge Query
 
-### Build visually. Verify on real data. Ship dbt.
+### Find the join gap. Keep the correction. Ship SQL/dbt.
 
-A local desktop workbench for turning files and PostgreSQL data into reusable transformations and runnable dbt projects.
+A local desktop workbench for investigating mismatched identifiers, editing reusable mappings, and checking the resulting calculation before exporting SQL/dbt.
 
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL_1.1-14b8a6)](LICENSE)
 [![dbt Core 1.x](https://img.shields.io/badge/dbt_Core-1.x-ff694b)](docs/export-and-run.md)
 [![Powered by DuckDB](https://img.shields.io/badge/powered_by-DuckDB-fff000)](docs/ARCHITECTURE.md)
 [![Early development](https://img.shields.io/badge/status-early_development-64748b)](#project-status)
 
-**[Get started](#get-started)** · **[Try the demo](#try-it-company-aliases-to-postgresql)** · **[Downloads](https://github.com/dwhforge/query/releases)** · **[Documentation](docs/GETTING_STARTED.md)** · **[Website](https://dwhforge.github.io/query/)**
+**[Try the offline lab](#try-it-offline-shipments--sales)** · **[Get started](#get-started)** · **[Downloads](https://github.com/dwhforge/query/releases)** · **[Documentation](docs/GETTING_STARTED.md)** · **[Development notes](docs/RELEASE_NOTES.md)**
 
-<img src="docs/welcome.png" alt="DWHForge Query desktop: source explorer, connected query nodes, applied steps, and a data preview" width="1100" />
+<img src="docs/stabilization/flagship-join-lens.png" alt="Actual offline Shipments ↔ sales lab: task card, original Join, No match keys, partial mapping, and a labelled sample preview" width="1100" />
 
-**Connect your sources. Inspect each step. Fix the joins. Publish your tables.**
+**Different SKU codes → inspect unmatched keys → save a mapping → recompute the example and reconciliation.**
 
 </div>
+
+*Actual Electron development-build screenshot, not a mockup. Task card, opt-in
+hints and preview-state polish describe this reviewed development checkout;
+downloaded releases and main may be older until these commits are published.
+See [build status and boundaries](docs/RELEASE_NOTES.md).*
 
 ## From messy inputs to a pipeline you can keep
 
@@ -25,7 +30,7 @@ Two feeds spell the same company differently. A join drops records. A business r
 
 DWHForge Query gives you a visual place to investigate and edit those transformations—with SQL you can inspect and a dbt project you can run in your own infrastructure.
 
-- **See the data behind the graph.** Select a query or an applied step to inspect its intermediate result.
+- **Know what you are looking at.** Data labels the query result or selected Join scope, sample/full mode, and running/cancelled/error states.
 - **Investigate joins where you build them.** Explore matched and unmatched keys, then turn corrections into reusable mappings.
 - **Compute where it makes sense.** Use DuckDB to transform files and publish the result to PostgreSQL, or keep both data and execution in PostgreSQL.
 - **Keep the result as code.** Export SQL models, dependencies, sources, and mapping seeds. Run them with dbt outside the app.
@@ -62,19 +67,23 @@ For **PostgreSQL → PostgreSQL**, dbt-postgres executes the transformations in 
 
 Custom SQL follows the **execution engine’s dialect**. See [export routes and materialization](docs/export-and-run.md).
 
-## Try it: company aliases to PostgreSQL
+## Try it offline: shipments ↔ sales
 
-The bundled **Key mapping** demo follows two feeds across **15 companies and 60 days**: sales and spending use different names for the same businesses.
+Sales uses commercial SKU codes; the plant reference uses product IDs. A plain
+Join leaves keys unmatched. The bundled **Shipments ↔ sales** lab lets you inspect
+the evidence, extend a partial mapping and compare the actual query outputs.
 
-1. **Open the problem.** Load **Help → Load demo → Key mapping** and inspect `dirty_join` to see names that do not match the company dimension.
-2. **Investigate and map.** Use Join Lens and the Mapping editor to connect source aliases to canonical company IDs. Reuse the mapping across both feeds.
-3. **Inspect the result.** Follow the daily combined data into the monthly rollup; inspect intermediate rows and generated model SQL.
-4. **Choose the outputs.** Set execution to **DuckDB**, destination to **PostgreSQL**, select your connection, and mark the daily and monthly queries **Publish to destination**.
-5. **Build the tables.** Choose **File → Export dbt…**, then **File → Build export…**. Inspect the published tables in PostgreSQL.
+1. Open **Help → Help Lab… → Shipments ↔ sales → Open lab**. Save current work or cancel if prompted; the lab is a separate unsaved project.
+2. Read **Why don't these SKUs match?** and choose **Show me where to start**, or manually select the original Join and **Data → Join Lens → No match**. The optional hint stops at No match.
+3. Use **Inspect mapped example** and **Inspect monthly reconciliation**. The mapped pipeline is a **pre-existing, partial example**, not a fix performed for you.
+4. In **Mappings → Commercial SKU → plant product**, add **COM-AMM → AMM-A** using **Add row**, then **Save map**. Reopen the mapped example and **Recompute**; inspect the changed rows, then the monthly gaps. Do not guess a mapping for NEW-BLEND without a reference product.
+5. **File → Save as…** keeps your own project. Export/Parse/Build are optional next steps, not requirements for trying the lab.
 
-To explore without a PostgreSQL connection, keep the destination set to **DuckDB**.
+**No PostgreSQL, LLM provider, account, fixture-generation script or dbt build is
+needed for this offline lab.** A clean sample is not full-input proof. On an older
+build without the task card, the same queries and manual Lens path remain the starting point.
 
-[Walk through the mapping workflow →](docs/keymap-workflows.md) · [Explore the other demos →](docs/DEMOS.md)
+[Offline walkthrough →](docs/GETTING_STARTED.md#2-first-launch--offline-lab) · [Other labs and prerequisites →](docs/DEMOS.md) · [Publish to PostgreSQL later →](docs/export-and-run.md)
 
 ## The output is a dbt project
 
@@ -111,23 +120,33 @@ Use a dbt environment with the appropriate adapter installed. Inside the app, **
 
 ### Run from source
 
-Prerequisites: **Git, Node.js 20+, npm, stable Rust, and Python 3 with venv support**. These commands use Bash.
+Prerequisites: **Git, Node.js 20+, npm, stable Rust and a working native linker**.
+The commands below use Linux/Bash. First-time package, Rust and extension downloads
+need network access; the prepared flagship runs locally afterward. Python/venv
+and dbt are needed only when you choose Parse/Build.
 
 ```bash
-git clone --branch feature/mapping_tools https://github.com/dwhforge/query.git
+git clone --branch main https://github.com/dwhforge/query.git
 cd query
 
-# One-time setup: preview extensions and a local dbt environment.
+# One-time preview extension setup; not a cloud service at runtime.
 ./scripts/fetch-duckdb-extensions.sh
-./scripts/fetch-dbt-venv.sh
 
-npm install
+npm ci
 cargo build -p dwh-host --release
 ./scripts/sync-duckdb-lib.sh
 npm run electron:dev
 ```
 
-The branch above contains the workflow described here. The setup script installs dbt Core 1.x with the DuckDB and PostgreSQL adapters into `dbt-venv/`.
+The remote default branch is **main**, a development baseline—not a promise that
+it matches a released package. For a release-matched source build, check out that
+release's tag. The screenshot UX was validated on **feature/matching**; use the
+reviewed checkout containing these commits for the exact new card/hints/preview
+behavior. This documentation does not claim unpublished local commits can be
+downloaded from main or an older tag.
+
+Optional later: [install dbt](docs/GETTING_STARTED.md#3-install-dbt-required-for-parse--build)
+for Parse/Build; it is not needed for the offline preview walkthrough.
 
 ### Desktop packages
 
@@ -146,7 +165,9 @@ The desktop app connects directly to the files, databases, and storage you confi
 
 **Early development.** The current focus is the complete edit → preview → export → build loop on DuckDB and PostgreSQL.
 
-- **Available:** visual multi-query authoring, step previews, Join Lens, Mappings, ready-made calculated operations, dbt export, publish controls, and build execution.
+- **Available in the reviewed checkout:** visual multi-query authoring, Join Lens key/row evidence, existing Mapping editor, offline flagship task + opt-in hints, honest comparison navigation, labelled preview states, dbt export and build controls. Release availability depends on the selected tag.
+- **In progress / limited preview:** broader Join Debugger investigation and contextual Matching, including optional LLM-assisted paths. They are not a universal debugger, automatic reconciliation, or a durable resumable Matching workplace. The flagship walkthrough makes no LLM calls.
+- **Not available as a finished workflow:** arbitrary dbt repository round-trip. General IDE guidance and automatic cloud/LLM graph editing are outside this batch, not promises implied by the local lab hints.
 - **Current dbt runtime:** Core **1.x**. dbt **2.0 compatibility is planned**, not yet supported.
 - **Current boundary:** the workspace generates its dbt project. Importing and round-tripping arbitrary existing dbt repositories is not supported.
 - **Later:** incremental and snapshot configuration, broader testing/profiling surfaces, and richer dbt project integration.

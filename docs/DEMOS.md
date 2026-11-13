@@ -6,6 +6,32 @@ Related: [ADR-0001](adr/0001-product-positioning.md), [ADR-0039](adr/0039-help-l
 
 ---
 
+## Start here: the offline reconciliation journey
+
+**Help → Help Lab… → Shipments ↔ sales → Open lab** is the first-user path.
+No PostgreSQL, LLM, dbt build or fixture generation is needed. In the reviewed
+development checkout, a dismissible task card explains the mismatch and **Show
+me where to start** selects the existing dirty Join. Opt-in inline hints stop
+when **No match** is reached; no mapping success is inferred. Older packages can
+follow the same query/Join/Lens path manually.
+
+Use **Inspect original join → Inspect mapped example → Inspect monthly
+reconciliation**. The mapped example is already present and only partially
+prepared. After editing a map, recompute the relevant preview before comparing
+rows. Sample previews are not full-input proof.
+
+Concrete exercise: in the existing **Commercial SKU → plant product** mapping,
+add **COM-AMM → AMM-A**, Save map, then Recompute the mapped example and inspect
+the monthly gap. Leave NEW-BLEND unresolved without valid product evidence.
+Save as creates your own project; opening labs does not silently reuse a previous
+working project's save/export target ([ADR-0045](adr/0045-safe-help-lab-switch.md)).
+
+[First-launch walkthrough](GETTING_STARTED.md#2-first-launch--offline-lab) ·
+[Actual Join Lens screenshot](stabilization/flagship-join-lens.png) ·
+[Development/release boundary](RELEASE_NOTES.md)
+
+---
+
 ## Naming rule
 
 | Layer | Where | Example |
@@ -169,7 +195,7 @@ Committed under `fixtures/labs/recon_ship_sales/`. Commercial codes (`COM-UREA`,
 |------------|------|
 | `shipments`, `sales`, `dim_product` | sources |
 | `dirty_recon` ★focus | sales ⋈ dim **without** map |
-| `sales_mapped` | ApplyKeyMap → join dim |
+| `sales_mapped` | Pre-existing partial example: ApplyKeyMap → join dim, not user-achieved success |
 | `recon_by_month` | ship ⋈ sales on product+month → `qty_gap_t` |
 
 Categories: A1, A3, A8, A15, A28.

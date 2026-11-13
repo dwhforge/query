@@ -1,6 +1,9 @@
-# Getting started — install, dbt, first export
+# Getting started — offline lab first, dbt when needed
 
-This guide is for people who already have a **DWHForge Query** build (release tarball/zip or a local `npm run electron:dev`). It covers what to do **after** the app opens, where **dbt** lives, and how to land tables in PostgreSQL.
+Start with a **DWHForge Query** desktop build and the committed offline flagship.
+You do not need PostgreSQL, an LLM, an account or dbt build to inspect it. Source
+setup is in §6; optional dbt/export setup follows the first-launch steps.
+The [development notes](RELEASE_NOTES.md) distinguish this checkout's UX from older packages.
 
 Related deep-dives: [Export & run](export-and-run.md) · [ADR-0014](adr/0014-query-execution-affinity.md) · [ADR-0017](adr/0017-export-offline-dbt-parse.md)
 
@@ -19,15 +22,25 @@ The app does **not** install dbt into the system Python. You create a project-lo
 
 ---
 
-## 2. First launch checklist
+## 2. First launch — offline lab
 
-1. Open the app (release binary or `npm run electron:dev`).
-2. **Help → Load demo → Key mapping** (or build your own graph).
-3. **Project** menu:
+1. Open the desktop app. If dbt setup is offered, choose **Not now** for this lab.
+2. Open **Help → Help Lab…**, find **Shipments ↔ sales**, then **Open lab**. If current work is unsaved, use **Save / Discard / Cancel**; cancel or a failed save keeps it open. The lab gets a new unsaved identity, not the working project's save path.
+3. Read the task card and press **Show me where to start**. It selects the original Join in **dirty_recon** and Data/Join Lens. Hints are optional, one at a time; **Got it**, **Dismiss** or Escape stops them. **Lab task** restores a dismissed card. On an older package without the card, select the Join manually.
+4. Select **No match** to inspect commercial SKU values without a plant product partner. Read the **Sample / Full preview** label; sample rows are not full-input proof. The hint disappears when No match is reached, not when the data is fixed.
+5. **Inspect mapped example** opens the prepared **sales_mapped** pipeline. **Inspect monthly reconciliation** opens **recon_by_month**. These queries already exist in the lab and the map is incomplete.
+6. For a concrete correction, open **Mappings → Commercial SKU → plant product**, choose **Add row**, fill **From = COM-AMM**, **To = AMM-A**, then **Save map**. Return to the mapped example and press **Recompute**. The product reference contains AMM-A; do not invent a match for NEW-BLEND.
+7. Inspect the changed mapped rows and monthly gap calculation. No success percentage or full-data reconciliation is implied. **File → Save as…** saves your edited project; reopen it to continue ordinary work. Tutorial hints are session-only, not saved project content.
+
+![Actual offline flagship Join Lens](stabilization/flagship-join-lens.png)
+
+### Optional later: destination and export
+
+1. **Project** menu:
    - **Execution engine** = SQL dialect for emit/preview honesty (`duckdb` or `postgres`).
    - **Destination** = where **published** models materialize (`duckdb` file or **PostgreSQL**).
-4. For Files/CSV → Postgres use **engine = DuckDB**, **destination = PostgreSQL**, and pick a Postgres **connection**.
-5. In the query inspector, enable **Publish to destination** on every query that should become a `mart_*` (empty publish list ⇒ only the ★ focus query).
+2. For Files/CSV → Postgres use **engine = DuckDB**, **destination = PostgreSQL**, and pick a Postgres **connection**.
+3. In the query inspector, enable **Publish to destination** on every query that should become a `mart_*` (empty publish list ⇒ only the ★ focus query).
 
 Secrets (Postgres DSN, S3 keys) live in `~/.dwhforge-query/secrets.json`, not inside the `.dwhproj.json` file.
 
@@ -122,7 +135,7 @@ Unpacked Linux/Windows packages typically look like:
 DWHForge-Query*          # launcher
 dwh-host                 # sidecar
 extensions/              # DuckDB extensions
-fixtures/                # optional demos
+fixtures/                # includes committed offline Help Lab assets
 # After you run fetch-dbt-venv.sh in this folder (or ship it):
 dbt-venv/
 ```
@@ -135,12 +148,23 @@ If Parse/Build say **dbt not found**, run `./scripts/fetch-dbt-venv.sh` in that 
 
 ```bash
 ./scripts/fetch-duckdb-extensions.sh   # once, needs network
-./scripts/fetch-dbt-venv.sh            # once
-npm install
+npm ci
 cargo build -p dwh-host --release
 ./scripts/sync-duckdb-lib.sh
 npm run electron:dev
 ```
+
+Run those commands from a checked-out repository with Node 20+, stable Rust,
+native linker and Bash. The remote default is main; the exact new task/hint UI
+requires the reviewed development checkout containing the UX commits. Release
+tags and packages may be older. Windows packages are produced by CI; these
+Linux source commands are not a clean-machine Windows validation claim.
+
+The extension fetch and dependency/build steps need network on first setup.
+Installing dbt is optional for the offline lab; do it later using §3.
+After dependencies and extensions are present, no cloud/provider is needed for
+the flagship. In a development session, run **npm run build** plus Electron E2E
+for UI/desktop checks; a UI bundle alone does not validate the desktop path.
 
 Prefer a normal terminal for `electron:dev` (avoid IDE “Debug” attach storms that exit the window).
 
@@ -150,6 +174,10 @@ Prefer a normal terminal for `electron:dev` (avoid IDE “Debug” attach storms
 
 | Symptom | Fix |
 |---------|-----|
+| Data says preview cancelled | Use **Recompute**; cancellation does not roll back committed mapping writes |
+| Data says preview failed | Read the error above/Details, correct the source or query, then **Recompute** |
+| Data returns zero rows | This is an empty result, not waiting; inspect filters, keys and preview scope |
+| Save before switching stops on Mapping/Matching drafts | Save those in their editor first; project-file Save is not warehouse/Matching Save-all |
 | White Electron window / GPU errors | Restart; Linux builds pass `--disable-gpu`. |
 | `dbt parse` / Build: dbt not found | `./scripts/fetch-dbt-venv.sh` |
 | Build: missing `DWH_PG_DSN` | Destination Postgres connection with DSN; or export env for CLI |

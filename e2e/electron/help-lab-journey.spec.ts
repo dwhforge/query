@@ -64,4 +64,61 @@ test.describe("flagship Help Lab journey", () => {
     await expect(page.getByTestId("lab-task-card").getByRole("button", { name: "Show me where to start" })).toBeDisabled();
     await expect(page.getByText("The original Join is no longer available in this edited lab.")).toBeVisible();
   });
+
+  test("opt-in hint follows actual Join and No match state, then stays completed", async ({}, info) => {
+    const { page } = session;
+    await openLab(page);
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(1);
+    await expect(page.getByTestId("join-lens-no-match")).toBeVisible();
+    await expect(page.getByTestId("lab-hint")).toContainText("Open No match");
+    await page.screenshot({ path: info.outputPath("no-match-hint.png") });
+    // A different step does not require a prescribed click: observed state drives the goal.
+    await page.locator('[data-step-type="FromQuery"] > [role="button"]').click();
+    await expect(page.getByTestId("lab-hint")).toContainText("Inspect this Join");
+    await page.locator('[data-step-type="Join"] > [role="button"]').click();
+    await expect(page.getByTestId("lab-hint")).toContainText("Open No match");
+    await page.getByTestId("join-lens-no-match").click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await expect(page.getByTestId("join-lens-no-match")).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "This row", exact: true }).click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+  });
+
+  test("alternative path, Got it, Escape and another lab do not revive hints", async () => {
+    const { page } = session;
+    await openLab(page);
+    await page.getByTestId("join-lens-no-match").click();
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await page.getByRole("button", { name: "This row", exact: true }).click();
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await page.getByTestId("lab-hint").getByRole("button", { name: "Got it", exact: true }).click();
+    await page.getByRole("tab", { name: "Model", exact: true }).click();
+    await page.getByRole("tab", { name: "Data", exact: true }).click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await openLab(page, "name_id_match", true);
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+  });
+
+  test("narrow layout and Model view use inline fallback without stealing focus", async ({}, info) => {
+    const { page } = session;
+    await openLab(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 820, height: 700 });
+    await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
+    await page.getByRole("tab", { name: "Model", exact: true }).click();
+    await expect(page.getByTestId("lab-hint")).toHaveCount(1);
+    await expect(page.getByTestId("lab-hint")).toContainText("Open Join Lens in Data");
+    await page.screenshot({ path: info.outputPath("narrow-hint-fallback.png") });
+    await page.getByTestId("lab-hint").getByRole("button", { name: "Got it", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("lab-hint")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "Model", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
 });

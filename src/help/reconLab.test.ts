@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ownsLabTask, reconJoinTarget, startLabTask } from "./reconLab";
+import { ownsLabTask, reconHintPhase, reconJoinTarget, startLabTask } from "./reconLab";
 import type { Workspace } from "../types/pipeline";
 
 assert.equal(startLabTask("sales", "p"), null);
@@ -18,4 +18,10 @@ const workspace: Workspace = { focus_query_id: "dirty_recon", queries: [{ id: "d
 assert.deepEqual(reconJoinTarget(workspace), { queryId: "dirty_recon", stepIndex: 2 });
 assert.equal(reconJoinTarget({ ...workspace, queries: workspace.queries.map((q) => ({ ...q, steps: [] })) }), null);
 assert.equal(ownsLabTask({ ...task!, visible: false }, "p"), true);
+assert.equal(reconHintPhase(task, workspace, "dirty_recon", 2), "off");
+assert.equal(reconHintPhase({ ...task!, hints: true }, workspace, "dirty_recon", 0), "find_join");
+assert.equal(reconHintPhase({ ...task!, hints: true }, workspace, "dirty_recon", 2), "open_no_match");
+assert.equal(reconHintPhase({ ...task!, hints: true, completed: true }, workspace, "dirty_recon", 2), "done");
+assert.equal(reconHintPhase({ ...task!, hints: true, completed: true }, workspace, "elsewhere", null), "done");
+assert.equal(reconHintPhase({ ...task!, visible: false, hints: true }, workspace, "dirty_recon", 2), "off");
 console.log("reconLab task tests passed");

@@ -10,7 +10,8 @@ import {
 import { labProject, projectFingerprint, replaceProject, type SwitchDecision } from "./app/projectLifecycle";
 import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
 import { LabTaskCard } from "./components/LabTaskCard";
-import { ownsLabTask, reconJoinTarget, startLabTask, type LabTaskSession } from "./help/reconLab";
+import { LabHint } from "./components/LabHint";
+import { ownsLabTask, reconHintPhase, reconJoinTarget, startLabTask, type LabTaskSession } from "./help/reconLab";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -981,6 +982,16 @@ function App() {
   const queries = project.workspace.queries;
   const focusQueryId = project.workspace.focus_query_id || null;
   const activeQuery = queries.find((q) => q.id === activeQueryId) ?? null;
+  const observeLabLensMode = useCallback((mode: "linked" | "probe" | "auto") => {
+    const target = reconJoinTarget(projectRef.current.workspace);
+    if (!target || mode !== "probe" || activeQueryId !== target.queryId || selectedStepIndex !== target.stepIndex) return;
+    setLabTask((task) => ownsLabTask(task, projectRef.current.project_uid) && task?.hints && !task.completed
+      ? { ...task, completed: true } : task);
+  }, [activeQueryId, selectedStepIndex, project.project_uid, activeLabTask?.hints, activeLabTask?.completed]);
+
+  function dismissLabHints() {
+    setLabTask((task) => task ? { ...task, hints: false } : null);
+  }
 
   /** ★ export mart — independent of canvas selection. */
   const workspace: Workspace | null = useMemo(() => {
@@ -3364,6 +3375,7 @@ function App() {
     if (!activeLabTask) return;
     const target = reconJoinTarget(project.workspace);
     if (!target) return;
+    setLabTask((task) => task ? { ...task, hints: true, completed: false } : null);
     selectQuery(target.queryId);
     setSelectedStepIndex(target.stepIndex);
     loadStepIntoEditor(project.workspace.queries.find((q) => q.id === target.queryId)?.steps[target.stepIndex]);
@@ -4805,6 +4817,11 @@ function App() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (switchChoice) return;
+      if (e.key === "Escape" && activeLabTask?.hints) {
+        e.preventDefault();
+        dismissLabHints();
+        return;
+      }
       if (e.key === "Escape" && centerTab !== "canvas") {
         e.preventDefault();
         if (centerTab === QUALITY_TAB) openMappingQualityCanvas();
@@ -4861,7 +4878,7 @@ function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs, switchChoice]);
+  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs, switchChoice, activeLabTask?.hints]);
 
   // Fix addCsvQuery focus race: simplify by combining into one setProject
   // (handlers above already mostly OK)
@@ -5204,6 +5221,17 @@ function App() {
 
   const canCopySql =
     bottomTab === "model" ? Boolean(modelPreview?.sql) : Boolean(preview?.sql);
+
+  const labPhase = reconHintPhase(activeLabTask, project.workspace, activeQueryId, selectedStepIndex);
+  const labStartTarget = activeLabTask ? reconJoinTarget(project.workspace) : null;
+  const showJoinHint = centerTab === "canvas" && labPhase === "find_join" &&
+    activeQueryId === labStartTarget?.queryId && !inspectorCollapsed;
+  const showLensToggleHint = centerTab === "canvas" && labPhase === "open_no_match" &&
+    bottomTab === "data" && !!joinLensTarget && !diagView && !joinLensOn && bottomDockHeight > 80;
+  const showNoMatchHint = centerTab === "canvas" && labPhase === "open_no_match" &&
+    bottomTab === "data" && !!preview && !!joinLensTarget && !diagView && joinLensOn && !overlayOpen && bottomDockHeight > 120;
+  const showLabFallback = centerTab === "canvas" && (labPhase === "find_join" || labPhase === "open_no_match") &&
+    !showJoinHint && !showLensToggleHint && !showNoMatchHint;
 
   return (
     <div className="flex h-screen flex-col text-slate-100">
@@ -6062,12 +6090,17 @@ function App() {
             {activeLabTask && centerTab === "canvas" && (activeLabTask.visible ? (
               <LabTaskCard canStart={reconJoinTarget(project.workspace) !== null}
                 onStart={showReconLabStart}
-                onDismiss={() => setLabTask((task) => task ? { ...task, visible: false } : null)} />
+                onDismiss={() => setLabTask((task) => task ? { ...task, visible: false, hints: false } : null)} />
             ) : (
               <button type="button" data-testid="lab-task-reopen"
                 onClick={() => setLabTask((task) => task ? { ...task, visible: true } : null)}
                 className="mx-3 mt-1 self-start rounded px-2 py-1 text-xs text-teal-300 hover:bg-teal-500/10">Lab task</button>
             ))}
+            {showLabFallback && <div className="mx-3 mb-2 shrink-0">
+              <LabHint fallback onDismiss={dismissLabHints}>{labPhase === "find_join"
+                ? "Select the original Join step in dirty_recon. Show me can return you there."
+                : "Open Join Lens in Data, then select No match. Waiting for a preview is normal while it runs."}</LabHint>
+            </div>}
 
             {(error || exportMsg) && (
               <div className="shrink-0 space-y-1 px-3 pb-1 pt-2">
@@ -6736,10 +6769,12 @@ function App() {
                 </div>
                 <div className="flex items-center gap-2 pb-1.5">
                   {joinLensTarget && bottomTab === "data" && !diagView && (
-                    <button
+                    <div className="flex flex-wrap items-center gap-2"><button
                       type="button"
+                      data-ui-anchor="join-lens-toggle"
+                      aria-pressed={joinLensOn}
                       onClick={() => setJoinLensOn((v) => !v)}
-                      className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                      className={`${showLensToggleHint ? "recon-hint-target" : ""} rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                         joinLensOn
                           ? "border-teal-500/50 bg-teal-500/15 text-teal-200"
                           : "border-slate-700 text-slate-500 hover:text-slate-300"
@@ -6748,6 +6783,7 @@ function App() {
                     >
                       Join Lens
                     </button>
+                    {showLensToggleHint && <LabHint onDismiss={dismissLabHints}>Open Join Lens</LabHint>}</div>
                   )}
                   {bottomTab === "data" &&
                     !diagView &&
@@ -6899,6 +6935,8 @@ function App() {
                       joinLensOn &&
                       joinLensTarget ? (
                       <JoinLens
+                        onModeChange={activeLabTask ? observeLabLensMode : undefined}
+                        noMatchAccessory={showNoMatchHint ? <LabHint onDismiss={dismissLabHints}>Open No match</LabHint> : undefined}
                         enabled={
                           joinLensOn &&
                           !overlayOpen &&
@@ -7210,6 +7248,8 @@ function App() {
               <>
               <div className="flex min-h-0 flex-[1_1_50%] flex-col border-b border-[var(--line)] px-3 py-2">
                 <History
+                  stepAccessory={showJoinHint && labStartTarget ? { index: labStartTarget.stepIndex,
+                    content: <LabHint onDismiss={dismissLabHints}>Inspect this Join — the SKU codes use different identifiers</LabHint> } : undefined}
                   steps={activeQuery?.steps ?? []}
                   queryNames={{
                     ...Object.fromEntries(

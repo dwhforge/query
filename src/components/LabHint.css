@@ -1,0 +1,12 @@
+@keyframes recon-hint-pulse {
+  0%, 100% { outline-color: rgb(45 212 191 / 0.45); }
+  50% { outline-color: rgb(45 212 191 / 0.95); }
+}
+.recon-hint-target {
+  outline: 1px solid rgb(45 212 191 / 0.75);
+  outline-offset: 1px;
+  animation: recon-hint-pulse 2.5s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .recon-hint-target { animation: none; }
+}

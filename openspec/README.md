@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [Flagship micro-hints](changes/recon-lab-hints/proposal.md) — PR-02H implemented; merged into [Help Lab](specs/help-lab/spec.md); [evidence](changes/recon-lab-hints/report.md). Opt-in, two semantic goals, no timer/framework.
+
 - [Flagship task card](changes/recon-lab-task/proposal.md) — PR-02 implemented; merged into [Help Lab](specs/help-lab/spec.md), [ADR-0046](../docs/adr/0046-flagship-lab-assistance.md); see [evidence](changes/recon-lab-task/report.md).
 
 - [Safe Help Lab switch](changes/safe-help-lab-switch/proposal.md) — **implemented; contract merged** → [Help Lab](specs/help-lab/spec.md) ([ADR-0045](../docs/adr/0045-safe-help-lab-switch.md)). Save / Discard / Cancel and independent lab save identity; see [delivery report](changes/safe-help-lab-switch/report.md) for actual tests and broader-suite failures.

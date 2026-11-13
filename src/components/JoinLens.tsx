@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ColumnMetadata,
   ConnectionDef,
@@ -462,6 +462,9 @@ function SidePanel({
 const FIRST_USE_HINT_KEY = "dwh.joinLens.firstUseHint.v1";
 
 export type JoinLensProps = {
+  /** Read-only mode observation and optional adjacent control accessory. */
+  onModeChange?: (mode: "linked" | "probe" | "auto") => void;
+  noMatchAccessory?: ReactNode;
   enabled: boolean;
   workspace: Workspace;
   hostQueryId: string;
@@ -559,6 +562,8 @@ function JoinLensImpl({
   onMapKey,
   onPrepareBusy,
   onRunDiagnostics,
+  onModeChange,
+  noMatchAccessory,
 }: JoinLensProps) {
   /** Linked-mode: parent schemas + sample rows for This row. */
   const [parentLeftCols, setParentLeftCols] = useState<ColumnMetadata[]>([]);
@@ -592,6 +597,9 @@ function JoinLensImpl({
   const activeSamplesGenRef = useRef(0);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
+  useEffect(() => {
+    if (enabled) onModeChange?.(sideMode);
+  }, [enabled, sideMode, onModeChange]);
   const [searchLeft, setSearchLeft] = useState("");
   const [searchRight, setSearchRight] = useState("");
   const [leftSel, setLeftSel] = useState<number | null>(null);
@@ -2157,8 +2165,11 @@ function JoinLensImpl({
             <button
               type="button"
               onClick={() => switchMode("probe")}
+              data-ui-anchor="join-lens-no-match"
+              data-testid="join-lens-no-match"
+              aria-pressed={sideMode === "probe"}
               title="Values that didn’t find a partner in the join"
-              className={`px-2 py-1 text-[11px] ${
+              className={`${noMatchAccessory ? "outline outline-1 outline-teal-400 outline-offset-[-1px]" : ""} px-2 py-1 text-[11px] ${
                 sideMode === "probe"
                   ? "bg-teal-500/20 text-teal-200"
                   : "text-slate-500 hover:text-slate-300"
@@ -2170,6 +2181,7 @@ function JoinLensImpl({
               )}
             </button>
           </div>
+          {noMatchAccessory}
           <button
             type="button"
             onClick={() => switchMode("auto")}

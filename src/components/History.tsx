@@ -1,4 +1,5 @@
 import { formatJoinKeyLabel } from "../lib/joinKeys";
+import type { ReactNode } from "react";
 import { targetKey, type TransformationStep } from "../types/pipeline";
 
 interface HistoryProps {
@@ -9,6 +10,8 @@ interface HistoryProps {
   onSelect: (index: number) => void;
   onRemoveAt: (index: number) => void;
   onMove: (index: number, dir: -1 | 1) => void;
+  /** Optional inline accessory belonging to one real step; no navigation logic. */
+  stepAccessory?: { index: number; content: ReactNode };
 }
 
 function isRootStep(step: TransformationStep): boolean {
@@ -127,6 +130,7 @@ export function History({
   onSelect,
   onRemoveAt,
   onMove,
+  stepAccessory,
 }: HistoryProps) {
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -148,7 +152,8 @@ export function History({
               index < steps.length - 1 && !(index === 0 && root);
 
             return (
-              <li key={`${step.type}-${index}`}>
+              <li key={`${step.type}-${index}`} data-step-index={index} data-step-type={step.type}
+                className={stepAccessory?.index === index ? "recon-hint-target rounded-md" : undefined}>
                 <div
                   role="button"
                   tabIndex={0}
@@ -217,6 +222,7 @@ export function History({
                     )}
                   </div>
                 </div>
+                {stepAccessory?.index === index && <div className="mt-1 pb-1">{stepAccessory.content}</div>}
               </li>
             );
           })}

@@ -20,5 +20,8 @@ ADR-0009 deferred save/load. Connections (ADR-0012), Sources, and Workspace must
 
 ## Consequences
 
-- Sample load does not wipe an explicit saved path unless replaced by Open.  
+- Original sample-load policy preserved an explicit saved path. **Superseded by
+  [ADR-0045](0045-safe-help-lab-switch.md):** Help labs and quick-load demos open
+  as independent clean projects, with Save / Discard / Cancel protection for
+  unsaved work; they do not retain the previous project's save target.
 - Export dbt remains a separate artifact tree; Project file is the authoring IR.

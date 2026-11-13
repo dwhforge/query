@@ -7,6 +7,8 @@ import {
   useState,
   type SetStateAction,
 } from "react";
+import { labProject, projectFingerprint, replaceProject, type SwitchDecision } from "./app/projectLifecycle";
+import { ProjectSwitchDialog } from "./components/ProjectSwitchDialog";
 
 function clampPanelWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -389,6 +391,14 @@ function App() {
   const project = projectBag.project;
   const projectRef = useRef(project);
   projectRef.current = project;
+  const savedProjectFingerprint = useRef<string | null | undefined>(undefined);
+  if (savedProjectFingerprint.current === undefined) {
+    savedProjectFingerprint.current = projectFingerprint(project);
+  }
+  const projectSaveInFlight = useRef(false);
+  const mapWritesInFlight = useRef(0);
+  const projectSwitchInFlight = useRef(false);
+  const [switchChoice, setSwitchChoice] = useState<((decision: SwitchDecision) => void) | null>(null);
   const setProject = useCallback((update: SetStateAction<Project>) => {
     dispatchProject({
       type: "set",
@@ -810,6 +820,8 @@ function App() {
   const [matchingTabs, setMatchingTabs] = useState<MatchingTabSession[]>([]);
   const matchingTabKey = (id: string) => `matching:${id}`;
   const matchingDirty = matchingTabs.some((t) => t.hasUnsavedDecisions);
+  const matchingTabsLiveRef = useRef(matchingTabs);
+  matchingTabsLiveRef.current = matchingTabs;
 
   useEffect(() => {
     if (!matchingDirty) return;
@@ -1145,6 +1157,7 @@ function App() {
   );
 
   const overlayOpen =
+    switchChoice !== null ||
     connEditorOpen ||
     helpOpen ||
     optionsOpen ||
@@ -2626,17 +2639,7 @@ function App() {
   }
 
   async function handleOpenRecentProject(path: string) {
-    try {
-      const loaded = await loadProject(path, { remember: true });
-      applyLoadedProject(loaded, path);
-      setExportMsg(`Opened ${path}`);
-      await rememberRecentProject(path);
-    } catch (e) {
-      const msg = typeof e === "string" ? e : String(e);
-      setError(msg || `Could not open ${path}`);
-      const pruned = (appSettings.recent_projects ?? []).filter((p) => p !== path);
-      await persistAppSettings({ ...appSettings, recent_projects: pruned });
-    }
+    await openProjectPath(path, true);
   }
 
   function handleSetExecutionEngine(e: ExecutionEngine) {
@@ -2694,89 +2697,18 @@ function App() {
   }
 
   async function handleLoadDemo(id: DemoId | string) {
-    if (
-      matchingTabs.some((t) => t.hasUnsavedDecisions) &&
-      !window.confirm(
-        "Matching has unsaved decisions. Switch project anyway? Matching drafts will be lost.",
-      )
-    ) {
-      return;
-    }
-    try {
-      const ws = await loadDemoWorkspace(id);
-      const projectName = `demo_${id}`;
-      // Route presets for KeyMap labs (ADR-0014). PG labs need conn_postgres.
-      type Eng = "duckdb" | "postgres";
-      let engine: Eng =
-        appSettings.default_execution_engine ??
-        appSettings.default_target_dialect ??
-        "duckdb";
-      let destKind: Eng | null = null;
-      if (id === "keymap_pg" || id === "keymap_pg_dual") {
-        engine = "postgres";
-        destKind = "postgres";
-      } else if (id === "keymap_pg_seed" || id === "keymap_mixed") {
-        engine = "duckdb";
-        destKind = "postgres";
-      } else if (id === "keymap_parquet" || id === "mapping_quality") {
-        engine = "duckdb";
-        destKind = "duckdb";
-      }
-      setProject((p) =>
-        migrateProject({
-          ...p,
-          name: projectName,
-          // Keep global connections; demos only replace sources/workspace.
-          sources: syncSourcesFromQueries([], ws.queries),
-          workspace: ws,
-          canvas: { positions: {} },
-          dbt_target: appSettings.default_dbt_target,
-          execution_engine: engine,
-          target_dialect: engine,
-          mapping_checks:
-            id === "mapping_quality"
-              ? ensureLabCheck([])
-              : (p.mapping_checks ?? []),
-          mapping_check_runs:
-            id === "mapping_quality" ? [] : (p.mapping_check_runs ?? []),
-          ...(destKind
-            ? {
-                destination: {
-                  kind: destKind,
-                  connection_id:
-                    destKind === "postgres"
-                      ? (p.connections.find((c) => c.id === "conn_postgres")
-                          ?.id ??
-                        p.destination?.connection_id ??
-                        "conn_postgres")
-                      : p.destination?.connection_id,
-                  duckdb_path: p.destination?.duckdb_path,
-                },
-              }
-            : {}),
-        }),
-      );
-      if (id === "mapping_quality") {
-        lastCheckRunFingerprint.current = null;
-        setCheckDeltaNote(null);
-        setCheckAllowNote(null);
-        setFrozenRemap(null);
-      }
-      setKeyMapTabs([]);
-      setMatchingTabs([]);
+    await requestProjectReplacement(async () => {
+      const workspace = await loadDemoWorkspace(id);
+      const next = labProject(id, workspace, projectRef.current, appSettings);
+      if (id === "mapping_quality") next.mapping_checks = ensureLabCheck([]);
+      return next;
+    }, (next) => {
+      applyLoadedProject(next);
+      // A loaded lab is a new unsaved document, not a saved baseline.
+      savedProjectFingerprint.current = null;
       setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
-      setActiveQueryId(ws.focus_query_id);
-      setSelectedStepIndex(
-        ws.queries.find((q) => q.id === ws.focus_query_id)?.steps.length
-          ? (ws.queries.find((q) => q.id === ws.focus_query_id)!.steps.length -
-              1)
-          : null,
-      );
-      setError(null);
       setExportMsg(null);
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    }
+    });
   }
 
   function updateActiveSteps(
@@ -3275,16 +3207,12 @@ function App() {
     setError(null);
   }
 
-  const persistCanvasPositions = useMemo(
-    () =>
-      debounce((positions: CanvasPositions) => {
-        setProject((p) => ({
-          ...p,
-          canvas: { positions },
-        }));
-      }, 300),
-    [],
-  );
+  // GraphCanvas calls only on drag stop. Commit now so a subsequent Save/switch
+  // sees the move, and no old-project debounce can mutate the next project.
+  const persistCanvasPositions = useCallback((positions: CanvasPositions) => {
+    const owner = project.project_uid;
+    setProject((p) => p.project_uid === owner ? { ...p, canvas: { positions } } : p);
+  }, [project.project_uid]);
 
   function removeStepAt(index: number) {
     updateActiveSteps((steps) => {
@@ -3444,101 +3372,171 @@ function App() {
     };
   }
 
-  async function writeProjectTo(path: string) {
+  function documentFingerprint(p: Project) {
+    return projectFingerprint(projectWithoutEphemeralInspect(p));
+  }
+
+  function hasUnsavedEditorDrafts() {
+    return matchingTabsLiveRef.current.some((t) => t.hasUnsavedDecisions) ||
+      keyMapTabsLiveRef.current.some((t) => t.localDraft || dirtyDeltaHasChanges(t.dirtyDelta ?? null));
+  }
+
+  function replacementState() {
+    return {
+      token: `${projectRef.current.root_path ?? ""}:${documentFingerprint(projectRef.current)}`,
+      drafts: JSON.stringify([
+        keyMapTabsLiveRef.current.map((t) => [t.map, t.localDraft, t.dirtyDelta]),
+        matchingTabsLiveRef.current,
+      ]),
+      busy: projectSaveInFlight.current || mapWritesInFlight.current > 0 || confirmRemapInFlightRef.current ||
+        keyMapTabsLiveRef.current.some((t) => t.saveInFlight || t.saveApi?.isSaving()),
+    };
+  }
+
+  async function requestProjectReplacement(load: () => Promise<Project>, commit: (next: Project) => void) {
+    if (projectSwitchInFlight.current) return;
+    projectSwitchInFlight.current = true;
+    try {
+      await replaceProject({
+        read: replacementState,
+        dirty: () => hasUnsavedEditorDrafts() ||
+          savedProjectFingerprint.current !== documentFingerprint(projectRef.current),
+        choose: () => new Promise<SwitchDecision>((resolve) => {
+          setSwitchChoice(() => (decision: SwitchDecision) => {
+            setSwitchChoice(null);
+            resolve(decision);
+          });
+        }),
+        save: async () => {
+          if (hasUnsavedEditorDrafts()) {
+            setError("Save Mapping and Matching drafts in their editors first, then retry opening the project. The current project is still open.");
+            return false;
+          }
+          return handleSaveProject();
+        },
+        load,
+        commit,
+      });
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      projectSwitchInFlight.current = false;
+    }
+  }
+
+  async function openProjectPath(path: string, pruneFailedRecent = false) {
+    await requestProjectReplacement(async () => {
+      try {
+        return await loadProject(path, { remember: true });
+      } catch (e) {
+        // Keep ADR-0021 missing-recent pruning, but never prune on Cancel/Save failure.
+        if (pruneFailedRecent) {
+          await persistAppSettings({ ...appSettings,
+            recent_projects: (appSettings.recent_projects ?? []).filter((p) => p !== path),
+          }).catch(() => {});
+        }
+        throw e;
+      }
+    }, (loaded) => {
+      applyLoadedProject(loaded, path);
+      setExportMsg(`Opened ${path}`);
+      void rememberRecentProject(path).catch((e) => setError(String(e)));
+    });
+  }
+
+  async function writeProjectTo(path: string, snapshot = projectRef.current, comparisonSnapshot = snapshot): Promise<boolean> {
     try {
       const base =
         path
           .split(/[/\\]/)
           .pop()
           ?.replace(/\.dwhproj\.json$/i, "")
-          .replace(/\.json$/i, "") ?? project.name;
-      const persisted = projectWithoutEphemeralInspect(project);
+          .replace(/\.json$/i, "") ?? snapshot.name;
+      const persisted = projectWithoutEphemeralInspect(snapshot);
       const saved = await saveProject(path, {
         ...persisted,
         root_path: path,
         name: base,
       });
-      // Keep the live Inspect node in the session; only the file omits it.
-      // Apply Save-time path relativization (ADR-0043) from the host response.
-      setProject((p) => ({
-        ...p,
+      const savedState: Project = {
+        ...snapshot,
+        connections: projectRef.current.connections,
         root_path: path,
         name: base,
-        format_version: saved.format_version ?? p.format_version,
-        project_uid: saved.project_uid ?? p.project_uid,
-        sources: saved.sources ?? p.sources,
+        format_version: saved.format_version ?? snapshot.format_version,
+        project_uid: saved.project_uid ?? snapshot.project_uid,
+        sources: saved.sources ?? snapshot.sources,
         workspace: {
-          ...p.workspace,
-          queries: saved.workspace?.queries ?? p.workspace.queries,
-          key_maps: p.workspace.key_maps,
-          focus_query_id: p.workspace.focus_query_id,
+          ...snapshot.workspace,
+          queries: [
+            ...(saved.workspace?.queries ?? persisted.workspace.queries),
+            ...snapshot.workspace.queries.filter((q) => isQualityInspectionQuery(q.id)),
+          ],
         },
-        connections: p.connections,
-      }));
+      };
+      const unchanged = documentFingerprint(projectRef.current) === documentFingerprint(comparisonSnapshot);
+      // Record the bytes actually saved, not edits made while the write awaited IPC.
+      savedProjectFingerprint.current = documentFingerprint(savedState);
+      if (unchanged) {
+        projectRef.current = savedState;
+        setProject(savedState);
+      }
       setExportMsg(`Project saved → ${path}`);
-      setError(null);
-      await rememberRecentProject(path);
+      setError(unchanged ? null : "Project saved, but newer edits remain unsaved. The current project is still open.");
+      await rememberRecentProject(path).catch((e) => setError(String(e)));
+      return unchanged;
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
+      return false;
     }
   }
 
-  async function handleSaveProject() {
-    let path = project.root_path;
-    if (!path) {
-      const picked =
-        (await save({
-          defaultPath: `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+  async function handleSaveProject(): Promise<boolean> {
+    if (projectSaveInFlight.current) return false;
+    projectSaveInFlight.current = true;
+    try {
+      let path = projectRef.current.root_path;
+      if (!path) {
+        const picked = await save({
+          defaultPath: `${projectRef.current.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
           filters: [{ name: "DWH Project", extensions: ["json"] }],
-        })) ?? null;
-      if (typeof picked !== "string") return;
-      path = picked;
+        });
+        if (typeof picked !== "string") return false;
+        path = picked;
+      }
+      return await writeProjectTo(path);
+    } catch (e) {
+      setError(String(e));
+      return false;
+    } finally {
+      projectSaveInFlight.current = false;
     }
-    await writeProjectTo(path);
   }
 
   async function handleSaveProjectAs() {
-    const picked =
-      (await save({
-        defaultPath:
-          project.root_path?.split(/[/\\]/).pop() ??
-          `${project.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
-        filters: [{ name: "DWH Project", extensions: ["json"] }],
-      })) ?? null;
-    if (typeof picked !== "string") return;
-    // ADR-0025: a copy is a new identity; keep referencing the original possible.
-    const sameFile =
-      !!project.root_path &&
-      project.root_path.replace(/\\/g, "/").toLowerCase() ===
-        picked.replace(/\\/g, "/").toLowerCase();
-    const forked = sameFile
-      ? project
-      : { ...project, project_uid: crypto.randomUUID() };
+    if (projectSaveInFlight.current) return;
+    projectSaveInFlight.current = true;
     try {
-      const base =
-        picked
-          .split(/[/\\]/)
-          .pop()
-          ?.replace(/\.dwhproj\.json$/i, "")
-          .replace(/\.json$/i, "") ?? forked.name;
-      const persisted = projectWithoutEphemeralInspect(forked);
-      const saved = await saveProject(picked, {
-        ...persisted,
-        root_path: picked,
-        name: base,
+      const picked = await save({
+        defaultPath:
+          projectRef.current.root_path?.split(/[/\\]/).pop() ??
+          `${projectRef.current.name.replace(/\s+/g, "_") || "project"}.dwhproj.json`,
+        filters: [{ name: "DWH Project", extensions: ["json"] }],
       });
-      setProject((p) => ({
-        ...forked,
-        root_path: picked,
-        name: base,
-        project_uid: saved.project_uid ?? forked.project_uid,
-        connections: p.connections,
-      }));
-      setExportMsg(`Project saved → ${picked}`);
-      setError(null);
-      await rememberRecentProject(picked);
+      if (typeof picked !== "string") return;
+      const current = projectRef.current;
+      // ADR-0025: a copy is a new identity.
+      const normalize = (path: string) => {
+        const slashes = path.replace(/\\/g, "/");
+        return /^[A-Za-z]:\//.test(slashes) ? slashes.toLowerCase() : slashes;
+      };
+      const sameFile = current.root_path && normalize(current.root_path) === normalize(picked);
+      const forked = sameFile ? current : { ...current, project_uid: crypto.randomUUID() };
+      await writeProjectTo(picked, forked, current);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      setError(String(e));
+    } finally {
+      projectSaveInFlight.current = false;
     }
   }
 
@@ -3549,7 +3547,27 @@ function App() {
       sources: loaded.sources ?? [],
       root_path: loaded.root_path ?? pathHint,
     });
+    savedProjectFingerprint.current = documentFingerprint(withConnections);
+    projectRef.current = withConnections;
     setProject(withConnections);
+    setKeyMapTabs([]);
+    setMatchingTabs([]);
+    setSelectedKeyMapId(null);
+    setCenterTab("canvas");
+    const focused = withConnections.workspace.queries.find(
+      (q) => q.id === withConnections.workspace.focus_query_id,
+    );
+    setSelectedStepIndex(focused?.steps.length ? focused.steps.length - 1 : null);
+    nextRequestGen(previewReqGenRef.current);
+    setPreview(null);
+    setLoading(false);
+    setDiagView(null);
+    setJoinDiag(null);
+    setJoinDiagError(null);
+    setFrozenRemap(null);
+    setCheckDeltaNote(null);
+    setCheckAllowNote(null);
+    lastCheckRunFingerprint.current = null;
     setActiveQueryId(withConnections.workspace.focus_query_id || null);
     void refreshExportTree(withConnections.last_dbt_export_path);
     setError(null);
@@ -3562,7 +3580,7 @@ function App() {
       void syncKeyMapsFromExport(withConnections.workspace, exportPath)
         .then((synced) => {
           setProject((p) => {
-            if (p.last_dbt_export_path !== exportPath) return p;
+            if (p.project_uid !== withConnections.project_uid || p.last_dbt_export_path !== exportPath) return p;
             // Don't clobber maps the user deleted while sync was in flight.
             const stillPresent = new Set(
               (p.workspace.key_maps ?? []).map((m) => m.id),
@@ -3646,6 +3664,18 @@ function App() {
   }
 
   async function saveKeyMapToProject(
+    map: KeyMapDef,
+    opts?: Parameters<typeof saveKeyMapToProjectImpl>[1],
+  ): Promise<KeyMapSaveResult> {
+    mapWritesInFlight.current += 1;
+    try {
+      return await saveKeyMapToProjectImpl(map, opts);
+    } finally {
+      mapWritesInFlight.current -= 1;
+    }
+  }
+
+  async function saveKeyMapToProjectImpl(
     map: KeyMapDef,
     opts?: {
       /** When set (e.g. check Confirm), prefer this over editor capture/tab delta. */
@@ -4399,14 +4429,18 @@ function App() {
   }
 
   async function refreshExportTree(exportPath: string | undefined) {
+    const ownerUid = projectRef.current.project_uid;
     if (!exportPath) {
       setExportFiles([]);
       return;
     }
     try {
-      setExportFiles(await listExportTree(exportPath));
+      const files = await listExportTree(exportPath);
+      if (projectRef.current.project_uid === ownerUid && projectRef.current.last_dbt_export_path === exportPath) {
+        setExportFiles(files);
+      }
     } catch {
-      setExportFiles([]);
+      if (projectRef.current.project_uid === ownerUid) setExportFiles([]);
     }
   }
 
@@ -4416,14 +4450,7 @@ function App() {
       filters: [{ name: "DWH Project", extensions: ["json"] }],
     });
     if (typeof path !== "string") return;
-    try {
-      const loaded = await loadProject(path, { remember: true });
-      applyLoadedProject(loaded, path);
-      setExportMsg(`Opened ${path}`);
-      await rememberRecentProject(path);
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    }
+    await openProjectPath(path);
   }
 
   /**
@@ -4570,10 +4597,12 @@ function App() {
         // Missing/corrupt session — fall through to Untitled.
       }
       if (!cancelled && !restored) {
-        setProject({
+        const initial = {
           ...emptyProject("Untitled", settings),
           connections: globalConns,
-        });
+        };
+        savedProjectFingerprint.current = documentFingerprint(initial);
+        setProject(initial);
       }
       // ADR-0023: offer dbt setup when CLI missing and not dismissed.
       try {
@@ -4757,6 +4786,7 @@ function App() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (switchChoice) return;
       if (e.key === "Escape" && centerTab !== "canvas") {
         e.preventDefault();
         if (centerTab === QUALITY_TAB) openMappingQualityCanvas();
@@ -4813,7 +4843,7 @@ function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs]);
+  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs, switchChoice]);
 
   // Fix addCsvQuery focus race: simplify by combining into one setProject
   // (handlers above already mostly OK)
@@ -5159,6 +5189,8 @@ function App() {
 
   return (
     <div className="flex h-screen flex-col text-slate-100">
+      {switchChoice && <ProjectSwitchDialog name={project.name}
+        hasDrafts={hasUnsavedEditorDrafts()} onChoose={switchChoice} />}
       <AppMenu
         projectName={project.name}
         projectPath={project.root_path}

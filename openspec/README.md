@@ -20,6 +20,8 @@ openspec/
 
 Active changes:
 
+- [Safe Help Lab switch](changes/safe-help-lab-switch/proposal.md) — **implemented; contract merged** → [Help Lab](specs/help-lab/spec.md) ([ADR-0045](../docs/adr/0045-safe-help-lab-switch.md)). Save / Discard / Cancel and independent lab save identity; see [delivery report](changes/safe-help-lab-switch/report.md) for actual tests and broader-suite failures.
+
 - [`changes/matching-workspace/`](changes/matching-workspace/) — Matching tab (ADR-0044); **contract merged** → [`specs/matching-workspace/`](specs/matching-workspace/); see `changes/matching-workspace/report.md` for tested scope / Electron E2E gap
 
 - ~~[`changes/project-relative-load-paths/`](changes/project-relative-load-paths/)~~ — **merged** → [`specs/project-relative-load-paths/`](specs/project-relative-load-paths/) ([ADR-0043](../docs/adr/0043-project-relative-load-paths.md))

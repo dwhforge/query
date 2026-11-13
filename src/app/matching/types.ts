@@ -127,6 +127,8 @@ export type MatchingFinalDiffRow = {
 export type MatchingTabSession = {
   id: string;
   title: string;
+  /** In-process data origin; demo never authorizes a Mapping write. */
+  executionMode: "live" | "demo";
   targetMapId?: string;
   entry: "lens" | "mapping" | "query";
   scope: MatchingScopeKind;
@@ -175,6 +177,7 @@ export function mapKeyToken(parts: string[]): string {
 export function emptyMatchingSession(
   partial: Omit<
     MatchingTabSession,
+    | "executionMode"
     | "candidates"
     | "proposals"
     | "decisions"
@@ -192,6 +195,7 @@ export function emptyMatchingSession(
 ): MatchingTabSession {
   return {
     ...partial,
+    executionMode: "live",
     candidates: [],
     proposals: [],
     decisions: [],

@@ -106,6 +106,7 @@ import { JoinLens } from "./components/JoinLens";
 import { JoinKeyEditor } from "./components/JoinKeyEditor";
 import { KeyMapEditor } from "./components/KeyMapEditor";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
+import { createMatchingDemoSession } from "./app/matching/executionPolicy";
 import { buildLensMatchingPlan } from "./app/matching/planDefaults";
 import { matchingSaveRevision, persistMatchingSession } from "./app/matching/persistSave";
 import {
@@ -6351,6 +6352,11 @@ function App() {
                 >
                   <MatchingWorkspace
                     session={tab}
+                    onOpenDemo={() => {
+                      const demo = createMatchingDemoSession();
+                      setMatchingTabs((tabs) => [...tabs, demo]);
+                      setCenterTab(matchingTabKey(demo.id));
+                    }}
                     onChange={(next) =>
                       setMatchingTabs((tabs) =>
                         tabs.map((t) => (t.id === next.id ? next : t)),

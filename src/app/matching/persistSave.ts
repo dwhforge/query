@@ -3,6 +3,7 @@ import type { KeyMapDirtyDelta, KeyMapSaveResult } from "../../lib/bridge";
 import { fromColumnsEff, fromPartsEff, outputColumnsEff, outputValuesEff } from "../../lib/keyMap";
 import type { KeyMapDef, KeyMapEntry } from "../../types/pipeline";
 import { commitMatchingSession } from "./commitSave";
+import { matchingWriteRefusal } from "./executionPolicy";
 import { mapKeyToken, type MatchingTabSession } from "./types";
 
 export type MatchingSaveResult =
@@ -28,7 +29,7 @@ export type MatchingSaveDependencies = {
 /** Navigation/filter changes are allowed; decision/plan/evidence changes are not. */
 export function matchingSaveRevision(session: MatchingTabSession): string {
   return JSON.stringify([
-    session.id, session.targetMapId, session.generation, session.plan,
+    session.id, session.targetMapId, session.executionMode, session.generation, session.plan,
     session.proposals, session.candidates, session.decisions,
     session.explicitReplaceKeys, session.mapBaseline,
   ]);
@@ -90,6 +91,8 @@ export async function persistMatchingSession(
 ): Promise<MatchingSaveResult> {
   const refused = (message: string): MatchingSaveResult => ({ status: "refused", message });
   try {
+    const originRefusal = matchingWriteRefusal(session);
+    if (originRefusal) return refused(originRefusal);
     if (!session.targetMapId) return refused("Choose a target Mapping before saving.");
     const start = deps.context();
     const map = start.map;

@@ -69,6 +69,9 @@ function mapHostCandidate(
 }
 
 export function loadFixtureTrial(session: MatchingTabSession): MatchingTabSession {
+  if (session.executionMode !== "demo") {
+    throw new Error("Fixture trials require an explicitly selected Demo fixtures session.");
+  }
   // Offline fixture rows use provider/region — never keep a Lens plan whose
   // comparisons point at vendor_label/… or expand will match on region alone.
   const plan: MatchingPlanDraft = {
@@ -120,7 +123,7 @@ export function loadFixtureTrial(session: MatchingTabSession): MatchingTabSessio
   };
 }
 
-/** Live retrieve via host; falls back to fixtures on empty rows / host error. */
+/** Explicit demo or live retrieve. Rejections leave the caller's draft untouched. */
 export async function runMatchingTrial(
   session: MatchingTabSession,
   live?: {
@@ -135,53 +138,51 @@ export async function runMatchingTrial(
       outputValues: string[];
     }[];
   },
+  retrieve = matchingRetrieve,
 ): Promise<MatchingTabSession> {
-  if (!session.plan) return loadFixtureTrial(session);
+  if (session.executionMode === "demo") return loadFixtureTrial(session);
+  if (!session.plan) throw new Error("Live matching unavailable: confirm a plan first.");
   if (!live?.sourceRows.length || !live.targetRows.length) {
-    return loadFixtureTrial(session);
+    throw new Error("Live matching unavailable: source and target rows must both be non-empty. No fixture fallback was used.");
   }
-  try {
-    const out = await matchingRetrieve({
-      sessionId: session.id,
-      plan: planToWire(session.plan),
-      mode: "trial",
-      sourceRows: live.sourceRows,
-      targetRows: live.targetRows,
-      llmBudgetRemaining: MATCHING_CAPS.maxLlmCallsPerRun,
-      allowExpand: true,
-    });
-    const metrics: MatchingRunMetrics = {
-      mode: "trial",
-      keysRequested: out.metrics.keysRequested,
-      keysProcessed: out.metrics.keysProcessed,
-      keysUnprocessed: out.metrics.keysUnprocessed,
-      candidatesScored: out.metrics.candidatesScored,
-      llmCalls: out.metrics.llmCalls,
-      llmRetries: out.metrics.llmRetries,
-      durationMs: out.metrics.durationMs,
-      stopReason: (out.metrics.stopReason as MatchingRunMetrics["stopReason"]) ?? "complete",
-      caps: {
-        keyCap: out.metrics.keyCap,
-        shortlistPerKey: out.metrics.shortlistPerKey,
-        llmPerKey: out.metrics.llmPerKey,
-        maxLlmCalls: out.metrics.maxLlmCalls,
-        localUniverse: out.metrics.localUniverse,
-      },
-    };
-    const proposals = out.proposals.map(mapHostProposal);
-    return {
-      ...session,
-      candidates: out.candidates.map(mapHostCandidate),
-      proposals,
-      decisions: [],
-      runMetrics: metrics,
-      selectedProposalId: proposals[0]?.proposalId ?? null,
-      pageIndex: 0,
-      reviewFilter: "needs_decision",
-      chatCollapsed: true,
-      generation: session.generation + 1,
-    };
-  } catch {
-    return loadFixtureTrial(session);
-  }
+  const out = await retrieve({
+    sessionId: session.id,
+    plan: planToWire(session.plan),
+    mode: "trial",
+    sourceRows: live.sourceRows,
+    targetRows: live.targetRows,
+    llmBudgetRemaining: MATCHING_CAPS.maxLlmCallsPerRun,
+    allowExpand: true,
+  });
+  const metrics: MatchingRunMetrics = {
+    mode: "trial",
+    keysRequested: out.metrics.keysRequested,
+    keysProcessed: out.metrics.keysProcessed,
+    keysUnprocessed: out.metrics.keysUnprocessed,
+    candidatesScored: out.metrics.candidatesScored,
+    llmCalls: out.metrics.llmCalls,
+    llmRetries: out.metrics.llmRetries,
+    durationMs: out.metrics.durationMs,
+    stopReason: (out.metrics.stopReason as MatchingRunMetrics["stopReason"]) ?? "complete",
+    caps: {
+      keyCap: out.metrics.keyCap,
+      shortlistPerKey: out.metrics.shortlistPerKey,
+      llmPerKey: out.metrics.llmPerKey,
+      maxLlmCalls: out.metrics.maxLlmCalls,
+      localUniverse: out.metrics.localUniverse,
+    },
+  };
+  const proposals = out.proposals.map(mapHostProposal);
+  return {
+    ...session,
+    candidates: out.candidates.map(mapHostCandidate),
+    proposals,
+    decisions: [],
+    runMetrics: metrics,
+    selectedProposalId: proposals[0]?.proposalId ?? null,
+    pageIndex: 0,
+    reviewFilter: "needs_decision",
+    chatCollapsed: true,
+    generation: session.generation + 1,
+  };
 }

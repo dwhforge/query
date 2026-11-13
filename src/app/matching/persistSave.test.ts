@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import type { KeyMapDef, KeyMapEntry } from "../../types/pipeline";
 import type { KeyMapSaveResult } from "../../lib/bridge";
-import { FIXTURE_CANDIDATES, FIXTURE_PLAN, fixtureProposals } from "./fixtures";
 import { applyDecision, buildFinalDiff, summarizeFinalDiff } from "./reviewLogic";
 import { emptyMatchingSession, mapKeyToken, type MatchingTabSession } from "./types";
 import { classifyMatchingWrite, matchingSaveRevision, persistMatchingSession,
@@ -9,9 +8,18 @@ import { classifyMatchingWrite, matchingSaveRevision, persistMatchingSession,
 
 function draft() {
   const s = emptyMatchingSession({ id: "s1", targetMapId: "map", title: "Matching",
-    entry: "mapping", scope: "cohort", instructionText: "", plan: FIXTURE_PLAN,
+    entry: "mapping", scope: "cohort", instructionText: "Synthetic save evidence", plan: {
+      sourceRef: "test_source", targetRef: "test_target", mapKeyFields: ["provider", "region"],
+      targetIdentityFields: ["id"], comparisons: [], normalization: ["trim"], outputs: ["id"],
+      ambiguity: "leave_for_manual", scope: "cohort", semanticRevision: 1, uiRevision: 0,
+    },
     hasUnsavedDecisions: false, chatCollapsed: true });
-  return applyDecision({ ...s, candidates: FIXTURE_CANDIDATES, proposals: fixtureProposals(1) },
+  return applyDecision({ ...s, candidates: [{ candidateId: "cand:2", targetId: "2",
+    outputValues: ["2"], fields: { id: "2" }, evidenceRevision: 1 }], proposals: [{
+    proposalId: "prop:a1-eurpope", mapKey: ["a1", "Eurpope"], sourceValues: { provider: "a1", region: "Eurpope" },
+    affectedSourceRows: 1, proposedCandidateId: "cand:2", alternativeCandidateIds: [], state: "proposed",
+    provenance: "manual", semanticPlanRevision: 1, evidenceRevision: 1, searchIncomplete: false, evidence: [],
+  }] },
     "prop:a1-eurpope", "choose_alternative", "cand:2");
 }
 
@@ -69,7 +77,7 @@ assert.equal(classifyMatchingWrite({ local: "saved", external: "skipped", messag
 assert.equal(classifyMatchingWrite({ local: "saved", external: "skipped", message: "refused" },
   { kind: "source", externalSeed: false }), "refused");
 
-for (const missing of ["id", "map", "refusal", "query", "ref", "shape", "stale_session"] as const) {
+for (const missing of ["id", "map", "refusal", "query", "ref", "shape", "stale_session", "demo", "fixture"] as const) {
   const h = harness();
   if (missing === "id") h.session = { ...h.session, targetMapId: undefined };
   if (missing === "map") h.context = { ...h.context, map: undefined };
@@ -78,6 +86,12 @@ for (const missing of ["id", "map", "refusal", "query", "ref", "shape", "stale_s
   if (missing === "ref") h.context.map!.storage = { kind: "ref", model: "m" };
   if (missing === "shape") h.context.map!.output_columns = ["other", "extra"];
   if (missing === "stale_session") h.current = false;
+  if (missing === "demo") h.session = { ...h.session, executionMode: "demo" };
+  if (missing === "fixture") h.session = { ...h.session, proposals: h.session.proposals.map((p) => ({ ...p, provenance: "fixture" })) };
+  if (missing === "demo" || missing === "fixture") {
+    h.deps.context = () => { throw new Error("Must refuse before reading context"); };
+    h.deps.plan = async () => { throw new Error("Must refuse before host planning"); };
+  }
   const result = await persistMatchingSession(h.session, h.deps);
   assert.equal(result.status, "refused", missing);
   assert.equal(h.writes, 0);
@@ -209,5 +223,6 @@ for (const phase of ["read_error", "cancel", "planning_edit", "late_decision", "
   const s = draft();
   assert.equal(matchingSaveRevision(s), matchingSaveRevision({ ...s, pageIndex: 2, reviewFilter: "all" }));
   assert.notEqual(matchingSaveRevision(s), matchingSaveRevision({ ...s, decisions: [] }));
+  assert.notEqual(matchingSaveRevision(s), matchingSaveRevision({ ...s, executionMode: "demo" }));
 }
 console.log("matching persistence acknowledgement tests ok");

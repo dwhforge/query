@@ -33,6 +33,7 @@ import {
   widenAllowlistWithLlmAliases,
 } from "../app/matching/semanticExpand";
 import { loadFixtureTrial } from "../app/matching/runTrial";
+import { LIVE_TRIAL_UNAVAILABLE, matchingWriteRefusal } from "../app/matching/executionPolicy";
 import type { MatchingSaveResult } from "../app/matching/persistSave";
 import type {
   MatchingFieldRole,
@@ -46,6 +47,7 @@ type Props = {
   session: MatchingTabSession;
   onChange: (next: MatchingTabSession) => void;
   onOpenLens?: () => void;
+  onOpenDemo?: () => void;
   /** Persist upserts into the bound Mapping via existing Save path. */
   onSaveToMap?: (args: {
     session: MatchingTabSession;
@@ -152,7 +154,12 @@ function emptyPlan(session: MatchingTabSession): MatchingPlanDraft {
       scope: session.scope,
     });
   }
-  return { ...FIXTURE_PLAN, scope: session.scope };
+  if (session.executionMode === "demo") return { ...FIXTURE_PLAN, scope: session.scope };
+  return {
+    sourceRef: "", targetRef: "", mapKeyFields: [], targetIdentityFields: [],
+    comparisons: [], normalization: ["trim", "lower"], outputs: [],
+    ambiguity: "leave_for_manual", scope: session.scope, semanticRevision: 1, uiRevision: 0,
+  };
 }
 
 function FieldSelect({
@@ -298,6 +305,7 @@ export function MatchingWorkspace({
   session,
   onChange,
   onOpenLens,
+  onOpenDemo,
   onSaveToMap,
   writeAllowed = true,
   writeRefusalReason = null,
@@ -319,6 +327,8 @@ export function MatchingWorkspace({
   const [showSavedContext, setShowSavedContext] = useState(true);
 
   const plan = emptyPlan(session);
+  const isDemo = session.executionMode === "demo";
+  const originRefusal = matchingWriteRefusal(session);
   const blockers = useMemo(() => planBlockers(plan), [plan]);
   const sourceCols = session.lensCtx?.sourceColumns ?? [];
   const targetCols = session.lensCtx?.targetColumns ?? [];
@@ -409,6 +419,11 @@ export function MatchingWorkspace({
   }
 
   function applyPlanAndTrial() {
+    if (!isDemo) {
+      setError(LIVE_TRIAL_UNAVAILABLE);
+      setCommitMsg(null);
+      return;
+    }
     if (blockers.length) return;
     setError(null);
     const withPlan = { ...session, plan: { ...plan, scope: session.scope } };
@@ -571,8 +586,8 @@ export function MatchingWorkspace({
     setError(null);
     setCommitMsg(null);
     try {
-      if (!writeAllowed || !onSaveToMap) {
-        setError(writeRefusalReason ?? "Mapping Save is unavailable. Confirmed decisions remain in draft.");
+      if (originRefusal || !writeAllowed || !onSaveToMap) {
+        setError(originRefusal ?? writeRefusalReason ?? "Mapping Save is unavailable. Confirmed decisions remain in draft.");
         return;
       }
       const result = await onSaveToMap({ session });
@@ -617,9 +632,35 @@ export function MatchingWorkspace({
         role="status"
         data-testid="matching-session-banner"
       >
-        Suggestions here are temporary until you write them to the Mapping.
-        Restarting the app clears this draft. After writing to Mapping, save the
-        project file to keep local Mapping changes.
+        {isDemo ? (
+          "Demo decisions are temporary and cannot be written to a Mapping. Restarting the app clears this demo."
+        ) : (
+          <>
+            Suggestions here are temporary until you write them to the Mapping.
+            Restarting the app clears this draft. After writing to Mapping, save the
+            project file to keep local Mapping changes.
+          </>
+        )}
+      </div>
+
+      <div
+        role="status"
+        data-testid="matching-data-origin"
+        className="shrink-0 border-b border-amber-900/50 px-3 py-2 text-[11px] text-amber-100"
+      >
+        {isDemo
+          ? "Demo fixtures — sample data only, not your live query results. Writing to Mapping is blocked. The trial uses the fixed provider/region example."
+          : LIVE_TRIAL_UNAVAILABLE}
+        {!isDemo && onOpenDemo && (
+          <button
+            type="button"
+            data-testid="matching-open-demo"
+            onClick={onOpenDemo}
+            className="ml-2 rounded border border-amber-600/70 px-2 py-1"
+          >
+            Demo fixtures
+          </button>
+        )}
       </div>
 
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 px-3 py-2">
@@ -634,7 +675,7 @@ export function MatchingWorkspace({
           keys · {counters.confirmed} marked to save
         </span>
         <div className="ml-auto flex gap-2">
-          {onOpenLens && (
+          {!isDemo && onOpenLens && (
             <button
               type="button"
               onClick={onOpenLens}
@@ -836,11 +877,11 @@ export function MatchingWorkspace({
               <button
                 type="button"
                 data-testid="matching-apply-plan"
-                disabled={blockers.length > 0 || busy}
+                disabled={(isDemo && blockers.length > 0) || busy}
                 onClick={applyPlanAndTrial}
                 className="rounded border border-amber-600/70 bg-amber-500/15 px-3 py-1.5 text-[12px] font-medium text-amber-50 disabled:opacity-40"
               >
-                1. Find matches
+                {isDemo ? "1. Run demo fixtures" : "1. Find matches"}
               </button>
               <button
                 type="button"
@@ -1299,7 +1340,7 @@ export function MatchingWorkspace({
                       }
                       className="rounded border border-slate-600 px-2 py-0.5 text-slate-200 disabled:opacity-40"
                     >
-                      Mark {bulkPreview.keyCount} to save
+                      Mark {bulkPreview.keyCount} {isDemo ? "in demo" : "to save"}
                     </button>
                     <button
                       type="button"
@@ -1316,7 +1357,7 @@ export function MatchingWorkspace({
                       onClick={() => setShowFinal((v) => !v)}
                       className="rounded border border-teal-800/60 px-2 py-1 text-[11px] text-teal-100"
                     >
-                      {showFinal ? "Hide" : "Show"} what will be written
+                      {showFinal ? "Hide" : "Show"} {isDemo ? "demo decisions (no writes)" : "what will be written"}
                     </button>
                     <span className="text-[10px] text-slate-500">
                       New {finalSum.adds} · change {finalSum.changes} · still
@@ -1325,11 +1366,12 @@ export function MatchingWorkspace({
                     <button
                       type="button"
                       data-testid="matching-save"
-                      disabled={busy || !session.hasUnsavedDecisions}
+                      disabled={busy || !!originRefusal || !session.hasUnsavedDecisions}
+                      title={originRefusal ?? undefined}
                       onClick={() => void onCommit()}
                       className="ml-auto rounded border border-amber-600/70 bg-amber-500/15 px-3 py-1 text-[12px] font-medium text-amber-50 disabled:opacity-40"
                     >
-                      {busy
+                      {isDemo ? "Demo — writing blocked" : busy
                         ? "Saving…"
                         : `Write ${session.decisions.filter((d) => d.kind === "confirm_proposed" || d.kind === "choose_alternative").length} to Mapping`}
                     </button>

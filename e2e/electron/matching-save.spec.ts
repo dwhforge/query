@@ -2,9 +2,18 @@ import { test, expect } from "@playwright/test";
 import path from "node:path";
 import fs from "node:fs";
 import { launchIsolatedSession, closeIsolatedSession } from "./helpers/launch.mjs";
-import { FIXTURE_PLAN, FIXTURE_CANDIDATES, fixtureProposals } from "../../src/app/matching/fixtures";
 import { applyDecision } from "../../src/app/matching/reviewLogic";
-import { emptyMatchingSession } from "../../src/app/matching/types";
+import { emptyMatchingSession, type MatchingPlanDraft } from "../../src/app/matching/types";
+
+// Synthetic live evidence for persistence tests ONLY. Not production demo output,
+// not a demo-policy bypass, and not evidence that live retrieval has run.
+const SAVE_TEST_PLAN: MatchingPlanDraft = {
+  sourceRef: "save_test_source", targetRef: "save_test_target",
+  mapKeyFields: ["provider", "region"], targetIdentityFields: ["id"],
+  comparisons: [{ sourceField: "provider", targetField: "name", role: "soft_signal" }],
+  normalization: ["trim"], outputs: ["id"], ambiguity: "leave_for_manual",
+  scope: "cohort", semanticRevision: 1, uiRevision: 0,
+};
 
 let appSession: Awaited<ReturnType<typeof launchIsolatedSession>>;
 test.beforeEach(async () => { appSession = await launchIsolatedSession(); });
@@ -26,12 +35,20 @@ test.afterEach(async () => {
 
 async function prepare(target: "present" | "missing" | "no_id" = "present", failSeed = false) {
   const { page, projectPath } = appSession;
-  const empty = emptyMatchingSession({ id: "save-fixture", title: "Matching: Save test fixture",
+  const empty = emptyMatchingSession({ id: "save-fixture", title: "Matching: Synthetic save test",
     targetMapId: target === "no_id" ? undefined : "save_test", entry: "mapping", scope: "cohort",
-    instructionText: "Explicit test fixture; no live retrieval", plan: FIXTURE_PLAN,
+    instructionText: "Injected synthetic live evidence; retrieval not exercised", plan: SAVE_TEST_PLAN,
     hasUnsavedDecisions: false, chatCollapsed: true });
-  const session = applyDecision({ ...empty, candidates: FIXTURE_CANDIDATES,
-    proposals: fixtureProposals(1) }, "prop:a1-eurpope", "choose_alternative", "cand:2");
+  const session = applyDecision({ ...empty, candidates: [{
+    candidateId: "cand:2", targetId: "2", outputValues: ["2"],
+    fields: { id: "2", name: "Synthetic save target" }, evidenceRevision: 1,
+  }], proposals: [{
+    proposalId: "prop:a1-eurpope", mapKey: ["a1", "Eurpope"],
+    sourceValues: { provider: "a1", region: "Eurpope" }, affectedSourceRows: 1,
+    proposedCandidateId: "cand:2", alternativeCandidateIds: [], state: "proposed",
+    provenance: "manual", semanticPlanRevision: 1, evidenceRevision: 1,
+    searchIncomplete: false, evidence: [{ field: "provider", note: "Synthetic E2E evidence; no live retrieval" }],
+  }] }, "prop:a1-eurpope", "choose_alternative", "cand:2");
   await page.evaluate(({ session, target, failSeed, projectPath }) => {
     const w = window as any;
     w.__dwhE2ePatchProject((p: any) => ({ ...p,
@@ -93,4 +110,57 @@ test("Matching acknowledges a real local save; project save/reopen retains exact
   const loaded = await page.evaluate(() => (window as any).__dwhE2eGetProject());
   expect(loaded.workspace.key_maps[0].entries).toHaveLength(1);
   expect(loaded.workspace.key_maps[0].entries[0].from_parts).toEqual(["a1", "Eurpope"]);
+});
+
+test("Live trial reports unavailable; explicit detached demo cannot write to the user's map", async () => {
+  const { page } = appSession;
+  await prepare();
+  const original = await currentDraft();
+  const active = () => page.locator('[aria-hidden="false"]').filter({ has: page.getByTestId("matching-data-origin") });
+  await expect(active().getByTestId("matching-data-origin")).toContainText("Live matching unavailable");
+  await active().getByTestId("matching-apply-plan").click();
+  expect(await currentDraft()).toEqual(original); // No fixture plan/results/metrics, no lost decision.
+  await expect(active().getByText(/Live matching unavailable:/)).toHaveCount(2); // Banner + attempted-run error.
+
+  await active().getByTestId("matching-open-demo").click();
+  await expect(active().getByTestId("matching-data-origin")).toContainText("sample data only");
+  const sessions = await page.evaluate(() => (window as any).__dwhE2eGetMatchingSessions());
+  expect(sessions).toHaveLength(2);
+  expect(sessions[0]).toEqual(original);
+  expect(sessions[1].executionMode).toBe("demo");
+  expect(sessions[1].targetMapId).toBeUndefined();
+  expect(sessions[1].lensCtx).toBeUndefined();
+  expect(sessions[1].proposals).toHaveLength(0); // Entry itself never auto-runs.
+  await active().getByTestId("matching-apply-plan").click();
+  await expect(active().getByTestId("matching-bulk-confirm")).toBeEnabled();
+  await active().getByTestId("matching-bulk-confirm").click();
+  await expect(active().getByTestId("matching-save")).toBeDisabled();
+  // Even a test-only attachment to a real map cannot authorize demo persistence.
+  await page.evaluate(() => {
+    const w = window as any;
+    const demo = w.__dwhE2eGetMatchingSessions().find((s: any) => s.executionMode === "demo");
+    w.__dwhE2eOpenMatchingSession({ ...demo, targetMapId: "save_test" });
+  });
+  await expect(active().getByTestId("matching-save")).toBeDisabled();
+  await expect(active().getByTestId("matching-data-origin")).toContainText("Writing to Mapping is blocked");
+  const project = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+  expect(project.workspace.key_maps[0].entries).toEqual([]);
+  const retained = await page.evaluate(() => (window as any).__dwhE2eGetMatchingSessions());
+  expect(retained[0]).toEqual(original);
+  expect(retained[1].hasUnsavedDecisions).toBe(true);
+});
+
+test("Fixture provenance in a live session does not authorize Mapping Save", async () => {
+  const { page } = appSession;
+  await prepare();
+  await page.evaluate(() => {
+    const w = window as any;
+    const s = w.__dwhE2eGetMatchingSessions()[0];
+    w.__dwhE2eOpenMatchingSession({ ...s,
+      proposals: s.proposals.map((p: any) => ({ ...p, provenance: "fixture" })) });
+  });
+  await expect(page.getByTestId("matching-save")).toBeDisabled();
+  expect((await currentDraft()).hasUnsavedDecisions).toBe(true);
+  const project = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+  expect(project.workspace.key_maps[0].entries).toEqual([]);
 });

@@ -20,6 +20,12 @@ openspec/
 
 Active changes:
 
+- [Matching demo/live separation](changes/matching-demo-live/proposal.md) — PR-00B;
+  explicit non-writing offline demo and truthful live-unavailable behavior;
+  requirements merged into [Matching workspace](specs/matching-workspace/spec.md)
+  under [ADR-0047](../docs/adr/0047-matching-demo-live-boundary.md);
+  [delivery evidence and limits](changes/matching-demo-live/report.md).
+
 - [Matching Save acknowledgement](changes/matching-save-ack/proposal.md) — PR-00A;
   explicit persistence outcomes and retryable drafts, with requirements merged
   into [Matching workspace](specs/matching-workspace/spec.md);

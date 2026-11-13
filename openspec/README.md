@@ -20,6 +20,10 @@ openspec/
 
 Active changes:
 
+- [Typed workspace tabs](changes/typed-workspace-tabs/proposal.md) — PR-01 complete;
+  [merged contract](specs/workspace-tabs/spec.md),
+  [delivery evidence and PR-02 notes](changes/typed-workspace-tabs/report.md).
+
 - [Matching demo/live separation](changes/matching-demo-live/proposal.md) — PR-00B;
   explicit non-writing offline demo and truthful live-unavailable behavior;
   requirements merged into [Matching workspace](specs/matching-workspace/spec.md)

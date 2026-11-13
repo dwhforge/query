@@ -81,7 +81,11 @@ import { AppMenu } from "./components/AppMenu";
 import { EmptyHero, type DemoId } from "./components/EmptyHero";
 import { HelpDialog } from "./components/HelpDialog";
 import { HelpLab } from "./components/HelpLab";
-import { HELP_LAB_TAB } from "./help/labCatalog";
+import {
+  QUERY_TAB, HELP_TAB, QUALITY_WORKSPACE_TAB, mappingTab, matchingTab,
+  tabKey, sameTab, initialTabs, openTab, activateTab, closeTab, resetProjectTabs,
+  type WorkspaceTab,
+} from "./app/workbench/tabs";
 import { OptionsDialog } from "./components/OptionsDialog";
 import { DbtSetupDialog } from "./components/DbtSetupDialog";
 import { ExplorerTree } from "./components/ExplorerTree";
@@ -118,7 +122,6 @@ import { MappingQualityOverview } from "./components/mapping-quality/MappingQual
 import { MappingCheckSetupDialog } from "./components/MappingCheckSetupDialog";
 import {
   QUALITY_INSPECTION,
-  QUALITY_TAB,
   isFullQualityJoin,
   isMappingQualityLab,
   isQualityInspectionQuery,
@@ -477,7 +480,7 @@ function App() {
     setInspectorCollapsedPersist(true);
     setJoinLensOn(true);
     setBottomTab("data");
-    setCenterTab("canvas");
+    setCenterTab(QUERY_TAB);
     maximizeBottomDock();
   }
 
@@ -499,7 +502,7 @@ function App() {
         setBottomTab("data");
       }
     }
-    setCenterTab("canvas");
+    setCenterTab(QUERY_TAB);
     setSelectedKeyMapId(null);
   }
 
@@ -677,7 +680,7 @@ function App() {
       setProject((p) => ({ ...p, mapping_checks: updated.mapping_checks }));
       setCheckDeltaNote(updated.note);
       setCheckSetup(null);
-      setCenterTab(QUALITY_TAB);
+      setCenterTab(QUALITY_WORKSPACE_TAB);
       setError(null);
       return;
     }
@@ -698,7 +701,7 @@ function App() {
     }
     setProject((p) => appendMappingCheck(p, created.check));
     setCheckSetup(null);
-    setCenterTab(QUALITY_TAB);
+    setCenterTab(QUALITY_WORKSPACE_TAB);
     setCheckDeltaNote(created.note);
     setError(null);
   }
@@ -825,7 +828,6 @@ function App() {
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
   /** ADR-0044 Matching workspace tabs (in-process draft only). */
   const [matchingTabs, setMatchingTabs] = useState<MatchingTabSession[]>([]);
-  const matchingTabKey = (id: string) => `matching:${id}`;
   const matchingDirty = matchingTabs.some((t) => t.hasUnsavedDecisions);
   const matchingTabsLiveRef = useRef(matchingTabs);
   matchingTabsLiveRef.current = matchingTabs;
@@ -853,15 +855,22 @@ function App() {
   const pendingConfirmOpIdRef = useRef<string | null>(null);
   const [mappingCreateOpen, setMappingCreateOpen] = useState(false);
   const pendingMappingCreateOpIdRef = useRef<string | null>(null);
-  /** Center workspace tab: canvas or open KeyMap id. */
-  const [centerTab, setCenterTab] = useState<"canvas" | string>("canvas");
+  /** Navigation identities only; document/session state remains above. */
+  const [workbenchTabs, setWorkbenchTabs] = useState(initialTabs);
+  const centerTab = workbenchTabs.active;
+  function setCenterTab(tab: WorkspaceTab) {
+    setWorkbenchTabs((state) => openTab(state, tab));
+  }
+  function activateCenterTab(tab: WorkspaceTab) {
+    setWorkbenchTabs((state) => activateTab(state, tab));
+  }
   /** True while the graph↔dock splitter is dragged — skip RO clamp (avoids RO loop). */
   const dockDraggingRef = useRef(false);
   const dockHeightRafRef = useRef(0);
   const stackClampRafRef = useRef(0);
 
   useEffect(() => {
-    if (centerTab !== "canvas") return;
+    if (centerTab.kind !== "query") return;
     const el = canvasDockStackRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const clampToStack = () => {
@@ -1199,7 +1208,7 @@ function App() {
     // Mapping quality overview owns preview while its tab is open (same preemptible lane).
     if (
       overlayOpen ||
-      centerTab !== "canvas" ||
+      centerTab.kind !== "query" ||
       !dataWorkspace
     ) {
       return;
@@ -1229,7 +1238,7 @@ function App() {
 
   // Free the preview lane when the quality overview takes over.
   useEffect(() => {
-    if (centerTab !== QUALITY_TAB) return;
+    if (centerTab.kind !== "quality") return;
     nextRequestGen(previewReqGenRef.current);
     setLoading(false);
     cancelHeavyQuery();
@@ -1269,8 +1278,8 @@ function App() {
   useEffect(() => {
     if (
       overlayOpen ||
-      centerTab === QUALITY_TAB ||
-      centerTab === HELP_LAB_TAB
+      centerTab.kind === "quality" ||
+      centerTab.kind === "help_lab"
     ) {
       return;
     }
@@ -1710,7 +1719,7 @@ function App() {
 
   const selectQuery = useCallback(
     (id: string) => {
-      setCenterTab("canvas");
+      setCenterTab(QUERY_TAB);
       setSelectedKeyMapId(null);
       setSelectedExternalKey(null);
       setActiveQueryId(id);
@@ -1952,7 +1961,7 @@ function App() {
     setActiveQueryId(null);
     setSelectedStepIndex(null);
     setSelectedKeyMapId(null);
-    setCenterTab("canvas");
+    setCenterTab(QUERY_TAB);
   }
 
   function useReferencedQuery(
@@ -2049,21 +2058,29 @@ function App() {
     }
   }
 
+  function acceptTabClose(tab: WorkspaceTab, dirty: boolean, message: string): boolean {
+    const result = closeTab(workbenchTabs, tab, { dirty });
+    if (result.status === "unchanged") return false;
+    if (result.status === "confirmation_required" && !window.confirm(message)) return false;
+    setWorkbenchTabs((state) => closeTab(state, tab, { discard: true }).state);
+    return true;
+  }
+
+  function closeMatchingTab(sessionId: string) {
+    const session = matchingTabsLiveRef.current.find((t) => t.id === sessionId);
+    if (!session || !acceptTabClose(matchingTab(sessionId), session.hasUnsavedDecisions,
+      "Matching has unsaved decisions. Close this tab? The draft will be lost.")) return;
+    setMatchingTabs((tabs) => tabs.filter((t) => t.id !== sessionId));
+  }
+
   /** Close map tab; if opened from Join Lens, restore Join + Lens No match. */
   function closeKeyMapTab(mapId: string, wsForJoin?: Workspace) {
     const closing = keyMapTabs.find((t) => t.map.id === mapId);
     const joinCtx = closing?.joinCtx;
-    setKeyMapTabs((tabs) => {
-      const idx = tabs.findIndex((t) => t.map.id === mapId);
-      const next = tabs.filter((t) => t.map.id !== mapId);
-      setCenterTab((cur) => {
-        if (cur !== mapId) return cur;
-        if (next.length === 0) return "canvas";
-        const fallback = next[Math.min(Math.max(idx, 0), next.length - 1)];
-        return fallback?.map.id ?? "canvas";
-      });
-      return next;
-    });
+    if (!closing || !acceptTabClose(mappingTab(mapId),
+      Boolean(closing.localDraft) || dirtyDeltaHasChanges(closing.dirtyDelta ?? null),
+      "Mapping has unsaved changes. Close this tab? The draft will be lost.")) return;
+    setKeyMapTabs((tabs) => tabs.filter((t) => t.map.id !== mapId));
     setSelectedKeyMapId((id) => (id === mapId ? null : id));
     if (!joinCtx) return;
     const ws = wsForJoin ?? project.workspace;
@@ -2138,7 +2155,7 @@ function App() {
     }));
     setFrozenRemap(null);
     setExportMsg(result.message);
-    setCenterTab(QUALITY_TAB);
+    setCenterTab(QUALITY_WORKSPACE_TAB);
     lastCheckRunFingerprint.current = null;
     void saveKeyMapToProject(result.nextMap, {
       dirtyDelta: result.dirtyDelta,
@@ -2757,7 +2774,7 @@ function App() {
       setLabTask(startLabTask(id, next.project_uid));
       // A loaded lab is a new unsaved document, not a saved baseline.
       savedProjectFingerprint.current = null;
-      setCenterTab(id === "mapping_quality" ? QUALITY_TAB : "canvas");
+      setCenterTab(id === "mapping_quality" ? QUALITY_WORKSPACE_TAB : QUERY_TAB);
       setExportMsg(null);
     });
   }
@@ -3631,7 +3648,7 @@ function App() {
     setKeyMapTabs([]);
     setMatchingTabs([]);
     setSelectedKeyMapId(null);
-    setCenterTab("canvas");
+    setWorkbenchTabs((state) => resetProjectTabs(state, true));
     const focused = withConnections.workspace.queries.find(
       (q) => q.id === withConnections.workspace.focus_query_id,
     );
@@ -3713,7 +3730,7 @@ function App() {
       next[i] = mergeKeyMapTabSession(tabs[i]!, normalized, opts);
       return next;
     });
-    setCenterTab(normalized.id);
+    setCenterTab(mappingTab(normalized.id));
     // Source-backed: KeyMapEditor loads paged rows (ADR-0022). Do not full-read here —
     // a late unbounded read would replace the page and drop dirty overlays.
     if (normalized.storage?.kind === "source") {
@@ -4581,6 +4598,8 @@ function App() {
           __dwhE2eGetProject?: () => Project;
           __dwhE2eOpenMatchingSession?: (session: MatchingTabSession) => void;
           __dwhE2eGetMatchingSessions?: () => MatchingTabSession[];
+          __dwhE2eOpenMapping?: (mapId: string) => void;
+          __dwhE2eGetMappingDrafts?: () => { map: KeyMapDef; dirty: boolean }[];
           __dwhE2eArmDescribeHold?: () => void;
           __dwhE2eReleaseDescribeHold?: () => void;
           __dwhE2eWaitDescribeStarted?: () => Promise<void>;
@@ -4597,9 +4616,16 @@ function App() {
         w.__dwhE2eGetProject = () => projectRef.current;
         w.__dwhE2eOpenMatchingSession = (session) => {
           setMatchingTabs((tabs) => [...tabs.filter((s) => s.id !== session.id), session]);
-          setCenterTab(`matching:${session.id}`);
+          setCenterTab(matchingTab(session.id));
         };
         w.__dwhE2eGetMatchingSessions = () => matchingTabsLiveRef.current;
+        w.__dwhE2eOpenMapping = (mapId) => {
+          const map = projectRef.current.workspace.key_maps?.find((m) => m.id === mapId);
+          if (map) openKeyMapEditor(map);
+        };
+        w.__dwhE2eGetMappingDrafts = () => keyMapTabsLiveRef.current.map((t) => ({
+          map: t.map, dirty: Boolean(t.localDraft) || dirtyDeltaHasChanges(t.dirtyDelta ?? null),
+        }));
         w.__dwhE2eSaveProject = async (path: string) => {
           const toSave = { ...projectRef.current, root_path: path };
           await saveProject(path, toSave);
@@ -4624,6 +4650,8 @@ function App() {
           delete w.__dwhE2eGetProject;
           delete w.__dwhE2eOpenMatchingSession;
           delete w.__dwhE2eGetMatchingSessions;
+          delete w.__dwhE2eOpenMapping;
+          delete w.__dwhE2eGetMappingDrafts;
           delete w.__dwhE2eArmDescribeHold;
           delete w.__dwhE2eReleaseDescribeHold;
           delete w.__dwhE2eWaitDescribeStarted;
@@ -4901,13 +4929,14 @@ function App() {
         dismissLabHints();
         return;
       }
-      if (e.key === "Escape" && centerTab !== "canvas") {
+      if (e.key === "Escape" && centerTab.kind !== "query") {
         e.preventDefault();
-        if (centerTab === QUALITY_TAB) openMappingQualityCanvas();
-        else if (centerTab === HELP_LAB_TAB) {
-          setCenterTab("canvas");
+        if (centerTab.kind === "quality") openMappingQualityCanvas();
+        else if (centerTab.kind === "help_lab") {
+          setCenterTab(QUERY_TAB);
           setSelectedKeyMapId(null);
-        } else closeKeyMapTab(centerTab);
+        } else if (centerTab.kind === "mapping") closeKeyMapTab(centerTab.mapId);
+        else if (centerTab.kind === "matching") closeMatchingTab(centerTab.sessionId);
         return;
       }
       const tag = (e.target as HTMLElement)?.tagName;
@@ -4927,8 +4956,8 @@ function App() {
         setShowPgPicker((v) => !v);
       } else if ((e.ctrlKey || e.metaKey) && k === "s") {
         e.preventDefault();
-        if (centerTab !== "canvas") {
-          const tab = keyMapTabs.find((t) => t.map.id === centerTab);
+        if (centerTab.kind !== "query") {
+          const tab = keyMapTabs.find((t) => centerTab.kind === "mapping" && t.map.id === centerTab.mapId);
           if (tab) {
             void saveKeyMapToProject(tab.map);
             return;
@@ -4957,7 +4986,7 @@ function App() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workspace, showPgPicker, project.name, project.dbt_target, centerTab, keyMapTabs, switchChoice, activeLabTask?.hints, activeLabTask?.completed]);
+  }, [workspace, showPgPicker, project.name, project.dbt_target, workbenchTabs, centerTab, keyMapTabs, matchingTabs, switchChoice, activeLabTask?.hints, activeLabTask?.completed]);
 
   // Fix addCsvQuery focus race: simplify by combining into one setProject
   // (handlers above already mostly OK)
@@ -5303,13 +5332,13 @@ function App() {
 
   const labPhase = reconHintPhase(activeLabTask, project.workspace, activeQueryId, selectedStepIndex);
   const labStartTarget = activeLabTask ? reconJoinTarget(project.workspace) : null;
-  const showJoinHint = centerTab === "canvas" && labPhase === "find_join" &&
+  const showJoinHint = centerTab.kind === "query" && labPhase === "find_join" &&
     activeQueryId === labStartTarget?.queryId && !inspectorCollapsed;
-  const showLensToggleHint = centerTab === "canvas" && labPhase === "open_no_match" &&
+  const showLensToggleHint = centerTab.kind === "query" && labPhase === "open_no_match" &&
     bottomTab === "data" && !!joinLensTarget && !diagView && !joinLensOn && bottomDockHeight > 80;
-  const showNoMatchHint = centerTab === "canvas" && labPhase === "open_no_match" &&
+  const showNoMatchHint = centerTab.kind === "query" && labPhase === "open_no_match" &&
     bottomTab === "data" && !!preview && !!joinLensTarget && !diagView && joinLensOn && !overlayOpen && bottomDockHeight > 120;
-  const showLabFallback = centerTab === "canvas" && (labPhase === "find_join" || labPhase === "open_no_match") &&
+  const showLabFallback = centerTab.kind === "query" && (labPhase === "find_join" || labPhase === "open_no_match") &&
     !showJoinHint && !showLensToggleHint && !showNoMatchHint;
 
   return (
@@ -5365,7 +5394,7 @@ function App() {
         }
         onLoadDemo={(id) => void handleLoadDemo(id)}
         onOpenHelpLab={() => {
-          setCenterTab(HELP_LAB_TAB);
+          setCenterTab(HELP_TAB);
           setSelectedKeyMapId(null);
         }}
         onOpenHelp={() => setHelpOpen(true)}
@@ -5784,7 +5813,7 @@ function App() {
           setShowPgImport(false);
           const focus = outcome.focus_query_id;
           if (focus) {
-            setCenterTab("canvas");
+            setCenterTab(QUERY_TAB);
             setActiveQueryId(focus);
             const query = outcome.project.workspace.queries.find(
               (q) => q.id === focus,
@@ -5862,10 +5891,10 @@ function App() {
         }}
       />
 
-      {empty && centerTab !== HELP_LAB_TAB ? (
+      {empty && centerTab.kind !== "help_lab" ? (
         <EmptyHero
           onOpenHelpLab={() => {
-            setCenterTab(HELP_LAB_TAB);
+            setCenterTab(HELP_TAB);
             setSelectedKeyMapId(null);
           }}
           onLoadDemo={(id) => void handleLoadDemo(id)}
@@ -5875,7 +5904,7 @@ function App() {
           onAddPostgres={() => openPgPicker("query")}
           onAddSqlModel={() => addSqlModelQuery()}
         />
-      ) : empty && centerTab === HELP_LAB_TAB ? (
+      ) : empty && centerTab.kind === "help_lab" ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div
             role="tablist"
@@ -5886,7 +5915,7 @@ function App() {
               type="button"
               role="tab"
               aria-selected={false}
-              onClick={() => setCenterTab("canvas")}
+              onClick={() => setCenterTab(QUERY_TAB)}
               className="shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 hover:bg-slate-900/50 hover:text-slate-300"
             >
               Pipeline canvas
@@ -6026,17 +6055,17 @@ function App() {
               <button
                 type="button"
                 role="tab"
-                aria-selected={centerTab === "canvas"}
+                aria-selected={centerTab.kind === "query"}
                 onClick={() => {
                   if (isMappingQualityLab(project.workspace)) {
                     openMappingQualityCanvas();
                   } else {
-                    setCenterTab("canvas");
+                    setCenterTab(QUERY_TAB);
                     setSelectedKeyMapId(null);
                   }
                 }}
                 className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] transition ${
-                  centerTab === "canvas"
+                  centerTab.kind === "query"
                     ? "bg-[#0a1520] text-teal-200"
                     : "text-slate-500 hover:bg-slate-900/50 hover:text-slate-300"
                 }`}
@@ -6046,13 +6075,13 @@ function App() {
               <button
                 type="button"
                 role="tab"
-                aria-selected={centerTab === HELP_LAB_TAB}
+                aria-selected={centerTab.kind === "help_lab"}
                 onClick={() => {
-                  setCenterTab(HELP_LAB_TAB);
+                  setCenterTab(HELP_TAB);
                   setSelectedKeyMapId(null);
                 }}
                 className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em] transition ${
-                  centerTab === HELP_LAB_TAB
+                  centerTab.kind === "help_lab"
                     ? "bg-[#0a1520] text-teal-200"
                     : "text-slate-500 hover:bg-slate-900/50 hover:text-slate-300"
                 }`}
@@ -6061,15 +6090,15 @@ function App() {
               </button>
               {(isMappingQualityLab(project.workspace) ||
                 (project.mapping_checks?.length ?? 0) > 0) && (
-                <button type="button" role="tab" aria-selected={centerTab === QUALITY_TAB}
-                  onClick={() => { setCenterTab(QUALITY_TAB); setSelectedKeyMapId(null); }}
-                  className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[12px] ${centerTab === QUALITY_TAB ? "bg-[#10251f] text-teal-100" : "text-slate-400 hover:text-teal-200"}`}>
+                <button type="button" role="tab" aria-selected={centerTab.kind === "quality"}
+                  onClick={() => { setCenterTab(QUALITY_WORKSPACE_TAB); setSelectedKeyMapId(null); }}
+                  className={`shrink-0 border-r border-[var(--line)] px-3 py-2 text-[12px] ${centerTab.kind === "quality" ? "bg-[#10251f] text-teal-100" : "text-slate-400 hover:text-teal-200"}`}>
                   ◈ Mapping quality
                 </button>
               )}
               {matchingTabs.map((tab) => {
-                const key = matchingTabKey(tab.id);
-                const on = centerTab === key;
+                const key = tabKey(matchingTab(tab.id));
+                const on = sameTab(centerTab, matchingTab(tab.id));
                 return (
                   <div
                     key={key}
@@ -6081,7 +6110,7 @@ function App() {
                       type="button"
                       role="tab"
                       aria-selected={on}
-                      onClick={() => setCenterTab(key)}
+                      onClick={() => activateCenterTab(matchingTab(tab.id))}
                       className={`max-w-[16rem] truncate px-3 py-2 text-left text-[12px] ${
                         on
                           ? "text-amber-100"
@@ -6096,18 +6125,7 @@ function App() {
                       aria-label={`Close ${tab.title}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (
-                          tab.hasUnsavedDecisions &&
-                          !window.confirm(
-                            "Matching has unsaved decisions. Close this tab? The draft will be lost.",
-                          )
-                        ) {
-                          return;
-                        }
-                        setMatchingTabs((tabs) =>
-                          tabs.filter((t) => t.id !== tab.id),
-                        );
-                        if (centerTab === key) setCenterTab("canvas");
+                        closeMatchingTab(tab.id);
                       }}
                       className={`px-1.5 text-[14px] leading-none ${
                         on
@@ -6121,10 +6139,10 @@ function App() {
                 );
               })}
               {keyMapTabs.map((tab) => {
-                const on = centerTab === tab.map.id;
+                const on = sameTab(centerTab, mappingTab(tab.map.id));
                 return (
                   <div
-                    key={tab.map.id}
+                    key={tabKey(mappingTab(tab.map.id))}
                     className={`group flex shrink-0 items-stretch border-r border-[var(--line)] ${
                       on ? "bg-[#0a1520]" : "hover:bg-slate-900/50"
                     }`}
@@ -6134,7 +6152,7 @@ function App() {
                       role="tab"
                       aria-selected={on}
                       onClick={() => {
-                        setCenterTab(tab.map.id);
+                        activateCenterTab(mappingTab(tab.map.id));
                         setSelectedKeyMapId(tab.map.id);
                       }}
                       className={`max-w-[14rem] truncate px-3 py-2 text-left text-[12px] ${
@@ -6166,7 +6184,7 @@ function App() {
               })}
             </div>
 
-            {activeLabTask && centerTab === "canvas" && (activeLabTask.visible ? (
+            {activeLabTask && centerTab.kind === "query" && (activeLabTask.visible ? (
               <LabTaskCard canStart={reconJoinTarget(project.workspace) !== null}
                 targets={reconComparisonTargets(project.workspace)} onNavigate={navigateReconView}
                 onStart={showReconLabStart}
@@ -6207,13 +6225,13 @@ function App() {
               </div>
             )}
 
-            {centerTab === HELP_LAB_TAB && (
+            {centerTab.kind === "help_lab" && (
               <div className="flex min-h-0 flex-1 flex-col">
                 <HelpLab onOpenLab={(id) => void handleLoadDemo(id)} />
               </div>
             )}
 
-            {centerTab === QUALITY_TAB &&
+            {centerTab.kind === "quality" &&
               (isMappingQualityLab(project.workspace) ||
                 (project.mapping_checks?.length ?? 0) > 0) && (
               <div className="flex min-h-0 flex-1 flex-col">
@@ -6342,8 +6360,8 @@ function App() {
               </div>
             )}
             {matchingTabs.map((tab) => {
-              const key = matchingTabKey(tab.id);
-              const on = centerTab === key;
+              const key = tabKey(matchingTab(tab.id));
+              const on = sameTab(centerTab, matchingTab(tab.id));
               return (
                 <div
                   key={key}
@@ -6355,7 +6373,7 @@ function App() {
                     onOpenDemo={() => {
                       const demo = createMatchingDemoSession();
                       setMatchingTabs((tabs) => [...tabs, demo]);
-                      setCenterTab(matchingTabKey(demo.id));
+                      setCenterTab(matchingTab(demo.id));
                     }}
                     onChange={(next) =>
                       setMatchingTabs((tabs) =>
@@ -6363,7 +6381,7 @@ function App() {
                       )
                     }
                     onOpenLens={() => {
-                      setCenterTab("canvas");
+                      setCenterTab(QUERY_TAB);
                       focusJoinLensLayout();
                     }}
                     writeAllowed={
@@ -6427,13 +6445,13 @@ function App() {
             })}
             {keyMapTabs.map((keyMapEditor) => (
               <div
-                key={keyMapEditor.map.id}
+                key={tabKey(mappingTab(keyMapEditor.map.id))}
                 className={
-                  centerTab === keyMapEditor.map.id
+                  sameTab(centerTab, mappingTab(keyMapEditor.map.id))
                     ? "flex min-h-0 flex-1 flex-col p-3"
                     : "hidden"
                 }
-                aria-hidden={centerTab !== keyMapEditor.map.id}
+                aria-hidden={!sameTab(centerTab, mappingTab(keyMapEditor.map.id))}
               >
                 <KeyMapEditor
                   map={keyMapEditor.map}
@@ -6582,7 +6600,7 @@ function App() {
                       chatCollapsed: false,
                     });
                     setMatchingTabs((tabs) => [...tabs, session]);
-                    setCenterTab(matchingTabKey(id));
+                    setCenterTab(matchingTab(id));
                   }}
                   onClose={() => closeKeyMapTab(keyMapEditor.map.id)}
                   importNotice={(() => {
@@ -6701,11 +6719,11 @@ function App() {
             <div
               ref={canvasDockStackRef}
               className={
-                centerTab === "canvas"
+                centerTab.kind === "query"
                   ? "flex min-h-0 flex-1 flex-col overflow-hidden"
                   : "hidden"
               }
-              aria-hidden={centerTab !== "canvas"}
+              aria-hidden={centerTab.kind !== "query"}
             >
             <div className="min-h-0 flex-1 overflow-hidden px-3 pb-1 pt-2">
               <GraphCanvas
@@ -7003,7 +7021,7 @@ function App() {
                         enabled={
                           joinLensOn &&
                           !overlayOpen &&
-                          centerTab === "canvas"
+                          centerTab.kind === "query"
                         }
                         workspace={project.workspace}
                         hostQueryId={joinLensTarget.hostQueryId}
@@ -7064,7 +7082,7 @@ function App() {
                             chatCollapsed: false,
                           });
                           setMatchingTabs((tabs) => [...tabs, session]);
-                          setCenterTab(matchingTabKey(id));
+                          setCenterTab(matchingTab(id));
                         }}
                       />
                     ) : preview ? (
@@ -7111,7 +7129,7 @@ function App() {
             </div>
           </section>
 
-          {centerTab !== QUALITY_TAB && <>
+          {centerTab.kind !== "quality" && <>
           <PanelResizeHandle
             collapsedRail={inspectorCollapsed}
             aria-label={

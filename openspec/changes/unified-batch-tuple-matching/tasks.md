@@ -18,6 +18,11 @@ handoff, not suites rerun by this documentation task.
 - [x] Update OpenSpec index and agent entry points.
 - [x] Parent review of decision, specs, design and evidence report.
 - [x] Parent final unit/type/build/browser/host/serial-engine/Electron validation.
+- [x] Review follow-up: one bounded batch prompt/schema and overall parser.
+- [x] Review follow-up: counted high-confidence draft acceptance and bulk undo.
+- [x] Review follow-up: exact-context commit receipt, persistent success summary and explicit refresh.
+- [x] Add multi-group, ambiguity/bulk, rerender-before-ack, ABA and real-data UI regressions.
+- [x] Final review follow-up unit/type/build/browser/Electron validation.
 - [ ] Separate follow-up: investigate parallel native SIGSEGV (disclosed limitation).
 
 Delivered behavior is merged and final validation is recorded. The unchecked

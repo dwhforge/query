@@ -38,11 +38,20 @@ ready. Fuzzy and model proposals are evidence, not user decisions.
    target, then accepts it in the draft or skips the record. Only **Write Mapping**
    commits accepted decisions. This supersedes ADR-0042 §3. Cancel/dismiss and
    unaccepted proposals do not change the project.
+   Review follow-up: an explicit counted **Accept high-confidence suggestions**
+   action may select/accept eligible untouched pending records in the draft only.
+   Reuse the Rust 0.88 cutoff and 0.03 ambiguity gap, checking every scored right
+   competitor (including below-cutoff candidates). Incomplete right coverage,
+   unknown scores, unsafe tuples, manual/user-touched decisions or competing LLM
+   alternatives exclude eligibility. Bulk undo is available; Write remains separate.
 4. **Fuzzy, manual, and optional LLM alternatives share the queue.** LLM remains
    available alongside fuzzy results and for pending records without fuzzy hits.
    Validate exact source and full target arrays against the allowlists actually
    sent. Deduplicate alternatives and retain provenance; later replies cannot
    replace accepted or skipped decisions. LLM never accepts or writes a Mapping.
+   Batch requests use one alignment, grouped source-specific allowlists, one
+   response schema and one overall parse. Multiple payloads are rejected as a
+   whole, never reduced to the first block. Single-source Suggest Right is unchanged.
 5. **Prepare privately; publish Mapping + Apply atomically.** Use existing
    [multi-output IR](0037-keymap-multi-output.md) and
    [ApplyPlan](0038-keymap-apply-operation.md), binding each output to its aligned
@@ -53,6 +62,11 @@ ready. Fuzzy and model proposals are evidence, not user decisions.
    not after preparation. Any failure leaves Mapping and graph unchanged; no
    editor tab is needed to finish. This is project-state atomicity, not a new
    warehouse transaction or an automatic project-file Save.
+   The acknowledged receipt identifies the exact resulting context, project
+   session, shifted Join index and applied count. Show a scoped success summary
+   across the batch's own context change; clear old decisions and retrieve again
+   only after **Refresh remaining review**. Never preserve stale actionable rows
+   through unrelated edits, project switches or ABA transitions.
 6. **Fail closed.** Reuse only a compatible static seed Mapping, or create one
    when eligible. An incompatible map already used by this Join blocks the batch;
    do not silently replace/reshape scalar, source, query, ref, or range maps.

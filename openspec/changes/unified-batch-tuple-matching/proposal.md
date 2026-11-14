@@ -28,10 +28,20 @@ implementation changes. Do not rewrite historical change documents.
 
 ## Status and review
 
+### Review follow-up
+
+Address three demonstrated review gaps without changing tuple identity, atomic
+Mapping/Apply, Rust scoring, Suggest Right or contextual Matching: replace repeated
+single-record LLM format instructions with one batch schema/parser; add explicit
+counted draft-only high-confidence acceptance and undo; acknowledge a successful
+write across its exact context transition with a scoped summary and deliberate
+remaining-review refresh. Unknown/ambiguous/incomplete candidate evidence remains
+ineligible for bulk acceptance, and unrelated context changes still invalidate.
+
 Implemented; this change records the delivered behavior retrospectively, not a
 claim that this new proposal preceded implementation. Review order is proposal
 → specs → [design](design.md) → [tasks](tasks.md).
 Contracts are merged into [merged specs](../../specs/unified-batch-tuple-matching/spec.md).
 [Report](report.md) separates supplied verified results, source-level evidence,
 known failures, and unverified integrations. Parent review/final validation is
-still pending; no comprehensive unrelated regression claim is made.
+recorded in the report; no comprehensive unrelated regression claim is made.

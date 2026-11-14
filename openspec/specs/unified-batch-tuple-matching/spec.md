@@ -37,6 +37,39 @@ project unchanged, and unaccepted decisions SHALL not affect SQL or persistence.
 - **WHEN** the user selects and accepts it
 - **THEN** the project remains unchanged until Write Mapping succeeds
 
+### Requirement: Explicit counted high-confidence draft acceptance
+
+An explicit **Accept high-confidence suggestions (N)** action MAY select and accept
+eligible records in the draft. Retrieval itself SHALL NOT select/accept/write.
+Eligibility SHALL require untouched pending/unselected records, safe complete
+tuples, fuzzy winner provenance, complete right coverage, all competitors scored,
+score at least 0.88 and a margin at least 0.03 over every competitor, including
+below-cutoff/hidden alternatives. Ties, unknown scores, truncated right retrieval,
+manual/user-touched decisions and conflicting LLM alternatives SHALL be excluded.
+The count SHALL reflect current eligibility. Bulk undo SHALL be available without
+overwriting intervening individual decisions. **Write Mapping** remains required.
+This is per-source spelling-similarity eligibility, not calibrated global confidence.
+
+#### Scenario: Accept a bounded set without applying it
+- **WHEN** the user explicitly accepts N eligible high-confidence suggestions
+- **THEN** only those draft decisions become accepted, with no project changes
+- **AND** the user can undo the bulk action or write the accepted batch separately
+
+### Requirement: One batch response format
+
+Batch prompts SHALL contain one ordered Join alignment, a bounded list of source
+groups with source-specific complete-target allowlists, and exactly one response
+schema for all groups. Parse the overall response once, retaining exact source,
+target, arity, nullable value, rationale and duplicate checks. Multiple structured
+payloads or oversized responses SHALL be rejected wholesale with feedback, not
+silently truncated or reduced to the first payload. Suggest Right remains unchanged.
+
+#### Scenario: Several source groups in one model response
+- **GIVEN** a prompt containing multiple source groups
+- **WHEN** one response contains valid allowed pairs for several groups
+- **THEN** all those proposals join the shared queue without automatic acceptance
+- **BUT** separate JSON payloads cause explicit rejection of the response
+
 ### Requirement: One bounded fuzzy/manual/LLM queue
 
 All alternatives SHALL identify real complete retrieved targets, never invented
@@ -76,6 +109,24 @@ Save SHALL remain the existing operations; this is not a warehouse transaction.
 - **GIVEN** a privately prepared Mapping + Apply
 - **WHEN** the project changes before the reducer receives the commit
 - **THEN** the newer project remains intact and the batch reports stale failure
+
+### Requirement: Acknowledged write and deliberate remaining review
+
+The commit receipt SHALL identify the exact resulting context, project session,
+actual Join index after Apply insertion and applied count. The Lens SHALL retain
+a success summary across only that acknowledged context transition, clear previous
+review decisions, and offer **Refresh remaining review** before fresh retrieval.
+Awaiting acknowledgement SHALL NOT expose stale actionable records. Intervening
+edits, project switches and switch-away/return (ABA) transitions SHALL invalidate
+old summaries/replies rather than resurrect them. Failed writes in an unchanged
+context SHALL preserve review decisions for correction/retry. Project Save remains
+separate from successful local publication.
+
+#### Scenario: Project rerenders before the commit callback resolves
+- **WHEN** Mapping and Apply change the workspace and shift the current Join index
+- **THEN** the acknowledged applied count remains visible without another search
+- **WHEN** the user refreshes remaining review
+- **THEN** a new bounded retrieval uses the updated context with fresh pending decisions
 
 ### Requirement: Compatible maps and dirty-state refusal
 

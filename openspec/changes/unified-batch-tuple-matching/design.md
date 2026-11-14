@@ -35,6 +35,23 @@ Normative behavior: [merged contract](../../specs/unified-batch-tuple-matching/s
 
 ## Freshness and privacy
 
+### Review follow-up implementation
+
+- The batch prompt is now purpose-built: one alignment, grouped complete-source
+  allowlists and one response schema. One parser validates all groups in a single
+  payload; multiple payloads are rejected rather than silently losing later ones.
+  The single-source Suggest Right prompt/parser are unchanged.
+- Explicit bulk draft acceptance reuses the Rust cutoff (0.88) and ambiguity gap
+  (0.03), but checks every scored competitor, including below-cutoff ones. It
+  excludes incomplete right coverage, unknown scores, unsafe values, competing LLM
+  alternatives and touched decisions. Counted bulk acceptance/undo never writes.
+- A local typed commit receipt carries the expected resulting context and Join
+  index. The wrapper can show success after the child remounts, but only across
+  the exact origin-to-committed-context transition. Project-session identity and
+  transition history reject ABA/intervening edits. The containing Lens survives
+  its own preview reset and Apply-induced index shift. Old decisions are cleared;
+  remaining retrieval requires an explicit refresh. Receipt tokens remain local.
+
 The [fingerprint](../../../src/lib/joinLensBatch.ts:12) is canonical serialized
 local definitions, not an opaque safe-to-log digest. It includes full workspace,
 Join identity, connections (including secrets), sources and project references.

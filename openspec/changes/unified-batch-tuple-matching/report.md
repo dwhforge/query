@@ -52,7 +52,49 @@ Older reports contain their own historical results, not additional runs here.
   its cleaned rows. Distinct exact keys that collide under the legacy trim-based
   readiness rules are blocked before publication, never merged or normalized.
 
-## New Electron source evidence
+## Review follow-up: batch format, explicit bulk acceptance and write acknowledgement
+
+The three review findings have been addressed:
+
+1. [Batch prompting](../../../src/lib/joinLensBatch.ts:138) no longer concatenates
+   single-record Suggest Right prompts. It emits one ordered Join alignment,
+   bounded source groups/allowlists and one response schema. The
+   [batch parser](../../../src/lib/joinLensBatch.ts:220) parses once and validates
+   all groups; multiple structured payloads and oversized responses are rejected
+   wholesale with feedback instead of importing only an initial block. Tuple
+   identity/type/arity, source-specific target allowlists and rationale checks
+   remain. Suggest Right's own prompt/parser remain unchanged.
+2. [Bulk eligibility](../../../src/lib/joinLensBatch.ts:76) uses Rust's existing
+   0.88 cutoff and 0.03 ambiguity gap, with every scored competitor checked,
+   including below-cutoff/hidden ones. Untouched pending/unselected records only;
+   complete right coverage, safe full tuples and fuzzy winner provenance are
+   required. Unknown scores, ambiguous/tied competitors, competing LLM proposals
+   and user-touched/manual decisions are excluded. The counted action and bulk
+   undo change draft decisions only, never project state. Write remains separate.
+3. A [local typed receipt](../../../src/lib/joinLensBatchCommit.ts) identifies the
+   exact acknowledged resulting context, project session, actual shifted Join
+   index and applied count. The wrapper shows a scoped success summary across its
+   own committed-context transition, clears old decisions and waits for explicit
+   Refresh remaining review. It does not preserve stale actionable rows or revive
+   summaries after intervening edits/project switches/ABA. The containing Lens
+   survives its own preview reset and Apply insertion. Atomic publication is unchanged.
+
+Follow-up verification: 47 unit files passed; TypeScript checking and production
+build passed; Find Matches browser coverage increased to 25 passing cases;
+Suggest Right browser coverage remained 13 passing cases. Final parent execution
+rebuilt the release Host/UI and passed both Electron suites together: 5 batch
+cases and 5 Suggest Right cases. Batch cases now verify real-score bulk acceptance
+and undo, a two-source loopback LLM response, persistent success summary, no automatic
+retrieval and explicit refresh of remaining records before execution/Save/cold reopen.
+Browser tests rerender the parent with changed workspace/Join index before resolving
+the commit promise and cover failure, edits, project ABA and oversized/multiple payloads.
+
+Rust scoring was not changed and native engine suites were not rerun for this
+follow-up. The previously recorded parallel native SIGSEGV remains unresolved;
+paid-model quality, external in-place data freshness and broader connector coverage
+are still not certified. Existing large-chunk/native build warnings remain.
+
+## Original Electron source evidence
 
 [join-batch-save suite](../../../e2e/electron/join-batch-save.spec.ts:34) creates
 temporary real left/right CSVs, with differing left/right field names and reverse

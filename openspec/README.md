@@ -1,5 +1,14 @@
 # OpenSpec
 
+Current batch decision: [ADR-0050](../docs/adr/0050-unified-batch-tuple-matching.md).
+~~[unified-batch-tuple-matching](changes/unified-batch-tuple-matching/)~~ —
+**implemented; contract merged** → [merged batch spec](specs/unified-batch-tuple-matching/spec.md).
+Find Matches supersedes the primary scalar/composite Auto UI and Quick match copy;
+explicit full-tuple decisions, atomic Mapping + Apply, local definition freshness.
+[Evidence report](changes/unified-batch-tuple-matching/report.md) records verified
+handoff results, the parallel native SIGSEGV, and unverified integrations. Parent
+review/final validation pending; Suggest Right and contextual Matching implementations unchanged.
+
 Spec-driven changes for DWHForge Query. Product decisions remain in `docs/` (DESIGN, ADR). OpenSpec tracks **behavior deltas** for a change before/while implementing.
 
 **Agents:** required workflow is in [`AGENTS.md`](../AGENTS.md) and [`.cursor/rules/adr-openspec.mdc`](../.cursor/rules/adr-openspec.mdc) (`alwaysApply`).

@@ -1,11 +1,15 @@
 # Spec Delta: matching-workspace
 
+Lens label amendment: [ADR-0050](../../../docs/adr/0050-unified-batch-tuple-matching.md)
+supersedes **Quick match** with **Find Matches** for the primary Lens batch UI.
+The contextual Matching implementation and the remaining contract are unchanged.
+
 ## ADDED Requirements
 
 ### Requirement: Lens Auto vs Matching UX boundary
 
-The product SHALL separate Join Lens **Quick match** (batch under current
-Lens fields and rules, no separate contextual plan — ADR-0042) from Matching
+The product SHALL separate Join Lens **Find Matches** (full ordered Join-tuple
+batch under current Lens fields, no separate contextual plan — ADR-0050) from Matching
 **Contextual matching** (multi-field task, constraints, alternatives,
 longer review). The split SHALL be by task complexity, not by whether an LLM is
 used. The product SHALL NOT present two identically labelled Auto/AI match
@@ -14,7 +18,7 @@ actions with different behaviour. Product UI copy SHALL be English.
 #### Scenario: Lens offers two distinct actions
 - **GIVEN** Join Lens on a Join with unmatched keys
 - **WHEN** the user views match actions
-- **THEN** **Quick match** is explained as using current Lens fields/rules
+- **THEN** **Find Matches** uses current ordered Join fields without a separate plan
 - **AND** **Contextual matching…** is explained as multi-field / conditions /
   alternatives and opens Matching
 

@@ -182,7 +182,8 @@ import {
 } from "./app/mappingCreate";
 import { MappingCreateWizard } from "./components/MappingCreateWizard";
 import { importWriteRefusal } from "./lib/pgImport";
-import { planTupleMapping } from "./app/keyMap/tupleMapping";
+import { planBatchTupleMapping, planTupleMapping } from "./app/keyMap/tupleMapping";
+import { batchContextFingerprint } from "./lib/joinLensBatch";
 import type { LensTupleMapping } from "./lib/joinLensConfirm";
 import {
   applyKeyMapOntoProject,
@@ -325,6 +326,7 @@ type ProjectBag = {
   /** Set by create_mapping; cleared after editor handoff. */
   mappingCreateResult: MappingCreateApplyResult | null;
   queryEditResult: { result: QueryEditResult; session: number } | null;
+  tupleBatchResult: { token: object; error: string | null } | null;
 };
 
 type ProjectBagAction =
@@ -335,6 +337,8 @@ type ProjectBagAction =
   | { type: "clear_confirm_remap_result" }
   | { type: "create_mapping"; intent: MappingCreateApplyIntent }
   | { type: "clear_mapping_create_result" }
+  | { type: "commit_tuple_batch"; expectedProject: Project; project: Project; token: object }
+  | { type: "clear_tuple_batch_result" }
   | { type: "edit_query"; edit: (editing: QueryEditingService) => QueryEditResult;
       ownerId: string; ownerUid: string | undefined; session: number }
   | { type: "clear_query_edit_result"; receipt: NonNullable<ProjectBag["queryEditResult"]> };
@@ -373,6 +377,15 @@ function projectBagReducer(
     }
     case "clear_mapping_create_result":
       return { ...state, mappingCreateResult: null };
+    case "commit_tuple_batch": {
+      // A prepared map + Apply is one transaction. Never replace queued edits.
+      const stale = state.project !== action.expectedProject;
+      return { ...state, project: stale ? state.project : action.project,
+        tupleBatchResult: { token: action.token, error: stale
+          ? "Project changed before the batch could be applied. Review Find Matches and try again." : null } };
+    }
+    case "clear_tuple_batch_result":
+      return { ...state, tupleBatchResult: null };
     case "edit_query": {
       if (state.project.id !== action.ownerId || state.project.project_uid !== action.ownerUid) return state;
       const result = action.edit(createQueryEditingService(state.project));
@@ -392,10 +405,18 @@ function App() {
     confirmRemapResult: null,
     mappingCreateResult: null,
     queryEditResult: null,
+    tupleBatchResult: null,
   });
   const project = projectBag.project;
   const projectRef = useRef(project);
   projectRef.current = project;
+  const pendingTupleBatchRef = useRef<{
+    token: object;
+    resolve: (error: string | null) => void;
+    map: KeyMapDef;
+    joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
+    count: number;
+  } | null>(null);
   const lifecycleRef = useRef<ProjectController | null>(null);
   const mapWritesInFlight = useRef(0);
   const [switchChoice, setSwitchChoice] = useState<((decision: SwitchDecision) => void) | null>(null);
@@ -1541,6 +1562,25 @@ function App() {
       }),
     );
   }
+
+  // Batch callbacks acknowledge the atomic reducer commit, not preparation.
+  useEffect(() => {
+    const receipt = projectBag.tupleBatchResult;
+    if (!receipt) return;
+    dispatchProject({ type: "clear_tuple_batch_result" });
+    const pending = pendingTupleBatchRef.current;
+    if (!pending || pending.token !== receipt.token) return;
+    pendingTupleBatchRef.current = null;
+    if (!receipt.error) {
+      patchKeyMapTab(pending.map.id, { map: pending.map, joinCtx: pending.joinCtx });
+      const index = resolveJoinStepFromCtx(projectBag.project.workspace, pending.joinCtx);
+      if (index != null) setSelectedStepIndex(index);
+      setExportMsg(`Applied ${pending.count} accepted tuple${pending.count === 1 ? "" : "s"} · ${pending.map.id}`);
+    }
+    // Resolve only after reducer acknowledgement, never inside a React updater.
+    pending.resolve(receipt.error);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- receipt owns this prepared transaction
+  }, [projectBag.tupleBatchResult]);
 
   // After apply_keymap commits into projectBag — close tab or show error (never
   // read apply outcome from impure setProject locals).
@@ -3235,6 +3275,42 @@ function App() {
     }
   }
 
+  async function handleAcceptTuplesFromLens(
+    selections: LensTupleMapping[],
+    contextFingerprint: string,
+  ): Promise<string | null> {
+    if (pendingTupleBatchRef.current) return "A tuple batch is already being applied. Wait for it to finish.";
+    const atStart = projectRef.current;
+    const target = joinLensTargetLiveRef.current;
+    if (!target) return "Join changed. Reopen Find Matches before applying a batch.";
+    if (frozenRemapLiveRef.current) return "Full tuple Mapping is unavailable in frozen Check remap. Open the live Join.";
+    const fingerprint = batchContextFingerprint(atStart.workspace, target.hostQueryId, target.joinStepIndex,
+      atStart.connections ?? [], atStart.sources ?? [], projectRefContext(atStart));
+    if (fingerprint !== contextFingerprint) return "Join context changed. Reopen Find Matches and review the batch again.";
+    const planned = planBatchTupleMapping(atStart.workspace, { ...target, probeSide: "left" }, selections);
+    if ("error" in planned) return planned.error;
+    const session = keyMapTabsLiveRef.current.find((tab) => tab.map.id === planned.map.id);
+    if (session?.localDraft || session?.saveInFlight || session?.saveApi?.isSaving()
+      || dirtyDeltaHasChanges(session?.dirtyDelta ?? null)) {
+      return "This Mapping has unsaved edits or a Save in progress. Save or discard those edits before applying a batch.";
+    }
+    // Prepare privately. Neither Mapping rows nor graph changes are published
+    // unless all output bindings resolve and the established Apply fold succeeds.
+    const withMap = upsertKeyMapIntoProject(atStart, planned.map);
+    const plan = resolveApplyPlan(planned.map, planned.joinCtx, "left", {
+      side: "left", bindings: planned.joinCtx.outputBindingsLeft!,
+    }, withMap.workspace);
+    if ("error" in plan) return plan.error;
+    const folded = applyKeyMapOntoProject(withMap, intentFromApplyPlan(plan));
+    if (folded.result.status !== "ok") return folded.result.reason || "Join changed. No batch changes were applied.";
+    const token = {};
+    return new Promise<string | null>((resolve) => {
+      pendingTupleBatchRef.current = { token, resolve, map: planned.map,
+        joinCtx: planned.joinCtx, count: selections.length };
+      dispatchProject({ type: "commit_tuple_batch", expectedProject: atStart, project: folded.project, token });
+    });
+  }
+
   function handleMapKeyFromLens(
     side: "left" | "right",
     fromValues: string[],
@@ -3912,6 +3988,8 @@ function App() {
       joinType: step.payload.join_type,
     };
   }, [activeQueryId, activeQuery, selectedStepIndex, project.workspace]);
+  const joinLensTargetLiveRef = useRef(joinLensTarget);
+  joinLensTargetLiveRef.current = joinLensTarget;
 
   /** Stable ProjectRef for JoinLens memo — fresh object every render breaks memo. */
   const joinLensProjectRef = useMemo(
@@ -5625,6 +5703,7 @@ function App() {
                         focusResultHint={lensFocusHint}
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
+                        onAcceptTuples={handleAcceptTuplesFromLens}
                         onPrepareBusy={(busy) => {
                           joinSession.onPrepareBusy(busy);
                           if (busy && contextIsCurrent(queryContext)) setOpProgress((cur) => cur?.kind === "quality" ? null : cur);

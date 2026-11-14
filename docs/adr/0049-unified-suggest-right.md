@@ -4,6 +4,13 @@
 
 Accepted — 2026-11-14.
 
+Later amendment, 2026-11-14: [ADR-0050](0050-unified-batch-tuple-matching.md)
+supersedes this ADR's promise to preserve legacy Auto's primary UI/options:
+**Find Matches** now uses full tuples for batch review. That promise described
+this change's scope, not a permanent restriction. Suggest Right implementation,
+its single-source contract, and legacy Rust scalar/composite command compatibility
+remain unchanged; the batch feature reuses the existing Rust tuple scorer.
+
 ## Context
 
 ADR-0024 introduced composite From tuples but legacy composite search scores one

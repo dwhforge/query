@@ -31,7 +31,9 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
-- `openspec/specs/matching-workspace/` — ADR-0044 Matching workspace (merged); change notes in `openspec/changes/matching-workspace/`; Lens **Quick match** ≠ Matching **Contextual matching**; English UI.
+- [Unified Batch Tuple Matching](openspec/specs/unified-batch-tuple-matching/spec.md) — [ADR-0050](docs/adr/0050-unified-batch-tuple-matching.md), implemented/merged; [report](openspec/changes/unified-batch-tuple-matching/report.md). **Find Matches** supersedes legacy Auto/Quick match primary batch UI, with explicit full-tuple decisions and atomic Mapping + Apply. Fingerprint is LOCAL-only definitions, not detection of external file/database content changed in place. Suggest Right and contextual Matching implementations unchanged.
+- [Unified Suggest Right](openspec/specs/unified-suggest-right/spec.md) — [ADR-0049](docs/adr/0049-unified-suggest-right.md), merged; single-source full-tuple review remains distinct from Find Matches batch.
+- `openspec/specs/matching-workspace/` — ADR-0044 Matching workspace (merged); change notes in `openspec/changes/matching-workspace/`; Lens **Find Matches** (ADR-0050; formerly Quick match) ≠ Matching **Contextual matching**; English UI.
 - `openspec/specs/project-relative-load-paths/` — ADR-0043 relative Load paths + path_kind (merged)
 - `openspec/specs/join-lens-in-place-confirm/` — ADR-0042 Join Lens in-place confirm (merged)
 - `openspec/specs/heavy-preview-sample/` — ADR-0041 heavy preview sample + Load full (merged)

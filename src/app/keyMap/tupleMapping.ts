@@ -1,9 +1,69 @@
 import type { KeyMapDef, Workspace } from "../../types/pipeline";
-import { emptyKeyMap, findApplyKeyMapIdForJoin, fromColumnsEff, outputColumnsEff, outputValuesEff } from "../../lib/keyMap";
+import { emptyKeyMap, findApplyKeyMapIdForJoin, fromColumnsEff, outputColumnsEff, outputValuesEff, validateKeyMapEntries } from "../../lib/keyMap";
 import { confirmTupleMapping, type LensTupleMapping } from "../../lib/joinLensConfirm";
 import { tupleIdentity } from "../../lib/joinLensTuple";
 import type { KeyMapJoinCtx } from "./types";
 import { resolveJoinStepFromCtx } from "./service";
+
+/**
+ * Pure, all-or-nothing batch preparation. Intermediate maps are private values,
+ * never project/editor updates. The caller must resolve/fold Apply before commit.
+ * Tuple identity is exact (including significant whitespace), not display text.
+ */
+export function planBatchTupleMapping(workspace: Workspace, ctx: KeyMapJoinCtx, selections: LensTupleMapping[]):
+  { map: KeyMapDef; joinCtx: KeyMapJoinCtx } | { error: string } {
+  if (!selections.length) return { error: "Select at least one complete tuple before applying a batch." };
+  const seen = new Set<string>();
+  for (const selection of selections) {
+    if (tupleIdentity(ctx.leftOn) !== tupleIdentity(selection.leftOn)
+      || tupleIdentity(ctx.rightOn) !== tupleIdentity(selection.rightOn)) {
+      return { error: "Join fields changed. Reopen Find Matches before applying a batch." };
+    }
+    const valid = confirmTupleMapping(selection.leftOn, selection.rightOn, selection.fromParts, selection.outputValues);
+    if ("error" in valid) return { error: `Source tuple ${tupleIdentity(selection.fromParts)}: ${valid.error}` };
+    const key = tupleIdentity(selection.fromParts);
+    if (seen.has(key)) return { error: `Batch contains duplicate From tuple ${key}. Select only one target for each full source tuple.` };
+    seen.add(key);
+  }
+  const preferredId = findApplyKeyMapIdForJoin(workspace, ctx);
+  const preferred = (workspace.key_maps ?? []).find((map) => map.id === preferredId);
+  const fromColumns = ctx.leftOn.map((column, i) => `from_${i + 1}_${column}`);
+  const outputColumns = ctx.rightOn.map((column, i) => `to_${i + 1}_${column}`);
+  if (preferredId && (!preferred || (preferred.storage?.kind ?? "seed") !== "seed"
+    || (preferred.time_mode ?? "none") !== "none"
+    || tupleIdentity(fromColumnsEff(preferred)) !== tupleIdentity(fromColumns)
+    || tupleIdentity(outputColumnsEff(preferred)) !== tupleIdentity(outputColumns))) {
+    return { error: "The Join already uses an incompatible Mapping. Review it before applying full tuples; no Mapping was changed." };
+  }
+  let staged = workspace;
+  let result: { map: KeyMapDef; joinCtx: KeyMapJoinCtx } | undefined;
+  for (const selection of selections) {
+    const planned = planTupleMapping(staged, ctx, selection);
+    if ("error" in planned) return { error: `Source tuple ${tupleIdentity(selection.fromParts)}: ${planned.error}` };
+    result = planned;
+    staged = { ...workspace, key_maps: [
+      ...(workspace.key_maps ?? []).filter((map) => map.id !== planned.map.id), planned.map,
+    ] };
+  }
+  // Validate the entire ready map, not just the rows touched by this batch.
+  // Do not use the editor's trim/clean routine: full tuples preserve exact bytes.
+  const ready = result!;
+  const mapKeys = new Set<string>();
+  for (const entry of ready.map.entries) {
+    const parts = entry.from_parts?.length ? entry.from_parts : [entry.from];
+    const key = tupleIdentity(parts);
+    if (mapKeys.has(key)) return { error: `Mapping contains duplicate From tuple ${key}. Resolve duplicates in Mapping first.` };
+    mapKeys.add(key);
+    const valid = confirmTupleMapping(ctx.leftOn, ctx.rightOn, parts, outputValuesEff(entry));
+    if ("error" in valid) return { error: `Mapping source tuple ${key} is not ready to Apply: ${valid.error}` };
+  }
+  // The existing KeyMap readiness contract also rejects keys that collide after
+  // trimming. Check representability, but NEVER publish its cleaned/trimmed rows:
+  // these selections retain exact tuple identity or the whole batch is blocked.
+  const readiness = validateKeyMapEntries(ready.map.entries, fromColumns.length, { outputArity: outputColumns.length });
+  if (!readiness.ok) return { error: `Mapping cannot represent this batch under the existing KeyMap validation rules: ${readiness.error}. No tuple values were normalized or written.` };
+  return ready;
+}
 
 /** Exact tuple handoff. Deliberately does not use the legacy scalar/trim fill. */
 export function planTupleMapping(workspace: Workspace, ctx: KeyMapJoinCtx, selection: LensTupleMapping):

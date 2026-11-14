@@ -4,6 +4,13 @@
 
 **Accepted** — OpenSpec merged under `openspec/specs/keymap-composite-*`
 
+Amended 2026-11-14 by [ADR-0050](0050-unified-batch-tuple-matching.md): §4's
+per-column/composite mode choice is superseded for the primary Join Lens batch
+surface by **Find Matches**, using all ordered Join pairs and explicit selection.
+Legacy Rust modes and existing manual scalar/composite Mapping workflows remain
+compatible. Tuple batch identity preserves significant whitespace exactly; the
+historical trimmed-key wording here is not an instruction to trim batch values.
+
 ## Context
 
 [ADR-0020](0020-join-key-mapping.md) KeyMaps are single-column `from → to`. That covers the common case (alias one entity key; other Join ON columns already align).

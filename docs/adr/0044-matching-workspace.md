@@ -7,6 +7,13 @@
 boundary, structured plan editor, numeric run caps, host-side trust boundary,
 session lifecycle gate, merge/bulk fixtures-first order.
 
+Amendment 2026-11-14: [ADR-0050](0050-unified-batch-tuple-matching.md) renames
+the primary Lens batch action from §2's **Quick match** to **Find Matches** and
+uses complete ordered Join tuples with explicit selection/no pre-acceptance.
+The contextual Matching workspace remains separate and its implementation,
+structured plan, caps, trust boundary and Save lifecycle are unchanged. The
+baseline caps below are historical, not the new batch UI/prompt limits.
+
 Baseline for this change: `60e68ee88a78316bf439260d2662c3065808ecd6`
 (`feature/matching`). Agents MUST re-verify descriptions against **current HEAD**
 before implementing; do not treat prior chat reviews as SoT over the tree.

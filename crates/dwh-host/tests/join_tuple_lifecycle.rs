@@ -110,9 +110,9 @@ fn assert_join(result: &Value, expected: &[Option<&str>]) {
     }
 }
 
-fn lifecycle(width: usize) {
+fn lifecycle(width: usize, batch: bool) {
     let root = TempRoot(std::env::temp_dir().join(format!(
-        "dwh-tuple-lifecycle-{}-{width}",
+        "dwh-tuple-lifecycle-{}-{width}-{batch}",
         std::process::id()
     )));
     fs::create_dir_all(&root.0).unwrap();
@@ -187,6 +187,24 @@ fn lifecycle(width: usize) {
         .iter()
         .any(|r| r["parts"] == json!(target)));
     assert_eq!(workspace, before, "Suggest is read-only");
+    if batch {
+        let all = host.rpc(
+            "join_key_fuzzy_suggest",
+            json!({"workspace": workspace,
+            "hostQueryId": "fact", "joinStepIndex": 1, "tuple": {}}),
+        );
+        let groups = all["tuple_report"]["sources"].as_array().unwrap();
+        assert_eq!(
+            groups.len(),
+            3,
+            "batch retrieval includes every unmatched context"
+        );
+        for parts in [&source, &us, &other] {
+            assert!(groups.iter().any(|g| g["source"]["parts"] == json!(parts)));
+        }
+        assert_eq!(workspace, before, "batch retrieval must remain read-only");
+        assert_join(&preview(&mut host, &workspace), &[None, None, None]);
+    }
     let from_columns: Vec<_> = left_on
         .iter()
         .enumerate()
@@ -201,7 +219,8 @@ fn lifecycle(width: usize) {
     workspace["key_maps"] = json!([{
         "id": "tuple_map", "name": "Join aliases fact", "from_column": from_columns[0], "from_columns": from_columns,
         "to_column": output_columns[0], "output_columns": output_columns, "storage": {"kind": "seed"},
-        "entries": [entry(&source, &target)]
+        "entries": if batch { vec![entry(&source, &target), entry(&other, &other_target)] }
+            else { vec![entry(&source, &target)] }
     }]);
     let bindings: Vec<_> = output_columns
         .iter()
@@ -211,12 +230,20 @@ fn lifecycle(width: usize) {
     workspace["queries"][0]["steps"].as_array_mut().unwrap().insert(1, json!({"type": "ApplyKeyMap", "payload": {
         "column": left_on[0], "columns": left_on, "output_bindings": bindings, "map_id": "tuple_map", "entries": []
     }}));
-    assert_join(&preview(&mut host, &workspace), &[Some("uk"), None, None]);
-    // A second full tuple can share its first two fields without overwriting the first.
-    workspace["key_maps"][0]["entries"]
-        .as_array_mut()
-        .unwrap()
-        .push(entry(&other, &other_target));
+    if !batch {
+        assert_join(&preview(&mut host, &workspace), &[Some("uk"), None, None]);
+        // A second full tuple can share its first two fields without overwriting the first.
+        workspace["key_maps"][0]["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(entry(&other, &other_target));
+    }
+    // Batch mode's first mutation contains both complete entries and one Apply.
+    assert_eq!(workspace["key_maps"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        workspace["queries"][0]["steps"].as_array().unwrap().len(),
+        3
+    );
     let mapped = preview(&mut host, &workspace);
     assert_join(&mapped, &[Some("uk"), None, Some("other")]);
     let project_path = root.0.join("saved.dwhproj.json");
@@ -277,21 +304,28 @@ fn lifecycle(width: usize) {
 
 #[test]
 fn one_key_save_reopen() {
-    lifecycle(1);
+    lifecycle(1, false);
 }
 #[test]
 fn two_key_save_reopen() {
-    lifecycle(2);
+    lifecycle(2, false);
 }
 #[test]
 fn three_key_save_reopen() {
-    lifecycle(3);
+    lifecycle(3, false);
 }
 #[test]
 fn four_key_save_reopen() {
-    lifecycle(4);
+    lifecycle(4, false);
 }
 #[test]
 fn five_key_save_reopen() {
-    lifecycle(5);
+    lifecycle(5, false);
+}
+
+#[test]
+fn batch_one_through_five_keys_execute_save_and_cold_reopen() {
+    for width in 1..=5 {
+        lifecycle(width, true);
+    }
 }

@@ -5,6 +5,14 @@
 **Accepted** (2026-11-07) — implemented; contract merged to
 `openspec/specs/join-lens-in-place-confirm/`.
 
+Amended 2026-11-14 by [ADR-0050](0050-unified-batch-tuple-matching.md): for the
+primary batch surface, **Find Matches** supersedes §3's pre-acceptance and §6's
+per-column/slot policy. All full-tuple proposals start pending/unselected; the
+user selects and accepts, then **Write Mapping** publishes Mapping + Apply
+atomically. §5's optional LLM remains in the same queue and may also rank pending
+sources with fuzzy candidates; it is not restricted to scalar leftovers.
+In-Lens staging, explicit final confirmation, and the fuzzy Join ON ban remain.
+
 ## Context
 
 Matching two sides (e.g. CSV `name1`/`id1` ↔ `name2`/`id2`) already has Join +

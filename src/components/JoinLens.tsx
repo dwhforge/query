@@ -527,6 +527,8 @@ export type JoinLensProps = {
       toLabels?: (string | null)[];
     },
   ) => void;
+  /** Atomic full-tuple Auto batch; null acknowledges commit, string explains refusal. */
+  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<string | null>;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
   onPrepareBusy?: (busy: boolean) => void;
   /** Run Join diagnostics (Probe lists unmatched samples). */
@@ -569,6 +571,7 @@ function JoinLensImpl({
   focusResultHint = null,
   onApplyNearMiss,
   onMapKey,
+  onAcceptTuples,
   onPrepareBusy,
   onRunDiagnostics,
   onModeChange,
@@ -2192,7 +2195,7 @@ function JoinLensImpl({
                 : "border-slate-700 text-slate-400 hover:border-amber-800/70 hover:text-amber-100"
             }`}
           >
-            Quick match
+            Find Matches
           </button>
           {onOpenMatching && (
             <button
@@ -2251,7 +2254,7 @@ function JoinLensImpl({
               <ol className="list-decimal space-y-1 pl-3.5">
                 <li>
                   <span className="font-semibold text-amber-200">
-                    Quick match
+                    Find Matches
                   </span>{" "}
                   — current Lens fields, one batch →{" "}
                   <span className="font-semibold text-amber-200">
@@ -2294,6 +2297,7 @@ function JoinLensImpl({
             connections={connections}
             sources={sources}
             projectRef={projectRef}
+            onAcceptTuples={onAcceptTuples}
             onAccept={
               onMapKey
                 ? (fromValues, toValues, opts) => {

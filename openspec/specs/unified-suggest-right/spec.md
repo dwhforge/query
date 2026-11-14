@@ -2,6 +2,11 @@
 
 Decision: [ADR-0049](../../../docs/adr/0049-unified-suggest-right.md).
 
+Later batch-only amendment: [ADR-0050](../../../docs/adr/0050-unified-batch-tuple-matching.md)
+replaces legacy Auto's primary UI with Find Matches. Suggest Right implementation
+and the single-source requirements below remain unchanged; preserving legacy
+command compatibility does not require preserving Auto's old mode picker.
+
 ## Ordered tuple semantics
 
 Suggest Right SHALL derive every ordered pair from the current Join's left/right
@@ -72,7 +77,8 @@ Confirmation SHALL store all source parts and all selected output values using
 existing KeyMap fields. Explicit output bindings SHALL align every output with
 the corresponding left Join column. Existing Apply review and validation SHALL
 remain authoritative; Join execution SHALL NOT be rewritten around Apply.
-Existing scalar mappings, Auto, and manual Mapping workflows SHALL remain valid.
+Existing scalar mappings, legacy Auto command compatibility, and manual Mapping
+workflows SHALL remain valid; the primary batch UI follows ADR-0050.
 Conflicting targets, duplicate From tuples, or unsaved editor changes SHALL NOT
 be silently overwritten. Cancel/close SHALL NOT mutate Mapping.
 

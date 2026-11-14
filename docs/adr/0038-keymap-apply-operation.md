@@ -8,6 +8,12 @@ OpenSpec: [`openspec/specs/keymap-apply-*`](../../openspec/specs/) (merged from 
 
 Builds on [ADR-0037](0037-keymap-multi-output.md) multi-output IR and [ADR-0036](0036-query-backed-keymap.md) full-set validation. Complements [ADR-0031](0031-execution-lifecycle.md) (session/cancel) without a job registry.
 
+Amendment 2026-11-14: [ADR-0050](0050-unified-batch-tuple-matching.md) prepares a
+complete tuple Mapping and resolves/folds this existing ApplyPlan privately,
+then publishes both with a guarded project reducer. It does not bypass map
+revision checks, runtime prepare/validate/execute, or external-content limits in
+§6. Project-state atomicity is not a new warehouse transaction.
+
 ## Context
 
 After ADR-0037, Apply correctness was restored with many corrective patches. Domain model (map vs Apply vs Join, query relation vs entries) is sound. Orchestration was not: bindings defaults, Join rewrite, and validation were decided again in Editor, `App.tsx`, helpers, emitter, and compile wrappers.

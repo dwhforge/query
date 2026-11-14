@@ -6,6 +6,11 @@
 
 OpenSpec before implementation: `openspec/changes/keymap-multi-output/`.
 
+Amendment 2026-11-14: [ADR-0050](0050-unified-batch-tuple-matching.md) uses this
+multi-output IR for full-tuple Find Matches and publishes Mapping + Apply in one
+guarded project commit. Its conservative NULL/empty/whitespace-only authoring
+gate does not change §5's stored-value semantics or execution uniqueness rules.
+
 Extends the v1 deferral in [ADR-0024](0024-keymap-composite.md) §5 and the out-of-scope line in [ADR-0028](0028-keymap-stewardship-shapes.md). Does not rewrite those ADRs. Does not lift [ADR-0036](0036-query-backed-keymap.md) bans on query-backed attrs and range SCD.
 
 ## Context

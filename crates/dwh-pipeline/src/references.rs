@@ -2045,7 +2045,10 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "q_products".into(),
             name: "products".into(),
-            steps: vec![TransformationStep::LoadCsv { path: "data/products.csv".into(), path_kind: Default::default() }],
+            steps: vec![TransformationStep::LoadCsv {
+                path: "data/products.csv".into(),
+                path_kind: crate::file_path::FilePathKind::Relative,
+            }],
             execution: Default::default(),
         });
         owner.workspace.focus_query_id = "q_products".into();
@@ -2409,7 +2412,10 @@ mod tests {
         owner.workspace.queries.push(QueryDef {
             id: "dep".into(),
             name: "dep".into(),
-            steps: vec![TransformationStep::LoadCsv { path: "rel.csv".into(), path_kind: Default::default() }],
+            steps: vec![TransformationStep::LoadCsv {
+                path: "rel.csv".into(),
+                path_kind: crate::file_path::FilePathKind::Relative,
+            }],
             execution: Default::default(),
         });
         owner.workspace.queries.push(QueryDef {

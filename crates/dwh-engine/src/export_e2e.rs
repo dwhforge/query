@@ -346,7 +346,10 @@ mod tests {
                 queries: vec![QueryDef {
                     id: "q_products".into(),
                     name: "products".into(),
-                    steps: vec![TransformationStep::LoadCsv { path: "data/products.csv".into(), path_kind: Default::default() }],
+                    steps: vec![TransformationStep::LoadCsv {
+                        path: "data/products.csv".into(),
+                        path_kind: dwh_pipeline::file_path::FilePathKind::Relative,
+                    }],
                     execution: Default::default(),
                 }],
                 focus_query_id: "q_products".into(),

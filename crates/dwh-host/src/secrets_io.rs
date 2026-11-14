@@ -263,9 +263,10 @@ mod tests {
         let saved = save_project_with_secrets(path.to_str().unwrap(), &project).unwrap();
         assert_eq!(saved.format_version, PROJECT_FORMAT_VERSION);
         let on_disk = fs::read_to_string(&path).unwrap();
-        assert!(
-            on_disk.contains("\"format_version\": 1") || on_disk.contains("\"format_version\":1"),
-            "stamped format_version missing: {on_disk}"
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&on_disk).unwrap()["format_version"],
+            PROJECT_FORMAT_VERSION,
+            "saved file must carry the current format version"
         );
         let bak = PathBuf::from(format!("{}.bak", path.display()));
         assert!(bak.is_file(), "v0 upgrade must leave .bak");

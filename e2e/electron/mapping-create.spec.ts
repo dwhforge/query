@@ -288,90 +288,113 @@ test.describe("mapping create Electron smoke", () => {
     await expect(dlg).toBeHidden();
   });
 
-  test("6) source key to → review shows to_2 → create → save keeps context", async () => {
-    const { page, fixtureWorkDir } = session;
-    await openCreateWizard(page);
-    const dlg = wizard(page);
-    await dlg.getByPlaceholder("Supplier products → catalog").fill("ToKeyMap");
-    await dlg.locator("select").nth(0).selectOption("supplier_products");
-    await dlg.locator("select").nth(1).selectOption("catalog_wide");
-    await dlg.getByRole("button", { name: "Next" }).click();
-    await expect(dlg.getByText("Include").first()).toBeVisible({
-      timeout: 60_000,
-    });
-    await includeExcludedColumn(dlg, "to");
-    await dlg.getByRole("button", { name: /^to$/ }).click();
-    await dlg.getByRole("button", { name: "product_id" }).click();
-    await dlg.getByRole("button", { name: "Next" }).click();
-    await expect(dlg.getByText("to_2")).toBeVisible();
-    await expect(dlg.getByText(/Authoring:/)).toBeVisible();
-    await dlg.getByRole("button", { name: /Update Fields and create map/ }).click();
-    await expect(dlg).toBeHidden({ timeout: 60_000 });
-    await expect(page.getByRole("tab", { name: "ToKeyMap" })).toBeVisible({
-      timeout: 30_000,
-    });
-
-    const outPath = path.join(fixtureWorkDir, `_e2e_saved_${Date.now()}.dwhproj.json`);
-    await page.evaluate(async (p) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const w = window as any;
-      if (typeof w.__dwhE2eSaveProject !== "function") {
-        throw new Error("__dwhE2eSaveProject missing");
+  for (const targetColumn of ["product_id", "to"]) {
+    test(`6) source key to → target ${targetColumn} → create/save/reopen keeps canonical context`, async () => {
+      const { page, fixtureWorkDir } = session;
+      const outputColumn = targetColumn === "to" ? "to_2" : "product_id";
+      if (targetColumn === "to") {
+        // Make an actual From/output collision in this test's isolated data.
+        // ADR-0037 prefers target field names, not a universal physical "to".
+        const catalog = path.join(fixtureWorkDir, "data/catalog.csv");
+        fs.writeFileSync(catalog, fs.readFileSync(catalog, "utf8").replace("product_id,", "to,"));
       }
-      await w.__dwhE2eSaveProject(p);
-    }, outPath);
-    await expect
-      .poll(() => fs.existsSync(outPath), { timeout: 30_000 })
-      .toBe(true);
+      await openCreateWizard(page);
+      const dlg = wizard(page);
+      await dlg.getByPlaceholder("Supplier products → catalog").fill("ToKeyMap");
+      await dlg.locator("select").nth(0).selectOption("supplier_products");
+      await dlg.locator("select").nth(1).selectOption("catalog_wide");
+      await dlg.getByRole("button", { name: "Next" }).click();
+      await expect(dlg.getByText("Include").first()).toBeVisible({
+        timeout: 60_000,
+      });
+      await includeExcludedColumn(dlg, "to");
+      await dlg.getByRole("button", { name: /^to$/ }).first().click();
+      await dlg.getByRole("button", { name: targetColumn, exact: true }).last().click();
+      await dlg.getByRole("button", { name: "Next" }).click();
+      await expect(dlg.getByText(outputColumn, { exact: true }).first()).toBeVisible();
+      await expect(dlg.getByText(/Authoring:/)).toBeVisible();
+      await dlg.getByRole("button", { name: /Update Fields and create map/ }).click();
+      await expect(dlg).toBeHidden({ timeout: 60_000 });
+      await expect(page.getByRole("tab", { name: "ToKeyMap" })).toBeVisible({
+        timeout: 30_000,
+      });
 
-    const saved = JSON.parse(fs.readFileSync(outPath, "utf8")) as {
-      workspace: {
-        key_maps: Array<{
-          name?: string;
-          to_column?: string;
-          authoring_context?: {
-            source_query_id: string;
-            target_query_id: string;
-            source_columns: string[];
-            target_column: string;
-          };
-        }>;
+      const outPath = path.join(fixtureWorkDir, `_e2e_saved_${Date.now()}.dwhproj.json`);
+      await page.evaluate(async (p) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const w = window as any;
+        if (typeof w.__dwhE2eSaveProject !== "function") {
+          throw new Error("__dwhE2eSaveProject missing");
+        }
+        await w.__dwhE2eSaveProject(p);
+      }, outPath);
+      await expect
+        .poll(() => fs.existsSync(outPath), { timeout: 30_000 })
+        .toBe(true);
+
+      const saved = JSON.parse(fs.readFileSync(outPath, "utf8")) as {
+        workspace: {
+          key_maps: Array<{
+            name?: string;
+            to_column?: string;
+            output_columns: string[];
+            authoring_context?: {
+              source_query_id: string;
+              target_query_id: string;
+              source_columns: string[];
+              target_column?: string;
+              target_columns: string[];
+            };
+          }>;
+        };
       };
-    };
-    const map = saved.workspace.key_maps.find((m) => m.name === "ToKeyMap");
-    expect(map).toBeTruthy();
-    expect(map!.to_column).toBe("to_2");
-    expect(map!.authoring_context).toEqual({
-      source_query_id: "supplier_products",
-      target_query_id: "catalog_wide",
-      source_columns: ["to"],
-      target_column: "product_id",
-    });
+      const map = saved.workspace.key_maps.find((m) => m.name === "ToKeyMap");
+      expect(map).toBeTruthy();
+      expect(map!.output_columns).toEqual([outputColumn]);
+      // Existing writers can retain compatibility mirrors. They must agree
+      // with the canonical lists; this regression does not change saved IR.
+      if (map!.to_column !== undefined) expect(map!.to_column).toBe(outputColumn);
+      expect(map!.authoring_context).toMatchObject({
+        source_query_id: "supplier_products",
+        target_query_id: "catalog_wide",
+        source_columns: ["to"],
+        target_columns: [targetColumn],
+      });
+      if (map!.authoring_context?.target_column !== undefined) {
+        expect(map!.authoring_context.target_column).toBe(targetColumn);
+      }
 
-    // Round-trip: reopen saved project and assert the same map.
-    await page.evaluate((p) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__dwhE2eOpenProject(p);
-    }, outPath);
-    await page.getByText(/Opened /, { timeout: 60_000 }).waitFor({
-      state: "visible",
-    });
-    const reopened = await page.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = (window as any).__dwhE2eGetProject();
-      return (p.workspace.key_maps ?? []).find(
-        (m: { name?: string }) => m.name === "ToKeyMap",
-      );
-    });
-    expect(reopened?.to_column).toBe("to_2");
-    expect(reopened?.authoring_context).toEqual({
-      source_query_id: "supplier_products",
-      target_query_id: "catalog_wide",
-      source_columns: ["to"],
-      target_column: "product_id",
-    });
-    await expect(page.getByRole("tab", { name: "ToKeyMap" })).toBeVisible();
+      // Round-trip: reopen saved project and assert the same map.
+      await page.evaluate((p) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__dwhE2eOpenProject(p);
+      }, outPath);
+      await page.getByText(/Opened /, { timeout: 60_000 }).waitFor({
+        state: "visible",
+      });
+      const reopened = await page.evaluate(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = (window as any).__dwhE2eGetProject();
+        return (p.workspace.key_maps ?? []).find(
+          (m: { name?: string }) => m.name === "ToKeyMap",
+        );
+      });
+      expect(reopened?.output_columns).toEqual([outputColumn]);
+      if (reopened?.to_column !== undefined) expect(reopened.to_column).toBe(outputColumn);
+      expect(reopened?.authoring_context).toMatchObject({
+        source_query_id: "supplier_products",
+        target_query_id: "catalog_wide",
+        source_columns: ["to"],
+        target_columns: [targetColumn],
+      });
+      if (reopened?.authoring_context?.target_column !== undefined) {
+        expect(reopened.authoring_context.target_column).toBe(targetColumn);
+      }
+      // Project replacement resets tool tabs; reopen the persisted Mapping.
+      await page.getByTestId("pg-keymap-ToKeyMap").click();
+      await expect(page.getByRole("tab", { name: "ToKeyMap" })).toBeVisible();
 
-    fs.unlinkSync(outPath);
-  });
+      fs.unlinkSync(outPath);
+    });
+  }
 });

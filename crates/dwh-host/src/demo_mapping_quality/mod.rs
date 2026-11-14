@@ -137,10 +137,17 @@ mod tests {
         let workspace = load(&root).expect("generate lab");
         assert_eq!(workspace.key_maps[0].entries.len(), 95_000);
         assert_eq!(dwh_pipeline::topo_queries(&workspace).unwrap().len(), 5);
+        // Production compilation supplies live Load/SqlModel schema evidence.
+        // Bare GraphCompiler must not bypass Apply's collision-safety checks.
+        let db = dwh_engine::DbSession::new().expect("duckdb");
+        let prepared = dwh_engine::prepare_workspace(&db, &workspace, &[], &[])
+            .expect("prepare lab schemas");
+        assert!(prepared.warnings.is_empty(), "{:?}", prepared.warnings);
         for id in [SUMMARY_QUERY, TARGETS_QUERY] {
             let mut selected = workspace.clone();
             selected.focus_query_id = id.into();
             let sql = dwh_pipeline::GraphCompiler::new(&selected)
+                .with_schemas(&prepared.schemas)
                 .to_sql(false)
                 .unwrap();
             assert!(!sql.contains("{{query:"));

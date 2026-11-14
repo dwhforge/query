@@ -1,3 +1,4 @@
+import type { TupleBatchCommitResult } from "../lib/joinLensBatchCommit";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ColumnMetadata,
@@ -527,8 +528,9 @@ export type JoinLensProps = {
       toLabels?: (string | null)[];
     },
   ) => void;
-  /** Atomic full-tuple Auto batch; null acknowledges commit, string explains refusal. */
-  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<string | null>;
+  /** Atomic full-tuple batch; successful receipt identifies the exact resulting context. */
+  projectIdentity: string;
+  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<TupleBatchCommitResult>;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
   onPrepareBusy?: (busy: boolean) => void;
   /** Run Join diagnostics (Probe lists unmatched samples). */
@@ -572,6 +574,7 @@ function JoinLensImpl({
   onApplyNearMiss,
   onMapKey,
   onAcceptTuples,
+  projectIdentity,
   onPrepareBusy,
   onRunDiagnostics,
   onModeChange,
@@ -2297,6 +2300,7 @@ function JoinLensImpl({
             connections={connections}
             sources={sources}
             projectRef={projectRef}
+            projectIdentity={projectIdentity}
             onAcceptTuples={onAcceptTuples}
             onAccept={
               onMapKey

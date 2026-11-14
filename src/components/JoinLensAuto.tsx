@@ -8,12 +8,15 @@ import { batchContextFingerprint, BATCH_HISTORY_MESSAGES, BATCH_MESSAGE_CHARS,
   tupleBatchProposals, type TupleBatchProposal } from "../lib/joinLensBatch";
 import { searchRightTuples, tupleCell, tupleCounts } from "../lib/joinLensTuple";
 import { PanelResizeHandle } from "./PanelResizeHandle";
+import type { TupleBatchCommitResult, TupleBatchCommitReceipt } from "../lib/joinLensBatchCommit";
+import { acceptHighConfidenceTupleBatch, tupleBatchHighConfidenceTarget } from "../lib/joinLensBatch";
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
 type Props = {
   workspace: Workspace; hostQueryId: string; joinStepIndex: number;
   connections: ConnectionDef[]; sources?: SourceDef[]; projectRef?: ProjectRefContext;
-  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<string | null>;
+  projectIdentity: string;
+  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<TupleBatchCommitResult>;
   /** Legacy caller compatibility only. Full tuple review never invokes scalar writes. */
   onAccept?: (fromValues: string[], toValues: string[], opts?: {
     fromParts?: string[][]; applyColumns?: string[]; outputColumn?: string;
@@ -28,7 +31,48 @@ const formatScore = (score: number | null | undefined) => score == null ? "unava
 export function JoinLensAuto(props: Props) {
   const fingerprint = batchContextFingerprint(props.workspace, props.hostQueryId, props.joinStepIndex,
     props.connections, props.sources ?? [], props.projectRef);
-  return <TupleBatchSession key={fingerprint} {...props} fingerprint={fingerprint} />;
+  const key = JSON.stringify([props.projectIdentity, fingerprint]);
+  const live = useRef({ key, version: 0 });
+  const pending = useRef<{ keys: string[] } | null>(null);
+  if (live.current.key !== key) {
+    live.current = { key, version: live.current.version + 1 };
+    pending.current?.keys.push(key);
+  }
+  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState<{ receipt: TupleBatchCommitReceipt; version: number } | null>(null);
+  const [refresh, setRefresh] = useState(0);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  async function commit(selections: LensTupleMapping[], context: string): Promise<TupleBatchCommitResult> {
+    if (!props.onAcceptTuples || pending.current) return { status: "error", error: "A batch is already applying." };
+    const request = { keys: [key] };
+    pending.current = request; setBusy(true);
+    try {
+      const result = await props.onAcceptTuples(selections, context);
+      if (mounted.current && result.status === "applied") {
+        const expected = JSON.stringify([result.projectIdentity, result.contextFingerprint]);
+        // Permit only the origin -> exact committed context transition. In particular,
+        // an edit/switch and return (ABA) cannot resurrect an earlier success receipt.
+        const transitions = request.keys.filter((k, i, all) => i === 0 || k !== all[i - 1]);
+        if (live.current.key === expected && (transitions.length === 1 ||
+          (transitions.length === 2 && transitions[1] === expected)) &&
+          transitions.every(k => k === key || k === expected)) {
+          setSummary({ receipt: result, version: live.current.version });
+        }
+      }
+      return result;
+    } finally {
+      if (pending.current === request) pending.current = null;
+      if (mounted.current) setBusy(false);
+    }
+  }
+  if (summary?.version === live.current.version) return <section aria-label="Find Matches" className="p-3 text-slate-200">
+    <p role="status">Applied {summary.receipt.appliedCount} complete tuple mappings.</p>
+    <p className="my-2 text-xs">Mapping and Apply are committed to the project. Save the project to persist them. Previous review decisions have been cleared.</p>
+    <button className={button} onClick={() => { setSummary(null); setRefresh(v => v + 1); }}>Refresh remaining review</button>
+  </section>;
+  if (busy && pending.current?.keys[0] !== key) return <section aria-label="Find Matches" className="p-3 text-slate-200"><p role="status">Awaiting Mapping commit acknowledgement…</p></section>;
+  return <TupleBatchSession key={`${key}:${refresh}`} {...props} onAcceptTuples={props.onAcceptTuples ? commit : undefined} fingerprint={fingerprint} />;
 }
 
 function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections, sources = [], projectRef,
@@ -56,6 +100,7 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
   const [llmHeight, setLlmHeight] = useState(280);
   const [committing, setCommitting] = useState(false);
   const [committed, setCommitted] = useState(false);
+  const [bulkUndo, setBulkUndo] = useState<string[]>([]);
   const generation = useRef(0);
   const commitLock = useRef(false);
   const chatLock = useRef(false);
@@ -138,11 +183,13 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
 
   function patch(id: string, change: (p: TupleBatchProposal) => TupleBatchProposal) {
     if (commitLock.current || committed) return;
-    updateProposals(decisionsRef.current.map(p => p.id === id ? change(p) : p));
+    setBulkUndo(ids => ids.filter(value => value !== id));
+    updateProposals(decisionsRef.current.map(p => p.id === id ? { ...change(p), userTouched: true } : p));
   }
   const active = proposals.find(p => p.id === activeId);
   const source = report && active ? report.sources[active.sourceIndex]?.source : null;
   const acceptedCount = proposals.filter(p => p.decision === "accepted").length;
+  const highCount = report ? proposals.filter(p => tupleBatchHighConfidenceTarget(report, p) != null).length : 0;
   const locked = committing || committed;
   const manual = report ? searchRightTuples(report, search) : [];
   const selectedMapping = report && active && source && active.selected != null
@@ -156,9 +203,9 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
     const gen = generation.current;
     commitLock.current = true; setCommitting(true); setError(null);
     try {
-      const failure = await onAcceptTuples(selections, fingerprint);
+      const result = await onAcceptTuples(selections, fingerprint);
       if (generation.current !== gen) return;
-      if (failure) setError(failure);
+      if (result.status === "error") setError(result.error);
       else { setCommitted(true); setNotice(`Applied ${selections.length} complete tuple mappings.`); }
     } catch (e) { if (generation.current === gen) setError(String(e)); }
     finally { if (generation.current === gen) { commitLock.current = false; setCommitting(false); } }
@@ -196,6 +243,16 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
       <div className="flex flex-wrap items-center gap-2"><strong>Find Matches</strong>
         <span className="text-xs">{proposals.filter(p => p.alternatives.length > 0).length} suggestions · {acceptedCount} accepted · {proposals.filter(p => p.decision === "pending").length} pending · {proposals.filter(p => p.decision === "skipped").length} skipped · {proposals.filter(p => p.alternatives.length === 0).length} without candidates</span>
         <button className={button} disabled={!acceptedCount || !onAcceptTuples || locked || chatBusy} onClick={() => void commitAccepted()}>{committing ? "Applying…" : committed ? "Applied" : `Write Mapping (${acceptedCount})`}</button>
+        <button className={button} disabled={!highCount || locked || chatBusy} onClick={() => {
+          if (!report || commitLock.current) return;
+          const next = acceptHighConfidenceTupleBatch(report, decisionsRef.current);
+          setBulkUndo(next.proposals.filter((p, i) => p !== decisionsRef.current[i]).map(p => p.id));
+          updateProposals(next.proposals);
+        }}>Accept high-confidence suggestions ({highCount})</button>
+        {!!bulkUndo.length && <button className={button} disabled={locked || chatBusy} onClick={() => {
+          updateProposals(decisionsRef.current.map(p => bulkUndo.includes(p.id) ? { ...p, decision: "pending", selected: null, userTouched: true } : p));
+          setBulkUndo([]);
+        }}>Undo bulk acceptance ({bulkUndo.length})</button>}
         <button className={button} onClick={() => setChatOpen(v => !v)}>{chatOpen ? "Hide LLM" : "Open LLM chat"}</button>
         <button className={button} disabled={loading || !configured || !sent?.groups.length || chatBusy || locked} onClick={() => void sendChat("Review the bounded complete source groups and rank safe right tuple alternatives with evidence. Return JSON pairs; do not invent values.")}>{chatBusy ? "Ranking…" : "Ask LLM to rank candidates"}</button>
       </div>

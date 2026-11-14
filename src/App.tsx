@@ -184,6 +184,7 @@ import { MappingCreateWizard } from "./components/MappingCreateWizard";
 import { importWriteRefusal } from "./lib/pgImport";
 import { planBatchTupleMapping, planTupleMapping } from "./app/keyMap/tupleMapping";
 import { batchContextFingerprint } from "./lib/joinLensBatch";
+import type { TupleBatchCommitResult, TupleBatchCommitReceipt } from "./lib/joinLensBatchCommit";
 import type { LensTupleMapping } from "./lib/joinLensConfirm";
 import {
   applyKeyMapOntoProject,
@@ -412,7 +413,10 @@ function App() {
   projectRef.current = project;
   const pendingTupleBatchRef = useRef<{
     token: object;
-    resolve: (error: string | null) => void;
+    resolve: (result: TupleBatchCommitResult) => void;
+    receipt: TupleBatchCommitReceipt;
+    project: Project;
+    session: number;
     map: KeyMapDef;
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
     count: number;
@@ -1571,14 +1575,14 @@ function App() {
     const pending = pendingTupleBatchRef.current;
     if (!pending || pending.token !== receipt.token) return;
     pendingTupleBatchRef.current = null;
-    if (!receipt.error) {
+    if (!receipt.error && projectBag.project === pending.project && pending.session === querySessionGenerationRef.current) {
       patchKeyMapTab(pending.map.id, { map: pending.map, joinCtx: pending.joinCtx });
       const index = resolveJoinStepFromCtx(projectBag.project.workspace, pending.joinCtx);
       if (index != null) setSelectedStepIndex(index);
       setExportMsg(`Applied ${pending.count} accepted tuple${pending.count === 1 ? "" : "s"} · ${pending.map.id}`);
     }
     // Resolve only after reducer acknowledgement, never inside a React updater.
-    pending.resolve(receipt.error);
+    pending.resolve(receipt.error ? { status: "error", error: receipt.error } : pending.receipt);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- receipt owns this prepared transaction
   }, [projectBag.tupleBatchResult]);
 
@@ -3278,21 +3282,21 @@ function App() {
   async function handleAcceptTuplesFromLens(
     selections: LensTupleMapping[],
     contextFingerprint: string,
-  ): Promise<string | null> {
-    if (pendingTupleBatchRef.current) return "A tuple batch is already being applied. Wait for it to finish.";
+  ): Promise<TupleBatchCommitResult> {
+    if (pendingTupleBatchRef.current) return { status: "error", error: "A tuple batch is already being applied. Wait for it to finish." };
     const atStart = projectRef.current;
     const target = joinLensTargetLiveRef.current;
-    if (!target) return "Join changed. Reopen Find Matches before applying a batch.";
-    if (frozenRemapLiveRef.current) return "Full tuple Mapping is unavailable in frozen Check remap. Open the live Join.";
+    if (!target) return { status: "error", error: "Join changed. Reopen Find Matches before applying a batch." };
+    if (frozenRemapLiveRef.current) return { status: "error", error: "Full tuple Mapping is unavailable in frozen Check remap. Open the live Join." };
     const fingerprint = batchContextFingerprint(atStart.workspace, target.hostQueryId, target.joinStepIndex,
       atStart.connections ?? [], atStart.sources ?? [], projectRefContext(atStart));
-    if (fingerprint !== contextFingerprint) return "Join context changed. Reopen Find Matches and review the batch again.";
+    if (fingerprint !== contextFingerprint) return { status: "error", error: "Join context changed. Reopen Find Matches and review the batch again." };
     const planned = planBatchTupleMapping(atStart.workspace, { ...target, probeSide: "left" }, selections);
-    if ("error" in planned) return planned.error;
+    if ("error" in planned) return { status: "error", error: planned.error };
     const session = keyMapTabsLiveRef.current.find((tab) => tab.map.id === planned.map.id);
     if (session?.localDraft || session?.saveInFlight || session?.saveApi?.isSaving()
       || dirtyDeltaHasChanges(session?.dirtyDelta ?? null)) {
-      return "This Mapping has unsaved edits or a Save in progress. Save or discard those edits before applying a batch.";
+      return { status: "error", error: "This Mapping has unsaved edits or a Save in progress. Save or discard those edits before applying a batch." };
     }
     // Prepare privately. Neither Mapping rows nor graph changes are published
     // unless all output bindings resolve and the established Apply fold succeeds.
@@ -3300,12 +3304,18 @@ function App() {
     const plan = resolveApplyPlan(planned.map, planned.joinCtx, "left", {
       side: "left", bindings: planned.joinCtx.outputBindingsLeft!,
     }, withMap.workspace);
-    if ("error" in plan) return plan.error;
+    if ("error" in plan) return { status: "error", error: plan.error };
     const folded = applyKeyMapOntoProject(withMap, intentFromApplyPlan(plan));
-    if (folded.result.status !== "ok") return folded.result.reason || "Join changed. No batch changes were applied.";
+    if (folded.result.status !== "ok") return { status: "error", error: folded.result.reason || "Join changed. No batch changes were applied." };
     const token = {};
-    return new Promise<string | null>((resolve) => {
-      pendingTupleBatchRef.current = { token, resolve, map: planned.map,
+    const resultingIndex = resolveJoinStepFromCtx(folded.project.workspace, planned.joinCtx);
+    if (resultingIndex == null) return { status: "error", error: "Cannot locate the resulting Join. No batch changes were applied." };
+    const receipt: TupleBatchCommitReceipt = { status: "applied", appliedCount: selections.length,
+      projectIdentity: `${atStart.project_uid}:${querySessionGenerationRef.current}`, joinStepIndex: resultingIndex,
+      contextFingerprint: batchContextFingerprint(folded.project.workspace, target.hostQueryId, resultingIndex,
+        folded.project.connections ?? [], folded.project.sources ?? [], projectRefContext(folded.project)) };
+    return new Promise<TupleBatchCommitResult>((resolve) => {
+      pendingTupleBatchRef.current = { token, resolve, receipt, project: folded.project, session: querySessionGenerationRef.current, map: planned.map,
         joinCtx: planned.joinCtx, count: selections.length };
       dispatchProject({ type: "commit_tuple_batch", expectedProject: atStart, project: folded.project, token });
     });
@@ -3975,19 +3985,26 @@ function App() {
       return resolveInspectJoinLensTarget(project.workspace, activeQuery);
     }
     if (isFullQualityJoin(activeQueryId)) return null;
-    const step = activeQuery.steps[selectedStepIndex];
+    // Keep the Lens mounted during its own atomic commit, before the ack effect
+    // publishes the shifted selected index. Never redirect an intervening edit.
+    const pending = pendingTupleBatchRef.current;
+    const committedIndex = projectBag.tupleBatchResult?.token === pending?.token &&
+      !projectBag.tupleBatchResult?.error && project === pending?.project &&
+      pending?.session === querySessionGenerationRef.current
+      ? pending.receipt.joinStepIndex : selectedStepIndex;
+    const step = activeQuery.steps[committedIndex];
     if (step?.type !== "Join" || step.payload.left_on.length === 0) {
       return null;
     }
     return {
       hostQueryId: activeQueryId,
-      joinStepIndex: selectedStepIndex,
+      joinStepIndex: committedIndex,
       rightQueryId: targetKey(step.payload.right_query_id),
       leftOn: step.payload.left_on,
       rightOn: step.payload.right_on,
       joinType: step.payload.join_type,
     };
-  }, [activeQueryId, activeQuery, selectedStepIndex, project.workspace]);
+  }, [activeQueryId, activeQuery, selectedStepIndex, project, projectBag.tupleBatchResult]);
   const joinLensTargetLiveRef = useRef(joinLensTarget);
   joinLensTargetLiveRef.current = joinLensTarget;
 
@@ -5703,6 +5720,7 @@ function App() {
                         focusResultHint={lensFocusHint}
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
+                        projectIdentity={`${project.project_uid}:${querySessionGenerationRef.current}`}
                         onAcceptTuples={handleAcceptTuplesFromLens}
                         onPrepareBusy={(busy) => {
                           joinSession.onPrepareBusy(busy);

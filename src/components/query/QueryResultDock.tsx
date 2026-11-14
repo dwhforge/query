@@ -217,7 +217,7 @@ export function QueryResultDock(props: QueryResultDockProps) {
               rows={diagView.rows}
               highlightKeys={diagView.highlightKeys}
             />
-          ) : preview &&
+          ) : lens &&
             joinLensOn &&
             joinLensTarget ? (
             lens

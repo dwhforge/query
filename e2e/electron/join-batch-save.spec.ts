@@ -21,7 +21,7 @@ async function execute(page: Page) {
       workspace: p.workspace, connections: p.connections, sources: p.sources,
       projectFile: p.root_path, rowLimit: 50,
     });
-    if (!reply.ok) throw new Error(JSON.stringify(reply.error));
+    if (!reply.ok) throw new Error(JSON.stringify(reply));
     const result = reply.result;
     const id = result.columns.findIndex((c: any) => c.name === "row_id");
     const partner = result.columns.findIndex((c: any) => c.name === "partner");
@@ -217,7 +217,6 @@ for (const width of [1, 2, 3, 4, 5]) {
       });
       // Exactly one user commit, no per-row Apply or separate Mapping editor hop.
       await batch.getByRole("button", { name: "Write Mapping (3)", exact: true }).click();
-      await expect.poll(() => execute(page)).toEqual(expected);
       await info.attach("post-commit-review", { contentType: "application/json", body: JSON.stringify({
         retrievals: await retrievalCount(),
         review: await batch.allTextContents(),

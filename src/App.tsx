@@ -318,6 +318,9 @@ import {
 /** Stable default — inline `{ kind: "lab_v1" }` in JSX re-triggers overview effects. */
 const LAB_V1_PROJECTION: MappingCheckProjection = { kind: "lab_v1" };
 
+const EMPTY_LENS_COLUMNS: { name: string; type: string }[] = [];
+const EMPTY_LENS_ROWS: unknown[][] = [];
+
 type ProjectBag = {
   project: Project;
   /** Set by apply_keymap; cleared after UI handles close/error. */
@@ -421,6 +424,7 @@ function App() {
     joinCtx: NonNullable<KeyMapTabSession["joinCtx"]>;
     count: number;
   } | null>(null);
+  const [tupleBatchAppliedContext, setTupleBatchAppliedContext] = useState<TupleBatchCommitReceipt | null>(null);
   const lifecycleRef = useRef<ProjectController | null>(null);
   const mapWritesInFlight = useRef(0);
   const [switchChoice, setSwitchChoice] = useState<((decision: SwitchDecision) => void) | null>(null);
@@ -1576,13 +1580,17 @@ function App() {
     if (!pending || pending.token !== receipt.token) return;
     pendingTupleBatchRef.current = null;
     if (!receipt.error && projectBag.project === pending.project && pending.session === querySessionGenerationRef.current) {
+      setTupleBatchAppliedContext(pending.receipt);
       patchKeyMapTab(pending.map.id, { map: pending.map, joinCtx: pending.joinCtx });
       const index = resolveJoinStepFromCtx(projectBag.project.workspace, pending.joinCtx);
       if (index != null) setSelectedStepIndex(index);
       setExportMsg(`Applied ${pending.count} accepted tuple${pending.count === 1 ? "" : "s"} · ${pending.map.id}`);
     }
     // Resolve only after reducer acknowledgement, never inside a React updater.
-    pending.resolve(receipt.error ? { status: "error", error: receipt.error } : pending.receipt);
+    pending.resolve(receipt.error ? { status: "error", error: receipt.error }
+      : projectBag.project !== pending.project || pending.session !== querySessionGenerationRef.current
+        ? { status: "error", error: "Mapping was applied, but the project changed before acknowledgement. Review the current Join context." }
+        : pending.receipt);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- receipt owns this prepared transaction
   }, [projectBag.tupleBatchResult]);
 
@@ -3282,9 +3290,13 @@ function App() {
   async function handleAcceptTuplesFromLens(
     selections: LensTupleMapping[],
     contextFingerprint: string,
+    projectIdentity: string,
   ): Promise<TupleBatchCommitResult> {
     if (pendingTupleBatchRef.current) return { status: "error", error: "A tuple batch is already being applied. Wait for it to finish." };
     const atStart = projectRef.current;
+    if (projectIdentity !== `${atStart.project_uid}:${querySessionGenerationRef.current}`) {
+      return { status: "error", error: "Project session changed. Reopen Find Matches and review the batch again." };
+    }
     const target = joinLensTargetLiveRef.current;
     if (!target) return { status: "error", error: "Join changed. Reopen Find Matches before applying a batch." };
     if (frozenRemapLiveRef.current) return { status: "error", error: "Full tuple Mapping is unavailable in frozen Check remap. Open the live Join." };
@@ -4005,6 +4017,11 @@ function App() {
       joinType: step.payload.join_type,
     };
   }, [activeQueryId, activeQuery, selectedStepIndex, project, projectBag.tupleBatchResult]);
+  const tupleBatchKeepsLens = !!joinLensTarget && (
+    pendingTupleBatchRef.current?.project === project ||
+    (tupleBatchAppliedContext?.projectIdentity === `${project.project_uid}:${querySessionGenerationRef.current}` &&
+      tupleBatchAppliedContext.contextFingerprint === batchContextFingerprint(project.workspace,
+        joinLensTarget.hostQueryId, joinLensTarget.joinStepIndex, connections, sources, projectRefContext(project))));
   const joinLensTargetLiveRef = useRef(joinLensTarget);
   joinLensTargetLiveRef.current = joinLensTarget;
 
@@ -5693,7 +5710,7 @@ function App() {
                 model: { result: modelPreview, error: modelError, copied: sqlCopied, copy: () => { void copySql(); } },
                 cancel: cancelHeavyQuery,
                 lensHint: showLensToggleHint ? <LabHint onDismiss={dismissLabHints}>Open Join Lens</LabHint> : undefined,
-                lens: preview && joinLensTarget ? (
+                lens: (preview || tupleBatchKeepsLens) && joinLensTarget ? (
                       <JoinLens
                         onModeChange={activeLabTask ? observeLabLensMode : undefined}
                         noMatchAccessory={showNoMatchHint ? <LabHint onDismiss={dismissLabHints}>Open No match</LabHint> : undefined}
@@ -5711,8 +5728,8 @@ function App() {
                         connections={connections}
                         sources={sources}
                         projectRef={joinLensProjectRef}
-                        columns={preview.columns}
-                        rows={preview.rows}
+                        columns={preview?.columns ?? EMPTY_LENS_COLUMNS}
+                        rows={preview?.rows ?? EMPTY_LENS_ROWS}
                         joinDiag={joinDiag}
                         joinDiagLoading={joinDiagLoading}
                         forceProbeNonce={forceProbeNonce}
@@ -5721,6 +5738,7 @@ function App() {
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
                         projectIdentity={`${project.project_uid}:${querySessionGenerationRef.current}`}
+                        preserveBatchReview={tupleBatchKeepsLens}
                         onAcceptTuples={handleAcceptTuplesFromLens}
                         onPrepareBusy={(busy) => {
                           joinSession.onPrepareBusy(busy);

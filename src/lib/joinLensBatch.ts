@@ -75,6 +75,12 @@ export function collectTupleBatch(report: JoinTupleReport, proposals: TupleBatch
 
 /** Eligible target for an explicit bulk draft-accept action, never retrieval-time consent.
  * Check the whole scored universe, not the capped visible fuzzy alternatives.
+ * Eligibility is per source, not global assignment/confidence: left truncation can
+ * omit other source records, but right truncation or unknown competitors blocks
+ * this action. Scores are spelling similarity, not calibrated probabilities.
+ * Unlike Rust's cutoff-filtered scalar ranking, include below-cutoff competitors
+ * in the 0.03 margin check. Safe values, untouched pending decisions, fuzzy winner
+ * provenance and absence of conflicting LLM alternatives are all required.
  */
 export function tupleBatchHighConfidenceTarget(report: JoinTupleReport, proposal: TupleBatchProposal): number | null {
   if (proposal.decision !== "pending" || proposal.selected !== null || proposal.userTouched

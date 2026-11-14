@@ -530,7 +530,9 @@ export type JoinLensProps = {
   ) => void;
   /** Atomic full-tuple batch; successful receipt identifies the exact resulting context. */
   projectIdentity: string;
-  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<TupleBatchCommitResult>;
+  /** Exact own-commit context only: keep batch mode through the shifted Join index. */
+  preserveBatchReview?: boolean;
+  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string, projectIdentity: string) => Promise<TupleBatchCommitResult>;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
   onPrepareBusy?: (busy: boolean) => void;
   /** Run Join diagnostics (Probe lists unmatched samples). */
@@ -575,6 +577,7 @@ function JoinLensImpl({
   onMapKey,
   onAcceptTuples,
   projectIdentity,
+  preserveBatchReview = false,
   onPrepareBusy,
   onRunDiagnostics,
   onModeChange,
@@ -612,6 +615,7 @@ function JoinLensImpl({
   const activeSamplesGenRef = useRef(0);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
+  const suspendBatchSideEffects = sideMode === "auto" && preserveBatchReview;
   useEffect(() => {
     if (enabled) onModeChange?.(sideMode);
   }, [enabled, sideMode, onModeChange]);
@@ -677,7 +681,7 @@ function JoinLensImpl({
   workspaceRef.current = workspace;
 
   useEffect(() => {
-    if (!enabled || !leftInputWs || !rightInputWs) return;
+    if (!enabled || !leftInputWs || !rightInputWs || suspendBatchSideEffects) return;
     let cancelled = false;
     // Drop any in-flight sample load that may have set only one side.
     samplesLoadGenRef.current += 1;
@@ -727,7 +731,7 @@ function JoinLensImpl({
     };
     // joinParentsKey only — connections/sources via refs (unstable [] defaults used to loop).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, joinParentsKey, leftInputWs, rightInputWs]);
+  }, [enabled, joinParentsKey, leftInputWs, rightInputWs, suspendBatchSideEffects]);
 
   function refreshPrepareStatus() {
     if (!hostQueryId || joinStepIndex < 1) return;
@@ -774,11 +778,11 @@ function JoinLensImpl({
   }
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || suspendBatchSideEffects) return;
     refreshPrepareStatus();
     // joinParentsKey — not workspace/sources object identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, joinParentsKey]);
+  }, [enabled, joinParentsKey, suspendBatchSideEffects]);
 
   const resultKeysFetchedRef = useRef("");
   const resultKeysStamp = useMemo(() => {
@@ -1087,7 +1091,7 @@ function JoinLensImpl({
     setSearchRight((cur) => (cur === "" ? cur : ""));
     setMatchesOnly((cur) => (cur ? false : cur));
     setActiveIndex((cur) => (cur === 0 ? cur : 0));
-    setSideMode((cur) => (cur === "linked" ? cur : "linked"));
+    setSideMode((cur) => (cur === "auto" && preserveBatchReview ? cur : cur === "linked" ? cur : "linked"));
     setKeyExplain((cur) => (cur == null ? cur : null));
     setKeyBlame((cur) => (cur == null ? cur : null));
     setKeyExplainError((cur) => (cur == null ? cur : null));

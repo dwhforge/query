@@ -16,7 +16,7 @@ type Props = {
   workspace: Workspace; hostQueryId: string; joinStepIndex: number;
   connections: ConnectionDef[]; sources?: SourceDef[]; projectRef?: ProjectRefContext;
   projectIdentity: string;
-  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string) => Promise<TupleBatchCommitResult>;
+  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string, projectIdentity: string) => Promise<TupleBatchCommitResult>;
   /** Legacy caller compatibility only. Full tuple review never invokes scalar writes. */
   onAccept?: (fromValues: string[], toValues: string[], opts?: {
     fromParts?: string[][]; applyColumns?: string[]; outputColumn?: string;
@@ -48,7 +48,7 @@ export function JoinLensAuto(props: Props) {
     const request = { keys: [key] };
     pending.current = request; setBusy(true);
     try {
-      const result = await props.onAcceptTuples(selections, context);
+      const result = await props.onAcceptTuples(selections, context, props.projectIdentity);
       if (mounted.current && result.status === "applied") {
         const expected = JSON.stringify([result.projectIdentity, result.contextFingerprint]);
         // Permit only the origin -> exact committed context transition. In particular,
@@ -71,12 +71,12 @@ export function JoinLensAuto(props: Props) {
     <p className="my-2 text-xs">Mapping and Apply are committed to the project. Save the project to persist them. Previous review decisions have been cleared.</p>
     <button className={button} onClick={() => { setSummary(null); setRefresh(v => v + 1); }}>Refresh remaining review</button>
   </section>;
-  if (busy && pending.current?.keys[0] !== key) return <section aria-label="Find Matches" className="p-3 text-slate-200"><p role="status">Awaiting Mapping commit acknowledgement…</p></section>;
+  if (busy && pending.current && pending.current.keys.length > 1) return <section aria-label="Find Matches" className="p-3 text-slate-200"><p role="status">Awaiting Mapping commit acknowledgement…</p></section>;
   return <TupleBatchSession key={`${key}:${refresh}`} {...props} onAcceptTuples={props.onAcceptTuples ? commit : undefined} fingerprint={fingerprint} />;
 }
 
 function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections, sources = [], projectRef,
-  onAcceptTuples, fingerprint }: Props & { fingerprint: string }) {
+  onAcceptTuples, projectIdentity, fingerprint }: Props & { fingerprint: string }) {
   const [report, setReport] = useState<JoinTupleReport | null>(null);
   const [proposals, setProposals] = useState<TupleBatchProposal[]>([]);
   const [loading, setLoading] = useState(true);
@@ -170,13 +170,16 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
     try {
       const result = await llmChat([{ role: "system", content: request.prompt }, ...next]);
       if (generation.current !== gen) return;
-      const content = result.content.slice(0, 12_000);
+      // Never parse a sliced response: doing so could hide later source groups or
+      // a second structured payload. Reject oversized output as a whole instead.
+      if (result.content.length > 12_000) throw new Error("Model response exceeded the 12,000-character batch limit. No alternatives were imported; request one bounded payload.");
+      const content = result.content;
       setChat(prev => [...prev, { role: "assistant" as const, content: content.slice(0, BATCH_MESSAGE_CHARS) }].slice(-BATCH_HISTORY_MESSAGES));
       // Read decisions made while the request was in flight, never its stale snapshot.
       const merged = mergeTupleBatchLlm(report, decisionsRef.current, content, request);
       updateProposals(merged.proposals);
       setNotice(`LLM: ${merged.added} alternatives added; ${merged.duplicates} duplicates merged/ignored; ${merged.conflicts} conflicts ignored. Accepted and skipped decisions were not overwritten.`);
-      if (!merged.added && !merged.duplicates && !merged.conflicts) setChatError("No valid complete tuple pairs returned. Invented, partial, wrong-source or out-of-allowlist pairs are rejected.");
+      if (!merged.added && !merged.duplicates && !merged.conflicts) setChatError("No valid complete tuple pairs returned. Multiple structured payloads are rejected as a whole; return one pairs object for all groups. Invented, partial, wrong-source or out-of-allowlist pairs are rejected.");
     } catch (e) { if (generation.current === gen) setChatError(String(e)); }
     finally { if (generation.current === gen) { chatLock.current = false; setChatBusy(false); } }
   }
@@ -203,7 +206,7 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
     const gen = generation.current;
     commitLock.current = true; setCommitting(true); setError(null);
     try {
-      const result = await onAcceptTuples(selections, fingerprint);
+      const result = await onAcceptTuples(selections, fingerprint, projectIdentity);
       if (generation.current !== gen) return;
       if (result.status === "error") setError(result.error);
       else { setCommitted(true); setNotice(`Applied ${selections.length} complete tuple mappings.`); }
@@ -243,7 +246,9 @@ function TupleBatchSession({ workspace, hostQueryId, joinStepIndex, connections,
       <div className="flex flex-wrap items-center gap-2"><strong>Find Matches</strong>
         <span className="text-xs">{proposals.filter(p => p.alternatives.length > 0).length} suggestions · {acceptedCount} accepted · {proposals.filter(p => p.decision === "pending").length} pending · {proposals.filter(p => p.decision === "skipped").length} skipped · {proposals.filter(p => p.alternatives.length === 0).length} without candidates</span>
         <button className={button} disabled={!acceptedCount || !onAcceptTuples || locked || chatBusy} onClick={() => void commitAccepted()}>{committing ? "Applying…" : committed ? "Applied" : `Write Mapping (${acceptedCount})`}</button>
-        <button className={button} disabled={!highCount || locked || chatBusy} onClick={() => {
+        <button className={button} disabled={!highCount || locked || chatBusy}
+          title="Draft only: untouched pending sources, complete scored right coverage, score ≥ 0.88 and margin ≥ 0.03, safe full tuples and no conflicting LLM alternative. Not global confidence or automatic writing."
+          onClick={() => {
           if (!report || commitLock.current) return;
           const next = acceptHighConfidenceTupleBatch(report, decisionsRef.current);
           setBulkUndo(next.proposals.filter((p, i) => p !== decisionsRef.current[i]).map(p => p.id));

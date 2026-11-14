@@ -7,6 +7,7 @@ const harness = buildSync({
     import { createElement, useState } from "react";
     import { createRoot } from "react-dom/client";
     import { JoinLensAuto } from "./src/components/JoinLensAuto";
+    import { batchContextFingerprint } from "./src/lib/joinLensBatch";
     window.calls = []; window.accepted = []; window.pendingLlm = []; window.pendingSuggest = [];
     window.pendingCommit = []; window.scalarCalls = [];
     window.dwh = { invoke: async (cmd, args) => {
@@ -26,14 +27,24 @@ const harness = buildSync({
     function App() {
       const [props, setProps] = useState({workspace: {focus_query_id: "fact", queries: []},
         hostQueryId: "fact", joinStepIndex: 1, connections: [{id: "local", password: "secret-connection"}],
-        sources: [], projectRef: {projectUid: "project-a"}});
+        sources: [], projectRef: {projectUid: "project-a"}, projectIdentity: "project-a:0"});
+      const receipt = (p, count = 1) => ({status: "applied", appliedCount: count, projectIdentity: p.projectIdentity,
+        joinStepIndex: p.joinStepIndex, contextFingerprint: batchContextFingerprint(p.workspace, p.hostQueryId,
+          p.joinStepIndex, p.connections, p.sources, p.projectRef)});
       window.patch = patch => setProps(p => ({...p, ...patch}));
+      window.prepareCommit = () => setProps(p => {
+        const next = {...p, joinStepIndex: 2, workspace: {...p.workspace, key_maps: [{id: "committed"}]}};
+        window.commitReceipt = receipt(next); return next;
+      });
       return createElement(JoinLensAuto, {...props,
         onAccept: (...args) => window.scalarCalls.push(args),
         onAcceptTuples: async (selections, fingerprint) => {
           window.accepted.push({selections, fingerprint});
-          if (window.holdCommit) return new Promise(resolve => window.pendingCommit.push(resolve));
-          return window.commitError || null;
+          if (window.holdCommit) return new Promise((resolve, reject) => {
+            window.pendingCommit.push(value => resolve(value || receipt(props, selections.length)));
+            window.rejectCommit = reject;
+          });
+          return window.commitError ? {status: "error", error: window.commitError} : receipt(props, selections.length);
         },
       });
     }
@@ -87,7 +98,8 @@ for (const n of [1, 2, 3, 4, 5]) {
     await page.getByRole("button", { name: "Write Mapping (1)" }).click();
     await expect(page.getByRole("button", { name: "Applying…" })).toBeDisabled();
     await page.evaluate("pendingCommit.shift()(null)");
-    await expect(page.getByRole("button", { name: "Applied", exact: true })).toBeDisabled();
+    await expect(page.getByRole("status")).toHaveText("Applied 1 complete tuple mappings.");
+    await expect(page.getByRole("button", { name: "Refresh remaining review" })).toBeVisible();
     const accepted = await page.evaluate<{ selections: { fromParts: string[]; outputValues: string[]; leftOn: string[]; rightOn: string[] }[]; fingerprint: string }>("accepted[0]");
     expect(accepted.selections[0].fromParts).toEqual(fixture(n).sources[0]!.source.parts);
     expect(accepted.selections[0].outputValues).toEqual(fixture(n).right_universe[1]!.parts);
@@ -256,4 +268,121 @@ test("large tuple reports keep prompts, history, fuzzy shortlists and rendered m
   await page.getByRole("button", { name: "Ask LLM to rank candidates" }).click();
   expect(await page.evaluate<string>("calls.filter(c => c.cmd === 'llm_chat').at(-1).args.messages[0].content")).toContain("source 190/0");
   await resolveLlm(page, []);
+});
+
+async function beginWrite(page: Page) {
+  await alternatives(page).getByRole("radio").first().check();
+  await page.getByRole("button", { name: "Accept selected" }).click();
+  await page.getByRole("button", { name: "Write Mapping (1)" }).click();
+}
+
+test("parent context/index renders before commit ack: scoped summary then deliberate fresh review", async ({ page }) => {
+  await mount(page, 2, { holdCommit: true });
+  await beginWrite(page);
+  await page.evaluate("prepareCommit()");
+  await expect(page.getByRole("status")).toHaveText("Awaiting Mapping commit acknowledgement…");
+  await expect(page.getByRole("radio")).toHaveCount(0);
+  expect(await page.evaluate("calls.filter(c => c.cmd === 'join_key_fuzzy_suggest').length")).toBe(1);
+  await page.evaluate("pendingCommit.shift()(commitReceipt)");
+  await expect(page.getByRole("status")).toHaveText("Applied 1 complete tuple mappings.");
+  expect(await page.evaluate("calls.filter(c => c.cmd === 'join_key_fuzzy_suggest').length")).toBe(1);
+  await page.evaluate("fixture.sources.shift(); fixture.left_distinct_total = 1");
+  await page.getByRole("button", { name: "Refresh remaining review" }).click();
+  await expect(page.getByRole("navigation").getByRole("button")).toHaveCount(1);
+  await expect(page.getByRole("radio", { checked: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Write Mapping (0)" })).toBeDisabled();
+  expect(await page.evaluate("calls.filter(c => c.cmd === 'join_key_fuzzy_suggest').at(-1).args.joinStepIndex")).toBe(2);
+});
+
+for (const kind of ["edit-before", "project-aba", "context-aba", "edit-after"] as const) {
+  test(`receipt cannot survive ${kind}`, async ({ page }) => {
+    await mount(page, 2, { holdCommit: true });
+    await beginWrite(page);
+    if (kind === "project-aba") {
+      await page.evaluate("patch({projectIdentity: 'other:1'})");
+      await expect(page.getByRole("radio")).toHaveCount(0);
+      await page.evaluate("patch({projectIdentity: 'project-a:0'})");
+      await expect(page.getByRole("radio")).toHaveCount(0);
+    }
+    await page.evaluate("prepareCommit()");
+    await expect(page.getByRole("status")).toContainText("Awaiting");
+    if (kind === "edit-before" || kind === "context-aba") {
+      await page.evaluate("patch({sources: [{id:'edit'}]})");
+      await expect(page.getByRole("status")).toContainText("Awaiting");
+      if (kind === "context-aba") {
+        await page.evaluate("patch({sources: []})");
+        await expect(page.getByRole("status")).toContainText("Awaiting");
+      }
+    }
+    await page.evaluate("pendingCommit.shift()(commitReceipt)");
+    if (kind === "edit-after") {
+      await expect(page.getByRole("status")).toHaveText("Applied 1 complete tuple mappings.");
+      await page.evaluate("patch({sources: [{id:'after'}]})");
+      await expect(page.getByText("Complete source tuple", {exact:true})).toBeVisible();
+      await page.evaluate("patch({sources: []})");
+    }
+    await expect(page.getByText("Complete source tuple", {exact:true})).toBeVisible();
+    await expect(page.getByText("Applied 1 complete tuple mappings.", {exact:true})).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Write Mapping (0)" })).toBeDisabled();
+  });
+}
+
+test("rejected commit after context render does not restore stale decisions", async ({ page }) => {
+  await mount(page, 2, { holdCommit: true });
+  await beginWrite(page);
+  await page.evaluate("prepareCommit()");
+  await expect(page.getByRole("status")).toContainText("Awaiting");
+  await page.evaluate("rejectCommit(new Error('commit rejected'))");
+  await expect(page.getByText("Complete source tuple", {exact:true})).toBeVisible();
+  await expect(page.getByRole("button", { name: "Write Mapping (0)" })).toBeDisabled();
+  await expect(page.getByRole("radio", {checked:true})).toHaveCount(0);
+});
+
+test("counted high-confidence action is explicit, draft-only and undoable", async ({ page }) => {
+  const report = fixture(2);
+  report.right_truncated = false; report.right_distinct_total = report.right_universe.length;
+  report.sources[0]!.candidates[1]!.score = .5;
+  await mount(page, 2, {}, report);
+  const bulk = page.getByRole("button", {name: "Accept high-confidence suggestions (1)"});
+  await expect(bulk).toBeEnabled();
+  await expect(page.getByRole("radio", {checked:true})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Write Mapping (0)"})).toBeDisabled();
+  await bulk.click();
+  await expect(page.getByRole("button", {name: "Write Mapping (1)"})).toBeEnabled();
+  expect(await page.evaluate("accepted.length")).toBe(0);
+  await page.getByRole("button", {name: "Undo bulk acceptance (1)"}).click();
+  await expect(page.getByRole("button", {name: "Write Mapping (0)"})).toBeDisabled();
+  await expect(page.getByRole("button", {name: "Accept high-confidence suggestions (0)"})).toBeDisabled();
+  await expect(page.getByRole("radio", {checked:true})).toHaveCount(0);
+});
+
+test("one batch LLM payload adds both sources and multiple payloads add neither", async ({ page }) => {
+  const report = fixture(2);
+  await mount(page);
+  const pairs = report.sources.map(s => ({from_parts:s.source.parts, to_parts:report.right_universe[2]!.parts, why:"both sources"}));
+  await page.getByRole("button", { name: "Ask LLM to rank candidates" }).click();
+  await page.evaluate(pairs => (window as any).pendingLlm.shift().resolve({content: JSON.stringify({pairs:[pairs[0]]}) + "\n" + JSON.stringify({pairs:[pairs[1]]})}), pairs);
+  await expect(page.getByRole("alert")).toContainText("No valid complete tuple pairs");
+  await expect(alternatives(page).getByText("both sources")).toHaveCount(0);
+  await page.getByRole("button", { name: "Ask LLM to rank candidates" }).click();
+  await resolveLlm(page, pairs);
+  await expect(page.getByRole("status")).toContainText("2 alternatives added");
+  await expect(alternatives(page).getByText("both sources")).toBeVisible();
+  await page.getByRole("navigation").getByRole("button").nth(1).click();
+  await expect(alternatives(page).getByText("both sources")).toBeVisible();
+});
+
+test("oversized LLM output is rejected whole, never parsed from a prefix", async ({ page }) => {
+  const report = fixture(2);
+  await mount(page);
+  await page.getByRole("button", {name:"Ask LLM to rank candidates"}).click();
+  await page.evaluate(report => {
+    const payload = JSON.stringify({pairs:[{from_parts:report.sources[1]!.source.parts,
+      to_parts:report.right_universe[2]!.parts, why:"valid prefix must not import"}]});
+    (window as any).pendingLlm.shift().resolve({content:payload + " ".repeat(12_000) + payload});
+  }, report);
+  await expect(page.getByRole("alert")).toContainText("exceeded the 12,000-character batch limit");
+  await page.getByRole("navigation").getByRole("button").nth(1).click();
+  await expect(alternatives(page).getByRole("radio")).toHaveCount(0);
+  expect(await page.evaluate("accepted.length")).toBe(0);
 });

@@ -8,7 +8,7 @@ import {
 export type QuerySelection = { queryId: string | null; stepIndex: number | null };
 export type QueryEditError = {
   code: "invalid_query_id" | "duplicate_query_id" | "query_not_found" |
-    "invalid_reference" | "self_join" | "invalid_step_index" | "root_required";
+    "invalid_reference" | "self_join" | "invalid_step_index" | "root_required" | "stale_query";
   message: string;
 };
 export type QueryEditResult =
@@ -192,7 +192,7 @@ export function appendStep(project: Project, input: {
 }
 
 export function removeStep(project: Project, input: {
-  queryId: string; index: number; selectedIndex: number | null;
+  queryId: string; index: number; selectedIndex?: number | null;
 }): QueryEditResult {
   return editSteps(project, input.queryId, query => {
     if (!validIndex(query, input.index)) return failure(project, "invalid_step_index", "Step no longer exists.");
@@ -200,7 +200,7 @@ export function removeStep(project: Project, input: {
       return failure(project, "root_required", "Remove later steps first, or clear the query — root step is required.");
     }
     const steps = query.steps.filter((_, i) => i !== input.index);
-    const selected = input.selectedIndex;
+    const selected = input.selectedIndex ?? null;
     const nextIndex = selected === null || !steps.length ? null :
       Math.min(selected >= input.index ? Math.max(0, selected - 1) : selected, steps.length - 1);
     return commitSteps(project, query, steps, { queryId: query.id, stepIndex: nextIndex });

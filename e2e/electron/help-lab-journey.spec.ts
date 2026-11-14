@@ -15,6 +15,21 @@ async function openLab(page: Page, id = "recon_ship_sales", discard = false) {
   await expect(page.getByRole("tab", { name: "Pipeline canvas", exact: true })).toHaveAttribute("aria-selected", "true");
 }
 
+async function inspectMappedRows(page: Page) {
+  await page.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "sales_mapped", exact: true })).toBeVisible();
+  await expect(page.getByTestId("preview-context")).toContainText("sales_mapped");
+  // Navigation starts preview and Lens independently. Do not toggle the old
+  // Lens while the destination preview is still queued/running. This scenario
+  // checks Mapping recomputation; busy-navigation races have separate tests.
+  await expect(page.getByTestId("preview-state")).toHaveCount(0);
+  const lens = page.getByRole("button", { name: "Join Lens", exact: true });
+  await expect(lens).toHaveAttribute("aria-pressed", "true");
+  await lens.click();
+  await expect(lens).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByTestId("preview-scope")).toHaveText("Sample · LIMIT 50");
+}
+
 test.describe("flagship Help Lab journey", () => {
   let session: Awaited<ReturnType<typeof launchIsolatedSession>>;
   test.beforeEach(async () => { session = await launchIsolatedSession(); });
@@ -157,28 +172,52 @@ test.describe("flagship Help Lab journey", () => {
     await expect(page.getByRole("button", { name: "Inspect original join", exact: true })).toBeEnabled();
   });
 
-  test("editing the existing partial map changes the recomputed example, without claiming full repair", async () => {
+  test("mapped-row inspection waits for the destination preview before leaving Lens", async () => {
     const { page } = session;
     await openLab(page);
-    await page.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
-    await page.getByRole("button", { name: "Join Lens", exact: true }).click();
+    await expect(page.getByTestId("preview-state")).toHaveCount(0);
+    await page.evaluate(() => (window as any).__dwhE2eArmPreviewHold());
+    const inspection = inspectMappedRows(page);
+    // Attach immediately so a test failure cannot leave an unhandled rejection.
+    const settled = inspection.then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+    try {
+      await page.evaluate(() => (window as any).__dwhE2eWaitPreviewStarted());
+      await expect(page.getByRole("heading", { name: "sales_mapped", exact: true })).toBeVisible();
+      await expect(page.getByTestId("preview-state")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Join Lens", exact: true })).toHaveAttribute("aria-pressed", "true");
+    } finally {
+      await page.evaluate(() => (window as any).__dwhE2eReleasePreviewHold());
+    }
+    const result = await settled;
+    if (!result.ok) throw result.error;
     await expect(page.getByRole("row").filter({ hasText: "COM-AMM" })).toHaveCount(2);
-    const project = await page.evaluate(() => (window as any).__dwhE2eGetProject());
-    const map = project.workspace.key_maps.find((m: any) => m.id === "map_sku");
-    await page.getByTestId(`pg-keymap-${map.name}`).click();
-    await page.getByRole("button", { name: "Add row", exact: true }).click();
-    await page.locator('input[data-col="from"]').last().fill("COM-AMM");
-    await page.locator('input[data-col="to"]').last().fill("AMM-A");
-    await page.getByRole("button", { name: "Save map", exact: true }).click();
-    await page.getByRole("tab", { name: "Pipeline canvas", exact: true }).click();
-    await page.getByRole("button", { name: "Inspect mapped example", exact: true }).click();
-    await page.getByRole("button", { name: "Join Lens", exact: true }).click();
-    await page.getByTestId("preview-recompute").click();
-    await expect(page.getByRole("row").filter({ hasText: "AMM-A" })).toHaveCount(2);
-    await expect(page.getByRole("row").filter({ hasText: "COM-AMM" })).toHaveCount(0);
-    await expect(page.getByTestId("lab-task-card")).toContainText("not a verified fix");
-    await page.getByRole("button", { name: "Inspect monthly reconciliation", exact: true }).click();
-    await expect(page.getByText("qty_gap_t", { exact: true }).first()).toBeAttached();
+  });
+
+  test("editing the existing partial map changes the recomputed example, without claiming full repair", async ({}, info) => {
+    const { page } = session;
+    try {
+      await openLab(page);
+      await inspectMappedRows(page);
+      await expect(page.getByRole("row").filter({ hasText: "COM-AMM" })).toHaveCount(2);
+      const project = await page.evaluate(() => (window as any).__dwhE2eGetProject());
+      const map = project.workspace.key_maps.find((m: any) => m.id === "map_sku");
+      await page.getByTestId(`pg-keymap-${map.name}`).click();
+      await page.getByRole("button", { name: "Add row", exact: true }).click();
+      await page.locator('input[data-col="from"]').last().fill("COM-AMM");
+      await page.locator('input[data-col="to"]').last().fill("AMM-A");
+      await page.getByRole("button", { name: "Save map", exact: true }).click();
+      await page.getByRole("tab", { name: "Pipeline canvas", exact: true }).click();
+      await inspectMappedRows(page);
+      await page.getByTestId("preview-recompute").click();
+      await expect(page.getByRole("row").filter({ hasText: "AMM-A" })).toHaveCount(2);
+      await expect(page.getByRole("row").filter({ hasText: "COM-AMM" })).toHaveCount(0);
+      await expect(page.getByTestId("lab-task-card")).toContainText("not a verified fix");
+      await page.getByRole("button", { name: "Inspect monthly reconciliation", exact: true }).click();
+      await expect(page.getByText("qty_gap_t", { exact: true }).first()).toBeAttached();
+    } catch (error) {
+      await page.screenshot({ path: info.outputPath("mapping-recompute-failure.png") }).catch(() => {});
+      throw error;
+    }
   });
 
   test("offline flagship No match is real inspectable evidence", async ({}, info) => {

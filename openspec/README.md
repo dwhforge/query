@@ -20,6 +20,10 @@ openspec/
 
 Active changes:
 
+- [Query operation boundary](changes/query-editing-boundary/proposal.md) — updated
+  roadmap PR-02 complete; [merged contract](specs/query-editing-boundary/spec.md),
+  [ownership, standalone use and verification](changes/query-editing-boundary/report.md).
+
 - [Pure Query graph edits](changes/query-graph-editing/proposal.md) — updated
   roadmap PR-01 complete; [merged contract](specs/query-graph-editing/spec.md),
   [ownership and verification](changes/query-graph-editing/report.md).

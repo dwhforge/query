@@ -15,9 +15,8 @@ import { useJoinDiagnostics } from "./app/joinDiagnostics/useJoinDiagnostics";
 import type { JoinInput } from "./app/joinDiagnostics/controller";
 import { resetProjectSession } from "./app/projectSessionReset";
 import {
-  applyJoin, appendStep as appendQueryStep, moveStep, removeQuery, removeStep, replaceStep,
-  type QueryEditResult,
-} from "./app/queryEditing/operations";
+  createQueryEditingService, type QueryEditingService, type QueryEditResult,
+} from "./app/queryEditing/service";
 import {
   captureJoinTarget, createQueryNavigation, isCurrentQueryContext, joinTargetUnavailable,
   transitionQueryContext, type QueryContext, type QueryDestination,
@@ -334,7 +333,7 @@ type ProjectBagAction =
   | { type: "clear_confirm_remap_result" }
   | { type: "create_mapping"; intent: MappingCreateApplyIntent }
   | { type: "clear_mapping_create_result" }
-  | { type: "edit_query"; edit: (project: Project) => QueryEditResult;
+  | { type: "edit_query"; edit: (editing: QueryEditingService) => QueryEditResult;
       ownerId: string; ownerUid: string | undefined; session: number }
   | { type: "clear_query_edit_result"; receipt: NonNullable<ProjectBag["queryEditResult"]> };
 
@@ -374,7 +373,7 @@ function projectBagReducer(
       return { ...state, mappingCreateResult: null };
     case "edit_query": {
       if (state.project.id !== action.ownerId || state.project.project_uid !== action.ownerUid) return state;
-      const result = action.edit(state.project);
+      const result = action.edit(createQueryEditingService(state.project));
       return { ...state, project: result.project, queryEditResult: { result, session: action.session } };
     }
     case "clear_query_edit_result":
@@ -2201,7 +2200,7 @@ function App() {
     await lifecycle.loadLab(id);
   }
 
-  function commitQueryEdit(edit: (project: Project) => QueryEditResult) {
+  function commitQueryEdit(edit: (editing: QueryEditingService) => QueryEditResult) {
     const owner = projectRef.current;
     dispatchProject({ type: "edit_query", edit, ownerId: owner.id,
       ownerUid: owner.project_uid, session: querySessionGenerationRef.current });
@@ -2215,7 +2214,7 @@ function App() {
   ) {
     if (!rightQueryId) return;
     const right = parseTargetKey(rightQueryId) ?? rightQueryId;
-    commitQueryEdit(p => applyJoin(p, { queryId: hostQueryId, right, pairs, joinType: type }));
+    commitQueryEdit(editing => editing.applyJoin({ queryId: hostQueryId, right, pairs, joinType: type }));
   }
 
   /** Domain projection only; request/sample ownership lives in Join controller. */
@@ -2463,7 +2462,7 @@ function App() {
   /** Drop a query node: remove from workspace, scrub Join/Append refs, fix focus. */
   function removeQueryOnCanvas(queryId: string) {
     const selection = { queryId: activeQueryId, stepIndex: selectedStepIndex };
-    commitQueryEdit(p => removeQuery(p, { queryId, selection }));
+    commitQueryEdit(editing => editing.removeQuery({ queryId, selection }));
   }
 
   // GraphCanvas calls only on drag stop. Commit now so a subsequent Save/switch
@@ -2477,19 +2476,19 @@ function App() {
     if (!activeQueryId) return;
     const queryId = activeQueryId;
     const selectedIndex = selectedStepIndex;
-    commitQueryEdit(p => removeStep(p, { queryId, index, selectedIndex }));
+    commitQueryEdit(editing => editing.removeStep({ queryId, index, selectedIndex }));
   }
 
   function moveStepAt(index: number, dir: -1 | 1) {
     if (!activeQueryId) return;
     const queryId = activeQueryId;
-    commitQueryEdit(p => moveStep(p, { queryId, index, direction: dir }));
+    commitQueryEdit(editing => editing.moveStep({ queryId, index, direction: dir }));
   }
 
   function replaceStepAt(index: number, step: TransformationStep) {
     if (!activeQueryId) return;
     const queryId = activeQueryId;
-    commitQueryEdit(p => replaceStep(p, { queryId, index, step }));
+    commitQueryEdit(editing => editing.replaceStep({ queryId, index, step }));
   }
 
   /** Rebind LoadCsv / local LoadParquet to another file (Sources catalog had no path edit). */
@@ -2566,7 +2565,7 @@ function App() {
   function appendStep(step: TransformationStep) {
     if (!activeQueryId) return;
     const queryId = activeQueryId;
-    commitQueryEdit(p => appendQueryStep(p, { queryId, step }));
+    commitQueryEdit(editing => editing.appendStep({ queryId, step }));
   }
 
   function selectStepAt(index: number) {

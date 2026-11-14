@@ -67,7 +67,7 @@ input rows. These checks are execution/persistence tests, not display-only check
 
 ## UI polish follow-up verification (2026-11-14)
 
-- Stable preferred 760 × 680 px viewport-bounded shell, pinned header/ranking
+- Stable preferred 840 × 740 px viewport-bounded shell, pinned header/ranking
   toolbar/footer, internally scrolling review. Existing Options palette and
   styled hover/focus/disabled controls; complete tuple semantics unchanged.
 - Prominent Ask LLM to rank candidates remains available alongside fuzzy hits;
@@ -77,10 +77,10 @@ input rows. These checks are execution/persistence tests, not display-only check
 - `npm run test:unit`: passed (all discovered frontend unit files).
 - `npm run build`: passed; existing large-chunk advisory remains.
 - `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium npx playwright test
-  -c src/components/FindRightDialog.playwright.config.ts`: 12 passed.
+  -c src/components/FindRightDialog.playwright.config.ts`: 13 passed.
   Actual app CSS is loaded through Vite. Geometry checks cover held retrieval,
   fuzzy hits, LLM busy/completion, disclosure/filtering, internal scrolling, and
-  pinned controls at 1280 × 900 and 640 × 540. Missing-provider manual selection
+  pinned controls at 1280 × 900, 640 × 540, and 390 × 700. Missing-provider manual selection
   and guidance are covered. Existing stale-context/tuple-safety tests still pass.
 - Visually reviewed generated `suggest-right-1280.png` and
   `suggest-right-640.png` under `test-results/suggest-right/`: app-consistent dark
@@ -89,3 +89,8 @@ input rows. These checks are execution/persistence tests, not display-only check
   lifecycle suites were not rerun for this UI-only follow-up. No backend or
   Mapping implementation was changed; prior unrelated working-tree work retained.
 - UI requirements merged into `openspec/specs/unified-suggest-right/spec.md`.
+
+Manual-list follow-up: compact target-value cards remove repeated source/target
+tables and retain every field, change marker, count and score. Component coverage
+asserts this compact structure; `suggest-right-compact-manual.png` captures it.
+Final frontend unit run: 46 files passed. Production build passed.

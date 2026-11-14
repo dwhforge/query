@@ -97,15 +97,20 @@ for (const n of [1, 2, 3]) {
   });
 }
 
-test("manual search spans all fields and NULL target is visible but blocked", async ({ page }) => {
+test("manual search spans all fields and NULL target is visible but blocked", async ({ page }, info) => {
   await mount(page, 3);
   await page.getByText("Search other records").click();
+  const manual = page.getByRole("region", { name: "Manual right search" });
+  await expect(manual.locator("table")).toHaveCount(0);
+  await expect(manual.getByText("right_2", { exact: false }).first()).toBeVisible();
+  await expect(manual.getByText("Field scores:", { exact: false }).first()).toBeVisible();
   await page.getByRole("searchbox").fill("NULL");
   await page.getByRole("radio", { name: /nullable/ }).check();
   await expect(page.getByRole("button", { name: "Add to mapping" })).toBeDisabled();
   await expect(page.getByText(/NULL cannot be represented/).first()).toBeVisible();
   await page.getByRole("searchbox").fill("search-only");
   await page.getByRole("radio", { name: /search-only/ }).check();
+  await page.screenshot({ path: info.outputPath("suggest-right-compact-manual.png") });
   await page.getByRole("button", { name: "Add to mapping" }).click();
   expect(await page.evaluate("accepted[0].outputValues")).toEqual(["manual", "manual", "search-only"]);
   expect(await page.evaluate("calls.filter(c => c.cmd === 'join_key_fuzzy_suggest').length")).toBe(1);
@@ -196,8 +201,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 640, height: 540 
     const shell = await dialog.boundingBox();
     const footerBox = await footer.boundingBox();
     const rankBox = await rank.boundingBox();
-    expect(shell!.width).toBe(Math.min(760, viewport.width - 32));
-    expect(shell!.height).toBe(Math.min(680, viewport.height - 32));
+    expect(shell!.width).toBe(Math.min(840, viewport.width - 32));
+    expect(shell!.height).toBe(Math.min(740, viewport.height - 32));
     await expect(rank).toBeVisible();
     await expect(rank).toBeDisabled();
     await expect(page.getByRole("searchbox")).toBeHidden();

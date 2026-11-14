@@ -162,7 +162,12 @@ export function FindRightDialog({ open, fromParts, workspace, hostQueryId, joinS
         <input type="radio" className="mt-0.5 shrink-0 accent-teal-400 focus-visible:outline-2 focus-visible:outline-teal-400" name={`suggest-right-${label}`} checked={picked === index} onChange={() => setPicked(index)} aria-label={`Select ${row.parts.map(tupleCell).join(" / ")}`} />
         <span className="min-w-0 flex-1 space-y-1">
           <span className="block text-xs text-teal-200">{label}{details?.score != null ? ` · score ${details.score.toFixed(3)}` : ""}</span>
-          <TupleFields leftOn={tuple.left_on} rightOn={tuple.right_on} source={fromParts} target={row.parts} />
+          {label === "Manual" ? <span className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
+            {row.parts.map((value, i) => <span key={i} className="min-w-0 text-xs">
+              <span className="text-[10px] text-slate-500">{tuple.right_on[i]} <span className={fromParts[i] === value ? "text-slate-500" : "text-amber-200"}>{fromParts[i] === value ? "· Same" : "· Changed"}</span></span>
+              <span className="block break-all whitespace-pre-wrap font-mono">{tupleCell(value)}</span>
+            </span>)}
+          </span> : <TupleFields leftOn={tuple.left_on} rightOn={tuple.right_on} source={fromParts} target={row.parts} />}
           <span className="block text-[11px] text-slate-400">{tupleCounts(row)} · {fromParts.filter((value, i) => value !== row.parts[i]).length} changed fields</span>
           {details && <span className="block text-[11px] text-slate-500">Field scores: {details.field_scores.map((s) => s == null ? "unscored" : s.toFixed(3)).join(" / ")}</span>}
           {why && <span className="block text-xs text-slate-300">{why}</span>}
@@ -174,7 +179,7 @@ export function FindRightDialog({ open, fromParts, workspace, hostQueryId, joinS
 
   if (!open) return null;
   return <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/60 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
-    <div role="dialog" aria-modal="true" aria-labelledby="find-right-title" className="flex h-[680px] max-h-[calc(100dvh-2rem)] w-full max-w-[760px] flex-col overflow-hidden rounded-xl border border-slate-700 bg-[#0a1219] text-slate-200 shadow-2xl shadow-black/50">
+    <div role="dialog" aria-modal="true" aria-labelledby="find-right-title" className="flex h-[740px] max-h-[calc(100dvh-2rem)] w-full max-w-[840px] flex-col overflow-hidden rounded-xl border border-slate-700 bg-[#0a1219] text-slate-200 shadow-2xl shadow-black/50">
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-800 px-4 py-3">
         <div><h2 id="find-right-title" className="text-sm font-semibold text-teal-100">Suggest Right</h2>
           <p className="text-xs text-slate-400">All Join fields are searched together. Choose a complete right tuple explicitly.</p></div>

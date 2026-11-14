@@ -24,12 +24,16 @@ and verification evidence are in the report.
 ## UI polish follow-up
 
 - Reuse Options dialog palette, typography, borders, hover/focus treatment.
-- Preferred 760 × 680 px shell, bounded by viewport minus 32 px. Pinned header,
+- Preferred 840 × 740 px shell, bounded by viewport minus 32 px. Pinned header,
   ranking toolbar, and fixed-height footer; only the body scrolls.
 - Stable-width Ask LLM to rank candidates action with configuration/search/block
   reasons and an explicit busy state, independent of fuzzy hit availability.
 - Four-column field review combines aligned field names without hiding values or
   differences. Manual universe starts behind Search other records; counts and
   all-field search remain discoverable. No backend or Mapping changes.
+- Manual browsing uses compact labeled target-value grids rather than repeating
+  full source/target tables for every record. Source values remain in the source
+  section; each target retains all values, per-field change markers, counts and
+  scores, with the whole card serving as the selection label.
 - Component tests load actual app CSS through Vite, checking geometry through
   delayed search and LLM completion at desktop and smaller viewport sizes.

@@ -54,7 +54,9 @@ retrieval, including when fuzzy hits exist. While unavailable it SHALL be disabl
 with a visible reason; an unconfigured provider SHALL explain configuration in
 Options. Busy ranking SHALL be labeled and prevent repeated requests. No ranking
 SHALL preselect or confirm a target. Manual browsing MAY start collapsed under
-Search other records, with the retrieved tuple count and an all-field search.
+Search other records, with the retrieved tuple count and an all-field search. Manual results SHOULD
+use compact labeled target values rather than repeated source/target tables,
+while retaining every field, difference marker, count, and score.
 
 ### Scenario: search and ranking complete without layout jumps
 

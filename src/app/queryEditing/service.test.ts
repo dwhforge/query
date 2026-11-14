@@ -44,7 +44,7 @@ function rejected(result: QueryEditResult, project: Project, code: string) {
   const original = fixture();
   const service = createQueryEditingService(original);
   equal(Object.keys(service).sort(), [
-    "appendStep", "applyJoin", "deriveQuery", "moveStep", "removeEdge", "removeQuery", "removeStep", "replaceStep", "revision",
+    "appendStep", "applyJoin", "deriveQuery", "moveStep", "prepareRemoveQuery", "removeEdge", "removeQuery", "removeStep", "replaceStep", "revision",
   ], "only existing operations and revision, no UI/store ports");
   const revision = service.revision("a");
   assert(revision !== null, "revision available for target");

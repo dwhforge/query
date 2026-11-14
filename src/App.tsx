@@ -2361,8 +2361,20 @@ function App() {
 
   /** Drop a query node: remove from workspace, scrub Join/Append refs, fix focus. */
   function removeQueryOnCanvas(queryId: string) {
+    const prepared = createQueryEditingService(projectRef.current).prepareRemoveQuery({ queryId });
+    if (!prepared.ok) {
+      setError(prepared.error.message);
+      return;
+    }
+    if (prepared.consequences.length) {
+      const details = prepared.consequences.map(effect =>
+        `• Query "${effect.queryName}" — ${effect.operation === "Join" ? "JOIN" : "Append"} (step ${effect.stepIndex + 1}): ${effect.action === "remove_step" ? "remove operation" : "remove this input; keep other inputs"}`);
+      if (!window.confirm(`Delete Query "${prepared.queryName}"?\n\nThis will also change:\n${details.join("\n")}\n\nThese Queries may return different results. Continue?`)) return;
+    }
     const selection = { queryId: activeQueryId, stepIndex: selectedStepIndex };
-    commitQueryEdit(editing => editing.removeQuery({ queryId, selection }));
+    commitQueryEdit(editing => editing.removeQuery({ queryId, selection,
+      expectedRemovalRevision: prepared.revision,
+    }));
   }
 
   // GraphCanvas calls only on drag stop. Commit now so a subsequent Save/switch

@@ -19,17 +19,33 @@ async function connect(page: Page, right: string, host: string) {
   const target = page.locator(`.react-flow__node[data-id="${host}"] .react-flow__handle.target`);
   await expect(source).toBeVisible();
   await expect(target).toBeVisible();
-  // Viewport resize starts React Flow fitView animation. Wait for actionability
-  // before taking coordinates; visible alone does not mean handles are stable.
-  await target.hover();
   await source.hover();
   const a = await source.boundingBox();
-  const b = await target.boundingBox();
-  if (!a || !b) throw new Error("Visible Query handles have no bounds");
+  if (!a) throw new Error("Visible source handle has no bounds");
   await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
   await page.mouse.down();
-  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 20 });
-  await page.mouse.up();
+  try {
+    // Cross the connection-drag threshold and wait until React Flow has entered
+    // connecting mode before measuring/moving to the target.
+    await page.mouse.move(a.x + a.width / 2 + 12, a.y + a.height / 2, { steps: 3 });
+    await expect(source).toHaveClass(/\bconnectingfrom\b/);
+    const b = await target.boundingBox();
+    if (!b) throw new Error("Visible target handle has no bounds");
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 20 });
+    await expect(target).toHaveClass(/\bvalid\b/);
+  } finally {
+    await page.mouse.up();
+  }
+}
+
+// Save canonicalizes local file paths (ADR-0043) and stamps default execution.
+// Compare the complete graph after resolving only these documented differences.
+function canonicalQueries(queries: any[], root: string) {
+  return queries.map(query => ({ ...query, execution: query.execution ?? "local",
+    steps: query.steps.map((step: any) => step.type === "LoadCsv" || step.type === "LoadParquet"
+      ? { ...step, payload: { ...step.payload, path: path.resolve(root, step.payload.path), path_kind: "absolute" } }
+      : step),
+  }));
 }
 
 test("canvas JOIN append and upsert select the actual committed JOIN, not a stale updater index", async ({}, info) => {
@@ -90,7 +106,7 @@ test("batched append, replace, move and remove use the latest graph and valid se
   await expect(page.getByTestId("preview-scope")).toHaveText("Sample · LIMIT 50");
 });
 
-test("canvas deletion scrubs structural dependencies without discarding another queued edit or Mapping", async () => {
+test("canvas deletion lists consequences, preserves cancellation and refuses a stale confirmation before retry", async () => {
   const { page } = session;
   await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({ ...p,
     workspace: { ...p.workspace, key_maps: [{ id: "keep", name: "Keep", entries: [], storage: { kind: "seed" } }],
@@ -100,13 +116,30 @@ test("canvas deletion scrubs structural dependencies without discarding another 
           { type: "Append", payload: { other_query_ids: ["supplier_products", "catalog_wide"] } }],
       }) },
   })));
-  // Append and Delete are batched; deletion must not restore captured old queries.
+  const before = await project(page);
+  let message = "";
+  page.once("dialog", async dialog => { message = dialog.message(); await dialog.dismiss(); });
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  expect(message).toContain('Query "catalog_products" — JOIN (step 3): remove operation');
+  expect(message).toContain('Query "catalog_products" — Append (step 4): remove this input; keep other inputs');
+  expect(await project(page)).toEqual(before);
+  await expect(page.getByRole("heading", { name: "supplier_products", exact: true })).toBeVisible();
+
+  // A queued graph edit invalidates confirmation, even in the same event turn.
+  page.once("dialog", dialog => dialog.accept());
   await page.evaluate(() => {
     (document.querySelector('button[title="Add Limit"]') as HTMLButtonElement).click();
     const button = [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === "Delete");
     if (!button) throw new Error("Canvas Delete unavailable");
     button.click();
   });
+  await expect(page.getByText("Query graph changed since deletion was prepared. Review the consequences and retry.", { exact: true })).toBeVisible();
+  const stale = await project(page);
+  expect(stale.workspace.queries).toHaveLength(3);
+  expect(stale.workspace.queries[0].steps.at(-1).type).toBe("Limit");
+  expect(stale.workspace.queries[1]).toEqual(before.workspace.queries[1]);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByRole("heading", { name: "catalog_products", exact: true })).toBeVisible();
   const current = await project(page);
   expect(current.workspace.queries.map((q: any) => q.id)).toEqual(["catalog_products", "catalog_wide"]);
@@ -125,7 +158,7 @@ test("sequential create/derive/edit/remove round-trips through Save + reopen wit
   await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({
     ...p,
     workspace: { ...p.workspace, key_maps: [
-      { id: "keep", name: "KeepSeed", entries: [], output_columns: ["id"], storage: { kind: "seed" } },
+      { id: "keep", name: "KeepSeed", from_column: "from", entries: [], output_columns: ["id"], storage: { kind: "seed" } },
     ] },
   })));
 
@@ -140,16 +173,32 @@ test("sequential create/derive/edit/remove round-trips through Save + reopen wit
   // 2) Add a JOIN to the derived branch, then a Limit step — exercises edit paths
   //    that both route through the same Query Editing service boundary.
   await connect(page, "supplier_products", derivedId);
+  // JOIN creation asynchronously describes its inputs. A later edit intentionally
+  // invalidates that pending context, so wait for the JOIN commit before Limit.
+  await expect.poll(async () =>
+    (await project(page)).workspace.queries.find((q: any) => q.id === derivedId).steps.map((s: any) => s.type))
+    .toEqual(["FromQuery", "Join"]);
   await page.locator('button[title="Add Limit"]').click();
   await expect.poll(async () =>
     (await project(page)).workspace.queries.find((q: any) => q.id === derivedId).steps.length).toBeGreaterThanOrEqual(3);
+
+  // Real SQL-model creation, not just derivation, must retain the full map list.
+  const mapsBeforeCreate = (await project(page)).workspace.key_maps;
+  await page.getByTitle("New query — pick source or create", { exact: true }).click();
+  await page.getByRole("button", { name: /SQL model/ }).click();
+  await expect.poll(async () => (await project(page)).workspace.queries.some((q: any) => q.name === "sql_model")).toBe(true);
+  expect((await project(page)).workspace.key_maps).toEqual(mapsBeforeCreate);
 
   // 3) Remove catalog_products; its Join/Append references in surviving Queries are
   //    structurally scrubbed rather than leaving a rootless Query. Focus it first so
   //    the canvas "Delete" toolbar applies to the correct node.
   await page.locator('[data-id="catalog_products"]').click();
+  // No dependent operations: deletion must not show an extra prompt.
+  const unexpectedDialog = (dialog: any) => { void dialog.dismiss(); throw new Error("Independent deletion prompted"); };
+  page.on("dialog", unexpectedDialog);
   await page.getByRole("button", { name: "Delete" }).click();
   await expect(page.getByRole("heading", { name: "catalog_products", exact: true })).toBeHidden();
+  page.off("dialog", unexpectedDialog);
 
   const afterDelete = await project(page);
   expect(afterDelete.workspace.queries.map((q: any) => q.id)).not.toContain("catalog_products");
@@ -179,6 +228,50 @@ test("sequential create/derive/edit/remove round-trips through Save + reopen wit
   expect(reopened.workspace.queries.map((q: any) => q.id)).toContain(derivedId);
   const keepMap = reopened.workspace.key_maps?.find((m: any) => m.id === "keep");
   expect(keepMap?.name).toBe("KeepSeed");
+  expect(canonicalQueries(reopened.workspace.queries, fixtureWorkDir))
+    .toEqual(canonicalQueries(afterDelete.workspace.queries, fixtureWorkDir));
+  expect(reopened.workspace.key_maps).toEqual(afterDelete.workspace.key_maps);
 
   fs.unlinkSync(outPath);
+});
+
+test("file and existing-Source Query creation preserve existing KeyMaps", async () => {
+  const { page, app, fixtureWorkDir } = session;
+  await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({ ...p,
+    workspace: { ...p.workspace, key_maps: [{ id: "keep", name: "Keep", storage: { kind: "seed" },
+      from_columns: ["ext"], output_columns: ["id"], entries: [{ from: "a", from_parts: ["a"], output_values: ["1"] }] }] },
+  })));
+  const before = await project(page);
+  // Only the native file picker is stubbed; creation uses the real CSV handler.
+  await app.evaluate(({ dialog }, filePath) => {
+    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [filePath] })) as any;
+  }, path.join(fixtureWorkDir, "data/supplier.csv"));
+  await page.getByTitle("New query — pick source or create", { exact: true }).click();
+  await page.getByRole("button", { name: /CSV…/ }).click();
+  await expect.poll(async () => (await project(page)).workspace.queries.length).toBe(4);
+  expect((await project(page)).workspace.key_maps).toEqual(before.workspace.key_maps);
+  await page.getByTitle("New query from this source", { exact: true }).first().click();
+  await expect.poll(async () => (await project(page)).workspace.queries.length).toBe(5);
+  expect((await project(page)).workspace.key_maps).toEqual(before.workspace.key_maps);
+  expect((await project(page)).workspace.queries.slice(0, 3)).toEqual(before.workspace.queries);
+});
+
+test("a query-backed Mapping protects its input JOIN in the loaded project", async () => {
+  const { page } = session;
+  await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({ ...p,
+    workspace: { ...p.workspace,
+      key_maps: [{ id: "computed", name: "Computed", storage: { kind: "query", query_id: "supplier_products" },
+        from_columns: ["product_name"], output_columns: ["name"], entries: [] }],
+      queries: p.workspace.queries.map((q: any) => q.id !== "supplier_products" ? q : { ...q,
+        steps: [...q.steps, { type: "Join", payload: { right_query_id: "catalog_products", join_type: "left",
+          left_on: ["product_name"], right_on: ["name"] } }] }),
+    },
+  })));
+  const before = await project(page);
+  const edge = page.locator('.react-flow__edge[data-id="join:catalog_products->supplier_products:s2"]');
+  await expect(edge).toBeVisible();
+  await edge.dispatchEvent("click");
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(page.getByText('Mapping "Computed" needs this Query. Rebind or remove the Mapping first.', { exact: true })).toBeVisible();
+  expect(await project(page)).toEqual(before);
 });

@@ -20,6 +20,12 @@ openspec/
 
 Active changes:
 
+- [Query editing integrity](changes/query-editing-integrity/proposal.md) —
+  review follow-up: transparent Join/Append deletion confirmation, graph-snapshot
+  revalidation and regression coverage; contracts merged into
+  [Query graph editing](specs/query-graph-editing/spec.md) and
+  [Query editing boundary](specs/query-editing-boundary/spec.md), under ADR-0048.
+
 - [Query operation boundary](changes/query-editing-boundary/proposal.md) — updated
   roadmap PR-02 complete; [merged contract](specs/query-editing-boundary/spec.md),
   [ownership, standalone use and verification](changes/query-editing-boundary/report.md).

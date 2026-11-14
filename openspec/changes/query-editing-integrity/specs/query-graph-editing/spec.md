@@ -12,6 +12,21 @@ Appends. Publications of the deleted Query SHALL be removed; focus/canvas/source
 catalog synchronization SHALL be preserved. All rejected edits SHALL retain the
 exact original snapshot and have no navigation effect.
 
+### Requirement: Confirm soft deletion consequences
+The application boundary SHALL expose structured affected Query IDs/names,
+operation kinds, step indices and whether a Join/Append step is removed or an
+Append input is removed. The UI SHALL list these consequences and require
+confirmation before changing surviving operations. Cancellation SHALL not mutate
+the Project or navigate. No extra prompt is required without these consequences.
+Commit SHALL revalidate hard dependencies and reject a stale graph-snapshot
+confirmation without applying deletion. Existing target revision semantics,
+project formats and IPC contracts SHALL remain unchanged.
+
+#### Scenario: Dependencies change after preparation
+Prepare deletion, then add/change a dependency in another Query or bind a Mapping
+or Check to the target. Committing the earlier confirmation SHALL reject with
+the current snapshot intact, even when the deleted Query itself did not change.
+
 ### Requirement: Pure derive and edge edits
 Derive and removeEdge SHALL use the existing pure Query Editing service and
 current reducer snapshot. Derive SHALL create a unique local FromQuery branch,

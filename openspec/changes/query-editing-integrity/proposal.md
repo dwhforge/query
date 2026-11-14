@@ -16,3 +16,11 @@ Leave file rebinding, target revision semantics, Shell decomposition and future
 CLI/Compare/MCP/plugin work untouched.
 
 Review: proposal → specs → design → tasks.
+
+## Follow-up review at HEAD 6f15be6
+
+Confirmed: soft Join/Append cleanup has no UI warning. Add pure consequence
+inspection and UI confirmation, retaining existing deletion semantics and hard
+blocks. Revalidate on commit and reject an outdated confirmation. Verify the
+existing dependency/creation/round-trip coverage and add missing cases. Keep
+conservative Mapping edge protection unless safety of a relaxation is proved.

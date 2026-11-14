@@ -17,6 +17,10 @@ controlled rejection is preferred to silently breaking dependencies.
 - Unprotected Join/Append references retain structural cleanup. Published
   `Project.outputs` entries for a deleted Query are removed explicitly; focus is
   repaired through existing rules. No transitive Query cascade is introduced.
+- Before cleanup changes surviving Join/Append operations, the UI lists affected
+  Queries and operations and requires confirmation. Pure application inspection
+  exposes these consequences without React. Commit rechecks hard dependencies
+  and refuses a changed graph; no-dependency deletion needs no extra prompt.
 - A From edge can be removed only if no rootless transforms remain. Clearing a
   root-only Query is allowed as an empty editing draft only if no surviving
   Query, publication, query-backed Mapping or Mapping Check needs its output.
@@ -26,6 +30,8 @@ controlled rejection is preferred to silently breaking dependencies.
 
 No IPC/format change, dependency-manager framework or Rust migration.
 Target-query revision tokens retain their existing, limited semantics.
+Deletion confirmation uses a separate graph-snapshot token, not a new persisted
+field or IPC contract.
 
 Related: ADR-0013, ADR-0027, ADR-0032, ADR-0034, ADR-0036.
 OpenSpec: [query-editing-integrity](../../openspec/changes/query-editing-integrity/proposal.md).

@@ -7,11 +7,16 @@ graph-rule owner.
 ## Requirements
 
 ### Requirement: Narrow existing-operation facade
-QueryEditingService SHALL expose only Query remove, JOIN upsert and step
-replace/move/append/remove. It SHALL be usable without React, Electron, DOM,
-storage or host IPC. Operation inputs SHALL contain domain targets/values and
+QueryEditingService SHALL expose Query removal/preparation, derivation, edge
+removal, JOIN upsert and step replace/move/append/remove. It SHALL be usable
+without React, Electron, DOM, storage or host IPC. Operation inputs SHALL contain domain targets/values and
 optional target revision, not QueryContext, panel geometry or tab/view state.
 The existing pure operations SHALL remain the sole owner of graph rules.
+File picker and Load-file rebinding orchestration SHALL remain outside this
+boundary. Deletion preparation SHALL expose structured consequences and a
+separate target-bound graph-snapshot token. It SHALL NOT commit the proposed
+deletion or request confirmation; UI/adapters own consent. Existing
+expectedRevision tokens SHALL remain target-definition-only.
 
 ### Requirement: Explicit snapshot and revision semantics
 The service SHALL evaluate against an explicitly bound Project snapshot. It

@@ -112,9 +112,46 @@ export function deriveQuery(project: Project, input: { queryId: string }): Query
     { queryId: id, stepIndex: 0 });
 }
 
+export type QueryRemovalConsequence = {
+  queryId: string; queryName: string; stepIndex: number;
+  operation: "Join" | "Append"; action: "remove_step" | "remove_input";
+};
+
+/** Deletion confirmation covers the graph, not just the deleted definition. */
+function removalRevision(project: Project, queryId: string): string {
+  return JSON.stringify([project.id, project.project_uid, queryId, project.workspace.queries,
+    project.workspace.key_maps, project.mapping_checks, project.outputs]);
+}
+
+/** Pure inspection; no proposed mutation is committed and hard blocks still win. */
+export function prepareRemoveQuery(project: Project, input: { queryId: string }):
+  | { ok: true; queryName: string; consequences: QueryRemovalConsequence[]; revision: string }
+  | Extract<QueryEditResult, { ok: false }> {
+  const result = removeQuery(project, input);
+  if (!result.ok) return result;
+  const consequences: QueryRemovalConsequence[] = [];
+  for (const query of project.workspace.queries) {
+    if (query.id === input.queryId) continue;
+    query.steps.forEach((step, stepIndex) => {
+      if (step.type === "Join" && localTargetId(step.payload.right_query_id) === input.queryId) {
+        consequences.push({ queryId: query.id, queryName: query.name, stepIndex,
+          operation: "Join", action: "remove_step" });
+      } else if (step.type === "Append" &&
+        step.payload.other_query_ids.some(id => localTargetId(id) === input.queryId)) {
+        consequences.push({ queryId: query.id, queryName: query.name, stepIndex,
+          operation: "Append", action: step.payload.other_query_ids.every(id => localTargetId(id) === input.queryId)
+            ? "remove_step" : "remove_input" });
+      }
+    });
+  }
+  return { ok: true, queryName: project.workspace.queries.find(q => q.id === input.queryId)?.name ?? input.queryId,
+    consequences, revision: removalRevision(project, input.queryId) };
+}
+
 export function removeQuery(project: Project, input: {
   queryId: string;
   selection?: QuerySelection;
+  expectedRemovalRevision?: string;
 }): QueryEditResult {
   const error = queryError(project, input.queryId);
   if (error) return { ok: false, project, error };
@@ -131,6 +168,9 @@ export function removeQuery(project: Project, input: {
   }
   const owner = protectedInputOwner(project, input.queryId);
   if (owner) return failure(project, "query_in_use", owner);
+  if (input.expectedRemovalRevision !== undefined && input.expectedRemovalRevision !== removalRevision(project, input.queryId)) {
+    return failure(project, "stale_query", "Query graph changed since deletion was prepared. Review the consequences and retry.");
+  }
   const queries = project.workspace.queries.filter(q => q.id !== input.queryId).map(q => {
     const steps = q.steps.flatMap((step): TransformationStep[] => {
       if (step.type === "Join" && localTargetId(step.payload.right_query_id) === input.queryId) return [];

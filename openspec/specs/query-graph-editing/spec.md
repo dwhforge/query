@@ -3,6 +3,8 @@
 Merged from [updated-roadmap PR-01](../../changes/query-graph-editing/proposal.md)
 under ADR-0032. Existing execution, navigation, lifecycle and Mapping contracts
 remain authoritative.
+Integrity and deletion confirmation follow ADR-0048 and the merged
+[integrity change](../../changes/query-editing-integrity/proposal.md).
 
 ## Requirements
 
@@ -15,17 +17,52 @@ React, DOM, IPC, storage or mutable global state. Ambiguous duplicate local Quer
 IDs and missing/invalid operation targets SHALL not partially mutate the project.
 
 ### Requirement: Structural Query deletion preserves independent owners
-Deleting a Query SHALL remove its local Join/FromQuery dependencies throughout
-the remaining graph, remove its Append inputs and empty Appends, repair published
-focus, remove its canvas position and use existing Source catalog synchronization.
-Other queries, external targets, workspace maps and unrelated project fields
-SHALL remain intact. Independent catalog Sources SHALL not be deleted just
-because a query was removed. Missing deletion is an explicit no-op.
+Deleting a Query SHALL preserve unrelated Workspace properties and KeyMaps.
+Surviving FromQuery or explicit SQL-placeholder consumers SHALL cause controlled
+rejection. Query-backed KeyMap and MappingCheck input closures that need the
+target SHALL block deletion, without automatic owner deletion/rebinding.
+Unprotected Join/Append references SHALL be scrubbed as before, including empty
+Appends. Publications of the deleted Query SHALL be removed; focus/canvas/source
+catalog synchronization SHALL be preserved. All rejected edits SHALL retain the
+exact original snapshot and have no navigation effect. Independent catalog
+Sources SHALL not be deleted just because a query was removed. Missing deletion
+is an explicit no-op.
 
 #### Scenario: Deep dependency graph
-Delete a node referenced by several descendants. Direct structural references
-to that node are scrubbed at every depth; surviving queries and references to
+Delete an unprotected node referenced by several Join/Append descendants. Those
+direct references are scrubbed at every depth; surviving queries and references to
 other nodes remain. No transitive query deletion or arbitrary SQL rewrite occurs.
+
+### Requirement: Confirm soft deletion consequences
+The application boundary SHALL expose structured affected Query IDs/names,
+operation kinds, step indices and whether a Join/Append step is removed or an
+Append input is removed. The UI SHALL list these consequences and require
+confirmation before changing surviving operations. Cancellation SHALL not mutate
+the Project or navigate. No extra prompt is required without these consequences.
+Commit SHALL revalidate hard dependencies and reject a stale graph-snapshot
+confirmation without applying deletion. Existing target revision semantics,
+project formats and IPC contracts SHALL remain unchanged.
+
+#### Scenario: Dependencies change after preparation
+Prepare deletion, then add/change a dependency in another Query or bind a Mapping
+or Check to the target. Committing the earlier confirmation SHALL reject with
+the current snapshot intact, even when the deleted Query itself did not change.
+
+### Requirement: Pure derive and edge edits
+Derive and removeEdge SHALL use the existing pure Query Editing service and
+current reducer snapshot. Derive SHALL create a unique local FromQuery branch,
+preserving other Workspace fields and unrelated project content. All five
+existing Query creation handlers SHALL retain KeyMaps.
+Edge removal SHALL distinguish typed local/external targets and indexed Joins,
+preserving unrelated edges. Stale/missing edges SHALL be no-ops. Removal SHALL
+refuse rootless transforms and protected Mapping/Check inputs. Clearing a sole
+From root SHALL refuse if another Query/publication/Mapping/Check needs it.
+
+#### Scenario: Round-trip after sequential edits
+Open a project with multiple Queries and KeyMaps, create Queries using the
+existing creation paths, derive, edit steps/Join and remove safe edges/Queries.
+After each action unrelated KeyMaps remain unchanged; Save and reopen preserve
+the resulting graph and Mapping definitions.
 
 ### Requirement: JOIN upsert retains editable keys and deterministic selection
 JOIN upsert SHALL update the first existing Join to the same right target or

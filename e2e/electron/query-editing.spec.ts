@@ -1,4 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
+import fs from "node:fs";
+import path from "node:path";
 import { launchIsolatedSession, closeIsolatedSession } from "./helpers/launch.mjs";
 
 let session: Awaited<ReturnType<typeof launchIsolatedSession>>;
@@ -112,4 +114,71 @@ test("canvas deletion scrubs structural dependencies without discarding another 
   expect(current.workspace.queries[0].steps[2].payload.other_query_ids).toEqual(["catalog_wide"]);
   expect(current.workspace.key_maps[0].id).toBe("keep");
   expect(current.workspace.focus_query_id).toBe("catalog_products");
+});
+
+test("sequential create/derive/edit/remove round-trips through Save + reopen without losing KeyMaps", async ({}, info) => {
+  const { page, fixtureWorkDir } = session;
+  const outPath = path.join(fixtureWorkDir, `_e2e_query_editing_${Date.now()}.dwhproj.json`);
+
+  // Seed an unrelated seed Mapping before any Query edit so the round-trip
+  // proves unrelated Workspace properties survive create/derive/edit/remove.
+  await page.evaluate(() => (window as any).__dwhE2ePatchProject((p: any) => ({
+    ...p,
+    workspace: { ...p.workspace, key_maps: [
+      { id: "keep", name: "KeepSeed", entries: [], output_columns: ["id"], storage: { kind: "seed" } },
+    ] },
+  })));
+
+  // 1) Derive a branch (ref↳) from a specific node, then focus the new branch so
+  //    canvas toolbar actions target it.
+  await page.locator('[data-id="catalog_wide"] button[title="Branch: new query = FromQuery / dbt ref(this)"]').click();
+  await expect.poll(async () => (await project(page)).workspace.queries.length).toBeGreaterThanOrEqual(4);
+  const before = await project(page);
+  const derivedId = before.workspace.queries.at(-1)!.id;
+  await page.locator(`[data-id="${derivedId}"]`).click();
+
+  // 2) Add a JOIN to the derived branch, then a Limit step — exercises edit paths
+  //    that both route through the same Query Editing service boundary.
+  await connect(page, "supplier_products", derivedId);
+  await page.locator('button[title="Add Limit"]').click();
+  await expect.poll(async () =>
+    (await project(page)).workspace.queries.find((q: any) => q.id === derivedId).steps.length).toBeGreaterThanOrEqual(3);
+
+  // 3) Remove catalog_products; its Join/Append references in surviving Queries are
+  //    structurally scrubbed rather than leaving a rootless Query. Focus it first so
+  //    the canvas "Delete" toolbar applies to the correct node.
+  await page.locator('[data-id="catalog_products"]').click();
+  await page.getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByRole("heading", { name: "catalog_products", exact: true })).toBeHidden();
+
+  const afterDelete = await project(page);
+  expect(afterDelete.workspace.queries.map((q: any) => q.id)).not.toContain("catalog_products");
+  // Unrelated seed Mapping survived the delete.
+  expect(afterDelete.workspace.key_maps?.find((m: any) => m.id === "keep")?.name).toBe("KeepSeed");
+
+  // 4) Save the project to disk (host-written JSON) and confirm the file exists.
+  await page.evaluate(async (p) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    if (typeof w.__dwhE2eSaveProject !== "function") throw new Error("__dwhE2eSaveProject missing");
+    await w.__dwhE2eSaveProject(p);
+  }, outPath);
+  await expect
+    .poll(() => fs.existsSync(outPath), { timeout: 30_000 })
+    .toBe(true);
+
+  // 5) Reopen the saved project and verify the graph and unrelated KeyMap survived.
+  await page.evaluate((p) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).__dwhE2eOpenProject(p);
+  }, outPath);
+  await expect(page.getByText(/Opened /)).toBeVisible({ timeout: 60_000 });
+
+  const reopened = await project(page);
+  expect(reopened.workspace.queries.map((q: any) => q.id)).not.toContain("catalog_products");
+  expect(reopened.workspace.queries.map((q: any) => q.id)).toContain(derivedId);
+  const keepMap = reopened.workspace.key_maps?.find((m: any) => m.id === "keep");
+  expect(keepMap?.name).toBe("KeepSeed");
+
+  fs.unlinkSync(outPath);
 });

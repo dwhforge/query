@@ -1,7 +1,7 @@
 /** Snapshot-bound Query mutations for UI or future tool adapters (ADR-0032). */
 import type { Project } from "../../types/pipeline";
 import {
-  appendStep, applyJoin, moveStep, removeQuery, removeStep, replaceStep,
+  appendStep, applyJoin, deriveQuery, moveStep, removeEdge, removeQuery, removeStep, replaceStep,
   type QueryEditResult,
 } from "./operations";
 export type { QueryEditResult } from "./operations";
@@ -37,6 +37,8 @@ export function createQueryEditingService(project: Project) {
   }
   return Object.freeze({
     revision: (queryId: string) => queryRevision(project, queryId),
+    deriveQuery: (input: Input<typeof deriveQuery>) => run(input, () => deriveQuery(project, input)),
+    removeEdge: (input: Input<typeof removeEdge>) => run(input, () => removeEdge(project, input)),
     removeQuery: (input: Input<typeof removeQuery>) => run(input, () => removeQuery(project, input)),
     applyJoin: (input: Input<typeof applyJoin>) => run(input, () => applyJoin(project, input)),
     replaceStep: (input: Input<typeof replaceStep>) => run(input, () => replaceStep(project, input)),

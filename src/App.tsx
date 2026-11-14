@@ -1776,6 +1776,7 @@ function App() {
         ...p,
         sources: nextSources,
         workspace: {
+          ...p.workspace,
           queries: nextQueries,
           focus_query_id: p.workspace.focus_query_id || id,
         },
@@ -1847,6 +1848,7 @@ function App() {
         ...p,
         sources: syncSourcesFromQueries(p.sources, nextQueries),
         workspace: {
+          ...p.workspace,
           queries: nextQueries,
           focus_query_id: p.workspace.focus_query_id || id,
         },
@@ -1885,6 +1887,7 @@ function App() {
         ...p,
         sources: syncSourcesFromQueries(p.sources, nextQueries),
         workspace: {
+          ...p.workspace,
           queries: nextQueries,
           focus_query_id: p.workspace.focus_query_id || id,
         },
@@ -2079,6 +2082,7 @@ function App() {
         ...p,
         sources: syncSourcesFromQueries(p.sources, nextQueries),
         workspace: {
+          ...p.workspace,
           queries: nextQueries,
           focus_query_id: p.workspace.focus_query_id || id,
         },
@@ -2342,121 +2346,17 @@ function App() {
   }
 
   function removeEdgeOnCanvas(edge: GraphEdgeInfo) {
-    if (edge.kind === "from") {
-      const host = queries.find((q) => q.id === edge.hostQueryId);
-      if (host) {
-        const withoutFrom = host.steps.filter(
-          (s) =>
-            !(
-              s.type === "FromQuery" &&
-              targetKey(s.payload.query_id) === edge.otherQueryId
-            ),
-        );
-        const stillHasRoot = withoutFrom.some(
-          (s) =>
-            s.type === "LoadCsv" ||
-            s.type === "LoadParquet" ||
-            s.type === "LoadPostgres" ||
-            s.type === "FromQuery" ||
-            s.type === "SqlModel",
-        );
-        if (!stillHasRoot && withoutFrom.length > 0) {
-          setError(
-            "Cannot remove FromQuery while later steps remain — delete those steps first.",
-          );
-          return;
-        }
-      }
-    }
-    setQueries((prev) =>
-      prev.map((q) => {
-        if (q.id !== edge.hostQueryId) return q;
-        if (edge.kind === "join") {
-          return {
-            ...q,
-            steps: q.steps.filter((s, i) => {
-              if (s.type !== "Join") return true;
-              if (
-                edge.stepIndex != null &&
-                i === edge.stepIndex &&
-                targetKey(s.payload.right_query_id) === edge.otherQueryId
-              ) {
-                return false;
-              }
-              if (
-                edge.stepIndex == null &&
-                targetKey(s.payload.right_query_id) === edge.otherQueryId
-              ) {
-                return false;
-              }
-              return true;
-            }),
-          };
-        }
-        if (edge.kind === "from") {
-          return {
-            ...q,
-            steps: q.steps.filter(
-              (s) =>
-                !(
-                  s.type === "FromQuery" &&
-                  targetKey(s.payload.query_id) === edge.otherQueryId
-                ),
-            ),
-          };
-        }
-        return {
-          ...q,
-          steps: q.steps
-            .map((s) => {
-              if (s.type !== "Append") return s;
-              const others = s.payload.other_query_ids.filter(
-                (id) => targetKey(id) !== edge.otherQueryId,
-              );
-              if (others.length === 0) return null;
-              return {
-                type: "Append" as const,
-                payload: { other_query_ids: others },
-              };
-            })
-            .filter((s): s is TransformationStep => s !== null),
-        };
-      }),
-    );
-    setError(null);
+    const selection = { queryId: activeQueryId, stepIndex: selectedStepIndex };
+    commitQueryEdit(editing => editing.removeEdge({
+      queryId: edge.hostQueryId, kind: edge.kind,
+      other: parseTargetKey(edge.otherQueryId) ?? edge.otherQueryId,
+      stepIndex: edge.stepIndex, selection,
+    }));
   }
 
   /** Branch: new query = FromQuery(selected) — dbt `ref`, no duplicate Load. */
   function deriveQueryFrom(fromQueryId: string) {
-    const src = queries.find((q) => q.id === fromQueryId);
-    if (!src) return;
-    const used = new Set(queries.map((q) => q.name));
-    let name = `${src.name}_derived`;
-    if (used.has(name)) {
-      let i = 2;
-      while (used.has(`${src.name}_${i}`)) i += 1;
-      name = `${src.name}_${i}`;
-    }
-    const id = newQueryId(name, queries.map((q) => q.id));
-    const q: QueryDef = {
-      id,
-      name,
-      steps: [{ type: "FromQuery", payload: { query_id: fromQueryId } }],
-    };
-    setProject((p) => {
-      const nextQueries = [...p.workspace.queries, q];
-      return {
-        ...p,
-        sources: syncSourcesFromQueries(p.sources, nextQueries),
-        workspace: {
-          queries: nextQueries,
-          focus_query_id: p.workspace.focus_query_id || id,
-        },
-      };
-    });
-    setActiveQueryId(id);
-    setSelectedStepIndex(0);
-    setError(null);
+    commitQueryEdit(editing => editing.deriveQuery({ queryId: fromQueryId }));
   }
 
   /** Drop a query node: remove from workspace, scrub Join/Append refs, fix focus. */

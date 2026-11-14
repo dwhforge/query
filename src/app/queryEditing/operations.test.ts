@@ -41,7 +41,7 @@ function error(result: QueryEditResult, code: string, original: Project) {
   const original = freeze(project([
     query("a"),
     query("b", [
-      { type: "FromQuery", payload: { query_id: "a" } },
+      root(),
       { type: "Join", payload: { right_query_id: "a", join_type: "left", left_on: [], right_on: [] } },
       { type: "Append", payload: { other_query_ids: ["a", "c", ext] } },
       filter(),
@@ -56,8 +56,8 @@ function error(result: QueryEditResult, code: string, original: Project) {
   const result = ok(removeQuery(original, { queryId: "a", selection: { queryId: "a", stepIndex: 0 } }));
   equal(result.project.workspace.queries.map(q => q.id), ["b", "c", "d"], "no cascade deletion");
   equal(result.project.workspace.queries[0]!.steps, [
-    { type: "Append", payload: { other_query_ids: ["c", ext] } }, filter(),
-  ], "scrub local From/Join/Append only");
+    root(), { type: "Append", payload: { other_query_ids: ["c", ext] } }, filter(),
+  ], "scrub safe local Join/Append only, retaining root");
   equal(result.project.workspace.queries[1]!.steps,
     [{ type: "FromQuery", payload: { query_id: "b" } }], "remove empty Append at depth");
   equal(result.project.workspace.queries[2]!.steps[2],
@@ -65,13 +65,13 @@ function error(result: QueryEditResult, code: string, original: Project) {
   equal(result.project.workspace.queries[2]!.steps[1], original.workspace.queries[3]!.steps[1],
     "same external object ID is not a local dependency");
   equal(result.project.workspace.focus_query_id, "b", "focus repaired");
-  equal(result.navigation, { queryId: "b", stepIndex: 1 }, "selection goes to survivor");
+  equal(result.navigation, { queryId: "b", stepIndex: 2 }, "selection goes to survivor");
   assert(!result.project.canvas!.positions.a && !!result.project.canvas!.positions.b, "canvas cleanup");
   assert(result.project.sources.some(s => s.id === "catalog"), "independent Sources retained");
   assert(result.project.workspace.key_maps === original.workspace.key_maps, "Mapping owner retained");
   equal(JSON.stringify(original), before, "frozen original unchanged");
   const selected = ok(removeQuery(original, { queryId: "a", selection: { queryId: "b", stepIndex: 3 } }));
-  equal(selected.navigation, { queryId: "b", stepIndex: 1 }, "selection follows retained step after scrub");
+  equal(selected.navigation, { queryId: "b", stepIndex: 2 }, "selection follows retained step after scrub");
   const final = ok(removeQuery(freeze(project([query("a")])), {
     queryId: "a", selection: { queryId: "a", stepIndex: 0 },
   }));

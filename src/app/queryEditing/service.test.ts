@@ -44,7 +44,7 @@ function rejected(result: QueryEditResult, project: Project, code: string) {
   const original = fixture();
   const service = createQueryEditingService(original);
   equal(Object.keys(service).sort(), [
-    "appendStep", "applyJoin", "moveStep", "removeQuery", "removeStep", "replaceStep", "revision",
+    "appendStep", "applyJoin", "deriveQuery", "moveStep", "removeEdge", "removeQuery", "removeStep", "replaceStep", "revision",
   ], "only existing operations and revision, no UI/store ports");
   const revision = service.revision("a");
   assert(revision !== null, "revision available for target");
@@ -78,6 +78,8 @@ function rejected(result: QueryEditResult, project: Project, code: string) {
   const bound = createQueryEditingService(current);
   const before = JSON.stringify(current);
   const stale: QueryEditResult[] = [
+    bound.deriveQuery({ queryId: "a", expectedRevision }),
+    bound.removeEdge({ queryId: "a", kind: "join", other: "b", expectedRevision }),
     bound.removeQuery({ queryId: "a", expectedRevision }),
     bound.applyJoin({ queryId: "a", right: "b", pairs: [], expectedRevision }),
     bound.replaceStep({ queryId: "a", index: 1, step: { type: "Filter", payload: { condition: "false" } }, expectedRevision }),

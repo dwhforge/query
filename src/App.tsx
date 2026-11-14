@@ -15,6 +15,10 @@ import { useJoinDiagnostics } from "./app/joinDiagnostics/useJoinDiagnostics";
 import type { JoinInput } from "./app/joinDiagnostics/controller";
 import { resetProjectSession } from "./app/projectSessionReset";
 import {
+  applyJoin, appendStep as appendQueryStep, moveStep, removeQuery, removeStep, replaceStep,
+  type QueryEditResult,
+} from "./app/queryEditing/operations";
+import {
   captureJoinTarget, createQueryNavigation, isCurrentQueryContext, joinTargetUnavailable,
   transitionQueryContext, type QueryContext, type QueryDestination,
 } from "./app/queryNavigation";
@@ -319,6 +323,7 @@ type ProjectBag = {
   confirmRemapResult: ConfirmRemapApplyResult | null;
   /** Set by create_mapping; cleared after editor handoff. */
   mappingCreateResult: MappingCreateApplyResult | null;
+  queryEditResult: { result: QueryEditResult; session: number } | null;
 };
 
 type ProjectBagAction =
@@ -328,7 +333,10 @@ type ProjectBagAction =
   | { type: "confirm_remap"; intent: ConfirmRemapApplyIntent }
   | { type: "clear_confirm_remap_result" }
   | { type: "create_mapping"; intent: MappingCreateApplyIntent }
-  | { type: "clear_mapping_create_result" };
+  | { type: "clear_mapping_create_result" }
+  | { type: "edit_query"; edit: (project: Project) => QueryEditResult;
+      ownerId: string; ownerUid: string | undefined; session: number }
+  | { type: "clear_query_edit_result"; receipt: NonNullable<ProjectBag["queryEditResult"]> };
 
 function projectBagReducer(
   state: ProjectBag,
@@ -364,6 +372,13 @@ function projectBagReducer(
     }
     case "clear_mapping_create_result":
       return { ...state, mappingCreateResult: null };
+    case "edit_query": {
+      if (state.project.id !== action.ownerId || state.project.project_uid !== action.ownerUid) return state;
+      const result = action.edit(state.project);
+      return { ...state, project: result.project, queryEditResult: { result, session: action.session } };
+    }
+    case "clear_query_edit_result":
+      return state.queryEditResult === action.receipt ? { ...state, queryEditResult: null } : state;
     default:
       return state;
   }
@@ -375,6 +390,7 @@ function App() {
     keyMapApplyResult: null,
     confirmRemapResult: null,
     mappingCreateResult: null,
+    queryEditResult: null,
   });
   const project = projectBag.project;
   const projectRef = useRef(project);
@@ -1598,6 +1614,35 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectBag.mappingCreateResult]);
 
+  const handledQueryEdit = useRef<ProjectBag["queryEditResult"]>(null);
+  useEffect(() => {
+    const receipt = projectBag.queryEditResult;
+    if (!receipt || handledQueryEdit.current === receipt) return;
+    handledQueryEdit.current = receipt;
+    dispatchProject({ type: "clear_query_edit_result", receipt });
+    const result = receipt.result;
+    // A later replacement/graph edit must not receive an old selection or error.
+    if (receipt.session !== querySessionGenerationRef.current ||
+      result.project.workspace !== projectRef.current.workspace ||
+      result.project.project_uid !== projectRef.current.project_uid) return;
+    if (!result.ok) {
+      setError(result.error.message);
+      return;
+    }
+    setError(null);
+    const destination = result.navigation;
+    if (!destination) return;
+    if (destination.queryId === null) {
+      queryPreview.navigationChanged();
+      setActiveQueryId(null);
+      setSelectedStepIndex(null);
+    } else {
+      queryNavigation.openQuery(destination.queryId, { stepIndex: destination.stepIndex });
+    }
+    // Navigation ports belong to the current render, not reducer execution.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectBag.queryEditResult]);
+
   const selectedStepIndexRef = useRef(selectedStepIndex);
   selectedStepIndexRef.current = selectedStepIndex;
 
@@ -2156,15 +2201,10 @@ function App() {
     await lifecycle.loadLab(id);
   }
 
-  function updateActiveSteps(
-    mutator: (steps: TransformationStep[]) => TransformationStep[],
-  ) {
-    if (!activeQueryId) return;
-    setQueries((prev) =>
-      prev.map((q) =>
-        q.id === activeQueryId ? { ...q, steps: mutator(q.steps) } : q,
-      ),
-    );
+  function commitQueryEdit(edit: (project: Project) => QueryEditResult) {
+    const owner = projectRef.current;
+    dispatchProject({ type: "edit_query", edit, ownerId: owner.id,
+      ownerUid: owner.project_uid, session: querySessionGenerationRef.current });
   }
 
   function applyJoinTo(
@@ -2173,55 +2213,9 @@ function App() {
     pairs: JoinKeyPair[],
     type: JoinType = "inner",
   ) {
-    const { left_on, right_on } = pairsToOn(pairs);
-    // Allow empty keys so canvas can open the Join for picking (never invent "id").
     if (!rightQueryId) return;
-    if (rightQueryId === hostQueryId) {
-      setError("Cannot join a query to itself");
-      return;
-    }
-    let joinIndex = -1;
-    let joinStep: TransformationStep | null = null;
-    setQueries((prev) =>
-      prev.map((q) => {
-        if (q.id !== hostQueryId) return q;
-        const step: TransformationStep = {
-          type: "Join",
-          payload: {
-            right_query_id: rightQueryId,
-            join_type: type,
-            left_on,
-            right_on,
-          },
-        };
-        // Update existing edge to the same right; otherwise append — keep other
-        // Joins (e.g. two RIGHT OUTER to different dims).
-        const existing = q.steps.findIndex(
-          (s) =>
-            s.type === "Join" &&
-            targetKey(s.payload.right_query_id) === rightQueryId,
-        );
-        let steps: TransformationStep[];
-        if (existing >= 0) {
-          steps = q.steps.map((s, i) => (i === existing ? step : s));
-          joinIndex = existing;
-        } else {
-          steps = [...q.steps, step];
-          joinIndex = steps.length - 1;
-        }
-        joinStep = step;
-        return { ...q, steps };
-      }),
-    );
-    setActiveQueryId(hostQueryId);
-    const idx = joinIndex;
-    const step = joinStep;
-    queueMicrotask(() => {
-      if (idx >= 0 && step) {
-        setSelectedStepIndex(idx);
-      }
-    });
-    setError(null);
+    const right = parseTargetKey(rightQueryId) ?? rightQueryId;
+    commitQueryEdit(p => applyJoin(p, { queryId: hostQueryId, right, pairs, joinType: type }));
   }
 
   /** Domain projection only; request/sample ownership lives in Join controller. */
@@ -2468,57 +2462,8 @@ function App() {
 
   /** Drop a query node: remove from workspace, scrub Join/Append refs, fix focus. */
   function removeQueryOnCanvas(queryId: string) {
-    const remaining = queries.filter((q) => q.id !== queryId);
-    const scrubbed = remaining.map((q) => ({
-      ...q,
-        steps: q.steps
-          .map((s) => {
-            if (
-              s.type === "Join" &&
-              targetKey(s.payload.right_query_id) === queryId
-            ) {
-              return null;
-            }
-            if (
-              s.type === "FromQuery" &&
-              targetKey(s.payload.query_id) === queryId
-            ) {
-              return null;
-            }
-            if (s.type === "Append") {
-              const others = s.payload.other_query_ids.filter(
-                (id) => targetKey(id) !== queryId,
-              );
-              if (others.length === 0) return null;
-              return {
-                type: "Append" as const,
-                payload: { other_query_ids: others },
-              };
-            }
-            return s;
-          })
-          .filter((s): s is TransformationStep => s !== null),
-      }));
-    const focus =
-      focusQueryId === queryId
-        ? (scrubbed[0]?.id ?? "")
-        : focusQueryId && scrubbed.some((q) => q.id === focusQueryId)
-          ? focusQueryId
-          : (scrubbed[0]?.id ?? "");
-    setProject((p) => {
-      const positions = { ...(p.canvas?.positions ?? {}) };
-      delete positions[queryId];
-      return {
-        ...p,
-        sources: syncSourcesFromQueries(p.sources, scrubbed),
-        workspace: { ...p.workspace, queries: scrubbed, focus_query_id: focus },
-        canvas: { positions },
-      };
-    });
-    if (activeQueryId === queryId) {
-      setActiveQueryId(scrubbed[0]?.id ?? null);
-    }
-    setError(null);
+    const selection = { queryId: activeQueryId, stepIndex: selectedStepIndex };
+    commitQueryEdit(p => removeQuery(p, { queryId, selection }));
   }
 
   // GraphCanvas calls only on drag stop. Commit now so a subsequent Save/switch
@@ -2529,58 +2474,22 @@ function App() {
   }, [project.project_uid]);
 
   function removeStepAt(index: number) {
-    updateActiveSteps((steps) => {
-      const victim = steps[index];
-      if (!victim) return steps;
-      const isRoot =
-        victim.type === "LoadCsv" ||
-        victim.type === "LoadParquet" ||
-        victim.type === "LoadPostgres" ||
-        victim.type === "LoadDuckdb" ||
-        victim.type === "FromQuery" ||
-        victim.type === "SqlModel";
-      // Deleting the root while later transforms remain → "requires a previous step".
-      if (isRoot && steps.length > 1) {
-        setError("Remove later steps first, or clear the query — root step is required.");
-        return steps;
-      }
-      return steps.filter((_, i) => i !== index);
-    });
-    setSelectedStepIndex((prev) => {
-      if (prev === null) return null;
-      if (prev === index) return Math.max(0, index - 1);
-      if (prev > index) return prev - 1;
-      return prev;
-    });
+    if (!activeQueryId) return;
+    const queryId = activeQueryId;
+    const selectedIndex = selectedStepIndex;
+    commitQueryEdit(p => removeStep(p, { queryId, index, selectedIndex }));
   }
 
   function moveStepAt(index: number, dir: -1 | 1) {
-    const j = index + dir;
-    updateActiveSteps((steps) => {
-      if (j < 0 || j >= steps.length) return steps;
-      const root = (s: TransformationStep) =>
-        s.type === "LoadCsv" ||
-        s.type === "LoadParquet" ||
-        s.type === "LoadPostgres" ||
-        s.type === "LoadDuckdb" ||
-        s.type === "FromQuery" ||
-        s.type === "SqlModel";
-      if (index === 0 && root(steps[0]!)) return steps;
-      if (j === 0 && root(steps[0]!) && index === 1) return steps;
-      const next = [...steps];
-      const a = next[index]!;
-      const b = next[j]!;
-      next[index] = b;
-      next[j] = a;
-      return next;
-    });
-    setSelectedStepIndex(j);
+    if (!activeQueryId) return;
+    const queryId = activeQueryId;
+    commitQueryEdit(p => moveStep(p, { queryId, index, direction: dir }));
   }
 
   function replaceStepAt(index: number, step: TransformationStep) {
-    updateActiveSteps((steps) =>
-      steps.map((s, i) => (i === index ? step : s)),
-    );
+    if (!activeQueryId) return;
+    const queryId = activeQueryId;
+    commitQueryEdit(p => replaceStep(p, { queryId, index, step }));
   }
 
   /** Rebind LoadCsv / local LoadParquet to another file (Sources catalog had no path edit). */
@@ -2655,11 +2564,9 @@ function App() {
   }
 
   function appendStep(step: TransformationStep) {
-    updateActiveSteps((steps) => {
-      const next = [...steps, step];
-      setSelectedStepIndex(next.length - 1);
-      return next;
-    });
+    if (!activeQueryId) return;
+    const queryId = activeQueryId;
+    commitQueryEdit(p => appendQueryStep(p, { queryId, step }));
   }
 
   function selectStepAt(index: number) {

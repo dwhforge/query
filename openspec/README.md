@@ -20,6 +20,10 @@ openspec/
 
 Active changes:
 
+- [Pure Query graph edits](changes/query-graph-editing/proposal.md) — updated
+  roadmap PR-01 complete; [merged contract](specs/query-graph-editing/spec.md),
+  [ownership and verification](changes/query-graph-editing/report.md).
+
 - [Query workspace / local Inspector editors](changes/query-workspace-inspector/proposal.md) — PR-05 complete; combined-suite reliability gap recorded;
   [merged contract](specs/query-workspace/spec.md),
   [responsibilities, validation and PR-06 tooling handoff](changes/query-workspace-inspector/report.md).

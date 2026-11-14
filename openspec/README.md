@@ -20,6 +20,11 @@ openspec/
 
 Active changes:
 
+- [Join Lens No match focus](changes/join-lens-no-match-focus/proposal.md) —
+  completed; persistent left context, right-pane Suggest, unmatched-only center,
+  All rows label, and responsive mapping picker. Contract merged into
+  [Join Lens No match](specs/join-lens-no-match/spec.md).
+
 - [Query editing integrity](changes/query-editing-integrity/proposal.md) —
   review follow-up: transparent Join/Append deletion confirmation, graph-snapshot
   revalidation and regression coverage; contracts merged into
@@ -105,6 +110,8 @@ Active changes:
 - ~~[`changes/keymap-live-bind/`](changes/keymap-live-bind/)~~ — **merged** → [`specs/keymap-live-bind/`](specs/keymap-live-bind/) ([ADR-0022](../docs/adr/0022-keymap-postgres-live-bind.md))
 - ~~[`changes/dbt-setup-onboarding/`](changes/dbt-setup-onboarding/)~~ — **merged** → [`specs/dbt-setup-onboarding/`](specs/dbt-setup-onboarding/) ([ADR-0023](../docs/adr/0023-dbt-setup-onboarding.md))
 - ~~[`changes/keymap-composite/`](changes/keymap-composite/)~~ — **merged** → [`specs/keymap-composite-*/`](specs/) ([ADR-0024](../docs/adr/0024-keymap-composite.md))
+
+- ~~[`changes/unified-suggest-right/`](changes/unified-suggest-right/)~~ — **merged** → [`specs/unified-suggest-right/`](specs/unified-suggest-right/) ([ADR-0049](../docs/adr/0049-unified-suggest-right.md)); full-tuple Suggest Right, contextual multi-output Apply, verified 1–5-key cold Save/Reopen.
 
 Review order: proposal → specs → design → tasks. Implement only after that review (`openspec apply` / agent apply).
 

@@ -131,6 +131,8 @@ export function buildApplyReviewState(args: {
   outCols: string[];
   leftOnCols: string[];
   rightOnCols: string[];
+  outputBindingsLeft?: ApplyKeyMapOutputBinding[];
+  outputBindingsRight?: ApplyKeyMapOutputBinding[];
 }): ApplyReviewState {
   // Anchor destination for the first output on the side being Applied.
   // `both` confirms one destination set for both sides (same bindings) —
@@ -139,8 +141,11 @@ export function buildApplyReviewState(args: {
     args.side === "right"
       ? args.rightOnCols[0] ?? ""
       : args.leftOnCols[0] ?? "";
-  const dests = defaultReviewDestinations(args.outCols, anchorCol);
-  const rights = defaultReviewRightCols(dests, args.rightOnCols);
+  const contextualBindings = args.side === "right" ? args.outputBindingsRight : args.outputBindingsLeft;
+  const defaults = defaultReviewDestinations(args.outCols, anchorCol);
+  const dests = args.outCols.map((col, i) => contextualBindings?.find((b) => b.map_column === col)?.destination_column ?? defaults[i]!);
+  const defaultRights = defaultReviewRightCols(dests, args.rightOnCols);
+  const rights = args.outCols.map((col, i) => args.outputBindingsRight?.find((b) => b.map_column === col)?.destination_column ?? defaultRights[i]!);
   // Default Join participation: one equality per current ON slot (extra
   // outputs like category_id stay Apply-only). Existing ON is opt-in keep
   // so rewritten keys are not duplicated beside new destinations.

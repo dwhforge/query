@@ -38,9 +38,9 @@ pub use join_lens::{
     JOIN_LENS_MAX_MATCHES,
 };
 pub use join_fuzzy::{
-    join_key_fuzzy_suggest, join_key_fuzzy_suggest_on, FuzzyAliasExample, FuzzyChatContext,
-    FuzzyFieldSample, FuzzyKeySample,
-    JoinKeyFuzzySuggest,
+    join_key_fuzzy_suggest, join_key_fuzzy_suggest_on, join_key_fuzzy_suggest_with_tuple,
+    FuzzyAliasExample, FuzzyChatContext, FuzzyFieldSample, FuzzyKeySample, JoinKeyFuzzySuggest,
+    JoinTupleCandidate, JoinTupleReport, JoinTupleRequest, JoinTupleSource, JoinTupleValue,
 };
 pub use join_near_miss::{
     join_key_near_miss, JoinKeyNearMiss, NearMissHypothesis, NearMissSide,

@@ -584,6 +584,28 @@ export type FuzzyPair = {
   from_parts?: string[];
 };
 
+/** Read-only full tuple retrieval on the existing Suggest RPC. */
+export type JoinTupleRequest = { source_parts?: (string | null)[] };
+export type JoinTupleValue = { parts: (string | null)[]; occurrences: number };
+export type JoinTupleCandidate = {
+  right_index: number;
+  score: number | null;
+  field_scores: (number | null)[];
+};
+export type JoinTupleReport = {
+  left_on: string[];
+  right_on: string[];
+  sources: { source: JoinTupleValue; candidates: JoinTupleCandidate[] }[];
+  right_universe: JoinTupleValue[];
+  left_distinct_total: number;
+  left_occurrences_total: number;
+  right_distinct_total: number;
+  right_occurrences_total: number;
+  left_truncated: boolean;
+  right_truncated: boolean;
+  tuple_cap: number;
+};
+
 export type JoinKeyFuzzySuggest = {
   host_query_id: string;
   join_step_index: number;
@@ -601,6 +623,7 @@ export type JoinKeyFuzzySuggest = {
   truncated: boolean;
   disabled_reason?: string | null;
   chat_context: FuzzyChatContext;
+  tuple_report?: JoinTupleReport | null;
 };
 
 export function joinKeyFuzzySuggest(
@@ -614,6 +637,7 @@ export function joinKeyFuzzySuggest(
   /** Composite-map mode: Join key indices forming From + which slot is fuzzy. */
   composite?: { indices: number[]; fuzzySlot: number } | null,
   projectRef?: ProjectRefContext,
+  tuple?: JoinTupleRequest,
 ): Promise<JoinKeyFuzzySuggest> {
   return invoke<JoinKeyFuzzySuggest>("join_key_fuzzy_suggest", {
     workspace,
@@ -621,6 +645,7 @@ export function joinKeyFuzzySuggest(
     joinStepIndex,
     connections,
     sources,
+    ...(tuple ? { tuple } : {}),
     ...(keyIndex != null ? { keyIndex } : {}),
     ...(composite
       ? {

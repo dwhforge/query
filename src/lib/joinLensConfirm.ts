@@ -3,6 +3,28 @@
  * Session staging lives in the Lens; KeyMap is SoT only after Apply accepted.
  */
 import type { FuzzyPair } from "./bridge";
+import { tupleMappingBlock, type TupleParts } from "./joinLensTuple";
+
+/** A selected complete target, not the scalar Auto proposal DTO. */
+export type LensTupleMapping = {
+  leftOn: string[];
+  rightOn: string[];
+  fromParts: string[];
+  outputValues: string[];
+};
+
+export function confirmTupleMapping(leftOn: string[], rightOn: string[], from: TupleParts, to: TupleParts): LensTupleMapping | { error: string } {
+  if (!leftOn.length || leftOn.length !== rightOn.length || from.length !== leftOn.length || to.length !== leftOn.length) {
+    return { error: "Mapping requires all aligned source and candidate Join fields." };
+  }
+  if (leftOn.some((column) => !column.trim()) || rightOn.some((column) => !column.trim())
+    || new Set(leftOn.map((column) => column.toLowerCase())).size !== leftOn.length) {
+    return { error: "Full tuple Mapping requires named Join fields and unique left destination columns." };
+  }
+  const block = tupleMappingBlock(from) ?? tupleMappingBlock(to);
+  if (block) return { error: block };
+  return { leftOn: [...leftOn], rightOn: [...rightOn], fromParts: [...from] as string[], outputValues: [...to] as string[] };
+}
 
 export type LensConfirmDecision = "accepted" | "pending" | "skipped";
 export type LensConfirmSource = "fuzzy" | "llm";

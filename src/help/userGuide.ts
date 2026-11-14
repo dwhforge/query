@@ -90,10 +90,10 @@ export const HELP_SECTIONS: HelpSection[] = [
     id: "join-diag",
     title: "Join diagnostics & Join Lens",
     paragraphs: [
-      "Select a Join step. Join Lens investigate modes: This row (source rows for the selected result) and No match (values without a partner). Suggest all… is a separate action for batch rename ideas. Click a left or right value to see how often it appears in the result.",
+      "Select a Join step. Join Lens investigate modes: All rows (full Join result, with source rows for the selected result on the sides) and No match (only result rows and side values without a partner). Suggest… in the right pane proposes a partner for the active left key. Click a left or right value to see how often it appears in the result.",
     ],
     bullets: [
-      "This row: sides show only rows that built the selected result (not the full left/right tables)",
+      "All rows: the center shows the full Join result; sides show only rows that built the selected result (not the full left/right tables)",
       "No match: values that didn’t join — click one to inspect; Find gaps loads the list",
       "Explain key: full-input result count + sample rows (not only preview LIMIT 50)",
       "Blame: absent at source vs filtered upstream (which step) vs no partner at Join",

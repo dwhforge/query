@@ -97,11 +97,101 @@ test.describe("flagship Help Lab journey", () => {
     await page.getByTestId("join-lens-no-match").click();
     await expect(page.getByTestId("lab-hint")).toHaveCount(0);
     await expect(page.getByTestId("join-lens-no-match")).toHaveAttribute("aria-pressed", "true");
-    await page.getByRole("button", { name: "This row", exact: true }).click();
+    await page.getByRole("button", { name: "All rows", exact: true }).click();
     await expect(page.getByTestId("lab-hint")).toHaveCount(0);
     await page.getByRole("tab", { name: "Help Lab", exact: true }).click();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("tab", { name: "Pipeline canvas", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("No match keeps left result context and suggests from the right pane", async ({}, info) => {
+    const { page } = session;
+    await page.setViewportSize({ width: 1600, height: 1100 });
+    await openLab(page);
+    await page.getByRole("button", { name: "Inspect original join", exact: true }).click();
+    await page.getByTestId("lab-task-card").getByRole("button", { name: "Dismiss", exact: true }).click();
+    await page.getByRole("separator", { name: "Resize data panel", exact: true }).dblclick();
+    await expect(page.getByTestId("preview-state")).toHaveCount(0);
+    await page.getByTestId("join-lens-no-match").click();
+    const left = page.getByTestId("join-lens-left-pane");
+    const right = page.getByTestId("join-lens-right-pane");
+    const context = left.locator('button[data-result-context="true"]');
+    const ureaRows = page.getByRole("row").filter({ hasText: "COM-UREA" });
+    await ureaRows.last().click();
+    await expect(context).toHaveCount(2);
+    await expect(context.first()).toContainText("COM-UREA");
+    await expect(context.first()).toHaveAttribute("aria-pressed", "false");
+    await expect(context.first()).toHaveClass(/border-sky-400/);
+    await expect(right).toContainText("COM-UREA");
+    await expect(page.getByRole("button", { name: "Suggest…", exact: true })).toHaveCount(1);
+    // It must persist after the former 1.6-second flash timeout and pointer travel.
+    await right.getByRole("button", { name: "Suggest…", exact: true }).hover();
+    await page.waitForTimeout(1800);
+    await expect(context.first()).toHaveClass(/border-sky-400/);
+    await expect(ureaRows).toHaveCount(2);
+    await page.getByRole("row").filter({ hasText: "COM-AMM" }).first().click();
+    await expect(context.first()).toContainText("COM-AMM");
+    await expect(right).toContainText("COM-AMM");
+    // Right-side filtering must not hide the key action with the candidate list.
+    await right.getByRole("searchbox").fill("no-such-right-key");
+    await right.getByRole("button", { name: "Suggest…", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Suggest Right", exact: true });
+    await expect(dialog).toContainText("COM-AMM");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await page.screenshot({ path: info.outputPath("no-match-result-context.png") });
+    await page.getByRole("button", { name: "All rows", exact: true }).click();
+    await expect(context).toHaveCount(0);
+    await expect(right.getByRole("button", { name: "Suggest…", exact: true })).toHaveCount(0);
+  });
+
+  test("No match hides joined rows and suggests with no unmatched right keys", async ({}, info) => {
+    const { page } = session;
+    await page.setViewportSize({ width: 1600, height: 1200 });
+    await openLab(page, "name_region_match");
+    await page.getByText("dirty_exact_pair", { exact: true }).first().click();
+    await page.getByRole("separator", { name: "Resize data panel", exact: true }).dblclick();
+    await expect(page.getByTestId("preview-state")).toHaveCount(0);
+    await expect(page.getByRole("row").filter({ hasText: "ComputerParts LLC" }).first()).toBeVisible();
+    await page.getByTestId("join-lens-no-match").click();
+    const left = page.getByTestId("join-lens-left-pane");
+    const right = page.getByTestId("join-lens-right-pane");
+    await expect(right).toContainText("Use Suggest… to look for a right-side partner for the selected left key.");
+    await expect(page.getByRole("row").filter({ hasText: "ComputerParts LLC" })).toHaveCount(0);
+    await page.getByRole("row").filter({ hasText: "CPC LLC" }).click();
+    const context = left.locator('button[data-result-context="true"]');
+    await expect(context).toHaveCount(1);
+    await expect(context).toContainText("Germany");
+    await expect(context).toHaveAttribute("aria-pressed", "false");
+    await expect(right).toContainText("CPC LLC");
+    await expect(right).toContainText("Germany");
+    await right.getByRole("button", { name: "Suggest…", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Suggest Right", exact: true });
+    await expect(dialog).toContainText("CPC LLC");
+    await expect(dialog).toContainText("Germany");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await page.screenshot({ path: info.outputPath("no-match-composite-empty-right.png") });
+    await page.getByRole("button", { name: /^(Save mapping…|Change…)$/ }).click();
+    const mapDialog = page.getByRole("dialog", { name: "Add unmatched key to a KeyMap", exact: true });
+    await expect(mapDialog).toBeVisible();
+    await page.setViewportSize({ width: 738, height: 526 });
+    const geometry = await mapDialog.locator("fieldset").evaluate((fieldset: HTMLElement) => {
+      const card = fieldset.parentElement!;
+      const bounds = card.getBoundingClientRect();
+      return {
+        fits: card.scrollWidth <= card.clientWidth + 1,
+        inViewport: bounds.left >= 0 && bounds.right <= window.innerWidth && bounds.top >= 0 && bounds.bottom <= window.innerHeight,
+        labelsFit: Array.from(fieldset.querySelectorAll("label")).every(label => {
+          const r = label.getBoundingClientRect();
+          return r.left >= bounds.left && r.right <= bounds.right;
+        }),
+      };
+    });
+    expect(geometry).toEqual({ fits: true, inViewport: true, labelsFit: true });
+    await page.screenshot({ path: info.outputPath("mapping-picker-narrow.png") });
+    await mapDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.setViewportSize({ width: 1600, height: 1200 });
+    await page.getByRole("button", { name: "All rows", exact: true }).click();
+    await expect(page.getByRole("row").filter({ hasText: "ComputerParts LLC" }).first()).toBeVisible();
   });
 
   test("alternative path, Got it, Escape and another lab do not revive hints", async () => {
@@ -110,7 +200,7 @@ test.describe("flagship Help Lab journey", () => {
     await page.getByTestId("join-lens-no-match").click();
     await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
     await expect(page.getByTestId("lab-hint")).toHaveCount(0);
-    await page.getByRole("button", { name: "This row", exact: true }).click();
+    await page.getByRole("button", { name: "All rows", exact: true }).click();
     await page.getByRole("button", { name: "Show me where to start", exact: true }).click();
     await page.getByTestId("lab-hint").getByRole("button", { name: "Got it", exact: true }).click();
     await page.getByRole("tab", { name: "Model", exact: true }).click();

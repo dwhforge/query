@@ -211,6 +211,52 @@ fn score_candidate(
     Some(ScoredCandidate { row, score, edits })
 }
 
+/// Full-tuple retrieval uses the same metric as the scalar matcher, independently
+/// on every aligned field. Equal NULLs score 1; NULL versus any string scores 0.
+/// Long values remain available for manual/LLM review but are not fuzzy-scored.
+/// No concatenated display label participates in scoring or identity.
+pub(crate) fn score_key_tuple(
+    left: &[Option<String>],
+    right: &[Option<String>],
+) -> (Option<f64>, Vec<Option<f64>>) {
+    assert!(!left.is_empty() && left.len() == right.len());
+    let fields: Vec<_> = left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| match (left, right) {
+            (None, None) => Some(1.0),
+            (None, Some(_)) | (Some(_), None) => Some(0.0),
+            (Some(left), Some(right)) => {
+                if left == right {
+                    return Some(1.0);
+                }
+                if left.chars().count() >= 200 || right.chars().count() >= 200 {
+                    return None;
+                }
+                let left = normalized(left, MatchPolicy::JoinKeyTypos);
+                let right = normalized(right, MatchPolicy::JoinKeyTypos);
+                score_candidate(
+                    &left,
+                    &right,
+                    0,
+                    KeyMatchOptions {
+                        score_cutoff: 0.0,
+                        ..Default::default()
+                    },
+                    MatchPolicy::Labels,
+                )
+                .map(|candidate| candidate.score)
+            }
+        })
+        .collect();
+    let score = fields
+        .iter()
+        .copied()
+        .sum::<Option<f64>>()
+        .map(|sum| sum / fields.len() as f64);
+    (score, fields)
+}
+
 fn best_first(a: &ScoredCandidate, b: &ScoredCandidate, right: &[&MatchRecord]) -> Ordering {
     b.score
         .total_cmp(&a.score)

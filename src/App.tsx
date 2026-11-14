@@ -182,6 +182,8 @@ import {
 } from "./app/mappingCreate";
 import { MappingCreateWizard } from "./components/MappingCreateWizard";
 import { importWriteRefusal } from "./lib/pgImport";
+import { planTupleMapping } from "./app/keyMap/tupleMapping";
+import type { LensTupleMapping } from "./lib/joinLensConfirm";
 import {
   applyKeyMapOntoProject,
   dirtyDeltaHasChanges,
@@ -3241,6 +3243,7 @@ function App() {
       fromParts?: string[][];
       applyColumns?: string[];
       outputColumn?: string;
+      tupleMapping?: LensTupleMapping;
       cellPatches?: import("./lib/keyMap").LensOutputCell[][];
       applyAcceptedInPlace?: boolean;
       fromLabels?: (string | null)[];
@@ -3248,6 +3251,27 @@ function App() {
     },
   ) {
     if (!joinLensTarget || fromValues.length === 0) return;
+    if (opts?.tupleMapping) {
+      // A complete tuple is never a scalar Auto/frozen-remap proposal.
+      if (frozenRemap) {
+        setError("Full tuple Mapping is unavailable in frozen Check remap. Open the live Join to map all fields.");
+        return;
+      }
+      const planned = planTupleMapping(project.workspace, {
+        ...joinLensTarget,
+        probeSide: "left",
+      }, opts.tupleMapping);
+      if ("error" in planned) { setError(planned.error); return; }
+      const session = keyMapTabsLiveRef.current.find((tab) => tab.map.id === planned.map.id);
+      if (session?.localDraft || session?.saveInFlight) {
+        setError("This Mapping has unsaved edits or a Save in progress. Save or discard those edits before adding a tuple.");
+        return;
+      }
+      setProject((p) => upsertKeyMapIntoProject(p, planned.map));
+      openKeyMapEditor(planned.map, { joinCtx: planned.joinCtx });
+      setMapSwitchOffer(null);
+      return;
+    }
     if (
       opts?.applyAcceptedInPlace &&
       opts.toValues?.length &&
@@ -4347,7 +4371,7 @@ function App() {
           }}
         >
           <div
-            className="w-full max-w-md rounded-xl border border-slate-700 bg-[#0a1520] p-4 shadow-2xl"
+            className="max-h-[calc(100dvh-2rem)] w-full min-w-0 max-w-lg overflow-y-auto rounded-xl border border-slate-700 bg-[#0a1520] p-4 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h2
@@ -4374,7 +4398,7 @@ function App() {
                   ? ` · ${mapPickPending.fromValues.length} keys`
                   : ""}
               </p>
-              <p className="mt-0.5 font-mono text-[13px] text-amber-100">
+              <p className="mt-0.5 break-words font-mono text-[13px] text-amber-100 [overflow-wrap:anywhere]">
                 {mapPickPending.fromValues.slice(0, 8).map((from, i) => {
                   const to = mapPickPending.toValues?.[i]?.trim();
                   return to
@@ -4385,7 +4409,7 @@ function App() {
               </p>
               {(mapPickPending.joinCtx.leftOn[0] ||
                 mapPickPending.joinCtx.rightOn[0]) && (
-                <p className="mt-1 font-mono text-[10px] text-slate-500">
+                <p className="mt-1 break-words font-mono text-[10px] text-slate-500 [overflow-wrap:anywhere]">
                   join on{" "}
                   {mapPickPending.joinCtx.leftOn[0] ?? "?"}
                   {" = "}
@@ -4393,7 +4417,7 @@ function App() {
                 </p>
               )}
             </div>
-            <fieldset className="mt-3">
+            <fieldset className="mt-3 min-w-0">
               <legend className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                 Target KeyMap
               </legend>
@@ -4410,7 +4434,7 @@ function App() {
                   return (
                     <li key={m.id}>
                       <label
-                        className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 ${
+                        className={`flex min-w-0 cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 ${
                           selected
                             ? "border-teal-600/70 bg-teal-500/10"
                             : preferred
@@ -4421,13 +4445,13 @@ function App() {
                         <input
                           type="radio"
                           name="map-pick-target"
-                          className="mt-1 accent-teal-400"
+                          className="mt-1 shrink-0 accent-teal-400"
                           checked={selected}
                           onChange={() => setMapPickChoice(m.id)}
                         />
                         <span className="min-w-0 flex-1">
-                          <span className="flex items-center gap-2">
-                            <span className="block truncate text-sm font-medium text-slate-100">
+                          <span className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span className="min-w-0 break-words text-sm font-medium text-slate-100 [overflow-wrap:anywhere]">
                               {m.name}
                             </span>
                             {preferred && (
@@ -5251,6 +5275,8 @@ function App() {
                           leftOnCols: keyMapEditor.joinCtx.leftOn,
                           rightOnCols: keyMapEditor.joinCtx.rightOn,
                           probeSide: keyMapEditor.joinCtx.probeSide,
+                          outputBindingsLeft: keyMapEditor.joinCtx.outputBindingsLeft,
+                          outputBindingsRight: keyMapEditor.joinCtx.outputBindingsRight,
                         }
                       : null
                   }

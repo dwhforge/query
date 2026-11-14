@@ -11,7 +11,7 @@ use dwh_engine::{
     describe_postgres_object as run_describe_postgres_object,
     describe_workspace as run_describe_workspace, explain_join_key as run_explain_join_key,
     explain_join_rows as run_explain_join_rows, join_diagnostics as run_join_diagnostics,
-    join_key_fuzzy_suggest_on as run_join_key_fuzzy_suggest_on,
+    join_key_fuzzy_suggest_with_tuple as run_join_key_fuzzy_suggest_with_tuple,
     join_key_near_miss as run_join_key_near_miss,
     join_prepare_status as run_join_prepare_status, list_postgres_objects as run_list_postgres_objects,
     ensure_join_sides_materialized as run_ensure_join_sides,
@@ -894,6 +894,9 @@ struct JoinDiagArgs {
     /// Which slot within `composite_indices` is fuzzy-scored (others exact).
     #[serde(default)]
     composite_fuzzy_slot: Option<usize>,
+    /// Read-only full-tuple retrieval; absent preserves legacy Auto behavior.
+    #[serde(default)]
+    tuple: Option<dwh_engine::JoinTupleRequest>,
     #[serde(default)]
     project_file: Option<String>,
     #[serde(default)]
@@ -2136,7 +2139,7 @@ impl HostState {
                     &a.connection_bindings,
                     a.execution_engine,
                 )?;
-                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest_on(
+                let out: JoinKeyFuzzySuggest = run_join_key_fuzzy_suggest_with_tuple(
                     &db,
                     &ws,
                     &conns,
@@ -2146,6 +2149,7 @@ impl HostState {
                     a.key_index,
                     a.composite_indices,
                     a.composite_fuzzy_slot,
+                    a.tuple,
                 )?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }

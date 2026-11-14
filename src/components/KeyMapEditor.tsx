@@ -131,6 +131,8 @@ export type KeyMapEditorProps = {
     rightOn: string;
     leftOnCols?: string[];
     rightOnCols?: string[];
+    outputBindingsLeft?: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
+    outputBindingsRight?: import("../lib/keyMap").ApplyKeyMapOutputBinding[];
     /** Unmatched side that opened Add to map… */
     probeSide?: "left" | "right";
   } | null;
@@ -2365,6 +2367,8 @@ export function KeyMapEditor({
                 outCols,
                 leftOnCols,
                 rightOnCols,
+                outputBindingsLeft: joinApplyContext.outputBindingsLeft,
+                outputBindingsRight: joinApplyContext.outputBindingsRight,
               }),
             );
             return;

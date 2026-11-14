@@ -10,7 +10,7 @@
 use crate::arrow_json::{array_value_to_json, map_arrow_type};
 use crate::compile::compile_ctes_for_execution;
 use crate::key_match::{
-    match_keys, CandidateSearch, FuzzyPair, KeyMatchOptions, MatchPolicy, MatchRecord,
+    match_keys, score_key_tuple, CandidateSearch, FuzzyPair, KeyMatchOptions, MatchPolicy, MatchRecord,
 };
 use crate::preview::ColumnMetadata;
 use crate::session::DbSession;
@@ -105,6 +105,59 @@ impl Default for FuzzyChatContext {
     }
 }
 
+/// Presence on the existing Suggest command opts into read-only full-tuple
+/// retrieval, not legacy Auto's per-column/composite-slot remapping policy.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct JoinTupleRequest {
+    /// Exact left tuple in Join ON order. None searches bounded unmatched left
+    /// tuples; Some (including NULL parts) restricts SQL before sampling.
+    #[serde(default)]
+    pub source_parts: Option<Vec<Option<String>>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct JoinTupleValue {
+    pub parts: Vec<Option<String>>,
+    pub occurrences: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JoinTupleCandidate {
+    /// Index into tuple_report.right_universe, never a display-string identity.
+    pub right_index: usize,
+    /// Equal-weight mean of ALL aligned fields. None means at least one field
+    /// exceeds the shared matcher's length bound; candidate is still pickable.
+    pub score: Option<f64>,
+    pub field_scores: Vec<Option<f64>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JoinTupleSource {
+    pub source: JoinTupleValue,
+    /// Every bounded right candidate, score-descending, then tuple-ascending.
+    /// Includes low-scoring alternatives and already-matched right tuples.
+    pub candidates: Vec<JoinTupleCandidate>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct JoinTupleReport {
+    pub left_on: Vec<String>,
+    pub right_on: Vec<String>,
+    pub sources: Vec<JoinTupleSource>,
+    /// Distinct real right tuples in deterministic NULL-first tuple order.
+    /// Parts are never joined/split; NULL, empty, and literal ∅ stay distinct.
+    pub right_universe: Vec<JoinTupleValue>,
+    /// Left totals are scoped to source_parts when supplied, unmatched otherwise.
+    pub left_distinct_total: u64,
+    pub left_occurrences_total: u64,
+    pub right_distinct_total: u64,
+    pub right_occurrences_total: u64,
+    pub left_truncated: bool,
+    pub right_truncated: bool,
+    pub tuple_cap: usize,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JoinKeyFuzzySuggest {
     pub host_query_id: String,
@@ -128,6 +181,179 @@ pub struct JoinKeyFuzzySuggest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
     pub chat_context: FuzzyChatContext,
+    /// Authoritative retrieval result in tuple mode. Legacy scalar suggestion /
+    /// leftover/count fields are not populated in this mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuple_report: Option<JoinTupleReport>,
+}
+
+/// Load a bounded, counted tuple universe without encoding parts into a string.
+/// Window totals are evaluated after grouping but before LIMIT, so duplicates
+/// never consume candidate slots or hide truncation.
+fn load_tuple_universe(
+    db: &DbSession,
+    compiled: &CompiledCtes,
+    cte: &str,
+    columns: &[String],
+    predicate: &str,
+) -> Result<(Vec<JoinTupleValue>, u64, u64), String> {
+    let fields = columns
+        .iter()
+        .map(|column| format!("CAST(t.{} AS VARCHAR)", quote_ident(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let positions = (1..=columns.len())
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = (1..=columns.len())
+        .map(|i| format!("{i} ASC NULLS FIRST"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = compiled.wrap_select(&format!(
+        "SELECT {fields}, count(*)::BIGINT AS occurrences,\n\
+         count(*) OVER ()::BIGINT AS distinct_total,\n\
+         sum(count(*)) OVER ()::BIGINT AS occurrences_total\n\
+         FROM {cte} t WHERE {predicate}\n\
+         GROUP BY {positions} ORDER BY {order} LIMIT {KEY_SCAN_CAP}"
+    ));
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![]).map_err(|e| e.to_string())?;
+        let mut tuples = Vec::new();
+        let mut distinct_total = 0;
+        let mut occurrences_total = 0;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let parts = (0..columns.len())
+                .map(|i| row.get::<_, Option<String>>(i))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            let occurrences: i64 = row.get(columns.len()).map_err(|e| e.to_string())?;
+            distinct_total = row
+                .get::<_, i64>(columns.len() + 1)
+                .map_err(|e| e.to_string())? as u64;
+            occurrences_total = row
+                .get::<_, i64>(columns.len() + 2)
+                .map_err(|e| e.to_string())? as u64;
+            tuples.push(JoinTupleValue {
+                parts,
+                occurrences: occurrences as u64,
+            });
+        }
+        Ok((tuples, distinct_total, occurrences_total))
+    })
+}
+
+fn join_key_fuzzy_suggest_tuple(
+    db: &DbSession,
+    compiled: &CompiledCtes,
+    left_cte: &str,
+    right_cte: &str,
+    host_query_id: &str,
+    join_step_index: usize,
+    left_on: &[String],
+    right_on: &[String],
+    request: JoinTupleRequest,
+) -> Result<JoinKeyFuzzySuggest, String> {
+    let predicate = if let Some(parts) = request.source_parts {
+        if parts.len() != left_on.len() {
+            return Err(format!(
+                "tuple.source_parts must have {} parts in Join ON order",
+                left_on.len()
+            ));
+        }
+        left_on
+            .iter()
+            .zip(parts)
+            .map(|(column, part)| {
+                let value = part
+                    .map(|value| format!("'{}'", escape_sql_string(&value)))
+                    .unwrap_or_else(|| "NULL".into());
+                format!(
+                    "CAST(t.{} AS VARCHAR) IS NOT DISTINCT FROM {value}",
+                    quote_ident(column)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    } else {
+        // Standard equality mirrors Join NULL behavior: NULL-bearing left
+        // tuples remain unmatched, even if a right tuple has the same NULLs.
+        let equal = left_on
+            .iter()
+            .zip(right_on)
+            .map(|(left, right)| {
+                format!(
+                    "t.{} = r.{}",
+                    quote_ident(left),
+                    quote_ident(right)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        format!("NOT EXISTS (SELECT 1 FROM {right_cte} r WHERE {equal})")
+    };
+    let (left, left_distinct_total, left_occurrences_total) =
+        load_tuple_universe(db, compiled, left_cte, left_on, &predicate)?;
+    let (right_universe, right_distinct_total, right_occurrences_total) =
+        load_tuple_universe(db, compiled, right_cte, right_on, "TRUE")?;
+    let sources = left
+        .into_iter()
+        .map(|source| {
+            let mut candidates: Vec<_> = right_universe
+                .iter()
+                .enumerate()
+                .map(|(right_index, target)| {
+                    let (score, field_scores) = score_key_tuple(&source.parts, &target.parts);
+                    JoinTupleCandidate {
+                        right_index,
+                        score,
+                        field_scores,
+                    }
+                })
+                .collect();
+            candidates.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.right_index.cmp(&b.right_index))
+            });
+            JoinTupleSource { source, candidates }
+        })
+        .collect::<Vec<_>>();
+    let left_truncated = left_distinct_total > sources.len() as u64;
+    let right_truncated = right_distinct_total > right_universe.len() as u64;
+    Ok(JoinKeyFuzzySuggest {
+        host_query_id: host_query_id.into(),
+        join_step_index,
+        left_on: left_on.to_vec(),
+        right_on: right_on.to_vec(),
+        metric: "mean_field_jaro_winkler_similarity".into(),
+        score_cutoff: SCORE_CUTOFF,
+        suggestions: vec![],
+        leftover_left: vec![],
+        leftover_right: vec![],
+        scanned_left: 0,
+        scanned_right: 0,
+        unmatched_left_total: 0,
+        unmatched_right_total: 0,
+        truncated: left_truncated || right_truncated,
+        disabled_reason: None,
+        chat_context: FuzzyChatContext::default(),
+        tuple_report: Some(JoinTupleReport {
+            left_on: left_on.to_vec(),
+            right_on: right_on.to_vec(),
+            sources,
+            right_universe,
+            left_distinct_total,
+            left_occurrences_total,
+            right_distinct_total,
+            right_occurrences_total,
+            left_truncated,
+            right_truncated,
+            tuple_cap: KEY_SCAN_CAP,
+        }),
+    })
 }
 
 /// Suggest left→right alias pairs for keys that do not already match exactly.
@@ -168,6 +394,39 @@ pub fn join_key_fuzzy_suggest_on(
     composite_indices: Option<Vec<usize>>,
     composite_fuzzy_slot: Option<usize>,
 ) -> Result<JoinKeyFuzzySuggest, String> {
+    join_key_fuzzy_suggest_with_tuple(
+        db,
+        workspace,
+        connections,
+        sources,
+        host_query_id,
+        join_step_index,
+        key_index,
+        composite_indices,
+        composite_fuzzy_slot,
+        None,
+    )
+}
+
+/// Existing Auto API plus optional full-tuple retrieval. Modes are mutually
+/// exclusive so old callers cannot accidentally change remapping semantics.
+pub fn join_key_fuzzy_suggest_with_tuple(
+    db: &DbSession,
+    workspace: &Workspace,
+    connections: &[ConnectionDef],
+    sources: &[dwh_pipeline::SourceDef],
+    host_query_id: &str,
+    join_step_index: usize,
+    key_index: Option<usize>,
+    composite_indices: Option<Vec<usize>>,
+    composite_fuzzy_slot: Option<usize>,
+    tuple: Option<JoinTupleRequest>,
+) -> Result<JoinKeyFuzzySuggest, String> {
+    if tuple.is_some()
+        && (key_index.is_some() || composite_indices.is_some() || composite_fuzzy_slot.is_some())
+    {
+        return Err("tuple mode cannot be combined with legacy key_index/composite options".into());
+    }
     let resolved = db.prepare_workspace(workspace, connections)?;
     let host = resolved
         .query(host_query_id)
@@ -204,6 +463,19 @@ pub fn join_key_fuzzy_suggest_on(
     let left_cte = cte_name(host_query_id, join_step_index - 1);
     let right_cte = cte_name(right_query_id, rq.steps.len() - 1);
     let compiled = compile_ctes_for_execution(db, &resolved, connections, sources, host_query_id)?;
+    if let Some(request) = tuple {
+        return join_key_fuzzy_suggest_tuple(
+            db,
+            &compiled,
+            &left_cte,
+            &right_cte,
+            host_query_id,
+            join_step_index,
+            left_on,
+            right_on,
+            request,
+        );
+    }
     let left_query_name = host.name.clone();
     let right_query_name = rq.name.clone();
     let right_query_id = right_query_id.to_string();
@@ -256,6 +528,7 @@ pub fn join_key_fuzzy_suggest_on(
             }
             None => {
                 return Ok(JoinKeyFuzzySuggest {
+                    tuple_report: None,
                     host_query_id: host_query_id.to_string(),
                     join_step_index,
                     left_on: left_on.clone(),
@@ -461,6 +734,7 @@ pub fn join_key_fuzzy_suggest_on(
     .unwrap_or_default();
 
     Ok(JoinKeyFuzzySuggest {
+        tuple_report: None,
         host_query_id: host_query_id.to_string(),
         join_step_index,
         left_on,
@@ -1038,6 +1312,7 @@ fn join_key_fuzzy_suggest_composite(
         .collect();
 
     Ok(JoinKeyFuzzySuggest {
+        tuple_report: None,
         host_query_id: host_query_id.to_string(),
         join_step_index,
         left_on: left_on.to_vec(),
@@ -1099,6 +1374,10 @@ fn query_two_side_tuple_keys(
     })
 }
 
+
+#[cfg(test)]
+#[path = "join_fuzzy_tuple_tests.rs"]
+mod tuple_tests;
 
 #[cfg(test)]
 mod tests {

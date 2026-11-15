@@ -154,6 +154,7 @@ for (const width of [1, 2, 3, 4, 5]) {
       expect(prepared.proposals.find((p: any) => JSON.stringify(p.mapKey) === JSON.stringify(sources[0])).affectedSourceRows).toBe(2);
       expect(await retrievalCount()).toBe(1);
       await expect(batch.getByTestId("matching-save")).toBeDisabled();
+      await batch.getByText("Review actions — explicit counted bulk", { exact: true }).click();
       const bulk = batch.getByRole("button", { name: /^Accept high-confidence suggestions/ });
       const bulkCount = Number((await bulk.innerText()).match(/\((\d+)\)/)![1]);
       console.log(`${width}-key real host bulk eligibility: ${bulkCount}`);
@@ -208,6 +209,8 @@ for (const width of [1, 2, 3, 4, 5]) {
       await expect(batch.getByTestId("matching-detail")).toContainText("llm");
       await expect(batch.getByTestId("matching-detail")).not.toContainText("INVENTED");
       await batch.getByTestId(`matching-choose-${JSON.stringify(targets[2])}`).click();
+      expect((await sessions())[0].decisions).toHaveLength(2);
+      await batch.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
       expect((await sessions())[0].decisions).toHaveLength(3);
       expect((await projectState(page)).workspace).toEqual(before);
       expect(await execute(page)).toEqual(baseline);

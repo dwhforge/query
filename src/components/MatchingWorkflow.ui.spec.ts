@@ -8,7 +8,7 @@ import { mount } from "./MatchingWorkspace.testHarness";
 const rows = (page: Page) => page.locator('tr[data-testid^="matching-row-"]');
 const manual = (page: Page) => page.getByRole("region", { name: "Manual right search" });
 async function browse(page: Page) {
-  await page.getByText("Search other records", { exact: true }).click();
+  await page.getByText("Search other records", { exact: true }).evaluate(el => { (el.parentElement as HTMLDetailsElement).open = true; });
   return manual(page);
 }
 async function ask(page: Page) {
@@ -47,11 +47,11 @@ for (const width of [1, 2, 3, 4, 5]) {
     await mount(page, width);
     const search = await browse(page);
     await expect(search.getByRole("radio", { checked: true })).toHaveCount(0);
-    await expect(search.getByRole("button", { name: "Confirm selected candidate" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Confirm selected candidate" })).toBeDisabled();
     await search.getByRole("radio").nth(1).check();
     await expect(search).toContainText("Repeated target tuple");
     expect(await page.evaluate("session.decisions.length")).toBe(0);
-    await search.getByRole("button", { name: "Confirm selected candidate" }).click();
+    await page.getByRole("button", { name: "Confirm selected candidate" }).click();
     const decision = await page.evaluate("session.decisions[0]");
     await expect(page.getByRole("region", { name: "Current draft decision" })).toContainText("target1/0");
     await page.getByRole("button", { name: /^All keys/ }).click();
@@ -70,18 +70,18 @@ test("all-field manual search reaches below-cutoff/hidden candidates and refuses
   report.right_universe[24]!.parts[4] = null;
   report.sources.forEach(g => g.candidates.forEach(c => { c.score = .1; }));
   await mount(page, 5, { reportOverride: report });
-  await expect(page.getByRole("button", { name: "Use this match", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Select suggested candidate", exact: true })).toBeDisabled();
   const search = await browse(page);
   await search.getByRole("searchbox").fill("target23/4");
   await expect(search.getByRole("radio")).toHaveCount(1);
   await search.getByRole("radio").check();
-  await search.getByRole("button", { name: "Confirm selected candidate" }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate" }).click();
   expect(await page.evaluate("session.decisions.length")).toBe(1);
   await page.getByRole("button", { name: "Undo decision", exact: true }).click();
   await search.getByRole("searchbox").fill("NULL");
   await search.getByRole("radio").check();
   await expect(search).toContainText("NULL cannot be represented");
-  await expect(search.getByRole("button", { name: "Confirm selected candidate" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Confirm selected candidate" })).toBeDisabled();
   expect(await page.evaluate("session.decisions.length")).toBe(0);
 });
 
@@ -111,13 +111,13 @@ test("empty RIGHT keeps unmatched sources reviewable, manual empty state and no 
   await expect(rows(page)).toHaveCount(2);
   const search = await browse(page);
   await expect(search).toContainText("No retrieved right tuples match this search.");
-  await expect(search.getByRole("button", { name: "Confirm selected candidate" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Confirm selected candidate" })).toBeDisabled();
   await page.getByRole("button", { name: "Skip for now", exact: true }).click();
   await expect(page.getByRole("button", { name: "Undo decision", exact: true })).toBeEnabled();
   expect(await page.evaluate("calls.filter(c => c.cmd === 'llm_chat').length")).toBe(0);
 });
 
-test("source search/sort/paging/filter never loses decisions or shows detail for a hidden row; bulk follows visible scope", async ({ page }) => {
+test("source search/sort/paging/filter preserves a visibly pinned inspector and decisions; bulk follows visible scope", async ({ page }) => {
   const report = largeReport(2, 60);
   report.sources.forEach((g, i) => { g.candidates = [{ right_index: i, score: .9 + i / 1000, field_scores: [.95, .95] }]; });
   // Complete competitors remain required: every source scores the entire universe.
@@ -125,13 +125,19 @@ test("source search/sort/paging/filter never loses decisions or shows detail for
     right_index: r, score: r === i ? .9 + i / 1000 : .1, field_scores: r === i ? [.95, .95] : [.1, .1],
   })); });
   await mount(page, 2, { reportOverride: report });
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   const decision = await page.evaluate("session.decisions[0]");
   await page.getByRole("button", { name: "Next source page", exact: true }).click();
   await expect(rows(page)).toHaveCount(10);
+  await expect(page.getByText("Pinned source is outside this page/filter.", { exact: false })).toBeVisible();
+  await expect(page.getByTestId("matching-detail")).toContainText("source0/0");
+  await rows(page).first().click();
   await expect(page.getByTestId("matching-detail")).toContainText("source50/0");
   await page.getByRole("searchbox", { name: "Search source keys" }).fill("source59/1");
   await expect(rows(page)).toHaveCount(1);
+  await expect(page.getByTestId("matching-detail")).toContainText("source50/0");
+  await rows(page).first().click();
   await expect(page.getByTestId("matching-detail")).toContainText("source59/0");
   await expect(page.getByTestId("matching-bulk-confirm")).toHaveText("Accept high-confidence suggestions (1)");
   await page.getByRole("searchbox", { name: "Search source keys" }).fill("");
@@ -139,6 +145,7 @@ test("source search/sort/paging/filter never loses decisions or shows detail for
   await expect(rows(page).first()).toContainText("source59/0");
   await page.getByRole("button", { name: /^Marked to save/ }).click();
   await expect(rows(page)).toHaveCount(1);
+  await rows(page).first().click();
   await expect(page.getByTestId("matching-detail")).toContainText("source0/0");
   expect(await page.evaluate("session.decisions[0]")).toEqual(decision);
 });
@@ -157,7 +164,7 @@ test("large retrieved universe renders 8 shortlist and 20 manual rows; selection
   await expect(search).toContainText('Selected (not confirmed): "target1/0"');
   await search.getByRole("combobox").selectOption("values");
   expect(await page.evaluate("session.decisions")).toEqual([]);
-  await search.getByRole("button", { name: "Confirm selected candidate" }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate" }).click();
   expect(await page.evaluate("session.candidates.find(c => c.candidateId === session.decisions[0].candidateId).outputValues[0]")).toBe("target1/0");
 });
 
@@ -176,7 +183,8 @@ test("LLM permission gate, provider failure and retry remain interactive without
 test("fuzzy and LLM share one ledger: concurrent explicit decision survives, second source can be reviewed and written together", async ({ page }) => {
   await mount(page);
   await ask(page);
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   const first = await page.evaluate("session.decisions[0]");
   const content = await page.evaluate<string>("JSON.stringify({pairs:report.sources.map(g => ({from_parts:g.source.parts,to_parts:report.right_universe[1].parts,why:'shared complete-tuple evidence'}))})");
   await reply(page, content);
@@ -184,7 +192,8 @@ test("fuzzy and LLM share one ledger: concurrent explicit decision survives, sec
   await rows(page).nth(1).click();
   await expect(page.getByRole("region", { name: "Candidate evidence" })).toContainText("shared complete-tuple evidence");
   expect(await page.evaluate("session.decisions.length")).toBe(1);
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   await page.getByTestId("matching-save").click();
   await expect(page.getByRole("region", { name: "Matching commit receipt" })).toContainText("Applied 2");
   expect(await page.evaluate("saved[0].length")).toBe(2);
@@ -199,7 +208,8 @@ test("normal full-scope default stays Basic until a semantic edit; dirty plan ed
   await page.getByTestId("matching-apply-plan").click();
   await expect(rows(page)).toHaveCount(2);
   expect(await page.evaluate("session.matchingMode")).toBe("basic");
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   const decisions = await page.evaluate("session.decisions");
   page.once("dialog", dialog => dialog.dismiss());
   await page.getByRole("combobox", { name: "How to use" }).first().selectOption("hard_constraint");
@@ -294,7 +304,8 @@ for (const kind of ["context", "unmount"] as const) {
 
 test("owned receipt before callback keeps review locked, shifts JOIN index, clears decisions and waits for explicit refresh", async ({ page }) => {
   await mount(page, 2, { holdWrite: true });
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   await page.getByTestId("matching-save").click();
   await page.evaluate("changeContext('p:0','next',expectedReceipt)");
   await expect(page.getByTestId("matching-workspace")).toHaveAttribute("inert", "");
@@ -312,7 +323,8 @@ test("owned receipt before callback keeps review locked, shifts JOIN index, clea
 for (const kind of ["edit-before", "project-aba", "context-aba", "edit-after", "rejected-after-context"] as const) {
   test(`commit cannot restore stale decisions/receipt after ${kind}`, async ({ page }) => {
     await mount(page, 2, { holdWrite: true });
-    await page.getByRole("button", { name: "Use this match", exact: true }).click();
+    await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+    await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
     await page.getByTestId("matching-save").click();
     if (kind === "edit-after") {
       await page.evaluate("releaseWrite(); holdWrite=false");
@@ -331,7 +343,7 @@ for (const kind of ["edit-before", "project-aba", "context-aba", "edit-after", "
     await expect(page.getByRole("region", { name: "Matching commit receipt" })).toHaveCount(0);
     expect(await page.evaluate("session.commitLifecycle.status")).toBe("stale");
     if (kind !== "edit-after") await expect(page.getByTestId("matching-save")).toBeDisabled();
-    if (kind !== "edit-after") await expect(page.getByRole("button", { name: "Use this match", exact: true })).toBeDisabled();
+    if (kind !== "edit-after") await expect(page.getByRole("button", { name: "Select suggested candidate", exact: true })).toBeDisabled();
     expect(await page.evaluate("calls.filter(c => c.cmd === 'retrieve').length")).toBe(1);
   });
 }

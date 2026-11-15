@@ -75,7 +75,7 @@ const harness = buildSync({ stdin: { resolveDir: process.cwd(), loader: "tsx", c
     // The App's synchronous latest() (pending commit lifecycle) must be visible to the
     // producer commit before React re-renders, so onChange updates the live ref eagerly.
     function commit(next){ live.current = next; window.session = next; setSession(next); }
-    return createElement(MatchingWorkspace,{session,onChange:commit,
+    return createElement(MatchingWorkspace,{session,onChange:commit,baseline:window.baseline,
       onMergeBasicLlm:(runId,text,sent)=>setSession(s=>mergeBasicLlm(s,runId,text,sent)),
       onRunBasic:async s => { window.calls.push({cmd:'retrieve'});
         if(window.holdRetrieve) await new Promise(resolve => window.releaseRetrieve = resolve);
@@ -120,9 +120,10 @@ export async function mount(page: Page, width = 2, options: Record<string, unkno
   await page.addStyleTag({ url: "/src/index.css?direct" });
   await page.evaluate(args => Object.assign(window, args), { width, ...options });
   await page.addScriptTag({ content: harness });
+  await page.getByRole("button", { name: /Hide how to match|How to match/ }).evaluate((el: HTMLButtonElement) => { if (el.textContent?.includes("How to match")) el.click(); });
   if (options.noRun) return;
   await page.getByTestId("matching-apply-plan").click();
   if (options.holdRetrieve) return;
   await expect(page.locator('tr[data-testid^="matching-row-"]')).toHaveCount(Math.min((options.reportOverride as any)?.sources?.length ?? 2, 50));
+  await page.getByText("Review actions — explicit counted bulk", { exact: true }).click();
 }
-

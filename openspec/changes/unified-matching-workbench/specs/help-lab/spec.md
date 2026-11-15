@@ -1,6 +1,6 @@
 # Delta: Help Lab — bidirectional Matching acceptance
 
-Status: **proposed / not implemented**. Decision:
+Status: **verified bounded delivery merged into capability specs, 2026-11-15**. Decision:
 [ADR-0052](../../../../../docs/adr/0052-matching-relationship-workbench.md).
 Extends [Help Lab](../../../../specs/help-lab/spec.md).
 
@@ -10,7 +10,7 @@ Extends [Help Lab](../../../../specs/help-lab/spec.md).
 
 At least one existing offline lab SHALL demonstrate opening a problematic JOIN,
 finding an unmatched source, inspecting real RIGHT candidates, focusing RIGHT and
-its provenance-grouped LEFT relationships, explicitly confirming, reviewing the
+its unified multi-provenance LEFT list, explicitly confirming, reviewing the
 Mapping diff, atomic Mapping + Apply and executing the changed JOIN. The journey
 SHALL work without understanding Basic versus Advanced. Existing flagship
 reconciliation, safe project switching and Suggest Right SHALL remain usable.

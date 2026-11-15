@@ -1,6 +1,6 @@
 # Delta: Matching workspace — business records and bidirectional relationships
 
-Status: **proposed / not implemented**. Decision:
+Status: **verified bounded delivery merged into capability specs, 2026-11-15**. Decision:
 [ADR-0052](../../../../../docs/adr/0052-matching-relationship-workbench.md).
 Extends [merged Matching](../../../../specs/matching-workspace/spec.md) without
 weakening ADR-0051 or changing persisted Mapping IR.
@@ -26,8 +26,9 @@ unacquired fields SHALL remain unknown, not be fabricated from IDs or fixtures.
 
 LEFT focus SHALL show suggestions, alternatives, explicit manual results, current
 draft and available Mapping relationship. RIGHT focus SHALL show associated LEFT
-records in separate actual JOIN, existing Mapping, confirmed draft and suggested
-groups. Both directions SHALL use the same Matching session and source-key ledger.
+records in ONE unified readable list with multiple actual JOIN, existing Mapping,
+confirmed draft and suggested provenance badges and filters. Authority summaries,
+coverage and count units SHALL remain separate and non-additive, not four expanded lists. Both directions SHALL use the same Matching session and source-key ledger.
 Focus, candidate selection and explicit confirmation SHALL be separate states.
 Navigation SHALL NOT select a candidate for confirmation, decide, persist or rerun.
 No producer/LLM result SHALL imply consent.
@@ -75,8 +76,10 @@ distinguished from distinct source-key counts and output counts.
 
 ### Requirement: Existing Mapping is a read-only baseline, not a draft
 
-The workspace SHALL reuse the authoritative Mapping definition and existing row
-acquisition; it SHALL NOT create another Mapping store. It SHALL establish shape,
+The workspace SHALL project the authoritative compatible seed Mapping definition
+read-only; it SHALL NOT create another Mapping store. Source/query/ref/range
+baselines not acquired by this bounded implementation SHALL be labelled unavailable,
+not inferred from empty session arrays. It SHALL establish shape,
 output binding and original-JOIN compatibility before presenting saved rows as a
 baseline. Empty session arrays SHALL NOT establish completeness. Unsaved editor
 rows SHALL NOT be labelled already in Mapping. Existing rows, confirmed-not-written,
@@ -138,6 +141,27 @@ SHALL stay bounded/paged and preserve acquisition caps and explicit refusals.
 The historical proposal-table/tier-first presentation is replaced by record-first
 exploration. Existing Basic, Advanced, manual lookup, LLM, Mapping-origin Save,
 JOIN-bound Mapping + Apply, Suggest Right and Lens contracts remain operational.
-Final acceptance SHALL require real CSV/DuckDB Electron journeys, the full
-navigation/lifecycle matrix and an existing Help Lab workflow, not screenshots or
-synthetic-session/component tests alone.
+Runtime verification SHALL include real CSV/DuckDB Electron navigation, lifecycle
+and existing Help Lab workflows, not screenshots or synthetic-session/component
+tests alone. The exhaustive risk matrix and independent usability/performance
+acceptance remain explicitly tracked in the runtime report.
+
+### Requirement: Fast explicit sequential review
+
+Previous/next unresolved SHALL navigate without deciding and preserve filters,
+per-source picks, drafts and context. Candidates SHALL remain visible. Pick and
+confirm SHALL be separate explicit actions with separate keyboard interactions.
+Optional advance after confirm SHALL be opt-in and use the same ledger action.
+
+#### Scenario: Sequential confirmation
+- WHEN a user picks a candidate then moves next and previous unresolved
+- THEN picks and drafts remain intact and no new decision is created
+- WHEN explicitly confirming with advance enabled
+- THEN only that source is confirmed and focus advances to an unresolved source
+
+### Requirement: Three distinct reverse scopes
+
+Renderer reverse evidence SHALL NOT be labelled executed JOIN evidence. Existing
+Host execution counts and bounded samples SHALL have independent units/coverage.
+Complete arbitrary-large executed reverse enumeration SHALL report unsupported;
+future paginated executed reverse is not a blocker and no new RPC is required.

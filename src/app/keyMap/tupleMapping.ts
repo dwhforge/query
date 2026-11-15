@@ -5,6 +5,25 @@ import { tupleIdentity } from "../../lib/joinLensTuple";
 import type { KeyMapJoinCtx } from "./types";
 import { resolveJoinStepFromCtx } from "./service";
 
+/** Read-only selection shared by batch preparation and the workbench baseline. */
+export function resolveTupleMapping(workspace: Workspace, ctx: Pick<KeyMapJoinCtx, "hostQueryId" | "joinStepIndex" | "rightQueryId" | "leftOn" | "rightOn" | "probeSide">, strictAttached = true):
+  { map: KeyMapDef | undefined; name: string; fromColumns: string[]; outputColumns: string[] } | { error: string } {
+  const fromColumns = ctx.leftOn.map((column, i) => `from_${i + 1}_${column}`);
+  const outputColumns = ctx.rightOn.map((column, i) => `to_${i + 1}_${column}`);
+  const name = `Join aliases ${ctx.hostQueryId} (${ctx.leftOn.join(", ")}) → ${ctx.rightQueryId} (${ctx.rightOn.join(", ")})`;
+  const maps = workspace.key_maps ?? [];
+  const preferredId = findApplyKeyMapIdForJoin(workspace, ctx);
+  const compatible = (map: KeyMapDef) => (map.storage?.kind ?? "seed") === "seed"
+    && (map.time_mode ?? "none") === "none"
+    && tupleIdentity(fromColumnsEff(map)) === tupleIdentity(fromColumns)
+    && tupleIdentity(outputColumnsEff(map)) === tupleIdentity(outputColumns);
+  const preferred = maps.find(m => m.id === preferredId);
+  if (strictAttached && preferredId && (!preferred || !compatible(preferred))) return {
+    error: "The Join already uses an incompatible Mapping. Review it before applying full tuples; no Mapping was changed.",
+  };
+  return { map: preferred && compatible(preferred) ? preferred : maps.find(m => m.name === name && compatible(m)), name, fromColumns, outputColumns };
+}
+
 /**
  * Pure, all-or-nothing batch preparation. Intermediate maps are private values,
  * never project/editor updates. The caller must resolve/fold Apply before commit.
@@ -25,16 +44,9 @@ export function planBatchTupleMapping(workspace: Workspace, ctx: KeyMapJoinCtx, 
     if (seen.has(key)) return { error: `Batch contains duplicate From tuple ${key}. Select only one target for each full source tuple.` };
     seen.add(key);
   }
-  const preferredId = findApplyKeyMapIdForJoin(workspace, ctx);
-  const preferred = (workspace.key_maps ?? []).find((map) => map.id === preferredId);
-  const fromColumns = ctx.leftOn.map((column, i) => `from_${i + 1}_${column}`);
-  const outputColumns = ctx.rightOn.map((column, i) => `to_${i + 1}_${column}`);
-  if (preferredId && (!preferred || (preferred.storage?.kind ?? "seed") !== "seed"
-    || (preferred.time_mode ?? "none") !== "none"
-    || tupleIdentity(fromColumnsEff(preferred)) !== tupleIdentity(fromColumns)
-    || tupleIdentity(outputColumnsEff(preferred)) !== tupleIdentity(outputColumns))) {
-    return { error: "The Join already uses an incompatible Mapping. Review it before applying full tuples; no Mapping was changed." };
-  }
+  const resolved = resolveTupleMapping(workspace, ctx);
+  if ("error" in resolved) return resolved;
+  const { fromColumns, outputColumns } = resolved;
   let staged = workspace;
   let result: { map: KeyMapDef; joinCtx: KeyMapJoinCtx } | undefined;
   for (const selection of selections) {
@@ -77,18 +89,9 @@ export function planTupleMapping(workspace: Workspace, ctx: KeyMapJoinCtx, selec
   }
   const valid = confirmTupleMapping(selection.leftOn, selection.rightOn, selection.fromParts, selection.outputValues);
   if ("error" in valid) return valid;
-  // Relation names are disjoint even when both Join sides use identical names.
-  const fromColumns = selection.leftOn.map((column, i) => `from_${i + 1}_${column}`);
-  const outputColumns = selection.rightOn.map((column, i) => `to_${i + 1}_${column}`);
-  const name = `Join aliases ${ctx.hostQueryId} (${ctx.leftOn.join(", ")}) → ${ctx.rightQueryId} (${ctx.rightOn.join(", ")})`;
-  const maps = workspace.key_maps ?? [];
-  const preferredId = findApplyKeyMapIdForJoin(workspace, ctx);
-  const compatible = (map: KeyMapDef) => (map.storage?.kind ?? "seed") === "seed"
-    && (map.time_mode ?? "none") === "none"
-    && tupleIdentity(fromColumnsEff(map)) === tupleIdentity(fromColumns)
-    && tupleIdentity(outputColumnsEff(map)) === tupleIdentity(outputColumns);
-  const existing = maps.find((m) => m.id === preferredId && compatible(m))
-    ?? maps.find((m) => m.name === name && compatible(m));
+  const resolved = resolveTupleMapping(workspace, ctx, false);
+  if ("error" in resolved) return resolved;
+  const { map: existing, name, fromColumns, outputColumns } = resolved;
   const base = existing ?? { ...emptyKeyMap(name), from_columns: fromColumns,
     from_column: fromColumns[0], output_columns: outputColumns, to_column: outputColumns[0] };
   const key = tupleIdentity(selection.fromParts);

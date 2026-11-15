@@ -2,9 +2,9 @@
  * Matching workspace tab (ADR-0044).
  * Plan editor → fixture/retrieval proposals → review → final diff → Save.
  */
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { llmChat, type MatchingJoinLookupResult, type MatchingLookupPage } from "../lib/bridge";
-import { tupleCell, tupleMappingBlock } from "../lib/joinLensTuple";
+import { tupleCell } from "../lib/joinLensTuple";
 import { basicPrompt, basicHighConfidenceIds, basicPlanCompatible } from "../app/matching/basic";
 import {
   advancedPlanCompatible,
@@ -19,7 +19,6 @@ import { FIXTURE_PLAN } from "../app/matching/fixtures";
 import { buildLensMatchingPlan } from "../app/matching/planDefaults";
 import {
   applyBulkConfirm,
-  applyDecision,
   buildFinalDiff,
   candidateById,
   filterProposals,
@@ -33,9 +32,6 @@ import {
 import {
   cascadeCounts,
   cascadeTierCounts,
-  cascadeTierLabel,
-  proposalCascadeTier,
-  proposalEvidenceSummary,
 } from "../app/matching/cascade";
 import { applyLlmRankingToSession } from "../app/matching/llmRank";
 import { MATCHING_CAPS } from "../lib/matchingCaps";
@@ -53,10 +49,17 @@ import type {
   MatchingProposalView,
   MatchingTabSession,
 } from "../app/matching/types";
-import { mapKeyToken } from "../app/matching/types";
+import { RelationshipInspector } from "./matching/RelationshipInspector";
+import { RecordValues } from "./matching/RecordValues";
+import { RelationshipBrowser } from "./matching/RelationshipBrowser";
+import { nextUnresolved, type MappingProjection } from "../app/matching/relationships";
+import type { MatchingCandidateView } from "../app/matching/types";
+import type { ExplainJoinKeyResult } from "../lib/bridge";
 
 type Props = {
   session: MatchingTabSession;
+  baseline?: MappingProjection;
+  onInspectJoin?: (outputs: (string | null)[]) => Promise<ExplainJoinKeyResult>;
   onLookupAdvanced?: (proposalId: string, page: MatchingLookupPage) => Promise<MatchingJoinLookupResult>;
   onRunBasic?: (session: MatchingTabSession) => Promise<MatchingTabSession>;
   onMergeBasicLlm?: (runId: string, text: string, sent: TupleBatchPrompt) => void;
@@ -319,6 +322,8 @@ function planBlockers(plan: MatchingPlanDraft): string[] {
 
 export function MatchingWorkspace({
   session,
+  baseline,
+  onInspectJoin,
   onRunBasic,
   onLookupAdvanced,
   onMergeBasicLlm,
@@ -330,14 +335,16 @@ export function MatchingWorkspace({
   writeAllowed = true,
   writeRefusalReason = null,
 }: Props) {
-  session = deriveMatchingReview(session);
+  const reviewedProposals = useMemo(() => deriveMatchingReview(session).proposals,
+    [session.proposals, session.decisions, session.plan?.semanticRevision, session.commitLifecycle, session.basicRun, session.advancedRun]);
+  session = { ...session, proposals: reviewedProposals };
   const latestSession = useRef(session);
   latestSession.current = session;
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const isBasic = !!session.joinBinding;
   const acknowledged = session.commitLifecycle?.status === "acknowledged" ? session.commitLifecycle.receipt : null;
-  const [chatOpen, setChatOpen] = useState(!session.chatCollapsed);
+  const [chatOpen, setChatOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [llmPhase, setLlmPhase] = useState<"idle" | "expand" | "rank">("idle");
   const [llmProgress, setLlmProgress] = useState<{
@@ -352,6 +359,11 @@ export function MatchingWorkspace({
   const [showFinal, setShowFinal] = useState(false);
   const [commitMsg, setCommitMsg] = useState<string | null>(null);
   const [showSavedContext, setShowSavedContext] = useState(true);
+  const [targetFocus, setTargetFocus] = useState<MatchingCandidateView | null>(null);
+  const [focusEpoch, setFocusEpoch] = useState(0);
+  const [advanceAfterConfirm, setAdvanceAfterConfirm] = useState(false);
+  function inspectTarget(candidate: MatchingCandidateView) { setFocusEpoch(e => e + 1); setTargetFocus(candidate); }
+  function focusSource(id: string) { setFocusEpoch(e => e + 1); setTargetFocus(null); onChange({ ...session, selectedProposalId: id }); }
   const [reviewSearch, setReviewSearch] = useState("");
   const [reviewSort, setReviewSort] = useState<"workflow" | "score">("workflow");
 
@@ -429,14 +441,30 @@ export function MatchingWorkspace({
     [filtered, skipPaging, pageIndex, session.pageSize],
   );
   const counters = matchingCounters(session);
-  const selected =
-    page.find((p) => p.proposalId === session.selectedProposalId) ??
-    page[0] ??
-    null;
+  const pinned = session.proposals.find(p => p.proposalId === session.selectedProposalId) ?? (session.selectedProposalId ? null : page[0] ?? null);
+  const selected = pinned?.state === "stale" && !page.some(p => p.proposalId === pinned.proposalId) ? null : pinned;
+  const selectedHidden = !!selected && !page.some(p => p.proposalId === selected.proposalId);
+  const sequenceIds = filtered.map(p => p.proposalId);
+  function navigate(direction: 1 | -1) {
+    const id = nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, direction);
+    if (id) focusSource(id);
+  }
+  function changeReview(next: MatchingTabSession) {
+    const confirmedNow = next.decisions.some(d => (d.kind === "choose_alternative" || d.kind === "confirm_proposed") &&
+      !session.decisions.some(old => old.proposalId === d.proposalId));
+    if (advanceAfterConfirm && confirmedNow) {
+      const id = nextUnresolved(next, sequenceIds, selected?.proposalId ?? null, 1);
+      if (id) { next = { ...next, selectedProposalId: id }; setTargetFocus(null); setFocusEpoch(e => e + 1); }
+    }
+    onChange(next);
+  }
+  useEffect(() => { setTargetFocus(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
   const bulkPreview = previewBulkConfirm(session, "selection", bulkScope === "selection" ? selectedIds
     : (bulkScope === "page" ? page : filtered).map(p => p.proposalId));
   const reviewedPreview = previewReviewedConfirm(session, selectedIds);
-  const finalDiff = useMemo(() => buildFinalDiff(session), [session]);
+  const finalDiff = useMemo(() => buildFinalDiff(baseline?.complete ? { ...session, mapBaseline: baseline.rows.map(r => ({
+    fromParts: r.fromParts as string[], outputValues: r.outputValues as string[],
+  })) } : session), [session, baseline]);
   const finalSum = summarizeFinalDiff(finalDiff);
 
   const scopeLabel =
@@ -1367,163 +1395,41 @@ export function MatchingWorkspace({
                   </div>
                 ) : null}
 
-                <div className="flex min-h-0 flex-1">
-                  <div className="min-w-0 flex-1 overflow-auto">
-                    <table className="w-full text-left text-[11px]">
-                      <thead className="sticky top-0 z-[1] bg-[#0b1220] text-slate-500">
-                        <tr>
-                          <th className="px-2 py-1">Reviewed</th>
-                          <th className="px-2 py-1">Tier</th>
-                          <th className="px-2 py-1">Key</th>
-                          <th className="px-2 py-1">Match</th>
-                          <th className="px-2 py-1">Why</th>
-                          <th className="px-2 py-1">Other options</th>
-                          <th className="px-2 py-1">Status</th>
-                          <th className="px-2 py-1">Rows</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {page.map((p, idx) => {
-                          const tier = proposalCascadeTier(p);
-                          const saved = p.state === "saved";
-                          const prev = idx > 0 ? page[idx - 1]! : null;
-                          const prevSaved = prev?.state === "saved";
-                          const prevTier = prev
-                            ? proposalCascadeTier(prev)
-                            : null;
-                          const showSavedSection =
-                            saved && (idx === 0 || !prevSaved);
-                          const showReadySection =
-                            isReadyView &&
-                            !saved &&
-                            (idx === 0 ||
-                              prevSaved ||
-                              prevTier !== tier);
-                          return (
-                          <Fragment key={p.proposalId}>
-                          {showSavedSection ? (
-                            <tr className="bg-teal-950/50">
-                              <td
-                                colSpan={7}
-                                className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-teal-200"
-                              >
-                                Already in Mapping · {savedRows.length} ·
-                                compare only, not editable here
-                              </td>
-                            </tr>
-                          ) : null}
-                          {showReadySection ? (
-                            <tr className="bg-slate-900/80">
-                              <td
-                                colSpan={7}
-                                className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-                                  tier === "fuzzy"
-                                    ? "text-emerald-300"
-                                    : tier === "leftover"
-                                      ? "text-amber-200"
-                                      : tier === "llm"
-                                        ? "text-violet-200"
-                                        : "text-slate-300"
-                                }`}
-                              >
-                                {tier === "fuzzy"
-                                  ? `Matched by spelling · ${readySplit.fuzzy}`
-                                  : tier === "leftover"
-                                    ? `Not matched yet — send to LLM · ${readySplit.leftover}`
-                                    : tier === "llm"
-                                      ? `LLM suggested · ${readySplit.llm}`
-                                      : `You decide · ${readySplit.other}`}
-                              </td>
-                            </tr>
-                          ) : null}
-                          <tr
-                            data-testid={`matching-row-${p.proposalId}`}
-                            onClick={() =>
-                              onChange({
-                                ...session,
-                                selectedProposalId: p.proposalId,
-                              })
-                            }
-                            className={`cursor-pointer border-t border-slate-800/80 ${
-                              selected?.proposalId === p.proposalId
-                                ? "bg-amber-950/30"
-                                : saved
-                                  ? "bg-teal-950/20 text-slate-400"
-                                  : "hover:bg-slate-900/50"
-                            }`}
-                          >
-                            <td className="px-2 py-1">
-                              <input type="checkbox" aria-label={`Reviewed source ${JSON.stringify(p.mapKey)}`}
-                                checked={selectedIds.includes(p.proposalId)} disabled={saved || p.state === "stale" || !!session.commitLifecycle}
-                                onClick={e => e.stopPropagation()}
-                                onChange={e => setSelectedIds(ids => e.target.checked ? [...new Set([...ids, p.proposalId])] : ids.filter(id => id !== p.proposalId))} />
-                            </td>
-                            <td className="px-2 py-1">
-                              <span
-                                className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                                  saved
-                                    ? "bg-teal-500/20 text-teal-100"
-                                    : tier === "fuzzy"
-                                      ? "bg-emerald-500/15 text-emerald-200"
-                                      : tier === "leftover"
-                                        ? "bg-amber-500/20 text-amber-100"
-                                        : tier === "llm"
-                                          ? "bg-violet-500/20 text-violet-100"
-                                          : "bg-slate-600/40 text-slate-200"
-                                }`}
-                              >
-                                {saved ? "Saved" : cascadeTierLabel(tier)}
-                              </span>
-                            </td>
-                            <td className="px-2 py-1 font-mono">
-                              {p.mapKey.map(tupleCell).join(" · ")}
-                            </td>
-                            <td className="px-2 py-1 font-mono">
-                              {candidateById(session, session.decisions.find(d => d.proposalId === p.proposalId)?.candidateId ?? p.proposedCandidateId)
-                                ?.targetId ?? "—"}
-                            </td>
-                            <td
-                              className="max-w-[14rem] truncate px-2 py-1 text-slate-400"
-                              title={p.evidence.map((e) => e.note).join("; ")}
-                            >
-                              {proposalEvidenceSummary(p)}
-                            </td>
-                            <td className="px-2 py-1">
-                              {tier === "fuzzy"
-                                ? "—"
-                                : p.alternativeCandidateIds.length ||
-                                    p.searchIncomplete
-                                  ? p.alternativeCandidateIds.length || "…"
-                                  : "—"}
-                            </td>
-                            <td className="px-2 py-1">{stateLabel(p.state)}</td>
-                            <td className="px-2 py-1">{p.affectedSourceRows}</td>
-                          </tr>
-                          </Fragment>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <DetailPanel
-                    key={(session.basicRun ?? session.advancedRun)?.id ?? session.id}
-                    session={session}
-                    onLookupAdvanced={onLookupAdvanced}
-                    proposal={selected}
-                    onChange={onChange}
-                    onAgreeReplace={(token) =>
-                      onChange({
-                        ...session,
-                        explicitReplaceKeys: Array.from(
-                          new Set([...session.explicitReplaceKeys, token]),
-                        ),
-                      })
-                    }
-                  />
+                <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-700 p-2 text-[11px]" aria-label="Sequential review">
+                  <button type="button" disabled={!nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, -1)} onClick={() => navigate(-1)}>Previous unresolved</button>
+                  <button type="button" disabled={!nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, 1)} onClick={() => navigate(1)}>Next unresolved</button>
+                  <label><input type="checkbox" checked={advanceAfterConfirm} onChange={e => setAdvanceAfterConfirm(e.target.checked)} /> Advance after confirm</label>
+                  {selectedHidden && <span role="status">Pinned source is outside this page/filter. <button type="button" onClick={() => { setReviewSearch(""); onChange({ ...session, reviewFilter: "all", pageIndex: Math.floor(session.proposals.findIndex(p => p.proposalId === selected?.proposalId) / session.pageSize) }); }}>Reveal source</button></span>}
+                </div>
+                <div className="grid min-h-0 flex-1 grid-cols-1 overflow-auto xl:grid-cols-2">
+                  <section className="min-w-0 overflow-auto" aria-label="Source explorer">
+                    <h3 className="p-2 font-semibold">LEFT records · {plan.sourceRef}</h3>
+                    {!targetFocus && <table className="w-full text-left text-[11px]">
+                      <thead className="sticky top-0 bg-slate-950 text-slate-400"><tr><th>Reviewed</th><th>Source record</th><th>Suggested / draft target</th><th>Status</th></tr></thead>
+                      <tbody>{page.map(p => {
+                        const target = candidateById(session, session.decisions.find(d => d.proposalId === p.proposalId)?.candidateId ?? p.proposedCandidateId);
+                        return <tr key={p.proposalId} data-testid={`matching-row-${p.proposalId}`} onClick={() => focusSource(p.proposalId)}
+                          className={`cursor-pointer border-t border-slate-800 ${selected?.proposalId === p.proposalId ? "bg-amber-950/30" : "hover:bg-slate-900"}`}>
+                          <td className="p-2"><input type="checkbox" aria-label={`Reviewed source ${JSON.stringify(p.mapKey)}`}
+                            checked={selectedIds.includes(p.proposalId)} disabled={p.state === "saved" || p.state === "stale" || !!session.commitLifecycle}
+                            onClick={e => e.stopPropagation()} onChange={e => setSelectedIds(ids => e.target.checked ? [...new Set([...ids, p.proposalId])] : ids.filter(id => id !== p.proposalId))} /></td>
+                          <td className="p-2"><button type="button" onClick={e => { e.stopPropagation(); focusSource(p.proposalId); }}><RecordValues fields={plan.mapKeyFields} values={p.mapKey} /></button><span className="text-slate-500">{p.affectedSourceRows} source rows</span></td>
+                          <td className="p-2">{target ? <RecordValues fields={plan.outputs} values={target.outputValues} /> : "No suggestion"}</td>
+                          <td className="p-2">{stateLabel(p.state)}</td>
+                        </tr>;
+                      })}</tbody>
+                    </table>}
+                    <RelationshipBrowser session={session} baseline={baseline} target={targetFocus} onFocusTarget={inspectTarget}
+                      onInspectJoin={onInspectJoin} focusEpoch={focusEpoch} onInvestigate={id => { setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }}
+                      onReturn={() => { setTargetFocus(null); setFocusEpoch(e => e + 1); }} />
+                  </section>
+                  <RelationshipInspector key={(session.basicRun ?? session.advancedRun)?.id ?? session.id} session={session} baseline={baseline}
+                    focusEpoch={focusEpoch} browsedTarget={targetFocus} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectTarget}
+                    onAgreeReplace={token => onChange({ ...session, explicitReplaceKeys: Array.from(new Set([...session.explicitReplaceKeys, token])) })} />
                 </div>
 
                 <div className="shrink-0 space-y-2 border-t border-slate-800 p-2">
+                  <details><summary className="cursor-pointer text-[11px]">Review actions — explicit counted bulk</summary>
                   <div className="flex flex-wrap items-center gap-2 text-[11px]">
                     <span className="text-slate-500">Mark as OK</span>
                     {(
@@ -1589,6 +1495,7 @@ export function MatchingWorkspace({
                     </button>
                   </div>
 
+                  </details>
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
@@ -1622,7 +1529,7 @@ export function MatchingWorkspace({
                     >
                       {finalDiff.map((r, i) => (
                         <div key={i} className="font-mono text-slate-300">
-                          [{r.kind}] {r.mapKey.map(tupleCell).join("|")}{" "}
+                          [{!baseline?.complete && r.kind !== "unresolved" ? "baseline unknown" : r.kind}] {r.mapKey.map(tupleCell).join("|")}{" "}
                           {r.oldOutputs?.join(",") ?? "∅"} →{" "}
                           {r.newOutputs?.join(",") ?? "∅"} ({r.origin}, rows=
                           {r.affectedSourceRows})
@@ -1686,335 +1593,5 @@ export function MatchingWorkspace({
         )}
       </div>
     </div>
-  );
-}
-
-function DetailPanel({
-  session,
-  onLookupAdvanced,
-  proposal,
-  onChange,
-  onAgreeReplace,
-}: {
-  session: MatchingTabSession;
-  onLookupAdvanced?: Props["onLookupAdvanced"];
-  proposal: MatchingProposalView | null;
-  onChange: (s: MatchingTabSession) => void;
-  onAgreeReplace: (token: string) => void;
-}) {
-  // Temporary picks are per-source and per-run (the parent keys this panel by run).
-  // They never mutate producer suggestions or the authoritative decision ledger.
-  const [picks, setPicks] = useState<Record<string, string>>({});
-  const [candidateSearch, setCandidateSearch] = useState("");
-  const [candidatePage, setCandidatePage] = useState(0);
-  const [candidateSort, setCandidateSort] = useState<"score" | "values">("score");
-  const [lookupResult, setLookupResult] = useState<MatchingJoinLookupResult | null>(null);
-  const [lookupBusy, setLookupBusy] = useState(false);
-  const [lookupError, setLookupError] = useState("");
-  const lookupGeneration = useRef(0);
-  const lookupOwner = JSON.stringify([session.id, session.advancedRun?.id, proposal?.proposalId, session.commitLifecycle, session.joinBinding]);
-  const ownerRef = useRef(lookupOwner); ownerRef.current = lookupOwner;
-  useEffect(() => { lookupGeneration.current++; setLookupResult(null); setLookupBusy(false); setLookupError("");
-    return () => { lookupGeneration.current++; };
-  }, [lookupOwner]);
-  async function findAdvanced(page: MatchingLookupPage) {
-    if (!proposal || !onLookupAdvanced) return;
-    const generation = ++lookupGeneration.current, owner = lookupOwner;
-    setLookupBusy(true); setLookupResult(null); setLookupError("");
-    try {
-      const result = await onLookupAdvanced(proposal.proposalId, page);
-      if (generation === lookupGeneration.current && ownerRef.current === owner) { setLookupResult(result); setCandidatePage(0); }
-    } catch (e) {
-      if (generation === lookupGeneration.current && ownerRef.current === owner) setLookupError(String(e));
-    } finally { if (generation === lookupGeneration.current && ownerRef.current === owner) setLookupBusy(false); }
-  }
-  useEffect(() => { setCandidateSearch(""); setCandidatePage(0); }, [proposal?.proposalId]);
-  if (!proposal) {
-    return (
-      <aside className="w-72 shrink-0 border-l border-slate-800 p-2 text-[11px] text-slate-500">
-        Select a key in the list
-      </aside>
-    );
-  }
-  const proposed = candidateById(session, proposal.proposedCandidateId);
-  const alts = proposal.alternativeCandidateIds
-    .map((id) => candidateById(session, id))
-    .filter(Boolean);
-  const live = session.mapLive.find(
-    (r) => mapKeyToken(r.fromParts) === mapKeyToken(proposal.mapKey),
-  );
-  const tier = proposalCascadeTier(proposal);
-  const decision = session.decisions.find(d => d.proposalId === proposal.proposalId);
-  const decided = candidateById(session, decision?.candidateId);
-  const picked = candidateById(session, picks[proposal.proposalId]);
-  const sourceBlock = tupleMappingBlock(proposal.mapKey);
-  // Basic can browse its full verified retrieved universe, not just its shortlist.
-  // Advanced manual results were source/plan verified by Host, beyond the shortlist.
-  const lookupRows = lookupResult?.candidates ?? [];
-  const universe = session.basicRun ? session.candidates : lookupResult
-    ? lookupRows.map(row => candidateById(session, row.candidateId)).filter(c => !!c) : alts.filter(c => !!c);
-  const query = candidateSearch.toLocaleLowerCase();
-  const candidates = universe.filter(c => [...c.outputValues, ...Object.values(c.fields)]
-    .some(v => tupleCell(v).toLocaleLowerCase().includes(query))).sort((a, b) => {
-      if (candidateSort === "values") return mapKeyToken(a.outputValues).localeCompare(mapKeyToken(b.outputValues));
-      const score = (id: string) => lookupRows.find(r => r.candidateId === id)?.score
-        ?? proposal.edges?.find(e => e.candidateId === id)?.score ?? -1;
-      return score(b.candidateId) - score(a.candidateId);
-    });
-  const pageCount = Math.max(1, Math.ceil(candidates.length / 20));
-  const visiblePage = Math.min(candidatePage, pageCount - 1);
-  const candidateLocked = !!session.commitLifecycle || proposal.state === "saved" || proposal.state === "stale";
-
-  function confirmPicked() {
-    if (!proposal || !picked || candidateLocked || sourceBlock || tupleMappingBlock(picked.outputValues)) return;
-    if (session.advancedRun && lookupResult && !lookupRows.some(r => r.candidateId === picked.candidateId)) return;
-    // Register a manual Basic alternative from the already retrieved universe
-    // only on explicit confirmation. Scores stay Host-owned or unknown.
-    const next = session.basicRun ? { ...session, proposals: session.proposals.map(p => {
-      if (p.proposalId !== proposal.proposalId) return p;
-      const edges = [...(p.edges ?? [])];
-      const index = edges.findIndex(e => e.candidateId === picked.candidateId);
-      const edge = index < 0 ? { candidateId: picked.candidateId, metric: "join_tuple_similarity" as const,
-        score: null, fieldScores: picked.outputValues.map(() => null), origins: [] } : edges[index]!;
-      const manual = { ...edge, origins: [...new Set([...edge.origins, "manual" as const])] };
-      if (index < 0) edges.push(manual); else edges[index] = manual;
-      return { ...p, edges, alternativeCandidateIds: [...new Set([...p.alternativeCandidateIds, picked.candidateId])] };
-    }) } : lookupResult ? { ...session, proposals: session.proposals.map(p => {
-      if (p.proposalId !== proposal.proposalId) return p;
-      const row = lookupRows.find(r => r.candidateId === picked.candidateId);
-      if (!row || JSON.stringify(row.outputValues) !== JSON.stringify(picked.outputValues)) return p;
-      return { ...p, userTouched: true,
-        manualLookups: { ...p.manualLookups, [picked.candidateId]: lookupResult.page },
-        edges: [...(p.edges ?? []).filter(e => e.candidateId !== picked.candidateId), {
-          candidateId: picked.candidateId, metric: "contextual" as const, score: row.score,
-          fieldScores: row.fieldScores, origins: ["manual" as const] }],
-        alternativeCandidateIds: [...new Set([...p.alternativeCandidateIds, picked.candidateId])] };
-    }) } : session;
-    onChange(applyDecision(next, proposal.proposalId, "choose_alternative", picked.candidateId));
-  }
-
-  return (
-    <aside
-      className="flex w-80 shrink-0 flex-col gap-2 overflow-auto border-l border-slate-800 p-2 text-[11px]"
-      data-testid="matching-detail"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <span
-          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-            tier === "fuzzy"
-              ? "bg-emerald-500/15 text-emerald-200"
-              : tier === "leftover"
-                ? "bg-amber-500/20 text-amber-100"
-                : tier === "llm"
-                  ? "bg-violet-500/20 text-violet-100"
-                  : "bg-slate-600/40 text-slate-200"
-          }`}
-        >
-          {tier === "fuzzy"
-            ? "Matched by spelling"
-            : tier === "leftover"
-              ? "Not sent to LLM yet"
-              : tier === "llm"
-                ? "LLM suggested this"
-                : "You need to pick"}
-        </span>
-      </div>
-      <div className="font-semibold text-slate-200">
-        Source:{" "}
-        <span className="font-mono">
-          {proposal.mapKey.map(tupleCell).join(" / ")}
-        </span>
-      </div>
-      <div className="text-slate-500">
-        This key covers {proposal.affectedSourceRows} source row(s)
-        {proposal.searchIncomplete ? " · search was cut off" : ""}
-      </div>
-      {decision && <section aria-label="Current draft decision" className="rounded border border-teal-800 p-2">
-        <p>{stateLabel(proposal.state)}{decided ? ` → ${decided.outputValues.map(tupleCell).join(" · ")}` : ""}</p>
-        <button type="button" disabled={candidateLocked} onClick={() => {
-          setPicks(current => { const next = { ...current }; delete next[proposal.proposalId]; return next; });
-          const decisions = session.decisions.filter(d => d.proposalId !== proposal.proposalId);
-          onChange({ ...session, decisions, hasUnsavedDecisions: decisions.length > 0,
-            proposals: session.proposals.map(p => p.proposalId === proposal.proposalId
-              ? { ...p, state: p.suggestionState ?? "proposed", userTouched: true } : p) });
-        }}>Undo decision</button>
-      </section>}
-      <div className="rounded border border-slate-800 bg-slate-950/50 px-2 py-1 text-[10px] text-slate-300">
-        {proposalEvidenceSummary(proposal)}
-      </div>
-
-      <table className="w-full font-mono text-[10px]">
-        <thead>
-          <tr className="text-slate-500">
-            <th className="text-left">Field</th>
-            <th className="text-left">Proposed</th>
-            <th className="text-left">Alt</th>
-          </tr>
-        </thead>
-        <tbody>
-          {Object.keys(proposed?.fields ?? alts[0]?.fields ?? { id: "" }).map(
-            (field) => (
-              <tr key={field} className="border-t border-slate-800">
-                <td className="py-0.5 text-slate-400">{field}</td>
-                <td>{proposed?.fields[field] ?? "—"}</td>
-                <td>{alts[0]?.fields[field] ?? "—"}</td>
-              </tr>
-            ),
-          )}
-        </tbody>
-      </table>
-
-      <ul className="list-disc pl-4 text-slate-400">
-        {proposal.evidence.map((e, i) => (
-          <li key={i}>
-            <span className="text-slate-500">{e.field}:</span> {e.note}
-          </li>
-        ))}
-      </ul>
-
-      {(session.basicRun ?? session.advancedRun) && <section aria-label="Candidate evidence" className="space-y-2">
-        <p>{proposal.coverage?.rightRetrieved}/{proposal.coverage?.rightTotal ?? "unknown"} retrieved right tuples · {proposal.coverage?.shortlistOmitted ?? 0} alternatives omitted from display · {proposal.coverage?.competitorsUnknown ?? "unknown"} unknown competitors</p>
-        {session.advancedRun && <p className="text-slate-400">Verified live acquisition, run {session.advancedRun.id.slice(0, 24)}… · {proposal.coverage?.sourceRetrieved} source tuples · right retrieval {proposal.coverage?.rightTruncated ? "truncated — incomplete coverage blocks confidence bulk" : "complete"}</p>}
-        {tupleMappingBlock(proposal.mapKey) && <p role="note" className="text-amber-200">{tupleMappingBlock(proposal.mapKey)}</p>}
-        {alts.map(c => {
-          if (!c) return null;
-          const edge = proposal.edges?.find(e => e.candidateId === c.candidateId);
-          return <div key={c.candidateId} className="rounded border border-slate-700 p-1">
-            <div className="font-mono">{c.outputValues.map(tupleCell).join(" · ")}</div>
-            <div>{edge?.origins.join(" + ") ?? "unknown origin"} · mean {edge?.score == null ? "unknown" : `${(edge.score * 100).toFixed(1)}%`} · {c.occurrences ?? "unknown"} target rows</div>
-            {(c.occurrences ?? 0) > 1 && <p className="text-amber-200">Repeated target tuple: the JOIN may multiply rows.</p>}
-            <div>Field scores: {edge?.fieldScores.map(s => s == null ? "unknown" : `${(s * 100).toFixed(1)}%`).join(" / ") ?? "unknown"}</div>
-            {edge?.rationale && <p>{edge.rationale}</p>}
-            {tupleMappingBlock(c.outputValues) && <p className="text-amber-200">{tupleMappingBlock(c.outputValues)}</p>}
-          </div>;
-        })}
-      </section>}
-
-      {(session.basicRun ?? session.advancedRun) && <details>
-        <summary>Search other records</summary>
-        <section aria-label="Manual right search" className="space-y-2">
-          <p>{session.basicRun ? "Search all retrieved RIGHT tuples only, not the full dataset."
-            : "Search the bounded RIGHT universe through Host, beyond the shortlist. Hard constraints still apply; no dataset-wide scalability claim."}</p>
-          <input type="search" aria-label="Search right candidates" placeholder="Search all fields"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1"
-            value={candidateSearch} onChange={e => { lookupGeneration.current++; setLookupBusy(false); setLookupResult(null); setLookupError(""); setCandidateSearch(e.target.value); setCandidatePage(0); }} />
-          {session.advancedRun && <>
-            <button type="button" data-testid="matching-advanced-lookup" disabled={lookupBusy || candidateLocked || !!decision || !onLookupAdvanced}
-              onClick={() => void findAdvanced({ text: candidateSearch, offset: 0 })}>{lookupBusy ? "Searching…" : "Find right records"}</button>
-            {lookupError && <p role="alert">{lookupError}</p>}
-            {lookupResult && <p role="status">{lookupResult.total} admissible matches in {lookupResult.universeCount}/{lookupResult.universeCap} bounded RIGHT records · Host page {lookupResult.page.offset / 20 + 1}</p>}
-            {lookupResult && <>
-              <button type="button" disabled={lookupBusy || lookupResult.page.offset === 0} onClick={() => void findAdvanced({ ...lookupResult.page, offset: lookupResult.page.offset - 20 })}>Previous lookup page</button>
-              <button type="button" disabled={lookupBusy || lookupResult.page.offset + 20 >= lookupResult.total} onClick={() => void findAdvanced({ ...lookupResult.page, offset: lookupResult.page.offset + 20 })}>Next lookup page</button>
-            </>}
-          </>}
-          <select aria-label="Sort right candidates" value={candidateSort}
-            className="w-full rounded border border-slate-700 bg-slate-950"
-            onChange={e => { setCandidateSort(e.target.value as "score" | "values"); setCandidatePage(0); }}>
-            <option value="score">Score: high to low (unknown last)</option>
-            <option value="values">Tuple values</option>
-          </select>
-          <p>{candidates.length} retrieved matches · page {visiblePage + 1}/{pageCount}</p>
-          {!candidates.length && <p>No retrieved right tuples match this search.</p>}
-          {candidates.slice(visiblePage * 20, (visiblePage + 1) * 20).map(c => {
-            const lookupRow = lookupRows.find(r => r.candidateId === c.candidateId);
-            const edge = lookupRow ? { ...lookupRow, metric: "contextual" } : proposal.edges?.find(e => e.candidateId === c.candidateId);
-            const block = tupleMappingBlock(c.outputValues);
-            return <label key={c.candidateId} className="block rounded border border-slate-700 p-1">
-              <input type="radio" name={`candidate-${proposal.proposalId}`} checked={picked?.candidateId === c.candidateId}
-                disabled={candidateLocked || !!decision} onChange={() => setPicks({ ...picks, [proposal.proposalId]: c.candidateId })} />
-              {c.outputValues.map(tupleCell).join(" · ")}
-              <span className="block">{edge?.metric ?? "unknown metric"} · mean {edge?.score == null ? "unknown" : `${(edge.score * 100).toFixed(1)}%`} · {c.occurrences ?? "unknown"} target rows</span>
-              {(c.occurrences ?? 0) > 1 && <span className="block text-amber-200">Repeated target tuple: the JOIN may multiply rows.</span>}
-              {block && <span className="block text-amber-200">{block}</span>}
-            </label>;
-          })}
-          <button type="button" disabled={visiblePage === 0} onClick={() => setCandidatePage(visiblePage - 1)}>Previous records</button>
-          <button type="button" disabled={visiblePage + 1 >= pageCount} onClick={() => setCandidatePage(visiblePage + 1)}>Next records</button>
-          {picked && <p>Selected (not confirmed): {picked.outputValues.map(tupleCell).join(" · ")}</p>}
-          <button type="button" disabled={!picked || candidateLocked || !!decision || !!sourceBlock || !!tupleMappingBlock(picked.outputValues)}
-            onClick={confirmPicked}>Confirm selected candidate</button>
-        </section>
-      </details>}
-
-      <div className="flex flex-wrap gap-1">
-        <button
-          type="button"
-           disabled={!proposed || !!decision || ((session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(proposed.outputValues))) || !!session.commitLifecycle}
-          onClick={() =>
-            onChange(
-              applyDecision(
-                session,
-                proposal.proposalId,
-                "confirm_proposed",
-                proposal.proposedCandidateId,
-              ),
-            )
-          }
-          className="rounded border border-teal-800/60 px-2 py-0.5 text-teal-100 disabled:opacity-40"
-        >
-          Use this match
-        </button>
-        {alts.map((a) =>
-          a ? (
-            <button
-              key={a.candidateId}
-              type="button"
-              data-testid={`matching-choose-${a.targetId}`}
-              disabled={!!decision || !!session.commitLifecycle || (!!(session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(a.outputValues)))}
-              onClick={() =>
-                onChange(
-                  applyDecision(
-                    session,
-                    proposal.proposalId,
-                    "choose_alternative",
-                    a.candidateId,
-                  ),
-                )
-              }
-              className="rounded border border-slate-600 px-2 py-0.5 text-slate-200"
-            >
-              Choose {a.targetId}
-            </button>
-          ) : null,
-        )}
-        <button
-          type="button"
-          onClick={() =>
-            onChange(
-              applyDecision(session, proposal.proposalId, "defer", null),
-            )
-          }
-          className="rounded border border-slate-700 px-2 py-0.5 text-slate-400"
-        >
-          Skip for now
-        </button>
-        <button
-          type="button"
-          onClick={() =>
-            onChange(
-              applyDecision(
-                session,
-                proposal.proposalId,
-                "no_suitable_target",
-                null,
-              ),
-            )
-          }
-          className="rounded border border-slate-700 px-2 py-0.5 text-slate-400"
-        >
-          No match in dictionary
-        </button>
-        {live && (
-          <button
-            type="button"
-            onClick={() => onAgreeReplace(mapKeyToken(proposal.mapKey))}
-            className="rounded border border-amber-800/50 px-2 py-0.5 text-amber-100"
-          >
-            Agree replace existing
-          </button>
-        )}
-      </div>
-    </aside>
   );
 }

@@ -69,15 +69,49 @@ python scripts/examples/generate_all.py
 python scripts/examples/load_postgres.py
 ```
 
-### Full-tuple Matching (ADR-0051)
+### Record-first full-tuple Matching (ADR-0051 / ADR-0052)
 
-Join Lens **Find Matches** opens the existing Matching tab. Every ordered JOIN
-pair participates: one source tuple maps to one complete right output tuple.
-There is no scalar/per-column fallback or competing inline batch review.
-**Edit plan** adds contextual rules using actual Host-acquired fields in the
-same Review. Review alternatives, bulk accept, then **Write Mapping** atomically
-prepares Mapping and Apply against the original JOIN. Refresh explicitly,
-execute, and Save the project separately.
+Join Lens **Find Matches** opens the existing Matching tab. Run **Find matches**
+explicitly; each LEFT key and RIGHT output has its own readable field label.
+Select a candidate for inspection, then **Confirm selected candidate** separately.
+**Previous/Next unresolved** changes focus only; **Advance after confirm** is opt-in.
+Filters and per-source picks survive navigation. A filtered-out source stays visibly
+pinned rather than silently becoming another actionable source.
+
+Search acquired RIGHT records or choose **Inspect RIGHT relationships**. One related
+LEFT list carries **Suggested**, **Confirmed draft**, **Existing Mapping** and
+**Actual JOIN** badges/filters. The authority summaries have separate coverage and
+units: never add suggestion keys, Mapping aliases and executed row counts together.
+Saved-only aliases and executed-only input records outside the run are read-only.
+
+**Inspect actual JOIN counts and examples** explicitly reads the original current
+JOIN through Host. Counts cover LEFT/RIGHT/result rows for the output-key group;
+examples are limited to 50 rows. NULL uses SQL equality, outer-JOIN result rows
+alone do not prove a partner, and transformed input keys do not recover original
+aliases. Cached query-time evidence is timestamped, not a historical preview or an
+external snapshot guarantee. Complete arbitrary-large reverse enumeration is not
+supported; future paginated executed reverse is not required to use this workbench.
+
+**Edit plan** retains contextual hard/soft/reference rules, using real Host fields.
+Basic searches its acquired RIGHT universe; Advanced **Find right records** performs
+source-scoped Host lookup beyond the shortlist, preserving hard constraints and
+final lookup-page replay. Browsing another source's target never authorizes a pair.
+Assistant, technical evidence and explicit counted bulk actions remain secondary.
+
+**Write Mapping** verifies the same ledger and atomically prepares Mapping + Apply
+before the original JOIN, with every ordered LEFT key mapped to its corresponding
+RIGHT output. Review the full-tuple consequences, execute, and Save the project
+separately. Refresh remaining review after Write to compare existing aliases with
+new drafts. First Save can change project-relative execution context: reopen Find
+Matches if the old review becomes stale; never bypass that guard. Cold reopen
+restores project Mappings, not unwritten Matching drafts.
+
+Compatible seed baselines come from the current project definition, not unsaved
+editor overlays or empty session arrays. Source/query/ref/range baseline inspection
+is explicitly unavailable here; unsupported writes are unchanged. The existing
+vendor Help Lab demonstrates the workflow without changing its vendor-ID seed.
+See [ADR-0052](adr/0052-matching-relationship-workbench.md) and the
+[runtime evidence](../openspec/changes/unified-matching-workbench/runtime-report.md).
 
 Crosswalk POS↔WMS (`sku` + `day`) and offer id+day (`keymap_offer`) remain useful
 composite examples. Existing manual scalar/composite Mapping tools remain valid.

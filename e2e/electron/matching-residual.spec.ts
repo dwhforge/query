@@ -54,7 +54,8 @@ async function setup(advanced: boolean, many = false, exported = false, emptySof
 }
 
 async function confirmProposed(page: Page) {
-  await review(page).getByRole("button", { name: "Use this match", exact: true }).click();
+  await review(page).getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await review(page).getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   await expect.poll(async () => (await getSessions(page))[0].decisions.length).toBe(1);
 }
 
@@ -92,7 +93,7 @@ for (const emptySoft of [false, true]) test(`Advanced real manual lookup beyond 
     const s = (await getSessions(page))[0];
     const wanted = s.candidates.find((c: any) => c.identityParts[0] === "wanted");
     expect(s.proposals[0].alternativeCandidateIds).not.toContain(wanted.candidateId);
-    await batch.getByText("Search other records", { exact: true }).click();
+    await batch.getByText("Search other records", { exact: true }).evaluate(el => { (el.parentElement as HTMLDetailsElement).open = true; });
     const search = batch.getByRole("region", { name: "Manual right search" });
     await search.getByTestId("matching-advanced-lookup").click();
     await expect(search).toContainText("56 admissible matches");
@@ -106,7 +107,11 @@ for (const emptySoft of [false, true]) test(`Advanced real manual lookup beyond 
     await expect(search).toContainText("mean 0.0%");
     await search.getByRole("radio").check();
     expect((await getSessions(page))[0].decisions).toHaveLength(0);
-    await search.getByRole("button", { name: "Confirm selected candidate" }).click();
+    await search.getByRole("button", { name: "Inspect RIGHT relationships", exact: true }).click();
+    await expect(batch.getByRole("region", { name: "RIGHT relationship explorer" })).toContainText("LEFT records related to this RIGHT");
+    await batch.getByRole("button", { name: "Select this relationship for inspection", exact: true }).click();
+    expect((await getSessions(page))[0].decisions).toHaveLength(0);
+    await page.getByRole("button", { name: "Confirm selected candidate" }).click();
     const accepted = (await getSessions(page))[0];
     expect(accepted.decisions).toHaveLength(1);
     expect(accepted.proposals[0].manualLookups[wanted.candidateId]).toEqual({ text: "Zebra", offset: 0 });
@@ -139,7 +144,7 @@ for (const mutation of ["query", "context-aba"] as const) {
     const { session, dir, batch } = await setup(true);
     try {
       const { page } = session; const before = (await getProject(page)).workspace;
-      await batch.getByText("Search other records", { exact: true }).click();
+      await batch.getByText("Search other records", { exact: true }).evaluate(el => { (el.parentElement as HTMLDetailsElement).open = true; });
       const search = batch.getByRole("region", { name: "Manual right search" });
       await search.getByRole("searchbox").fill("Zebra");
       await hold(session, "matching_lookup_join_candidates");

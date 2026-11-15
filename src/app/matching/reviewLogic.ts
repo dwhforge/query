@@ -360,14 +360,22 @@ export function candidateById(
 /** JOIN-bound status is a read projection, never another authority for confirmation. */
 export function deriveMatchingReview(session: MatchingTabSession): MatchingTabSession {
   if (!sessionRun(session)) return session;
-  return { ...session, proposals: session.proposals.map(p => {
-    const d = session.decisions.find(d => mapKeyToken(d.mapKey) === mapKeyToken(p.mapKey));
+  const byKey = new Map<string, MatchingTabSession["decisions"][number]>();
+  for (const decision of session.decisions) {
+    const key = mapKeyToken(decision.mapKey);
+    if (!byKey.has(key)) byKey.set(key, decision);
+  }
+  const proposals = session.proposals.map(p => {
+    const d = byKey.get(mapKeyToken(p.mapKey));
     const stale = session.commitLifecycle?.status === "stale" || (d && (d.expectedRunId !== p.runId
       || d.expectedEvidenceRevision !== p.evidenceRevision || d.expectedSemanticRevision !== session.plan?.semanticRevision));
     const state: MatchingProposalState = stale ? "stale" : !d ? p.suggestionState ?? p.state
       : ["confirm_proposed", "choose_alternative"].includes(d.kind) ? "confirmed_in_draft" : d.kind === "defer" ? "deferred" : "rejected";
-    return { ...p, state };
-  }) };
+    return state === p.state ? p : { ...p, state };
+  });
+  // Presentation-only changes retain the graph's immutable collection identity.
+  // This is still only a ledger projection, not another independently mutable store.
+  return proposals.every((p, i) => p === session.proposals[i]) ? session : { ...session, proposals };
 }
 
 /** Undo only the latest bulk's unchanged entries. Touched evidence stays touched. */

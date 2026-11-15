@@ -1,6 +1,69 @@
 import { test, expect } from "@playwright/test";
 import { mount } from "./MatchingWorkspace.testHarness";
 
+test("keyboard pick and explicit confirmation are separate; sequential review preserves picks and filters", async ({ page }) => {
+  await mount(page, 2);
+  const detail = page.getByTestId("matching-detail");
+  const radio = detail.getByRole("radio").nth(1);
+  await radio.focus(); await page.keyboard.press("Space");
+  expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
+  await page.getByRole("button", { name: "Next unresolved", exact: true }).click();
+  await page.getByRole("button", { name: "Previous unresolved", exact: true }).click();
+  await expect(detail.getByRole("radio").nth(1)).toBeChecked();
+  expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
+  await page.getByRole("checkbox", { name: "Advance after confirm", exact: true }).check();
+  const confirm = detail.getByRole("button", { name: "Confirm selected candidate", exact: true });
+  await confirm.focus(); await page.keyboard.press("Enter");
+  expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
+  await expect(detail).toContainText("source1/0");
+  expect(await page.evaluate(() => (window as any).session.reviewFilter)).toBe("all");
+});
+
+test("RIGHT browsing never selects or confirms and uses one provenance-filtered related LEFT list", async ({ page }) => {
+  await mount(page, 2);
+  const browser = page.getByRole("region", { name: "RIGHT relationship explorer" });
+  await browser.getByTestId("matching-browse-target").first().click();
+  await expect(browser.getByRole("list", { name: "Unified related LEFT records" })).toHaveCount(1);
+  await expect(page.getByTestId("matching-detail").getByRole("radio", { checked: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Confirm selected candidate", exact: true })).toBeDisabled();
+  await expect(browser).toContainText("Actual JOIN: not inspected");
+  await browser.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Confirmed draft");
+  await expect(browser.getByRole("listitem")).toHaveCount(0);
+  await browser.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Suggested");
+  await browser.getByRole("listitem").last().getByRole("button").click();
+  await expect(page.getByTestId("matching-detail")).toContainText("source1/0");
+  await page.getByRole("button", { name: "Select this relationship for inspection", exact: true }).click();
+  expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
+  await expect(browser.getByRole("listitem").last()).toContainText("Confirmed draft");
+  expect(await page.evaluate(() => (window as any).calls.filter((c: any) => c.cmd === "retrieve").length)).toBe(1);
+});
+
+test("compatible baseline shows no-op, conflict and saved-only aliases with merged non-additive provenance", async ({ page }) => {
+  await mount(page, 2, { baseline: { complete: true, coverage: "Complete within project definition", rows: [
+    { fromParts: ["source0/0", "source0/1"], outputValues: ["target0/0", "target0/1"] },
+    { fromParts: ["source1/0", "source1/1"], outputValues: ["other", "outputs"] },
+    { fromParts: ["saved alias", "DE"], outputValues: ["target0/0", "target0/1"] },
+  ] } });
+  await expect(page.getByRole("region", { name: "Relationship comparison" })).toContainText("Already matches / no-op");
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
+  const browser = page.getByRole("region", { name: "RIGHT relationship explorer" });
+  await browser.getByTestId("matching-browse-target").first().click();
+  const same = browser.getByRole("listitem").filter({ hasText: "source0/0" });
+  await expect(same).toContainText("Suggested");
+  await expect(same).toContainText("Confirmed draft");
+  await expect(same).toContainText("Existing Mapping");
+  const saved = browser.getByRole("listitem").filter({ hasText: "saved alias" });
+  await expect(saved).toContainText("outside this run — read-only");
+  await expect(saved.getByRole("button")).toHaveCount(0);
+  await expect(browser).toContainText("counts are non-additive");
+  await browser.getByRole("button", { name: "Return to LEFT review", exact: true }).click();
+  await page.locator('tr[data-testid^="matching-row-"]').last().click();
+  await expect(page.getByRole("region", { name: "Relationship comparison" })).toContainText("Conflict: existing outputs differ");
+  expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
+});
+
 for (const width of [1, 2, 3, 4, 5]) {
   test(`${width}-key shared review: no preaccept, locked outputs, confidence bulk undo, explicit reviewed bulk and receipt`, async ({ page }) => {
     await mount(page, width);
@@ -31,16 +94,17 @@ test("NULL values remain distinct and unsafe confirmation is disabled", async ({
   await mount(page, 2, { nullSource: true, incomplete: true });
   await expect(page.getByTestId("matching-detail")).toContainText("NULL");
   await expect(page.getByTestId("matching-detail")).toContainText("NULL cannot be represented");
-  await expect(page.locator("button").filter({ hasText: "Use this match" })).toBeDisabled();
+  await expect(page.locator("button").filter({ hasText: "Select suggested candidate" })).toBeDisabled();
   await expect(page.getByTestId("matching-bulk-confirm")).toBeDisabled();
 });
 
 test("failed write retains decisions and permits retry; pending locks old rows", async ({ page }) => {
   await mount(page, 3, { failWrite: true, holdWrite: true });
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   await page.getByTestId("matching-save").click();
   await expect(page.getByTestId("matching-workspace")).toHaveAttribute("inert", "");
-  await expect(page.getByRole("button", { name: "Use this match", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Select suggested candidate", exact: true })).toBeDisabled();
   await page.evaluate(() => { (window as any).releaseWrite(); (window as any).holdWrite = false; });
   await expect(page.getByText(/Apply refused; no publication/)).toBeVisible();
   expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
@@ -55,7 +119,8 @@ test("late LLM alternatives preserve the latest explicit decision and exact prov
   await page.getByRole("checkbox", { name: "Allow sending matching fields to external LLM" }).check();
   await page.getByTestId("matching-rank-llm").click();
   await expect.poll(() => page.evaluate(() => (window as any).pendingLlm.length)).toBe(1);
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   const decision = await page.evaluate(() => (window as any).session.decisions[0]);
   await page.evaluate(() => {
     const w = window as any;
@@ -70,7 +135,8 @@ test("late LLM alternatives preserve the latest explicit decision and exact prov
 test("Advanced live run: semantic edit confirms, disclosure never re-runs, edits invalidate, verified commit + receipt + refresh", async ({ page }) => {
   await mount(page, 2);
   // One explicit decision on the Basic proposal.
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
 
   // A semantic edit (comparison role) confirms the Advanced plan shape AND invalidates
@@ -116,7 +182,8 @@ test("Advanced live run: semantic edit confirms, disclosure never re-runs, edits
   expect(await page.evaluate(() => (window as any).calls.filter((c: any) => c.cmd === "acquire").length)).toBe(2);
 
   // Confirm the advanced proposal, then the verified atomic commit (verify + write + ack).
-  await page.getByRole("button", { name: "Use this match", exact: true }).click();
+  await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   await page.getByTestId("matching-save").click();
   await expect(page.getByRole("region", { name: "Matching commit receipt" })).toContainText("Applied 1 complete tuple mappings.");
   expect(await page.evaluate(() => (window as any).calls.filter((c: any) => c.cmd === "verify").length)).toBe(1);

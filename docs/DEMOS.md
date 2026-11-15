@@ -40,8 +40,10 @@ Open a lab query's Join Lens → **No match**. Select a complete LEFT key and
 inspect RIGHT **Candidates**; toggle back to **No match** to retain the original
 diagnostics. **Suggest Right** still corrects one correspondence in its modal.
 For bulk work choose **Find Matches** to open the existing Matching tab, then
-explicitly run Fuzzy, inspect alternatives and scores, optionally ask the LLM,
-bulk accept reviewed proposals and **Write Mapping**. Mapping + Apply is one
+explicitly find matches, inspect readable records, use previous/next unresolved,
+select a candidate and confirm separately. RIGHT focus shows one multi-provenance
+LEFT list; inspect actual JOIN counts/examples explicitly, not from suggestions.
+Optionally ask the LLM or use counted bulk actions, then **Write Mapping**. Mapping + Apply is one
 guarded JOIN-bound operation; execute, Save the project and reopen to verify.
 
 **Edit plan** adds hard/soft/reference fields in the same review, reading real

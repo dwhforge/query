@@ -1,5 +1,21 @@
 # Development notes — immediate UX batch
 
+## Matching relationship workbench — 2026-11-15 (development checkout)
+
+- Accepted [ADR-0052](adr/0052-matching-relationship-workbench.md): readable labelled
+  records, previous/next unresolved, explicit pick then confirm, opt-in advance,
+  pinned filter context and focused browser/inspector components.
+- RIGHT has one multi-provenance related-LEFT list and non-additive authority
+  summaries. Compatible project-seed Mapping aliases remain separate from drafts.
+- Explicit existing-Host actual JOIN counts and timestamped examples (up to 50)
+  never masquerade as renderer proposals or complete arbitrary-large enumeration.
+- Existing ledger, source-specific Advanced lookup/hard constraints, original JOIN,
+  atomic Mapping + Apply/receipt, Save/concurrency and stale-context guards remain.
+- The existing vendor Help Lab now teaches records and reverse relationships.
+  No new engine, global store, RPC or durable draft restore was added.
+- Evidence, supported bounds and residual acceptance:
+  [runtime report](../openspec/changes/unified-matching-workbench/runtime-report.md).
+
 ## Unified Matching Workspace — 2026-11-15 (development checkout)
 
 - One existing Matching tab now owns full-tuple Fuzzy/LLM and contextual live

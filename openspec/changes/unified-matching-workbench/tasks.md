@@ -1,7 +1,7 @@
 # Tasks and acceptance gates: Unified Matching relationship workbench
 
-**Phase 1 architecture packet prepared; architecture review pending. Runtime work
-has not started.** Decision: [proposed ADR-0052](../../../docs/adr/0052-matching-relationship-workbench.md).
+**Phase 1 accepted; Phases 2–4 authorized with mandatory amendments. Verified bounded contracts are merged; residual
+acceptance is separately listed below.** Decision: [Accepted ADR-0052](../../../docs/adr/0052-matching-relationship-workbench.md).
 Review [proposal](proposal.md) → [deltas](specs/) → [design](design.md) → tasks.
 
 ## Phase 1 — architecture and UX contract (no runtime changes)
@@ -13,21 +13,21 @@ Review [proposal](proposal.md) → [deltas](specs/) → [design](design.md) → 
 - [x] Document renderer-derived versus fresh Host relationships, Mapping baseline gaps and API limits.
 - [x] Produce proposed ADR, proposal, capability deltas, design/layout/navigation, coverage/identity model and reuse inventory.
 - [x] Validate packet links/diff and reconcile claims against current implementation evidence; see [Phase 1 report](report.md).
-- [ ] Architecture/product review accepts packet before Phase 2 runtime work.
+- [x] Architecture accepted with three mandatory amendments; user authorized runtime Phases 2–4.
 
-**Gate 1:** explicit acceptance of the record-first UX, four provenance groups,
+**Gate 1 (passed):** explicit acceptance of the record-first UX, one multi-provenance list,
 scoped completeness, no-new-RPC bounded inspection boundary and same-ledger
 confirmation. Proposed contracts are not merged as implemented behavior.
 
 ## Phase 2 — data-centric workspace and complete LEFT regression
 
-- [ ] Extract focused explorer/inspector/plan/assistant/summary boundaries; retain current tab/session owner.
-- [ ] Add lossless labelled-value presentation (NULL, empty, whitespace), separate focus/pick/confirmation and explicit consequences.
-- [ ] Promote target search/manual lookup for zero-candidate sources; preserve Basic acquired-universe and Advanced source/page verification.
-- [ ] Move Rules, Assistant, evidence and bulk to secondary/contextual disclosures without semantic invalidation or lost review.
-- [ ] Resolve compatible authoritative Mapping baseline using existing preparation selection rules; add unknown/partial baseline display, not false adds.
-- [ ] Retain same single-confirm, undo, source defer/reject, bulk eligibility, LLM and Mapping-origin Save paths.
-- [ ] Run LEFT browser and actual CSV/DuckDB Electron journeys through write, execution, project Save and cold reopen.
+- [x] Extract focused record-value, relationship-browser and inspector boundaries; keep Rules/Assistant secondary and retain current tab/session owner.
+- [x] Add lossless labelled-value presentation (NULL, empty, whitespace), separate focus/pick/confirmation and explicit consequences.
+- [x] Promote target search/manual lookup for zero-candidate sources; preserve Basic acquired-universe and Advanced source/page verification.
+- [x] Move Rules, Assistant, evidence and bulk to secondary/contextual disclosures without semantic invalidation or lost review.
+- [x] Resolve compatible authoritative Mapping baseline using existing preparation selection rules; add unknown/partial baseline display, not false adds.
+- [x] Retain same single-confirm, undo, source defer/reject, bulk eligibility, LLM and Mapping-origin Save paths.
+- [x] Run LEFT browser and actual CSV/DuckDB Electron journeys through write, execution, project Save and cold reopen.
 
 **Gate 2:** one/many/no-candidate LEFT cases, manual outside shortlist, selection
 without confirmation, confirmation/undo, failure retry and atomic Mapping + Apply
@@ -36,14 +36,14 @@ behavior assertions. No final acceptance claim at this intermediate phase.
 
 ## Phase 3 — RIGHT investigation, provenance and bounded execution
 
-- [ ] Build pure memoized sparse indexes from acquired edges/decisions/baseline references; test collision-safe identity and non-additive provenance counts.
-- [ ] Add RIGHT focus, per-group coverage/units and source navigation with retained picks/review/decisions.
-- [ ] Show existing Mapping/draft/suggestion conflicts and equal-output no-ops without replacing baseline or inventing target identities.
-- [ ] Support source-scoped confirmation from RIGHT through existing validation/manual lookup; saved-only/executed-only sources remain read-only outside current proposals.
-- [ ] Add explicit actual-key inspection through existing Host API; distinguish full counts, bounded examples, transformed input keys and shared output-key groups.
-- [ ] Implement read-only acquisition ownership/intent epochs, bounded cache/eviction, stale/error/loading protection and complete-query refusal.
-- [ ] Test source/target/candidate/baseline completeness separately and keep acquisition/unsupported-scope refusal behavior.
-- [ ] Verify navigation/index work is linear in stored edges/rows and not recomputed quadratically per focus/render; record bounded render/memory measurements.
+- [x] Build pure memoized sparse indexes from acquired edges/decisions/baseline references; test collision-safe identity and non-additive provenance counts.
+- [x] Add RIGHT focus, per-authority coverage/units and source navigation with retained picks/review/decisions.
+- [x] Show existing Mapping/draft/suggestion conflicts and equal-output no-ops without replacing baseline or inventing target identities.
+- [x] Support source-scoped confirmation from RIGHT through existing validation/manual lookup; saved-only/executed-only sources remain read-only outside current proposals.
+- [x] Add explicit actual-key inspection through existing Host API; distinguish full counts, bounded examples, transformed input keys and shared output-key groups.
+- [x] Implement read-only acquisition ownership/intent epochs, bounded cache/eviction, stale/error/loading protection and complete-query refusal.
+- [x] Test source/target/candidate/baseline completeness separately and keep acquisition/unsupported-scope refusal behavior.
+- [x] Verify linear sparse indexing and stable dependencies; record 10,000-edge timing and bounded DOM/cache counts. Full UI heap/latency profiling remains residual.
 
 **Gate 3:** RIGHT with many/no/only-suggested/existing/draft/mixed sources works;
 the same RIGHT reached from different LEFTs retains one identity and ledger.
@@ -52,15 +52,15 @@ demonstrated correctness gap and separate contract review.
 
 ## Phase 4 — real integration and product acceptance
 
-- [ ] Extend actual Electron/Host journeys according to the matrix below, including genuine acquired Mapping and executed relationships.
-- [ ] Adapt existing vendor Help Lab: problematic JOIN → unmatched → candidates → RIGHT associations → confirm → review → atomic Apply → execute → Save/cold reopen.
-- [ ] Preserve flagship reconciliation, safe Help Lab switching, Basic/Advanced/LLM, Mapping Save, Join Lens and Suggest Right regressions.
-- [ ] Run serial native Host/engine tests, unit tests, browser suites, fresh Electron release Host/E2E UI, type checks and production build.
-- [ ] Record exact runtime/test revisions, selected Host binary, commands, results, failures/retries, unverified cases and residual limitations.
-- [ ] Complete product review against readable records, bidirectional investigation and comprehensible consequences, not screenshots alone.
-- [ ] Merge verified delivered deltas into merged Matching/JOIN diagnostics/Help Lab capability specs, update indexes/report and close only completed work.
+- [x] Extend actual Electron/Host journeys for the delivered bounded matrix, including genuine Mapping definitions and executed relationships. Exhaustive cross-products remain residual.
+- [x] Adapt existing vendor Help Lab: problematic JOIN → unmatched → candidates → RIGHT associations → confirm → review → atomic Apply → execute → Save/cold reopen.
+- [x] Preserve flagship reconciliation, safe Help Lab switching, Basic/Advanced/LLM, Mapping Save, Join Lens and Suggest Right regressions.
+- [x] Run serial native Host/engine tests, unit tests, browser suites, fresh Electron release Host/E2E UI, type checks and production build.
+- [x] Record exact runtime/test revisions, selected Host binary, commands, results, failures/retries, unverified cases and residual limitations.
+- [x] Complete automated business-record/navigation/consequence review through real Host journeys, not screenshots alone; independent human usability review remains residual.
+- [x] Merge verified delivered deltas into merged Matching/JOIN diagnostics/Help Lab capability specs, update indexes/report and close only completed work.
 
-**Gate 4:** all matrix rows have actual evidence or a verified explicit limitation
+**Gate 4 (bounded delivery passed):** delivered matrix rows have actual evidence or a verified explicit limitation
 allowed by the contract. Core bidirectional journeys may not be waived. A report
 must not relabel unavailable complete inspection as successful sample inspection.
 
@@ -115,3 +115,19 @@ entrypoints. Use a virtual display on headless Linux; rebuild release Host and E
 UI rather than trusting stale artifacts. Verify portable Host precedence. Record
 actual commands in the implementation report; prior pass counts are not this
 change's acceptance evidence. Phase 1 runs documentation checks only.
+
+## Authorized amendment gate (2026-11-15)
+
+- [x] Record accepted architecture and mandatory amendments before runtime edits.
+- [x] Implement fast sequential review, separate pick/confirm and opt-in advance.
+- [x] Implement ONE multi-provenance related-LEFT list, non-additive authority summaries.
+- [x] Distinguish renderer reverse, Host counts/samples and unsupported unbounded enumeration.
+- [x] Verify actual Host/Electron journeys and cold reopen; merge only verified contracts.
+
+## Residual acceptance (not a new-RPC blocker)
+
+- [ ] Independent human narrow-window/accessibility/usability review and full UI heap/latency profiling.
+- [ ] Exhaustive cross-product of external source/query/ref/range baselines and remote mutable-data interleavings. This delivery labels these baselines unavailable and does not broaden writes.
+
+The matrix is a risk inventory, not a claim that every cross-product was rerun.
+See [runtime evidence and limitations](runtime-report.md) for exact delivered coverage.

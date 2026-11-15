@@ -132,6 +132,7 @@ test("Live trial reports unavailable; explicit detached demo cannot write to the
   expect(sessions[1].lensCtx).toBeUndefined();
   expect(sessions[1].proposals).toHaveLength(0); // Entry itself never auto-runs.
   await active().getByTestId("matching-apply-plan").click();
+  await active().getByText("Review actions — explicit counted bulk", { exact: true }).click();
   await expect(active().getByTestId("matching-bulk-confirm")).toBeEnabled();
   await active().getByTestId("matching-bulk-confirm").click();
   await expect(active().getByTestId("matching-save")).toBeDisabled();

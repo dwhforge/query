@@ -122,6 +122,8 @@ import {
 import { JoinLens } from "./components/JoinLens";
 
 import { KeyMapEditor } from "./components/KeyMapEditor";
+import { projectMatchingBaseline } from "./app/matching/relationships";
+import { explainJoinKey } from "./lib/bridge";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
 import { createMatchingDemoSession } from "./app/matching/executionPolicy";
 import { buildLensMatchingPlan } from "./app/matching/planDefaults";
@@ -800,6 +802,9 @@ function App() {
   const [keyMapTabs, setKeyMapTabs] = useState<KeyMapTabSession[]>([]);
   /** ADR-0044 Matching workspace tabs (in-process draft only). */
   const [matchingTabs, setMatchingTabs] = useState<MatchingTabSession[]>([]);
+  const baselineBindings = JSON.stringify(matchingTabs.map(s => [s.id, s.targetMapId, s.joinBinding]));
+  const matchingBaselines = useMemo(() => new Map(matchingTabs.map(s => [s.id, projectMatchingBaseline(project.workspace, s)])),
+    [project.workspace, baselineBindings]);
   const matchingDirty = matchingTabs.some((t) => t.hasUnsavedDecisions);
   const matchingTabsLiveRef = useRef(matchingTabs);
   matchingTabsLiveRef.current = matchingTabs;
@@ -5464,6 +5469,22 @@ function App() {
                 >
                   <MatchingWorkspace
                     session={tab}
+                    baseline={matchingBaselines.get(tab.id)}
+                    onInspectJoin={tab.joinBinding ? async outputs => {
+                      const latest = matchingTabsLiveRef.current.find(s => s.id === tab.id);
+                      if (!latest || !basicContextCurrent(latest) || latest.commitLifecycle || matchingWriteRefusal(latest)) throw new Error("Original JOIN context unavailable or stale.");
+                      const b = latest.joinBinding!;
+                      const before = projectRef.current;
+                      const runId = (latest.advancedRun ?? latest.basicRun)?.id;
+                      const result = await explainJoinKey(before.workspace, b.hostQueryId, b.joinStepIndex, "right", outputs,
+                        before.connections ?? [], before.sources ?? [], projectRefContext(before));
+                      const current = matchingTabsLiveRef.current.find(s => s.id === tab.id);
+                      if (!current || !basicContextCurrent(current) || current.commitLifecycle || current.joinBinding !== b ||
+                        (current.advancedRun ?? current.basicRun)?.id !== runId || projectRef.current.workspace !== before.workspace) {
+                        throw new Error("JOIN inspection became stale; inspect again against the current context.");
+                      }
+                      return result;
+                    } : undefined}
                     onRunBasic={tab.joinBinding ? (s) => (s.matchingMode === "advanced" ? runAdvancedMatching(s) : runBasicMatching(s)) : undefined}
                     onLookupAdvanced={tab.advancedRun ? (proposalId, page) => {
                       const latest = matchingTabsLiveRef.current.find(s => s.id === tab.id);

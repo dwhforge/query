@@ -30,6 +30,7 @@ for (const width of [1, 2, 3, 4, 5, 8]) {
   assert.deepEqual(session.plan?.targetIdentityFields, ["target_id"]);
   assert.equal(session.decisions.length, 0, "retrieval never confirms");
   assert.equal(session.hasUnsavedDecisions, false);
+  assert.strictEqual(deriveMatchingReview(session).proposals, session.proposals, "presentation-only review retains sparse index dependencies");
   assert.deepEqual(session.proposals[0].mapKey, from);
   assert.deepEqual(session.candidates[0].outputValues, to);
   assert.equal(session.candidates[0].occurrences, 3);

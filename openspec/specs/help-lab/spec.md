@@ -282,3 +282,28 @@ require recomputation after mapping edits before comparing results.
 - **WHEN** the user edits the existing mapping and recomputes a relevant preview
 - **THEN** any comparison is based on the current map through existing preview semantics
 - **AND** the task never declares automatic success
+
+## ADR-0052 — record-first relationship workbench
+
+Decision: [ADR-0052](../../../docs/adr/0052-matching-relationship-workbench.md).
+Verified bounded delivery: [runtime evidence and residual limits](../../changes/unified-matching-workbench/runtime-report.md).
+This amends presentation only; existing session, ledger and write authority remain.
+
+### Requirement: Existing lab teaches records, relationships and consequences
+
+At least one existing offline lab SHALL demonstrate opening a problematic JOIN,
+finding an unmatched source, inspecting real RIGHT candidates, focusing RIGHT and
+its unified multi-provenance LEFT list, explicitly confirming, reviewing the
+Mapping diff, atomic Mapping + Apply and executing the changed JOIN. The journey
+SHALL work without understanding Basic versus Advanced. Existing flagship
+reconciliation, safe project switching and Suggest Right SHALL remain usable.
+
+#### Scenario: Vendor name/region investigation
+- GIVEN the existing vendor name/region lab opened through Help Lab
+- WHEN a user investigates Germany aliases from its exact-pair JOIN
+- THEN actual target labels and region values are visible, not opaque tuple IDs
+- AND RIGHT focus separates executed rows, compatible saved Mapping, draft and suggestions
+- WHEN the user confirms and reviews a relationship, writes Mapping + Apply and rechecks
+- THEN actual CSV/DuckDB results reflect the explicit decision
+- AND project Save plus cold Electron reopen retains the Mapping and equivalent execution
+- AND the unrelated vendor-ID seed is not presented as a compatible name/region Mapping

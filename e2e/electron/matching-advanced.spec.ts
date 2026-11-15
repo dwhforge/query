@@ -253,6 +253,7 @@ test("Advanced LIVE: real pre-JOIN derive field, hard/soft/reference semantics, 
     expect(row("acme corp").sourceValues.category).toBe("online");
 
     // ---- Confidence bulk is honestly BLOCKED (bounded shortlist != full universe) ----
+    await batch.getByText("Review actions — explicit counted bulk", { exact: true }).click();
     const bulk = batch.getByRole("button", { name: /^Accept high-confidence suggestions/ });
     const bulkCount = Number((await bulk.innerText()).match(/\((\d+)\)/)![1]);
     expect(bulkCount).toBe(0);
@@ -285,6 +286,7 @@ test("Advanced LIVE: real pre-JOIN derive field, hard/soft/reference semantics, 
       await batch.getByTestId(`matching-row-${r.proposalId}`).getByRole("checkbox").check();
     };
     for (const c of ["acme corp", "beacon ind", "gamma llc"]) await checkRow(c);
+    await batch.getByText("Review actions — explicit counted bulk", { exact: true }).click();
     await batch.getByTestId("matching-reviewed-bulk").click();
     s = (await sessions())[0];
     expect(s.decisions).toHaveLength(3);

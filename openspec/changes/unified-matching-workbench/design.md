@@ -1,6 +1,6 @@
 # Design: Unified Matching relationship workbench
 
-**Proposed Phase 1 contract; no runtime implementation.** Decision:
+**Accepted architecture; runtime implementation authorized, verification pending.** Decision:
 [ADR-0052](../../../docs/adr/0052-matching-relationship-workbench.md).
 Read [proposal](proposal.md) and [deltas](specs/) first. The
 [investigation](investigation.md) is the evidence inventory; [tasks](tasks.md)
@@ -50,7 +50,9 @@ only acquired key fields: do not invent vendor IDs or categories. Advanced can s
 actually acquired comparison/reference fields.
 
 RIGHT focus keeps both explorers visible. The SOURCE pane changes its heading to
-**LEFT records related to this RIGHT**, with four independently expandable groups:
+**LEFT records related to this RIGHT**, as ONE unified list with multiple provenance
+badges and provenance filters. The following are separate authority summaries,
+not four expanded competing lists:
 
 ```text
 RIGHT focus: vendor_name: ComputerParts LLC / region: DE
@@ -60,10 +62,19 @@ Confirmed draft     1 source key, not written
 Suggested           2 source keys in installed run edges; shortlist incomplete
 ```
 
-Each group lists labelled LEFT keys, source-row occurrences when known and its
-coverage sentence. Group counts are **not additive**. A key may legitimately occur
+The unified list deduplicates exact LEFT keys and carries multiple badges. Each
+authority summary retains source-row occurrences when known and its own coverage
+sentence and count unit. Authority counts are **not additive**. A key may legitimately occur
 in more than one group. Rejected/deferred/stale decisions appear with explicit
 badges and never count as confirmed relationships.
+
+### Fast sequential review
+
+Previous/next unresolved changes focus only and preserves searches, filters, picks,
+drafts and context. Candidates remain visible. Picking and confirming are separate
+explicit actions; keyboard selection does not confirm. Optional advance after
+confirm is off by default and moves to the next unresolved source only after the
+existing decision operation. No navigation can stage a decision.
 
 ### Interaction rules
 
@@ -139,7 +150,7 @@ Suggested responsibilities (names are conceptual, not new files in Phase 1):
 | Boundary | Responsibility |
 |---|---|
 | Workbench composition | Header, focus/inspection state, secondary disclosures, existing operation callbacks |
-| Source explorer | Bounded source list/search/status, RIGHT-related provenance groups |
+| Source explorer | Bounded source list/search/status, one RIGHT-related multi-provenance list |
 | Target explorer | Candidate and acquired-target lists, explicit scoped lookup, navigation |
 | Relationship inspector | Labelled comparison, origin/status, validation blockers, same confirm/undo actions |
 | Relationship summary | Per-group coverage, executed facts, Mapping/draft consequences, final diff |
@@ -229,7 +240,7 @@ is one suggestion with two origins. Identical duplicate input rows contribute
 occurrences, not new source-key relationships. A current confirmation appears as
 confirmed-not-written; retain its original suggestion provenance in Details.
 An existing Mapping row and a draft targeting the same outputs appear as two
-badges on the pair and in their separate groups, with a no-op consequence, not a
+badges on the same unified LEFT row and in separate authority summaries, with a no-op consequence, not a
 combined unique-association total. If outputs differ, show the existing and proposed
 relationships side by side; do not overlay the draft onto the baseline or silently
 delete the old reverse relation. No sum across provenance groups is displayed.
@@ -329,7 +340,7 @@ Interpret [engine results](../../../crates/dwh-engine/src/join_lens.rs:875) hone
 For a request for **complete rows**, report unsupported if the existing response
 exceeds the sample cap; offer **Inspect bounded examples (up to 50)** explicitly.
 Do not return a sample under a successful complete-query label. No new RPC or
-general arbitrary-SQL browser is required by this bounded contract. True complete
+general arbitrary-SQL browser is required by this bounded contract. Future paginated executed reverse is not an implementation blocker. True complete
 external reverse pagination, snapshot-consistent pages or arbitrary original alias
 lineage would need separately reviewed capabilities, not a layout-driven RPC.
 
@@ -411,7 +422,24 @@ Expose the workflow using business actions, not instructions to pick an algorith
 
 ## 11. Completion boundary
 
-Follow [tasks and acceptance matrix](tasks.md). Phase 1 ends with the proposed
-packet only. Phase 2 alone is not final acceptance; Phase 3 requires understandable
+Follow [tasks and acceptance matrix](tasks.md). Phase 1 architecture is accepted. Phase 2 alone is not final acceptance; Phase 3 requires understandable
 reverse investigation, and Phase 4 requires real Host journeys, regression evidence
 and merged delivered contracts. Record failures and unsupported scopes honestly.
+
+## Delivered bounded implementation notes
+
+The focused browser/inspector/value components compose the existing owner. Seed
+definitions use the shared pure tuple resolver. Source/query/ref/range baselines
+are explicitly unavailable here; no empty session array is treated as complete.
+Inspection cache holds at most eight executed-key replies; source-scoped Advanced
+lookup cache holds at most sixteen pages. Both reject obsolete replies by intent
+and original context. Cached execution evidence carries an inspection timestamp.
+
+Original proposal keys merge suggestion/draft/Mapping badges. Executed input keys
+remain a distinct namespace in the SAME list because preceding Apply/transforms
+do not recover original aliases. Expanding an executed row shows acquired input
+fields from at most fifty examples; count units and sample coverage stay separate.
+
+First project Save may change project-relative execution context and stale an old
+review. Do not bypass that guard: refresh remaining review after Write before first
+Save, or reopen Find Matches against the saved project. Drafts are never persisted.

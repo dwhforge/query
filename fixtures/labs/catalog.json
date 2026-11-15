@@ -38,17 +38,19 @@
   {
     "id": "name_region_match",
     "track": "start",
-    "title": "Vendors · name + region both soft",
-    "tagline": "ComputerParts LLC US≠DE (exact same name). Nestlé / Danone need LLM synonyms on name and region. Mart: vendor_name, region, SUM(qty).",
+    "title": "Vendors · records and relationships",
+    "tagline": "Investigate name/region aliases in both directions. Inspect actual JOIN counts, confirm a relationship, write Mapping + Apply, then Save and reopen.",
     "teaches": [
-      "Exact same vendor_name in different regions are different companies (ComputerParts LLC US ≠ DE)",
-      "Brand synonyms (NW bottled water, Danone Eau, EU/RF/Russia) need Matching/LLM on both fields",
-      "Name-only Join fans shared names across regions; mapped mart keeps region in the grain"
+      "Open dirty_exact_pair → Join Lens → Find Matches. Find CPC LLC / Germany and inspect ComputerParts LLC / DE.",
+      "Inspect RIGHT relationships: one LEFT list shows provenance badges. Suggested, existing Mapping, draft keys and actual JOIN input rows have separate non-additive counts.",
+      "Use Previous/Next unresolved, select a candidate, then Confirm separately. Optional Advance after confirm preserves your review.",
+      "Review the complete name/region output, Write Mapping + Apply, execute and Save the project. After Write, Refresh remaining review to compare existing aliases with a new draft. Save and reopen the project to check persisted results; start Find Matches again for a fresh review.",
+      "Inspect actual JOIN counts/examples explicitly. dirty_name_only demonstrates real cross-region fan-out; suggestions alone do not prove it."
     ],
     "youKeep": [
-      "KeyMap seed map_pos_to_vendor (vendor_label,region,vendor_id)",
-      "invoices_mapped + by_vendor_region (vendor_name, region, SUM(qty))",
-      "Two Matching practice sets: exact same-name cross-region + LLM synonyms"
+      "Original vendor-ID seed and mapped mart remain unchanged",
+      "A separate full-tuple name/region Mapping prepared by the existing guarded write path",
+      "Saved project reproduces the explicit relationships; temporary review drafts do not survive restart"
     ],
     "requires": "offline",
     "featured": true

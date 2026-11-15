@@ -1,6 +1,6 @@
 # Delta: JOIN diagnostics — Matching relationship inspection
 
-Status: **proposed / not implemented**. Decision:
+Status: **verified bounded delivery merged into capability specs, 2026-11-15**. Decision:
 [ADR-0052](../../../../../docs/adr/0052-matching-relationship-workbench.md).
 Extends [JOIN diagnostics](../../../../specs/join-diagnostics/spec.md); does not
 transfer existing controller ownership or replace Lens.

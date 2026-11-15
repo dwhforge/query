@@ -2,11 +2,11 @@
 
 ## Status and review boundary
 
-**Phase 1 only — proposed, no runtime implementation.** Baseline branch:
-**feature/redesign**; HEAD **0c152c8fa0a8b86f037389617ba8eb9a8d24a9cd**;
-working tree clean at inspection on 2026-11-15.
+**Authorized Phases 2–4 implemented; verified bounded contracts merged.** Reinspection: clean checkout at
+**3939be0**, 2026-11-15. Phase 1 documentation is preserved; runtime verification
+will be recorded separately.
 
-Decision: [proposed ADR-0052](../../../docs/adr/0052-matching-relationship-workbench.md).
+Decision: [Accepted ADR-0052](../../../docs/adr/0052-matching-relationship-workbench.md).
 Review order: this proposal → [deltas](specs/) → [design](design.md) →
 [tasks](tasks.md). [Investigation](investigation.md) distinguishes observed code
 from proposed behavior and historical verification reports from tests run now.
@@ -26,8 +26,11 @@ Mapping coverage.
   candidate inspection and explicit confirmation, with a compact consequence view.
 - Bidirectional navigation over the existing session, without changing decisions
   or rerunning retrieval merely because focus changes.
-- Four relationship groups: executed JOIN, existing Mapping, confirmed draft,
-  suggestions; separate completeness and cardinality evidence for each.
+- One unified related-LEFT list with multiple provenance badges/filters: executed
+  JOIN, existing Mapping, confirmed draft, suggestions. Separate non-additive
+  authority summaries, completeness and cardinality units.
+- Fast previous/next unresolved review; explicit pick then confirm; optional advance
+  after confirmation; independent keyboard actions; preserved filters/drafts/context.
 - Memoized sparse reverse indexes; scoped read-only Mapping projections; explicit
   executed-key inspection using existing Host operations.
 - Collapsed Matching Rules, optional assistant panel, contextual bulk actions and
@@ -42,7 +45,8 @@ Mapping coverage.
 Another workspace, map representation, authoritative ledger, persistence model,
 matching algorithm, LLM orchestration, external matching engine, global assignment,
 arbitrary alias lineage, unbounded dictionary browsing or broad App/store refactor.
-No new RPC is proposed. Complete large external reverse inspection unavailable
+No new RPC is proposed. Renderer reverse evidence and Host executed counts/samples
+are distinct; future paginated executed reverse is not a blocker. Complete large external reverse inspection unavailable
 through existing APIs must report that limitation, not quietly sample.
 
 ## Delivery phases and gates
@@ -75,3 +79,10 @@ retain their residual performance, confidence-bulk and preview risks. This chang
 does not close them by documentation. Its own behavior deltas remain in flight
 until implemented and verified; do not merge proposed behavior into the source
 of truth at the end of Phase 1.
+
+## Runtime delivery
+
+See [runtime report](runtime-report.md) for 71 real Electron/Host tests, cold reopen,
+44 browser tests, native/unit gates, corrections and explicit residual limits.
+The historical Phase 1 stop is superseded by user authorization; no new RPC or
+second engine/store was introduced. Only verified contracts were merged.

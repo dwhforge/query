@@ -1,3 +1,6 @@
+> Historical Phase 1 report below. Architecture is now Accepted and runtime Phases 2–4
+> are authorized. Current implementation/verification: [runtime report](runtime-report.md).
+
 # Phase 1 delivery report — architecture only
 
 ## Scope and checkout

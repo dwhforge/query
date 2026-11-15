@@ -1,5 +1,11 @@
 # OpenSpec
 
+Proposed record-centric Matching redesign: [ADR-0052](../docs/adr/0052-matching-relationship-workbench.md)
+and [Unified Matching relationship workbench](changes/unified-matching-workbench/proposal.md).
+**Phase 1 architecture only; runtime not started and architecture review pending.**
+Review proposal → capability deltas → design → gated tasks. This builds on ADR-0051;
+it does not close that change's residual risks or merge proposed behavior as delivered.
+
 Unified Matching Workspace: [ADR-0051](../docs/adr/0051-unified-matching-workspace.md).
 Basic real-data Fuzzy/LLM, Advanced live plan execution and read-only Lens
 Candidates are implemented; delivered contracts are merged into

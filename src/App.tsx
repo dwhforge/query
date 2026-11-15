@@ -5920,8 +5920,6 @@ function App() {
                         onApplyNearMiss={handleApplyNearMiss}
                         onMapKey={handleMapKeyFromLens}
                         projectIdentity={`${project.project_uid}:${querySessionGenerationRef.current}`}
-                        preserveBatchReview={tupleBatchKeepsLens}
-                        onAcceptTuples={handleAcceptTuplesFromLens}
                         onPrepareBusy={(busy) => {
                           joinSession.onPrepareBusy(busy);
                           if (busy && contextIsCurrent(queryContext)) setOpProgress((cur) => cur?.kind === "quality" ? null : cur);

@@ -186,13 +186,13 @@ export function previewBulkConfirm(
   const included: MatchingProposalView[] = [];
   const excluded: BulkConfirmPreview["excluded"] = [];
   const seenKeys = new Set<string>();
+  // Whole-run eligibility is invariant across this preview. Recomputing it for
+  // every row makes a capped 200×200 tuple review unnecessarily quadratic.
+  const eligibleIds = session.basicRun ? new Set(basicHighConfidenceIds(session))
+    : session.advancedRun ? new Set(advancedHighConfidenceIds(session, BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP)) : null;
 
   for (const p of pool) {
-    if (session.basicRun && !basicHighConfidenceIds(session).includes(p.proposalId)) {
-      excluded.push({ proposalId: p.proposalId, reason: "not_high_confidence" });
-      continue;
-    }
-    if (session.advancedRun && !advancedHighConfidenceIds(session, BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP).includes(p.proposalId)) {
+    if (eligibleIds && !eligibleIds.has(p.proposalId)) {
       excluded.push({ proposalId: p.proposalId, reason: "not_high_confidence" });
       continue;
     }

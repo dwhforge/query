@@ -1,11 +1,15 @@
 # OpenSpec
 
-Approved next change: [Unified Matching Workspace](changes/unified-matching-workspace/proposal.md)
-under [ADR-0051](../docs/adr/0051-unified-matching-workspace.md) — architecture
-approved 2026-11-15, implementation not started. One existing Matching review for Basic
-batch and Advanced contextual evidence; both JOIN-origin paths preserve ordered
-LEFT keys → RIGHT outputs and atomic Mapping + Apply. Review proposal → specs →
-design → tasks. Current merged contracts below still describe shipped behavior.
+Unified Matching Workspace: [ADR-0051](../docs/adr/0051-unified-matching-workspace.md).
+Basic real-data Fuzzy/LLM, Advanced live plan execution and read-only Lens
+Candidates are implemented; delivered contracts are merged into
+[Matching](specs/matching-workspace/spec.md),
+[batch](specs/unified-batch-tuple-matching/spec.md) and
+[No match](specs/join-lens-no-match/spec.md).
+The [implementation report](changes/unified-matching-workspace/report.md) records
+actual verification and revisions. The [change](changes/unified-matching-workspace/tasks.md)
+remains **open for residual acceptance**: Advanced beyond-shortlist extra lookup,
+full adversarial App interleavings and unverified integration cases are not done.
 
 Current batch decision: [ADR-0050](../docs/adr/0050-unified-batch-tuple-matching.md).
 ~~[unified-batch-tuple-matching](changes/unified-batch-tuple-matching/)~~ —
@@ -14,7 +18,7 @@ Find Matches supersedes the primary scalar/composite Auto UI and Quick match cop
 explicit full-tuple decisions, atomic Mapping + Apply, local definition freshness.
 [Evidence report](changes/unified-batch-tuple-matching/report.md) records verified
 handoff results, the parallel native SIGSEGV, and unverified integrations. Parent
-review/final validation pending; Suggest Right and contextual Matching implementations unchanged.
+review/final validation pending; Suggest Right remains unchanged; ADR-0051 now hosts contextual Matching and batch review together.
 
 Spec-driven changes for DWHForge Query. Product decisions remain in `docs/` (DESIGN, ADR). OpenSpec tracks **behavior deltas** for a change before/while implementing.
 

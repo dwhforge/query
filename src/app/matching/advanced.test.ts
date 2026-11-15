@@ -32,6 +32,7 @@ function basicPlan() {
 /** An Advanced-shaped plan: same locked key/output, different comparison roles. */
 function advancedPlan(rev = 2) {
   const p = basicPlan();
+  p.scope = "full";
   p.comparisons = [{ sourceField: "vendor_name", targetField: "vendor_name", role: "soft_signal" }, { sourceField: "region", targetField: "region", role: "hard_constraint" }];
   p.normalization = ["trim"];
   p.semanticRevision = rev;
@@ -39,7 +40,7 @@ function advancedPlan(rev = 2) {
 }
 function boundSession(plan = basicPlan()): MatchingTabSession {
   return emptyMatchingSession({
-    id: "adv-test", title: "Advanced", entry: "lens", scope: "cohort", instructionText: "match names",
+    id: "adv-test", title: "Advanced", entry: "lens", scope: plan.scope, instructionText: "match names",
     hasUnsavedDecisions: false, chatCollapsed: true,
     joinBinding: { projectIdentity: "project:0", contextFingerprint: "local", hostQueryId: "fact", joinStepIndex: 1,
       leftOn: left, rightOn: right, rightQueryId: "dim" },
@@ -143,13 +144,15 @@ assert.throws(() => adaptAdvancedSnapshot(boundSession(advancedPlan()), { ...sna
       assert.equal(args.plan.sourceRef, "fact");
       assert.deepEqual(args.plan.mapKeyFields, left);
       assert.deepEqual(args.plan.outputs, right);
-      acquired = snapshot();
+      assert.equal(args.plan.scope, "full");
+      assert.equal(args.scope, "all");
+      acquired = { ...snapshot(), runId: args.runId };
       return acquired;
     },
     latest: () => s,
   });
   const out = await run();
-  assert.equal(out.advancedRun?.id, "adv-test:1");
+  assert.equal(out.advancedRun?.id, acquired!.runId);
   assert.equal(out.matchingMode, "advanced");
   // Stale generation after acquisition refuses the install.
   await assert.rejects(runAdvancedMatching(s, {
@@ -209,11 +212,12 @@ assert.throws(() => adaptAdvancedSnapshot(boundSession(advancedPlan()), { ...sna
   assert.equal(reconcileAdvancedContext(s, "project:0", "local"), s, "unchanged context stays valid");
   const stale = reconcileAdvancedContext(s, "project:0", "changed");
   assert.equal(stale.commitLifecycle?.status, "stale");
-  assert.equal(stale.advancedRun, undefined);
+  assert.equal(stale.advancedRun, s.advancedRun, "stale evidence remains inspectable, not actionable");
   // Own receipt transition is permitted (pending + exact receipt context).
   const receipt: TupleBatchCommitReceipt = { status: "applied", contextFingerprint: "next", projectIdentity: "project:0",
     joinStepIndex: 3, appliedCount: 1, matchingSessionId: "adv-test", matchingRunId: "adv-test:1" };
-  const pending = { ...s, commitLifecycle: { status: "pending" as const, runId: "adv-test:1" } };
+  const reviewed = applyDecision(s, s.proposals[0]!.proposalId, "confirm_proposed", "cand:t1");
+  const pending = { ...reviewed, commitLifecycle: { status: "pending" as const, runId: "adv-test:1" } };
   const kept = reconcileAdvancedContext(pending, "project:0", "next", receipt);
   assert.equal(kept.commitLifecycle?.status, "pending", "own receipt transition is never invalidated");
   const lost = reconcileAdvancedContext(pending, "project:0", "other", receipt);
@@ -229,7 +233,8 @@ assert.throws(() => adaptAdvancedSnapshot(boundSession(advancedPlan()), { ...sna
   assert.equal(reconcileBasicContext(basic, "project:0", "local"), basic);
   assert.equal(reconcileBasicContext(basic, "project:0", "x").commitLifecycle?.status, "stale");
   const basicAck = acknowledgeBasicReceipt(
-    { ...basic, commitLifecycle: { status: "pending", runId: "basic:1" } }, receipt2("basic:1"), "project:0", "local", null);
+    { ...applyDecision(basic, basic.proposals[0]!.proposalId, "confirm_proposed", basic.proposals[0]!.proposedCandidateId),
+      commitLifecycle: { status: "pending", runId: "basic:1" } }, receipt2("basic:1"), "project:0", "local", null);
   assert.ok(!("error" in basicAck), "Basic ack unchanged by Advanced work");
   assert.equal(basicAck.basicRun, undefined);
 }
@@ -263,6 +268,19 @@ function receipt2(runId: string): TupleBatchCommitReceipt {
   assert.ok(accepted.decisions[0]?.bulkToken?.startsWith("bulk:"), "bulk decision carries its undo token");
   const undone = undoMatchingBulk(accepted);
   assert.equal(undone.decisions.length, 0);
+  assert.deepEqual(advancedHighConfidenceIds(undone, .88, .03), [], "undo remains user-touched");
+  for (const kind of ["defer", "reject", "no_suitable_target", "confirm_proposed"] as const) {
+    const individual = applyDecision(s, "prop:0", kind, "cand:t1");
+    assert.deepEqual(advancedHighConfidenceIds(individual, .88, .03), [], "ledger excludes every explicit decision");
+    assert.deepEqual(applyBulkConfirm(individual, preview).decisions, individual.decisions,
+      "old bulk preview cannot overwrite an intervening individual decision");
+  }
+  const unsafe = { ...s, candidates: s.candidates.map(c => ({ ...c, outputValues: [null, "US"] })) };
+  assert.deepEqual(advancedHighConfidenceIds(unsafe, .88, .03), [], "unsafe tuple cannot qualify");
+  const manual = { ...s, proposals: s.proposals.map(p => ({ ...p, edges: p.edges?.map(e => ({ ...e, origins: ["manual" as const] })) })) };
+  assert.deepEqual(advancedHighConfidenceIds(manual, .88, .03), [], "manual evidence is not automatic confidence");
+  const wrongPick = { ...s, proposals: s.proposals.map(p => ({ ...p, proposedCandidateId: "cand:t2" })) };
+  assert.deepEqual(advancedHighConfidenceIds(wrongPick, .88, .03), [], "high score for another candidate cannot qualify the current suggestion");
   // Reviewed bulk confirms the displayed target (an alternative, not the proposed).
   const reviewed = confirmReviewedSelection(s, [s.proposals[0]!.proposalId]);
   assert.equal(reviewed.decisions[0]?.kind, "confirm_proposed");
@@ -353,6 +371,122 @@ function receipt2(runId: string): TupleBatchCommitReceipt {
   assert.equal(advancedRankAllowlist(boundSession(advancedPlan())), undefined);
   const renamed = { ...s, candidates: s.candidates.map((c) => c.candidateId === "cand:t2" ? { ...c, targetId: "gone" } : c) };
   assert.deepEqual(advancedRankAllowlist(renamed), { "prop:0": ["t1", "gone"] });
+}
+
+// Unsupported scopes never invoke acquisition, including session/plan mismatch.
+{
+  const s = boundSession(advancedPlan());
+  let calls = 0;
+  for (const scope of ["selected", "cohort"] as const) {
+    for (const restricted of [{ ...s, scope }, { ...s, plan: { ...s.plan!, scope } }]) {
+      await assert.rejects(runAdvancedMatching(restricted, {
+        execution: {} as never, targetRef: "dim", isContextCurrent: () => true,
+        acquire: async () => { calls++; return snapshot(); }, latest: () => restricted,
+      }), /selected\/cohort scope is unsupported/);
+    }
+  }
+  assert.equal(calls, 0, "unsupported scope must not read the broader dataset");
+}
+
+// Delayed retrieval consults latest semantic ownership, not only generation.
+{
+  const s = boundSession(advancedPlan());
+  const ctx = {
+    execution: {} as never, targetRef: "dim", isContextCurrent: () => true,
+    acquire: async (args: { runId: string }) => ({ ...snapshot(), runId: args.runId }),
+    latest: () => s,
+  };
+  for (const latest of [
+    { ...s, plan: { ...s.plan!, semanticRevision: 3 } },
+    { ...s, scope: "selected" as const },
+    { ...s, joinBinding: { ...s.joinBinding!, joinStepIndex: 4 } },
+    { ...s, commitLifecycle: { status: "stale" as const, reason: "A → B → A" } },
+    { ...s, commitLifecycle: { status: "pending" as const, runId: "other" } },
+  ]) {
+    await assert.rejects(runAdvancedMatching(s, { ...ctx, latest: () => latest }), /context changed while retrieving/);
+  }
+  for (const patch of [{ sessionId: "foreign" }, { runId: "old" }, { evidenceRevision: 2 },
+    { plan: { ...snapshot().plan, scope: "selected" as const } }]) {
+    await assert.rejects(runAdvancedMatching(s, {
+      ...ctx, acquire: async args => ({ ...snapshot(), runId: args.runId, ...patch }),
+    }), /different session, run or scope/);
+  }
+  // Acknowledged review is allowed to refresh explicitly, but not automatically.
+  const acked = { ...s, commitLifecycle: { status: "acknowledged" as const, runId: "prior", receipt: receipt2("prior") } };
+  assert.ok((await runAdvancedMatching(acked, { ...ctx, latest: () => acked })).advancedRun);
+}
+
+// Exact tuple enrichment must not alias embedded NUL delimiters.
+{
+  const snap = snapshot();
+  const keys = [["a\0b", "c"], ["a", "b\0c"]];
+  snap.acquisition.sourceRows = keys.map((mapKey, i) => ({ mapKey, fields: { context: `row-${i}` }, affectedSourceRows: i + 1 }));
+  snap.retrieval.proposals = keys.map((mapKey, i) => ({ ...retrieval().proposals[0]!, proposalId: `prop:${i}`, mapKey }));
+  const out = adaptAdvancedSnapshot(boundSession(advancedPlan()), snap);
+  assert.deepEqual(out.proposals.map(p => p.sourceValues), [{ context: "row-0" }, { context: "row-1" }]);
+  assert.deepEqual(out.proposals.map(p => p.affectedSourceRows), [1, 2]);
+}
+
+// A verification reply cannot write a changed ledger/run, even if the caller's
+// project predicate is permissive. Count-only materialization checks are unsafe.
+{
+  const s = adapted;
+  const decided = applyDecision(s, s.proposals[0]!.proposalId, "confirm_proposed", "cand:t1");
+  const pending: MatchingTabSession = { ...decided, commitLifecycle: { status: "pending", runId: s.advancedRun!.id } };
+  const verified = { sessionId: s.id, runId: s.advancedRun!.id, evidenceRevision: 1,
+    materialized: [{ candidateId: "cand:t1", sourceParts: ["Acme", "US"], outputValues: ["Acme Inc", "United States"] }] };
+  let writes = 0;
+  const ctx = {
+    execution: {} as never, isContextCurrent: () => true, verify: async () => verified,
+    write: async () => { writes++; return { result: "error" as const, message: "not reached" }; },
+    identity: () => "project:0", fingerprint: () => "next", navigationTarget: () => null, latest: () => pending,
+  };
+  for (const latest of [
+    { ...pending, generation: pending.generation + 1 },
+    { ...pending, advancedRun: { ...pending.advancedRun!, id: "other" } },
+    { ...pending, joinBinding: { ...pending.joinBinding!, joinStepIndex: 4 } },
+    { ...pending, scope: "selected" as const },
+    { ...pending, decisions: [] },
+    { ...pending, commitLifecycle: { status: "stale" as const, reason: "ABA" } },
+    { ...pending, commitLifecycle: { status: "pending" as const, runId: "other" } },
+  ]) assert.equal((await commitAdvancedMatching(pending, { ...ctx, latest: () => latest })).status, "refused");
+  for (const patch of [{ candidateId: "other" }, { sourceParts: ["other", "US"] }, { outputValues: ["forged", "US"] }]) {
+    assert.equal((await commitAdvancedMatching(pending, { ...ctx,
+      verify: async () => ({ ...verified, materialized: [{ ...verified.materialized[0]!, ...patch }] }),
+    })).status, "refused");
+  }
+  assert.equal(writes, 0);
+
+  const receipt = { ...receipt2(s.advancedRun!.id), contextFingerprint: "next", joinStepIndex: 2 };
+  let after = pending;
+  const interleaved = await commitAdvancedMatching(pending, {
+    ...ctx,
+    latest: () => after,
+    write: async () => {
+      // A same-count individual edit must not be cleared by the old receipt.
+      after = { ...pending, decisions: pending.decisions.map(d => ({ ...d, candidateId: "cand:t2" })) };
+      return { result: "applied" as const, message: "Applied 1", receipt };
+    },
+  });
+  assert.equal(interleaved.status, "refused");
+  assert.match(interleaved.message, /draft was not cleared/);
+  assert.equal(after.decisions[0]!.candidateId, "cand:t2");
+  for (const bad of [{ ...receipt, appliedCount: 0 }, { ...receipt, appliedCount: 2 },
+    { ...receipt, joinStepIndex: -1 }, { ...receipt, joinStepIndex: 1.5 }]) {
+    assert.ok("error" in acknowledgeAdvancedReceipt(pending, bad, "project:0", "next", null));
+    assert.equal(reconcileAdvancedContext(pending, "project:0", "next", bad).commitLifecycle?.status, "stale");
+  }
+  const acknowledged = acknowledgeAdvancedReceipt(pending, receipt, "project:0", "next", null);
+  assert.ok(!("error" in acknowledged));
+  assert.equal(reconcileAdvancedContext(acknowledged, "project:0", "next"), acknowledged);
+  const stale = reconcileAdvancedContext(acknowledged, "project:0", "unrelated");
+  assert.equal(stale.commitLifecycle?.status, "stale", "summary is invalidated even without a producer run");
+  assert.equal(reconcileAdvancedContext(stale, "project:0", "next"), stale, "summary cannot revive after ABA");
+  const staleDraft = reconcileAdvancedContext(pending, "project:0", "unrelated");
+  assert.deepEqual(staleDraft.decisions, pending.decisions, "stale decisions stay inspectable");
+  assert.ok("error" in collectAdvancedDecisions(staleDraft), "inspectable does not mean writable");
+  assert.equal(applyDecision(staleDraft, "prop:0", "reject", null), staleDraft);
+  assert.ok("error" in collectAdvancedDecisions({ ...pending, scope: "cohort" }), "old broadened runs cannot commit");
 }
 
 console.log("advanced.test.ts: ok");

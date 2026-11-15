@@ -69,14 +69,19 @@ python scripts/examples/generate_all.py
 python scripts/examples/load_postgres.py
 ```
 
-### Multi-key Join Auto (ADR-0024)
+### Full-tuple Matching (ADR-0051)
 
-| Mode | Lab | When |
-|------|-----|------|
-| **Per-column** | Crosswalk POS↔WMS (`sku` + `day`) | Other ON cols already align; remap only the dirty key |
-| **Composite map** | Offer id+day (`keymap_offer`) | From uniqueness needs the **tuple** (recycled ext id) |
+Join Lens **Find Matches** opens the existing Matching tab. Every ordered JOIN
+pair participates: one source tuple maps to one complete right output tuple.
+There is no scalar/per-column fallback or competing inline batch review.
+**Edit plan** adds contextual rules using actual Host-acquired fields in the
+same Review. Review alternatives, bulk accept, then **Write Mapping** atomically
+prepares Mapping and Apply against the original JOIN. Refresh explicitly,
+execute, and Save the project separately.
 
-Never invent a glued `" · "` From string — Accept uses `from_parts`.
+Crosswalk POS↔WMS (`sku` + `day`) and offer id+day (`keymap_offer`) remain useful
+composite examples. Existing manual scalar/composite Mapping tools remain valid.
+Never invent a glued `" · "` From string; structured exact parts preserve context.
 
 ---
 

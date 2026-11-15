@@ -1,5 +1,18 @@
 # Development notes — immediate UX batch
 
+## Unified Matching Workspace — 2026-11-15 (development checkout)
+
+- One existing Matching tab now owns full-tuple Fuzzy/LLM and contextual live
+  plan review, alternatives, conservative/reviewed bulk acceptance and undo.
+- JOIN-bound Write Mapping reuses atomic Mapping + Apply with original-JOIN
+  ownership, Host verification, acknowledged receipts and explicit refresh.
+- No match RIGHT offers read-only lazy Candidates; Suggest Right remains modal.
+- Real CSV/DuckDB Electron Save/Reopen is verified for Basic 1–5 keys and
+  Advanced extra-field constraints. This is not a new published package.
+- Bounded inputs, unsupported Advanced scopes/NULL fields, no durable draft
+  restoration and stateless external-data verification remain limitations.
+  Full evidence and unverified cases: [report](../openspec/changes/unified-matching-workspace/report.md).
+
 ## Unreleased development checkout — 2026-11-13
 
 These notes describe the reviewed **feature/matching** checkout, not a declaration

@@ -2,6 +2,11 @@
 
 ## Status
 
+Amended 2026-11-15 by [ADR-0051](0051-unified-matching-workspace.md): Find Matches
+now opens the existing Matching tab instead of an embedded Lens batch queue.
+Its tuple safety, algorithms, conservative acceptance and atomic commit lifecycle
+remain; contextual plan execution shares the same review and JOIN-bound write.
+
 Accepted — 2026-11-14. Documents implemented behavior; contract merged into
 [unified-batch-tuple-matching](../../openspec/specs/unified-batch-tuple-matching/spec.md).
 Review record: [proposal](../../openspec/changes/unified-batch-tuple-matching/proposal.md)

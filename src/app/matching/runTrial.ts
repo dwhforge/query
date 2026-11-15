@@ -16,6 +16,7 @@ import type {
   MatchingRunMetrics,
   MatchingTabSession,
 } from "./types";
+import { mapKeyToken } from "./types";
 
 export function planToWire(plan: MatchingPlanDraft) {
   return {
@@ -93,7 +94,7 @@ function applyProposalEnrichment(
   p: MatchingProposalView,
   en: TrialEnrichment | undefined,
 ): MatchingProposalView {
-  const key = p.mapKey.join("\0");
+  const key = mapKeyToken(p.mapKey);
   const sourceValues = en?.sourceValuesByKey?.[key];
   // Host evidence maps are keyed by Host proposal id, not by source key.
   const scores = en?.scoresByProposal?.[p.proposalId];

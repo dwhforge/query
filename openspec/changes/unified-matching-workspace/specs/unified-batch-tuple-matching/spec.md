@@ -1,7 +1,7 @@
 # Delta: Unified batch tuple matching
 
 Decision: [ADR-0051](../../../../../docs/adr/0051-unified-matching-workspace.md).
-Status: architecture approved on 2026-11-15; delta not merged or implemented.
+Status: delivered requirements merged on 2026-11-15; remaining verification/extension work is tracked in tasks.md and report.md.
 
 ## MODIFIED Requirements
 

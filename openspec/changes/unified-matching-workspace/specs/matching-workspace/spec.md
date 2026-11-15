@@ -1,7 +1,7 @@
 # Delta: Matching workspace
 
 Decision: [ADR-0051](../../../../../docs/adr/0051-unified-matching-workspace.md).
-Status: architecture approved on 2026-11-15; delta not merged or implemented.
+Status: delivered requirements merged on 2026-11-15; remaining verification/extension work is tracked in tasks.md and report.md.
 
 ## MODIFIED Requirements
 
@@ -42,7 +42,7 @@ Detachment, arbitrary output rebinding and Mapping-only transitions are excluded
 #### Scenario: Originating JOIN changes
 - WHEN a JOIN definition or upstream context changes
 - THEN the bound session refuses stale run replies and commit
-- AND explicit validated refresh may bind the new definition with fresh review
+- AND reopening Find Matches binds current definitions with fresh review
 - AND existing decisions are not silently reinterpreted
 
 ## ADDED Requirements
@@ -90,6 +90,10 @@ Missing fields, ambiguous source evidence, unavailable connectors, cancellation,
 errors or over-cap inputs SHALL report unavailable/partial/refused, never fixtures.
 NULL/missing values SHALL NOT be coerced to empty strings. Existing contextual
 caps and permission/budget limits remain; no silent full target download.
+The normal JOIN entry explicitly uses full unmatched-input scope; Advanced UI
+selected/cohort scopes without a captured executable restriction SHALL refuse,
+not silently widen to full. NULL contextual fields and over-cap inputs currently
+refuse rather than claiming a partial successful run.
 
 #### Scenario: Same map key with contradictory source context
 - GIVEN actual source rows sharing a map key but differing in compared context
@@ -102,8 +106,10 @@ caps and permission/budget limits remain; no silent full target download.
 The existing review detail SHALL load/render the active source's real right tuple
 candidates lazily, retain exact identity, fields, counts, score availability and
 pagination/omissions, and cancel/ignore stale selection requests. Basic browsing
-remains within its retrieved universe; Advanced additional lookups SHALL register
-verified candidates before selection/acceptance. Neither implies dataset-wide search.
+remains within its retrieved universe. Advanced currently browses only its verified
+retrieved shortlist; an extra-lookup action beyond that shortlist remains unfinished.
+Any future additional lookup SHALL verify candidates before selection/acceptance.
+Neither current browsing path implies dataset-wide search.
 
 ### Requirement: JOIN-bound atomic commit and acknowledged refresh
 

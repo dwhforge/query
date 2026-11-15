@@ -28,6 +28,9 @@ Reusing both avoids a second UI, second engine and duplicated decisions.
   permissions, lifecycle and runtime validation.
 - Preserve the agreed Join Lens No match / Candidates selector and existing
   Suggest Right modal. Advanced remains in this same change after the Basic gate.
+- Phase 4 implements that Lens selector as **read-only single-source inspection**:
+  lazy bounded full-tuple candidates through the existing Suggest Right Host RPC,
+  not another Matching review, extra-lookup acceptance path or Mapping writer.
 
 ## Not in scope
 

@@ -189,6 +189,25 @@ never persist, send to models, log or include in telemetry. Project Save is sepa
 
 ## 5. Milestones and validation
 
+### Phase 4 Lens inspection boundary
+
+The agreed No match / Candidates selector is separate from the shared Matching
+review's candidate-ledger/extra-lookup requirement. Lens inspection has no decision
+store and no commit route. The existing ordered nullable Suggest Right source
+selection feeds a focused existing tuple RPC with scalar/composite arguments null.
+The modal itself remains unchanged and owns its own retrieval and confirmation.
+
+The dedicated Lens child retains a sixteen-result, context-scoped LRU keyed by
+JSON-array tuple identity. Definition/context changes clear the cache. A monotonic
+generation plus live value ownership guards both replies and loading/error state;
+value equality alone cannot guard ABA. Only an inactive-to-active opening can run
+automatically; tuple changes require explicit Find candidates (cache hits are reused).
+Render at most eight Host-ranked complete targets; never recalculate scores or
+restrict retrieval to the diagnostic unmatched-right sample. Report incomplete
+coverage and unknown evidence without claiming dataset-wide freshness or confidence.
+
+### Parent milestones
+
 1. Shared model/adapters/decision reducer and pure tests first. Cover nullable/
    delimiter/whitespace identity, arities 1–5 plus a higher-arity unit, counts,
    provenance deduplication, incomplete/unknown evidence, late reply preservation,

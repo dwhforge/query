@@ -65,6 +65,22 @@ for (const width of [1, 2, 3, 4, 5]) {
       await page.getByRole("separator", { name: "Resize data panel", exact: true }).dblclick();
       await page.getByTestId("join-lens-no-match").click();
       await page.getByRole("row").filter({ hasText: "row0" }).first().click();
+      // Real Host candidate inspection is read-only and does not replace Suggest Right.
+      const beforeCandidates = await page.evaluate(() => JSON.stringify((window as any).__dwhE2eGetProject().workspace));
+      const rightPane = page.getByTestId("join-lens-right-pane");
+      await rightPane.getByRole("button", { name: "Candidates", exact: true }).click();
+      const candidates = page.getByTestId("join-lens-candidates");
+      await expect(candidates.getByTestId("right-candidate").first()).toBeVisible();
+      await expect(candidates.getByTestId("candidate-source")).toContainText("UK");
+      for (const name of rightOn) await expect(candidates.getByTestId("right-candidate").first()).toContainText(name);
+      await candidates.getByTestId("right-candidate").first().locator("summary").click();
+      for (let i = 0; i < width; i++) await expect(candidates.getByTestId("right-candidate").first()).toContainText(`${leftOn[i]} → ${rightOn[i]}`);
+      await expect(candidates).toContainText("Mean score:");
+      expect(await page.evaluate(() => JSON.stringify((window as any).__dwhE2eGetProject().workspace))).toBe(beforeCandidates);
+      await rightPane.getByRole("button", { name: "No match", exact: true }).click();
+      await expect(candidates).toHaveCount(0);
+      await rightPane.getByRole("button", { name: "Candidates", exact: true }).click();
+      await expect(candidates.getByTestId("right-candidate").first()).toBeVisible();
       await page.getByTestId("join-lens-right-pane").getByRole("button", { name: "Suggest…", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Suggest Right", exact: true });
       await expect(dialog.getByRole("region", { name: "Source tuple" })).toContainText("UK");

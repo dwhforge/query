@@ -116,13 +116,15 @@ console.log("Basic shared Matching model: nullable exact identity, arities 1–5
   assert.deepEqual(ack.decisions, []); assert.deepEqual(ack.proposals, []); assert.deepEqual(ack.candidates, []);
   assert.equal(ack.basicRun, undefined, "acknowledgement does not auto-retrieve");
   for (const bad of [ { ...receipt, matchingSessionId: "foreign" }, { ...receipt, matchingRunId: "old" },
-    { ...receipt, projectIdentity: "project:1" }, { ...receipt, contextFingerprint: "other" } ]) {
+    { ...receipt, projectIdentity: "project:1" }, { ...receipt, contextFingerprint: "other" },
+    { ...receipt, appliedCount: 0 }, { ...receipt, appliedCount: 2 }, { ...receipt, joinStepIndex: -1 }, { ...receipt, joinStepIndex: 1.5 } ]) {
     assert.ok("error" in acknowledgeBasicReceipt(pending, bad, "project:0", "committed", null));
   }
   assert.ok("error" in acknowledgeBasicReceipt(reviewed, receipt, "project:0", "committed", null), "no acknowledgement without matching pending run");
   const edited = reconcileBasicContext(pending, "project:0", "upstream-edit", receipt);
   assert.equal(edited.commitLifecycle?.status, "stale");
   assert.deepEqual(edited.decisions, pending.decisions, "invalidated drafts stay inspectable");
+  assert.ok("error" in collectBasicDecisions(edited), "stale ledger cannot be materialized for writing");
   assert.strictEqual(reconcileBasicContext(edited, "project:0", "local-only"), edited, "ABA cannot restore old actions");
   assert.ok("error" in acknowledgeBasicReceipt(edited, receipt, "project:0", "committed", null));
   assert.equal(reconcileBasicContext(reviewed, "project:1", "local-only").commitLifecycle?.status, "stale", "project session ABA");

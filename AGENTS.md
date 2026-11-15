@@ -31,9 +31,11 @@ Product decisions and behavior contracts are not optional context.
 
 ### Active OpenSpec changes
 
-- [Unified Batch Tuple Matching](openspec/specs/unified-batch-tuple-matching/spec.md) — [ADR-0050](docs/adr/0050-unified-batch-tuple-matching.md), implemented/merged; [report](openspec/changes/unified-batch-tuple-matching/report.md). **Find Matches** supersedes legacy Auto/Quick match primary batch UI, with explicit full-tuple decisions and atomic Mapping + Apply. Fingerprint is LOCAL-only definitions, not detection of external file/database content changed in place. Suggest Right and contextual Matching implementations unchanged.
+- [Unified Matching Workspace](openspec/changes/unified-matching-workspace/tasks.md) — [ADR-0051](docs/adr/0051-unified-matching-workspace.md). Delivered Basic/Advanced live and Lens Candidates contracts merged into capability specs; residual acceptance remains open. One existing Matching tab/review/decision ledger; JOIN-bound atomic Mapping + Apply; Suggest Right remains modal. See [report](openspec/changes/unified-matching-workspace/report.md).
+
+- [Unified Batch Tuple Matching](openspec/specs/unified-batch-tuple-matching/spec.md) — [ADR-0050](docs/adr/0050-unified-batch-tuple-matching.md), implemented/merged; [report](openspec/changes/unified-batch-tuple-matching/report.md). **Find Matches** supersedes legacy Auto/Quick match primary batch UI, with explicit full-tuple decisions and atomic Mapping + Apply. Fingerprint is LOCAL-only definitions, not detection of external file/database content changed in place. Suggest Right unchanged; ADR-0051 unifies contextual and batch review.
 - [Unified Suggest Right](openspec/specs/unified-suggest-right/spec.md) — [ADR-0049](docs/adr/0049-unified-suggest-right.md), merged; single-source full-tuple review remains distinct from Find Matches batch.
-- `openspec/specs/matching-workspace/` — ADR-0044 Matching workspace (merged); change notes in `openspec/changes/matching-workspace/`; Lens **Find Matches** (ADR-0050; formerly Quick match) ≠ Matching **Contextual matching**; English UI.
+- `openspec/specs/matching-workspace/` — ADR-0044 Matching workspace (merged); change notes in `openspec/changes/matching-workspace/`; ADR-0051 supersedes the separate Lens/contextual UI: Find Matches opens one Matching tab; English UI.
 - `openspec/specs/project-relative-load-paths/` — ADR-0043 relative Load paths + path_kind (merged)
 - `openspec/specs/join-lens-in-place-confirm/` — ADR-0042 Join Lens in-place confirm (merged)
 - `openspec/specs/heavy-preview-sample/` — ADR-0041 heavy preview sample + Load full (merged)

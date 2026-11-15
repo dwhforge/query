@@ -132,6 +132,7 @@ export function mergeBasicLlm(session: MatchingTabSession, runId: string, text: 
 
 export function collectBasicDecisions(session: MatchingTabSession): LensTupleMapping[] | { error: string } {
   const binding = session.joinBinding, run = session.basicRun;
+  if (session.commitLifecycle?.status === "stale") return { error: "Stale Matching review cannot be written. Reopen Find Matches." };
   if (!binding || !run || !session.plan || !basicPlanCompatible(session)) return { error: "Missing original JOIN run or unsupported Advanced plan." };
   const result: LensTupleMapping[] = [];
   const seen = new Set<string>();
@@ -151,12 +152,21 @@ export function collectBasicDecisions(session: MatchingTabSession): LensTupleMap
 }
 
 /** Sticky local-definition invalidation; returning to an old definition is not refresh. */
+export function matchingReceiptOwned(session: MatchingTabSession, receipt: TupleBatchCommitReceipt): boolean {
+  const run = session.advancedRun ?? session.basicRun;
+  const count = session.decisions.filter(d => ["confirm_proposed", "choose_alternative"].includes(d.kind)).length;
+  return !!run && session.commitLifecycle?.status === "pending" && session.commitLifecycle.runId === run.id
+    && receipt.matchingSessionId === session.id && receipt.matchingRunId === run.id
+    && receipt.projectIdentity === session.joinBinding?.projectIdentity
+    && count > 0 && receipt.appliedCount === count
+    && Number.isInteger(receipt.joinStepIndex) && receipt.joinStepIndex >= 0;
+}
+
 export function reconcileBasicContext(session: MatchingTabSession, identity: string, fingerprint: string,
   ownReceipt?: TupleBatchCommitReceipt): MatchingTabSession {
   const b = session.joinBinding;
   if (!b || session.commitLifecycle?.status === "stale") return session;
-  const permitted = session.commitLifecycle?.status === "pending" && ownReceipt?.matchingSessionId === session.id
-    && ownReceipt.matchingRunId === session.commitLifecycle.runId && ownReceipt.projectIdentity === b.projectIdentity;
+  const permitted = !!ownReceipt && matchingReceiptOwned(session, ownReceipt);
   if (identity === b.projectIdentity && fingerprint === (permitted ? ownReceipt.contextFingerprint : b.contextFingerprint)) return session;
   return { ...session, commitLifecycle: { status: "stale", reason: "Original JOIN context changed. Draft retained for inspection only; reopen Find Matches to review current data." } };
 }
@@ -164,7 +174,7 @@ export function reconcileBasicContext(session: MatchingTabSession, identity: str
 export function acknowledgeBasicReceipt(session: MatchingTabSession, receipt: TupleBatchCommitReceipt,
   identity: string, fingerprint: string, navigationTarget: JoinNavigationTarget | null): MatchingTabSession | { error: string } {
   const b = session.joinBinding, run = session.basicRun;
-  if (!b || !run || session.commitLifecycle?.status !== "pending" || session.commitLifecycle.runId !== run.id
+  if (!b || !run || !matchingReceiptOwned(session, receipt)
     || receipt.matchingSessionId !== session.id || receipt.matchingRunId !== run.id
     || receipt.projectIdentity !== b.projectIdentity || identity !== receipt.projectIdentity
     || fingerprint !== receipt.contextFingerprint) return { error: "Project or Matching session changed before acknowledgement. Inspect the project and reopen Find Matches." };

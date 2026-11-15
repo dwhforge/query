@@ -1,4 +1,3 @@
-import type { TupleBatchCommitResult } from "../lib/joinLensBatchCommit";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ColumnMetadata,
@@ -45,9 +44,9 @@ import {
 import { resolveLeftSourceQueryId } from "../app/matching/planDefaults";
 import { workspaceFocusingObject } from "../lib/projectRefs";
 import { FindRightDialog } from "./FindRightDialog";
+import { JoinLensCandidates } from "./JoinLensCandidates";
 import type { LensTupleMapping } from "../lib/joinLensConfirm";
 import { tupleCell, type TupleParts } from "../lib/joinLensTuple";
-import { JoinLensAuto } from "./JoinLensAuto";
 import { PreviewTable } from "./PreviewTable";
 import type { JoinPrepareStatus } from "../lib/bridge";
 
@@ -233,7 +232,7 @@ function blameLabel(b: BlameUnmatchedKeyResult): string {
   }
 }
 
-type SideMode = "linked" | "probe" | "auto";
+type SideMode = "linked" | "probe";
 
 type SidePanelProps = {
   title: "Left" | "Right";
@@ -263,6 +262,9 @@ type SidePanelProps = {
   /** Probe right: suggest a target for the displayed left source key. */
   onFindRight?: () => void;
   suggestFromLabel?: string | null;
+  probeAccessory?: ReactNode;
+  probeContent?: ReactNode;
+  showProbeContent?: boolean;
 };
 
 function SidePanel({
@@ -288,6 +290,9 @@ function SidePanel({
   mapButtonLabel = "Save mapping…",
   onFindRight,
   suggestFromLabel,
+  probeAccessory,
+  probeContent,
+  showProbeContent = false,
 }: SidePanelProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
@@ -336,7 +341,8 @@ function SidePanel({
         >
           {title} · {mode === "linked" ? "for this row" : "no match"}
         </div>
-        {mode !== "linked" && (
+        {probeAccessory}
+        {mode !== "linked" && !showProbeContent && (
           <input
             type="search"
             value={search}
@@ -345,7 +351,7 @@ function SidePanel({
             className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[11px] text-slate-200 outline-none placeholder:text-slate-600 focus:ring-1 focus:ring-teal-700"
           />
         )}
-        <div className="min-w-0 text-[11px] leading-snug text-slate-500">
+        <div hidden={showProbeContent} className="min-w-0 text-[11px] leading-snug text-slate-500">
           {loading ? "loading…" : listModeLabel}
           {statusHint && (
             <span className="mt-0.5 block text-[11px] text-slate-400">
@@ -370,7 +376,8 @@ function SidePanel({
           </button>
         </div>
       )}
-      <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto p-1.5">
+      {probeContent}
+      <div ref={bodyRef} hidden={showProbeContent} className="min-h-0 flex-1 overflow-auto p-1.5">
         {visibleIndices.length === 0 ? (
           <p className="px-1 py-2 text-[11px] leading-relaxed text-slate-600">
             {loading ? "Loading…" : emptyHint}
@@ -436,7 +443,7 @@ function SidePanel({
           })
         )}
       </div>
-      {mode === "probe" &&
+      {mode === "probe" && !showProbeContent &&
         onAddToMap &&
         selectedIndex != null && (
         <div className="shrink-0 space-y-1.5 border-t border-amber-900/50 bg-amber-950/35 px-2 py-2">
@@ -471,7 +478,7 @@ const FIRST_USE_HINT_KEY = "dwh.joinLens.firstUseHint.v1";
 
 export type JoinLensProps = {
   /** Read-only mode observation and optional adjacent control accessory. */
-  onModeChange?: (mode: "linked" | "probe" | "auto") => void;
+  onModeChange?: (mode: "linked" | "probe") => void;
   noMatchAccessory?: ReactNode;
   enabled: boolean;
   workspace: Workspace;
@@ -528,11 +535,7 @@ export type JoinLensProps = {
       toLabels?: (string | null)[];
     },
   ) => void;
-  /** Atomic full-tuple batch; successful receipt identifies the exact resulting context. */
   projectIdentity: string;
-  /** Exact own-commit context only: keep batch mode through the shifted Join index. */
-  preserveBatchReview?: boolean;
-  onAcceptTuples?: (selections: LensTupleMapping[], contextFingerprint: string, projectIdentity: string) => Promise<TupleBatchCommitResult>;
   /** Sync prepare busy to App so top bar doesn't say "computing" in parallel. */
   onPrepareBusy?: (busy: boolean) => void;
   /** Run Join diagnostics (Probe lists unmatched samples). */
@@ -575,9 +578,7 @@ function JoinLensImpl({
   focusResultHint = null,
   onApplyNearMiss,
   onMapKey,
-  onAcceptTuples,
   projectIdentity,
-  preserveBatchReview = false,
   onPrepareBusy,
   onRunDiagnostics,
   onModeChange,
@@ -615,12 +616,12 @@ function JoinLensImpl({
   const activeSamplesGenRef = useRef(0);
 
   const [sideMode, setSideMode] = useState<SideMode>("linked");
-  const suspendBatchSideEffects = sideMode === "auto" && preserveBatchReview;
   useEffect(() => {
     if (enabled) onModeChange?.(sideMode);
   }, [enabled, sideMode, onModeChange]);
   const [searchLeft, setSearchLeft] = useState("");
   const [searchRight, setSearchRight] = useState("");
+  const [rightView, setRightView] = useState<"no-match" | "candidates">("no-match");
   const [leftSel, setLeftSel] = useState<number | null>(null);
   const [rightSel, setRightSel] = useState<number | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -681,7 +682,7 @@ function JoinLensImpl({
   workspaceRef.current = workspace;
 
   useEffect(() => {
-    if (!enabled || !leftInputWs || !rightInputWs || suspendBatchSideEffects) return;
+    if (!enabled || !leftInputWs || !rightInputWs) return;
     let cancelled = false;
     // Drop any in-flight sample load that may have set only one side.
     samplesLoadGenRef.current += 1;
@@ -731,7 +732,7 @@ function JoinLensImpl({
     };
     // joinParentsKey only — connections/sources via refs (unstable [] defaults used to loop).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, joinParentsKey, leftInputWs, rightInputWs, suspendBatchSideEffects]);
+  }, [enabled, joinParentsKey, leftInputWs, rightInputWs]);
 
   function refreshPrepareStatus() {
     if (!hostQueryId || joinStepIndex < 1) return;
@@ -778,11 +779,11 @@ function JoinLensImpl({
   }
 
   useEffect(() => {
-    if (!enabled || suspendBatchSideEffects) return;
+    if (!enabled) return;
     refreshPrepareStatus();
     // joinParentsKey — not workspace/sources object identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, joinParentsKey, suspendBatchSideEffects]);
+  }, [enabled, joinParentsKey]);
 
   const resultKeysFetchedRef = useRef("");
   const resultKeysStamp = useMemo(() => {
@@ -1091,7 +1092,7 @@ function JoinLensImpl({
     setSearchRight((cur) => (cur === "" ? cur : ""));
     setMatchesOnly((cur) => (cur ? false : cur));
     setActiveIndex((cur) => (cur === 0 ? cur : 0));
-    setSideMode((cur) => (cur === "auto" && preserveBatchReview ? cur : cur === "linked" ? cur : "linked"));
+    setSideMode("linked");
     setKeyExplain((cur) => (cur == null ? cur : null));
     setKeyBlame((cur) => (cur == null ? cur : null));
     setKeyExplainError((cur) => (cur == null ? cur : null));
@@ -1680,9 +1681,7 @@ function JoinLensImpl({
   const leftListMode =
     sideMode === "linked"
       ? linkedListLabel(leftPin)
-      : sideMode === "auto"
-        ? `Unmatched sample · ${visibleLeft.length}`
-        : probeListLabel(
+      : probeListLabel(
             "left",
             unmatchedLeft,
             visibleLeft.length,
@@ -1691,9 +1690,7 @@ function JoinLensImpl({
   const rightListMode =
     sideMode === "linked"
       ? linkedListLabel(rightPin)
-      : sideMode === "auto"
-        ? `Unmatched sample · ${visibleRight.length}`
-        : probeListLabel(
+      : probeListLabel(
             "right",
             unmatchedRight,
             visibleRight.length,
@@ -2044,6 +2041,11 @@ function JoinLensImpl({
         : null
     : null;
 
+  // Missing columns are not a selected NULL value: require every ordered key.
+  const candidateSourceColumns = leftSel != null ? leftCols : columns;
+  const candidateFromParts = suggestFromParts && leftOn.every((name) =>
+    candidateSourceColumns.some((c) => fold(c.name) === fold(name))) ? suggestFromParts : null;
+
   const findRightContext = JSON.stringify({ enabled, workspace, hostQueryId, joinStepIndex,
     connections, sources, projectRef, leftOn, rightOn, activeIndex, leftSel, sideMode, rows, suggestFromParts });
   useEffect(() => {
@@ -2136,7 +2138,6 @@ function JoinLensImpl({
           leftSel != null ? keyLabelFor("left", leftSel) : null
         }
         onSelect={(index) => {
-          if (sideMode === "auto") return;
           setLeftSel((prev) => (prev === index ? null : index));
         }}
         mapButtonLabel={pairMode ? "Save mapping…" : "Save mapping…"}
@@ -2194,13 +2195,9 @@ function JoinLensImpl({
           {noMatchAccessory}
           {!onOpenMatching && <button
             type="button"
-            onClick={() => switchMode("auto")}
-            title="Using current Lens fields and rules — fast batch, no separate contextual plan"
-            className={`rounded border px-2 py-1 text-[11px] font-medium ${
-              sideMode === "auto"
-                ? "border-amber-600/80 bg-amber-500/20 text-amber-50"
-                : "border-slate-700 text-slate-400 hover:border-amber-800/70 hover:text-amber-100"
-            }`}
+            disabled
+            title="Matching workspace is unavailable in this context"
+            className="rounded border border-slate-700 px-2 py-1 text-[11px] font-medium text-slate-400"
           >
             Find Matches
           </button>}
@@ -2210,7 +2207,7 @@ function JoinLensImpl({
               data-testid="lens-open-matching"
               onClick={() =>
                 onOpenMatching({
-                  scope: "cohort",
+                  scope: "full",
                   hostQueryId,
                   joinStepIndex,
                   leftOn,
@@ -2231,7 +2228,7 @@ function JoinLensImpl({
                   ).map((c) => c.name),
                 })
               }
-              title="Review complete JOIN tuples in the Matching workspace"
+              title="Review bounded unmatched keys from the full JOIN input in Matching (not just selected Lens rows)"
               className="rounded border border-slate-700 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-teal-700/70 hover:text-teal-100"
             >
               Find Matches
@@ -2242,16 +2239,12 @@ function JoinLensImpl({
             title={
               sideMode === "linked"
                 ? "Which left/right rows built this result row?"
-                : sideMode === "auto"
-                  ? "Using current Lens fields and rules"
-                  : "Values that didn’t find a partner"
+                : "Values that didn’t find a partner"
             }
           >
             {sideMode === "linked"
               ? "Where this result came from"
-              : sideMode === "auto"
-                ? "Current Lens fields → Write Mapping"
-                : "Values that didn’t join"}
+              : "Values that didn’t join"}
           </span>
         </div>
 
@@ -2268,12 +2261,7 @@ function JoinLensImpl({
                     Write Mapping
                   </span>
                 </li>
-                <li>
-                  <span className="font-semibold text-teal-200">
-                    Contextual matching…
-                  </span>{" "}
-                  — multiple fields, constraints, and alternatives (Matching tab)
-                </li>
+                <li>Advanced fields and constraints are available inside the same Matching tab.</li>
                 <li>
                   <span className="font-semibold text-teal-200">No match</span> —
                   one key at a time if you prefer manual pick
@@ -2296,41 +2284,7 @@ function JoinLensImpl({
           </div>
         )}
 
-        {sideMode === "auto" && !onOpenMatching ? (
-          <JoinLensAuto
-            workspace={workspace}
-            hostQueryId={hostQueryId}
-            joinStepIndex={joinStepIndex}
-            connections={connections}
-            sources={sources}
-            projectRef={projectRef}
-            projectIdentity={projectIdentity}
-            onAcceptTuples={onAcceptTuples}
-            onAccept={
-              onMapKey
-                ? (fromValues, toValues, opts) => {
-                    // ADR-0042: parent Apply accepted path merges KeyMap + ApplyKeyMap
-                    // without requiring a Mapping tab hop.
-                    onMapKey("left", fromValues, {
-                      toValues,
-                      fromParts: opts?.fromParts,
-                      applyColumns: opts?.applyColumns,
-                      outputColumn: opts?.outputColumn,
-                      applyAcceptedInPlace: true,
-                      fromLabels: opts?.fromLabels,
-                      toLabels: opts?.toLabels,
-                    });
-                    const toast = `Applied ${fromValues.length} accepted alias${fromValues.length === 1 ? "" : "es"}`;
-                    setMapToast(toast);
-                    window.setTimeout(() => {
-                      setMapToast((cur) => (cur === toast ? null : cur));
-                    }, 3500);
-                  }
-                : undefined
-            }
-          />
-        ) : (
-          <>
+        <>
         {/* Layer 2: status */}
         <div className="min-h-6 shrink-0 border-b border-slate-800/60 bg-slate-950/50 px-2 py-1.5 text-[11px] leading-snug text-slate-400">
           {statusLine}
@@ -2728,12 +2682,20 @@ function JoinLensImpl({
           />
         </div>
           </>
-        )}
       </div>
 
       <SidePanel
         title="Right"
         mode={sideMode}
+        probeAccessory={sideMode === "probe" ? <div role="group" aria-label="Right panel view" className="flex gap-1">
+          <button type="button" aria-pressed={rightView === "no-match"} onClick={() => setRightView("no-match")} className={`rounded border px-2 py-1 text-[11px] ${rightView === "no-match" ? "border-teal-600 bg-teal-500/20 text-teal-100" : "border-slate-700 text-slate-400"}`}>No match</button>
+          <button type="button" aria-pressed={rightView === "candidates"} onClick={() => setRightView("candidates")} className={`rounded border px-2 py-1 text-[11px] ${rightView === "candidates" ? "border-teal-600 bg-teal-500/20 text-teal-100" : "border-slate-700 text-slate-400"}`}>Candidates</button>
+        </div> : null}
+        showProbeContent={sideMode === "probe" && rightView === "candidates"}
+        probeContent={<JoinLensCandidates active={enabled && sideMode === "probe" && rightView === "candidates"}
+          sourceParts={candidateFromParts} workspace={workspace} hostQueryId={hostQueryId} joinStepIndex={joinStepIndex}
+          leftOn={leftOn} rightOn={rightOn} connections={connections} sources={sources} projectRef={projectRef}
+          projectIdentity={projectIdentity} sessionContext={JSON.stringify([enabled, rightQueryId, forceProbeNonce, autoPrepareNonce])} />}
         columns={rightCols}
         rows={rightRows}
         visibleIndices={visibleRight}
@@ -2757,7 +2719,6 @@ function JoinLensImpl({
           rightSel != null ? keyLabelFor("right", rightSel) : null
         }
         onSelect={(index) => {
-          if (sideMode === "auto") return;
           setRightSel((prev) => (prev === index ? null : index));
         }}
         mapButtonLabel="Save mapping…"

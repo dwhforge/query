@@ -1,5 +1,10 @@
 # Spec: join-lens-in-place-confirm
 
+Supersession: [ADR-0051](../../../docs/adr/0051-unified-matching-workspace.md)
+moves batch review/confirmation to the existing Matching tab. Historical Lens
+queue layout requirements below no longer expose a competing workflow. Atomic
+Mapping + Apply safety survives; Suggest Right remains its existing modal.
+
 Capability contract for [ADR-0042](../../../docs/adr/0042-join-lens-in-place-confirm.md).
 Amended by [ADR-0050](../../../docs/adr/0050-unified-batch-tuple-matching.md);
 the [batch tuple contract](../unified-batch-tuple-matching/spec.md) supplies full

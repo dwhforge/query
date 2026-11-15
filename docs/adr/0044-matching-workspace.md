@@ -2,6 +2,13 @@
 
 ## Status
 
+Amended 2026-11-15 by [ADR-0051](0051-unified-matching-workspace.md): the
+separate Lens/Contextual review boundary below is superseded. Find Matches opens
+one existing Matching tab; its plan controls both default JOIN and contextual
+execution. JOIN-bound outputs are ordered RIGHT JOIN keys, not candidate IDs,
+and Write Mapping uses atomic Mapping + Apply with acknowledged explicit refresh.
+Mapping-origin persistence, trust/merge rules and the demo/live boundary remain.
+
 **Accepted** (decision only — implementation via OpenSpec
 `openspec/changes/matching-workspace/`). Amended 2026-11-10: Lens/Matching UX
 boundary, structured plan editor, numeric run caps, host-side trust boundary,

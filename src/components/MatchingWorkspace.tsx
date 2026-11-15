@@ -2,7 +2,7 @@
  * Matching workspace tab (ADR-0044).
  * Plan editor → fixture/retrieval proposals → review → final diff → Save.
  */
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { llmChat } from "../lib/bridge";
 import { tupleCell, tupleMappingBlock } from "../lib/joinLensTuple";
 import { basicPrompt, basicHighConfidenceIds, basicPlanCompatible } from "../app/matching/basic";
@@ -13,7 +13,7 @@ import {
   invalidateRunOnPlanChange,
 } from "../app/matching/advanced";
 import type { TupleBatchPrompt } from "../lib/joinLensBatch";
-import { BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP } from "../lib/joinLensBatch";
+import { BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP, parseSuggestedBatchTuplePairs } from "../lib/joinLensBatch";
 import { undoMatchingBulk, confirmReviewedSelection, deriveMatchingReview, previewReviewedConfirm } from "../app/matching/reviewLogic";
 import { FIXTURE_PLAN } from "../app/matching/fixtures";
 import { buildLensMatchingPlan } from "../app/matching/planDefaults";
@@ -331,6 +331,8 @@ export function MatchingWorkspace({
   session = deriveMatchingReview(session);
   const latestSession = useRef(session);
   latestSession.current = session;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const isBasic = !!session.joinBinding;
   const acknowledged = session.commitLifecycle?.status === "acknowledged" ? session.commitLifecycle.receipt : null;
   const [chatOpen, setChatOpen] = useState(!session.chatCollapsed);
@@ -348,6 +350,8 @@ export function MatchingWorkspace({
   const [showFinal, setShowFinal] = useState(false);
   const [commitMsg, setCommitMsg] = useState<string | null>(null);
   const [showSavedContext, setShowSavedContext] = useState(true);
+  const [reviewSearch, setReviewSearch] = useState("");
+  const [reviewSort, setReviewSort] = useState<"workflow" | "score">("workflow");
 
   const plan = emptyPlan(session);
   const isDemo = session.executionMode === "demo";
@@ -390,7 +394,13 @@ export function MatchingWorkspace({
     [session.proposals],
   );
   const filtered = useMemo(() => {
-    const open = filterProposals(session.proposals, session.reviewFilter);
+    const query = reviewSearch.toLocaleLowerCase();
+    const open = filterProposals(session.proposals, session.reviewFilter).filter(p =>
+      !query || [...p.mapKey, ...Object.values(p.sourceValues ?? {})].some(v => tupleCell(v).toLocaleLowerCase().includes(query)));
+    if (reviewSort === "score") {
+      const score = (p: MatchingProposalView) => p.edges?.find(e => e.candidateId === p.proposedCandidateId)?.score ?? -1;
+      open.sort((a, b) => score(b) - score(a));
+    }
     if (
       showSavedContext &&
       session.reviewFilter !== "saved" &&
@@ -399,27 +409,30 @@ export function MatchingWorkspace({
       savedRows.length
     ) {
       const seen = new Set(open.map((p) => p.proposalId));
-      return [...open, ...savedRows.filter((p) => !seen.has(p.proposalId))];
+      return [...open, ...savedRows.filter((p) => !seen.has(p.proposalId) &&
+        (!query || p.mapKey.some(v => tupleCell(v).toLocaleLowerCase().includes(query))))];
     }
     return open;
-  }, [session.proposals, session.reviewFilter, showSavedContext, savedRows]);
+  }, [session.proposals, session.reviewFilter, showSavedContext, savedRows, reviewSearch, reviewSort]);
   const isReadyView = session.reviewFilter === "ready";
   const isSavedView = session.reviewFilter === "saved";
-  const skipPaging = isReadyView || isSavedView || showSavedContext;
+  const skipPaging = isReadyView || isSavedView || (showSavedContext && savedRows.length > 0 && session.reviewFilter !== "all");
+  const pageIndex = Math.min(session.pageIndex, Math.max(0, Math.ceil(filtered.length / session.pageSize) - 1));
   // Ready / Saved / compare mode: one scroll so tiers aren't split across pages.
   const page = useMemo(
     () =>
       skipPaging
         ? filtered
-        : pageSlice(filtered, session.pageIndex, session.pageSize),
-    [filtered, skipPaging, session.pageIndex, session.pageSize],
+        : pageSlice(filtered, pageIndex, session.pageSize),
+    [filtered, skipPaging, pageIndex, session.pageSize],
   );
   const counters = matchingCounters(session);
   const selected =
-    session.proposals.find((p) => p.proposalId === session.selectedProposalId) ??
+    page.find((p) => p.proposalId === session.selectedProposalId) ??
     page[0] ??
     null;
-  const bulkPreview = previewBulkConfirm(session, bulkScope, selectedIds);
+  const bulkPreview = previewBulkConfirm(session, "selection", bulkScope === "selection" ? selectedIds
+    : (bulkScope === "page" ? page : filtered).map(p => p.proposalId));
   const reviewedPreview = previewReviewedConfirm(session, selectedIds);
   const finalDiff = useMemo(() => buildFinalDiff(session), [session]);
   const finalSum = summarizeFinalDiff(finalDiff);
@@ -429,9 +442,12 @@ export function MatchingWorkspace({
       ? "selected rows only"
       : session.scope === "cohort"
         ? "this group of rows (not the whole table)"
-        : "all rows";
+        : isBasic ? "Full input scope · bounded unmatched keys" : "all rows";
 
   function patchPlan(patch: Partial<MatchingPlanDraft>, semantic: boolean) {
+    if (semantic && session.hasUnsavedDecisions && !window.confirm(
+      "Changing the matching plan clears current suggestions and draft decisions. Continue?",
+    )) return;
     const base = session.plan ?? plan;
     const next: MatchingPlanDraft = {
       ...base,
@@ -447,6 +463,10 @@ export function MatchingWorkspace({
     }
     // ADR-0051: a semantic edit explicitly invalidates producer evidence and
     // decisions (both producers). Disclosure alone never re-runs.
+    if (semantic && isBasic && (session.basicRun ?? session.advancedRun)) {
+      setCommitMsg("Plan changed: previous evidence and draft decisions were cleared. Find matches explicitly to run the edited plan.");
+      setSelectedIds([]);
+    }
     onChange(semantic && isBasic ? invalidateRunOnPlanChange({ ...session, plan: next }) : { ...session, plan: next });
   }
 
@@ -466,7 +486,9 @@ export function MatchingWorkspace({
         const target = planRunsAdvanced
           ? { ...session, matchingMode: "advanced" as const }
           : { ...session, matchingMode: "basic" as const };
-        onChange(await onRunBasic(target)); setSelectedIds([]); setShowFinal(false);
+        const next = await onRunBasic(target);
+        if (!mounted.current || latestSession.current.id !== session.id || latestSession.current.commitLifecycle?.status === "stale") return;
+        onChange(next); setSelectedIds([]); setShowFinal(false);
       }
       catch (e) { setError(String(e)); }
       finally { setBusy(false); }
@@ -549,7 +571,9 @@ export function MatchingWorkspace({
       setBusy(true); setError(null);
       try {
         const reply = await llmChat([{ role: "system", content: sent.prompt }, { role: "user", content: session.instructionText.slice(0, 4000) }]);
+        if (!mounted.current || latestSession.current.basicRun?.id !== runId || latestSession.current.commitLifecycle) return;
         if (reply.content.length > 12000) throw new Error("Oversized model response rejected as a whole.");
+        if (!parseSuggestedBatchTuplePairs(reply.content, sent).length) throw new Error("No valid complete tuple pairs in the model response. No alternatives were added.");
         onMergeBasicLlm(runId, reply.content, sent);
         setCommitMsg(`LLM alternatives merged without confirming decisions. Prompt omitted ${sent.omittedSources} source groups and ${sent.omittedCandidates} candidate slots.`);
       } catch (e) { setError(String(e)); }
@@ -700,6 +724,7 @@ export function MatchingWorkspace({
   }
 
   async function onCommit() {
+    if (session.commitLifecycle) return;
     setBusy(true);
     setError(null);
     setCommitMsg(null);
@@ -1215,6 +1240,16 @@ export function MatchingWorkspace({
             ) : (
               <>
                 <div className="flex shrink-0 flex-wrap gap-1 border-b border-slate-800 px-2 py-1.5">
+                  <input type="search" aria-label="Search source keys" value={reviewSearch}
+                    placeholder="Search source keys"
+                    className="min-w-0 rounded border border-slate-700 bg-slate-950 px-2 text-[11px]"
+                    onChange={e => { setReviewSearch(e.target.value); onChange({ ...session, pageIndex: 0 }); }} />
+                  <select aria-label="Sort source keys" value={reviewSort}
+                    className="rounded border border-slate-700 bg-slate-950 text-[11px]"
+                    onChange={e => { setReviewSort(e.target.value as "workflow" | "score"); onChange({ ...session, pageIndex: 0 }); }}>
+                    <option value="workflow">Workflow order</option>
+                    <option value="score">Suggested score: high to low (unknown last)</option>
+                  </select>
                   {FILTERS.map((f) => {
                     const n = filterProposals(session.proposals, f.id).length;
                     return (
@@ -1256,28 +1291,30 @@ export function MatchingWorkspace({
                     <div className="ml-auto flex items-center gap-1 text-[10px] text-slate-500">
                       <button
                         type="button"
-                        disabled={session.pageIndex <= 0}
+                        aria-label="Previous source page"
+                        disabled={pageIndex <= 0}
                         onClick={() =>
                           onChange({
                             ...session,
-                            pageIndex: Math.max(0, session.pageIndex - 1),
+                            pageIndex: Math.max(0, pageIndex - 1),
                           })
                         }
                         className="rounded border border-slate-700 px-1.5 disabled:opacity-30"
                       >
                         ‹
                       </button>
-                      page {session.pageIndex + 1}
+                      page {pageIndex + 1}
                       <button
                         type="button"
+                        aria-label="Next source page"
                         disabled={
-                          (session.pageIndex + 1) * session.pageSize >=
+                          (pageIndex + 1) * session.pageSize >=
                           filtered.length
                         }
                         onClick={() =>
                           onChange({
                             ...session,
-                            pageIndex: session.pageIndex + 1,
+                            pageIndex: pageIndex + 1,
                           })
                         }
                         className="rounded border border-slate-700 px-1.5 disabled:opacity-30"
@@ -1468,6 +1505,7 @@ export function MatchingWorkspace({
                   </div>
 
                   <DetailPanel
+                    key={(session.basicRun ?? session.advancedRun)?.id ?? session.id}
                     session={session}
                     proposal={selected}
                     onChange={onChange}
@@ -1563,7 +1601,7 @@ export function MatchingWorkspace({
                     <button
                       type="button"
                       data-testid="matching-save"
-                      disabled={busy || !!originRefusal || !session.hasUnsavedDecisions}
+                      disabled={busy || !!session.commitLifecycle || !!originRefusal || !session.hasUnsavedDecisions}
                       title={originRefusal ?? undefined}
                       onClick={() => void onCommit()}
                       className="ml-auto rounded border border-amber-600/70 bg-amber-500/15 px-3 py-1 text-[12px] font-medium text-amber-50 disabled:opacity-40"
@@ -1659,6 +1697,13 @@ function DetailPanel({
   onChange: (s: MatchingTabSession) => void;
   onAgreeReplace: (token: string) => void;
 }) {
+  // Temporary picks are per-source and per-run (the parent keys this panel by run).
+  // They never mutate producer suggestions or the authoritative decision ledger.
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [candidateSearch, setCandidateSearch] = useState("");
+  const [candidatePage, setCandidatePage] = useState(0);
+  const [candidateSort, setCandidateSort] = useState<"score" | "values">("score");
+  useEffect(() => { setCandidateSearch(""); setCandidatePage(0); }, [proposal?.proposalId]);
   if (!proposal) {
     return (
       <aside className="w-72 shrink-0 border-l border-slate-800 p-2 text-[11px] text-slate-500">
@@ -1674,6 +1719,41 @@ function DetailPanel({
     (r) => mapKeyToken(r.fromParts) === mapKeyToken(proposal.mapKey),
   );
   const tier = proposalCascadeTier(proposal);
+  const decision = session.decisions.find(d => d.proposalId === proposal.proposalId);
+  const decided = candidateById(session, decision?.candidateId);
+  const picked = candidateById(session, picks[proposal.proposalId]);
+  const sourceBlock = tupleMappingBlock(proposal.mapKey);
+  // Basic can browse its full verified retrieved universe, not just its shortlist.
+  // Advanced remains constrained to this source's Host-verified shortlist: no
+  // fabricated registration or new out-of-shortlist lookup authority.
+  const universe = session.basicRun ? session.candidates : alts.filter(c => !!c);
+  const query = candidateSearch.toLocaleLowerCase();
+  const candidates = universe.filter(c => [...c.outputValues, ...Object.values(c.fields)]
+    .some(v => tupleCell(v).toLocaleLowerCase().includes(query))).sort((a, b) => {
+      if (candidateSort === "values") return mapKeyToken(a.outputValues).localeCompare(mapKeyToken(b.outputValues));
+      const score = (id: string) => proposal.edges?.find(e => e.candidateId === id)?.score ?? -1;
+      return score(b.candidateId) - score(a.candidateId);
+    });
+  const pageCount = Math.max(1, Math.ceil(candidates.length / 20));
+  const visiblePage = Math.min(candidatePage, pageCount - 1);
+  const candidateLocked = !!session.commitLifecycle || proposal.state === "saved" || proposal.state === "stale";
+
+  function confirmPicked() {
+    if (!proposal || !picked || candidateLocked || sourceBlock || tupleMappingBlock(picked.outputValues)) return;
+    // Register a manual Basic alternative from the already retrieved universe
+    // only on explicit confirmation. Scores stay Host-owned or unknown.
+    const next = session.basicRun ? { ...session, proposals: session.proposals.map(p => {
+      if (p.proposalId !== proposal.proposalId) return p;
+      const edges = [...(p.edges ?? [])];
+      const index = edges.findIndex(e => e.candidateId === picked.candidateId);
+      const edge = index < 0 ? { candidateId: picked.candidateId, metric: "join_tuple_similarity" as const,
+        score: null, fieldScores: picked.outputValues.map(() => null), origins: [] } : edges[index]!;
+      const manual = { ...edge, origins: [...new Set([...edge.origins, "manual" as const])] };
+      if (index < 0) edges.push(manual); else edges[index] = manual;
+      return { ...p, edges, alternativeCandidateIds: [...new Set([...p.alternativeCandidateIds, picked.candidateId])] };
+    }) } : session;
+    onChange(applyDecision(next, proposal.proposalId, "choose_alternative", picked.candidateId));
+  }
 
   return (
     <aside
@@ -1711,6 +1791,16 @@ function DetailPanel({
         This key covers {proposal.affectedSourceRows} source row(s)
         {proposal.searchIncomplete ? " · search was cut off" : ""}
       </div>
+      {decision && <section aria-label="Current draft decision" className="rounded border border-teal-800 p-2">
+        <p>{stateLabel(proposal.state)}{decided ? ` → ${decided.outputValues.map(tupleCell).join(" · ")}` : ""}</p>
+        <button type="button" disabled={candidateLocked} onClick={() => {
+          setPicks(current => { const next = { ...current }; delete next[proposal.proposalId]; return next; });
+          const decisions = session.decisions.filter(d => d.proposalId !== proposal.proposalId);
+          onChange({ ...session, decisions, hasUnsavedDecisions: decisions.length > 0,
+            proposals: session.proposals.map(p => p.proposalId === proposal.proposalId
+              ? { ...p, state: p.suggestionState ?? "proposed", userTouched: true } : p) });
+        }}>Undo decision</button>
+      </section>}
       <div className="rounded border border-slate-800 bg-slate-950/50 px-2 py-1 text-[10px] text-slate-300">
         {proposalEvidenceSummary(proposal)}
       </div>
@@ -1762,10 +1852,46 @@ function DetailPanel({
         })}
       </section>}
 
+      {(session.basicRun ?? session.advancedRun) && <details>
+        <summary>Search other records</summary>
+        <section aria-label="Manual right search" className="space-y-2">
+          <p>{session.basicRun ? "Search all retrieved RIGHT tuples only, not the full dataset."
+            : "Search this source's verified Advanced shortlist only. Additional live lookups are unavailable."}</p>
+          <input type="search" aria-label="Search right candidates" placeholder="Search all fields"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1"
+            value={candidateSearch} onChange={e => { setCandidateSearch(e.target.value); setCandidatePage(0); }} />
+          <select aria-label="Sort right candidates" value={candidateSort}
+            className="w-full rounded border border-slate-700 bg-slate-950"
+            onChange={e => { setCandidateSort(e.target.value as "score" | "values"); setCandidatePage(0); }}>
+            <option value="score">Score: high to low (unknown last)</option>
+            <option value="values">Tuple values</option>
+          </select>
+          <p>{candidates.length} retrieved matches · page {visiblePage + 1}/{pageCount}</p>
+          {!candidates.length && <p>No retrieved right tuples match this search.</p>}
+          {candidates.slice(visiblePage * 20, (visiblePage + 1) * 20).map(c => {
+            const edge = proposal.edges?.find(e => e.candidateId === c.candidateId);
+            const block = tupleMappingBlock(c.outputValues);
+            return <label key={c.candidateId} className="block rounded border border-slate-700 p-1">
+              <input type="radio" name={`candidate-${proposal.proposalId}`} checked={picked?.candidateId === c.candidateId}
+                disabled={candidateLocked || !!decision} onChange={() => setPicks({ ...picks, [proposal.proposalId]: c.candidateId })} />
+              {c.outputValues.map(tupleCell).join(" · ")}
+              <span className="block">{edge?.metric ?? "unknown metric"} · mean {edge?.score == null ? "unknown" : `${(edge.score * 100).toFixed(1)}%`} · {c.occurrences ?? "unknown"} target rows</span>
+              {(c.occurrences ?? 0) > 1 && <span className="block text-amber-200">Repeated target tuple: the JOIN may multiply rows.</span>}
+              {block && <span className="block text-amber-200">{block}</span>}
+            </label>;
+          })}
+          <button type="button" disabled={visiblePage === 0} onClick={() => setCandidatePage(visiblePage - 1)}>Previous records</button>
+          <button type="button" disabled={visiblePage + 1 >= pageCount} onClick={() => setCandidatePage(visiblePage + 1)}>Next records</button>
+          {picked && <p>Selected (not confirmed): {picked.outputValues.map(tupleCell).join(" · ")}</p>}
+          <button type="button" disabled={!picked || candidateLocked || !!decision || !!sourceBlock || !!tupleMappingBlock(picked.outputValues)}
+            onClick={confirmPicked}>Confirm selected candidate</button>
+        </section>
+      </details>}
+
       <div className="flex flex-wrap gap-1">
         <button
           type="button"
-          disabled={!proposed || ((session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(proposed.outputValues))) || !!session.commitLifecycle}
+           disabled={!proposed || !!decision || ((session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(proposed.outputValues))) || !!session.commitLifecycle}
           onClick={() =>
             onChange(
               applyDecision(
@@ -1786,7 +1912,7 @@ function DetailPanel({
               key={a.candidateId}
               type="button"
               data-testid={`matching-choose-${a.targetId}`}
-              disabled={!!session.commitLifecycle || (!!(session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(a.outputValues)))}
+              disabled={!!decision || !!session.commitLifecycle || (!!(session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(a.outputValues)))}
               onClick={() =>
                 onChange(
                   applyDecision(

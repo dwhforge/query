@@ -2,6 +2,10 @@
 
 ## Status
 
+Amended 2026-11-15 by [ADR-0051](0051-unified-matching-workspace.md): batch
+confirmation is hosted by the existing Matching tab, not the Lens. The atomic
+Mapping + Apply intent survives; single-source Suggest Right remains modal.
+
 **Accepted** (2026-11-07) — implemented; contract merged to
 `openspec/specs/join-lens-in-place-confirm/`.
 

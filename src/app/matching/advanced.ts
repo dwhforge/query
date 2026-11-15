@@ -23,8 +23,11 @@ import type {
 } from "../../lib/bridge";
 import type { TupleBatchCommitReceipt } from "../../lib/joinLensBatchCommit";
 import { MATCHING_CAPS } from "../../lib/matchingCaps";
+import { confirmTupleMapping } from "../../lib/joinLensConfirm";
 import type { JoinNavigationTarget } from "../queryNavigation";
 import { installMatchingRetrieval, type TrialEnrichment } from "./runTrial";
+import { matchingReceiptOwned, reconcileBasicContext } from "./basic";
+import { matchingSaveRevision } from "./persistSave";
 import type {
   MatchingCandidateView,
   MatchingPlanDraft,
@@ -38,6 +41,12 @@ import { mapKeyToken, requireStringTuple } from "./types";
  * confirmation. Unknown evidence stays unknown. */
 export function sessionRun(session: MatchingTabSession): { id: string; evidenceRevision: number } | undefined {
   return session.advancedRun ?? session.basicRun;
+}
+
+/** Local-only async ownership token; never expose definition-bearing revisions. */
+function advancedReviewRevision(session: MatchingTabSession): string {
+  const run = sessionRun(session);
+  return JSON.stringify([matchingSaveRevision(session), session.scope, session.joinBinding, run?.id, run?.evidenceRevision]);
 }
 
 /** Advanced plan is usable when it retains the original ordered JOIN
@@ -60,7 +69,7 @@ export function advancedCandidateId(runId: string, targetId: string): string {
 function buildEnrichment(snapshot: MatchingJoinSnapshot): TrialEnrichment {
   const sourceValuesByKey: TrialEnrichment["sourceValuesByKey"] = {};
   for (const row of snapshot.acquisition.sourceRows) {
-    sourceValuesByKey[row.mapKey.join("\0")] = { ...row.fields };
+    sourceValuesByKey[mapKeyToken(row.mapKey)] = { ...row.fields };
   }
   const targetByTargetId: TrialEnrichment["targetByTargetId"] = {};
   for (const row of snapshot.acquisition.targetRows) {
@@ -106,9 +115,9 @@ export function adaptAdvancedSnapshot(
   const installed = installMatchingRetrieval(session, snapshot.retrieval, buildEnrichment(snapshot));
   const complete = snapshot.acquisition.complete;
   const totalRight = snapshot.acquisition.targetRows.length;
-  const sourceRowsByKey = new Map(snapshot.acquisition.sourceRows.map((r) => [r.mapKey.join("\0"), r] as const));
+  const sourceRowsByKey = new Map(snapshot.acquisition.sourceRows.map((r) => [mapKeyToken(r.mapKey), r] as const));
   const proposals: MatchingProposalView[] = installed.proposals.map((p) => {
-    const src = sourceRowsByKey.get(p.mapKey.join("\0"));
+    const src = sourceRowsByKey.get(mapKeyToken(p.mapKey));
     const scored = p.edges?.length ?? 0;
     // The Host shortlist reports the proposed candidate separately from its
     // alternatives. The shared ledger requires the proposed candidate to be
@@ -186,11 +195,6 @@ export type AdvancedExecutionContext = {
 };
 
 function advancedPlanToWire(plan: MatchingPlanDraft, targetRef: string) {
-  // Advanced acquisition is a bounded SQL GROUP BY over the pre-JOIN left: it has
-  // its own bounded scope (full = all bounded keys, selected = one exact key via
-  // sourceParts). The Lens display cohort label is not a SQL scope, so the only
-  // supported plan scopes here are "full" (cohort/full map to it) and "selected".
-  const wireScope: "full" | "selected" = plan.scope === "selected" ? "selected" : "full";
   return {
     sourceRef: plan.sourceRef,
     targetRef,
@@ -200,7 +204,7 @@ function advancedPlanToWire(plan: MatchingPlanDraft, targetRef: string) {
     normalization: [...plan.normalization],
     outputs: [...plan.outputs],
     ambiguity: plan.ambiguity,
-    scope: wireScope,
+    scope: plan.scope,
     semanticRevision: plan.semanticRevision,
     uiRevision: plan.uiRevision,
   };
@@ -231,8 +235,14 @@ export async function runAdvancedMatching(
   const b = session.joinBinding, plan = session.plan;
   if (!advancedPlanCompatible(session) || !plan) throw new Error("Advanced requires a confirmed plan that retains the original JOIN keys/outputs.");
   if (!ctx.isContextCurrent(session)) throw new Error("Original JOIN context changed. Reopen Find Matches.");
+  if (session.commitLifecycle?.status === "pending" || session.commitLifecycle?.status === "stale") throw new Error("Matching review is locked or stale. Reopen Find Matches.");
   if (session.hasUnsavedDecisions) throw new Error("Review decisions are still dirty. Undo or finish this review before re-running the plan.");
-  const scope: "unmatched" | "all" = plan.scope === "selected" ? "unmatched" : "all";
+  // Neither a cohort definition nor an immutable selected source tuple is captured
+  // by this session. Never reinterpret either label as all/unmatched source keys.
+  if (session.scope !== "full" || plan.scope !== "full") {
+    throw new Error("Advanced selected/cohort scope is unsupported: no exact selected tuple or cohort is bound to this session. No rows were acquired; full scope was not substituted.");
+  }
+  const revision = advancedReviewRevision(session);
   const { runId, evidenceRevision } = advancedRunIdentity(session);
   const request: MatchingAcquireJoinArgs = {
     workspace: ctx.execution.workspace, connections: ctx.execution.connections, sources: ctx.execution.sources,
@@ -242,12 +252,20 @@ export async function runAdvancedMatching(
     queryId: b!.hostQueryId, joinIndex: b!.joinStepIndex, sessionId: session.id,
     runId, evidenceRevision,
     plan: advancedPlanToWire(plan, ctx.targetRef),
-    mode: "trial", scope, allowExpand: true, llmBudgetRemaining: MATCHING_CAPS.maxLlmCallsPerRun,
+    mode: "trial", scope: "all", allowExpand: true, llmBudgetRemaining: MATCHING_CAPS.maxLlmCallsPerRun,
   };
   const snapshot = await ctx.acquire(request);
   const latest = ctx.latest();
-  if (!latest || latest.generation !== session.generation || latest.hasUnsavedDecisions || !ctx.isContextCurrent(latest)) {
+  if (!latest || advancedReviewRevision(latest) !== revision
+    || latest.commitLifecycle?.status === "pending" || latest.commitLifecycle?.status === "stale"
+    || latest.hasUnsavedDecisions || !ctx.isContextCurrent(latest)) {
     throw new Error("Matching context changed while retrieving. No evidence was installed.");
+  }
+  if (snapshot.sessionId !== session.id || snapshot.runId !== runId || snapshot.evidenceRevision !== evidenceRevision
+    || snapshot.plan.semanticRevision !== plan.semanticRevision || snapshot.plan.scope !== plan.scope
+    || snapshot.acquisition.queryId !== b!.hostQueryId || snapshot.acquisition.joinIndex !== b!.joinStepIndex
+    || snapshot.acquisition.scope !== request.scope) {
+    throw new Error("Advanced retrieval returned evidence for a different session, run or scope. No evidence was installed.");
   }
   return adaptAdvancedSnapshot(latest, snapshot);
 }
@@ -307,23 +325,10 @@ export function reconcileAdvancedContext(
   fingerprint: string,
   ownReceipt?: TupleBatchCommitReceipt,
 ): MatchingTabSession {
-  const b = session.joinBinding;
-  if (!b || !session.advancedRun) return session;
-  if (session.commitLifecycle?.status === "stale") return session;
-  const permitted =
-    session.commitLifecycle?.status === "pending" &&
-    ownReceipt?.matchingSessionId === session.id &&
-    ownReceipt?.matchingRunId === session.advancedRun.id &&
-    ownReceipt?.projectIdentity === b.projectIdentity;
-  if (
-    identity === b.projectIdentity &&
-    fingerprint === (permitted ? ownReceipt!.contextFingerprint : b.contextFingerprint)
-  )
-    return session;
-  return invalidateAdvancedOnJoinChange(
-    session,
-    "Original JOIN context changed. Advanced draft retained for inspection only; re-run the confirmed plan to review current data.",
-  );
+  // This also guards an acknowledged summary after its producer run is cleared.
+  // Preserve stale evidence for inspection, just as the App's shared reconciler
+  // does; returning to the old definition must not restore write authority.
+  return reconcileBasicContext(session, identity, fingerprint, ownReceipt);
 }
 
 /** Collect Advanced decisions eligible for the atomic verified write. Reuse the
@@ -333,7 +338,10 @@ export function collectAdvancedDecisions(
 ): { error: string } | { sourceParts: string[]; outputValues: string[]; candidateId: string }[] {
   const binding = session.joinBinding;
   const run = session.advancedRun;
+  if (session.commitLifecycle?.status === "stale") return { error: "Stale Matching review cannot be written. Reopen Find Matches." };
   if (!binding || !run || !session.plan) return { error: "Missing original JOIN run or advanced session." };
+  if (session.scope !== "full" || session.plan.scope !== "full" || run.snapshot.plan.scope !== "full")
+    return { error: "Advanced selected/cohort scope is unsupported. Retrieve and review an explicitly full-scope session before writing." };
   const result: { sourceParts: string[]; outputValues: string[]; candidateId: string }[] = [];
   const seen = new Set<string>();
   for (const d of session.decisions) {
@@ -393,6 +401,7 @@ export async function commitAdvancedMatching(
   const selections = collectAdvancedDecisions(session);
   if ("error" in selections) return refused(selections.error);
   if (!selections.length) return refused("Confirm at least one complete tuple first.");
+  const revision = advancedReviewRevision(session);
   // Mark pending so the shared UI freezes this session during the write.
   // The App applies this via onChange before awaiting (see App wiring).
   // Verification reacquires with the FROZEN acquisition input (the snapshot's
@@ -414,13 +423,19 @@ export async function commitAdvancedMatching(
     verification: { expectedSemanticRevision: snapshot.plan.semanticRevision, expectedSnapshot: snapshot,
       decisions: selections.map((d) => ({ candidateId: d.candidateId, sourceParts: d.sourceParts, outputValues: d.outputValues, runId: run.id, evidenceRevision: run.evidenceRevision })) } });
   const latest = ctx.latest();
-  if (!latest || !ctx.isContextCurrent(latest) || verified.sessionId !== session.id || verified.runId !== run.id
-    || verified.evidenceRevision !== run.evidenceRevision || verified.materialized.length !== selections.length)
+  if (!latest || advancedReviewRevision(latest) !== revision || latest.commitLifecycle?.status !== "pending"
+    || latest.commitLifecycle.runId !== run.id || !ctx.isContextCurrent(latest) || verified.sessionId !== session.id || verified.runId !== run.id
+    || verified.evidenceRevision !== run.evidenceRevision || verified.materialized.length !== selections.length
+    || selections.some(d => verified.materialized.filter(v => v.candidateId === d.candidateId
+      && mapKeyToken(v.sourceParts) === mapKeyToken(d.sourceParts)
+      && mapKeyToken(v.outputValues) === mapKeyToken(d.outputValues)).length !== 1))
     return refused("Context changed during live verification. Draft retained.");
   const written = await ctx.write(latest, verified.materialized.map((v) => ({ sourceParts: v.sourceParts, outputValues: v.outputValues })));
   if (written.result !== "applied" || !written.receipt) return { status: written.result === "error" ? "error" : "refused", message: written.message };
   const after = ctx.latest();
   if (!after) return refused("Matching session was closed before acknowledgement. Inspect the project.");
+  if (advancedReviewRevision(after) !== revision)
+    return refused("Matching review changed before acknowledgement. Inspect the project; the current draft was not cleared.");
   const acknowledged = acknowledgeAdvancedReceipt(after, written.receipt, ctx.identity(), ctx.fingerprint(), ctx.navigationTarget());
   if ("error" in acknowledged) return refused(acknowledged.error);
   return { status: "saved", message: `Applied ${written.receipt.appliedCount} complete tuple mappings. Save the project file separately.`, session: acknowledged };
@@ -441,8 +456,7 @@ export function acknowledgeAdvancedReceipt(
   if (
     !b ||
     !run ||
-    session.commitLifecycle?.status !== "pending" ||
-    session.commitLifecycle.runId !== run.id ||
+    !matchingReceiptOwned(session, receipt) ||
     receipt.matchingSessionId !== session.id ||
     receipt.matchingRunId !== run.id ||
     receipt.projectIdentity !== b.projectIdentity ||
@@ -496,12 +510,22 @@ export function advancedHighConfidenceIds(
   if (!session.advancedRun || session.commitLifecycle) return [];
   const ids: string[] = [];
   for (const p of session.proposals) {
-    if (p.searchIncomplete) continue;
+    if (p.searchIncomplete || p.userTouched || session.decisions.some(d => mapKeyToken(d.mapKey) === mapKeyToken(p.mapKey))) continue;
+    const candidate = session.candidates.find(c => c.candidateId === p.proposedCandidateId);
+    const binding = session.joinBinding;
+    if (!binding || !candidate || p.runId !== session.advancedRun.id || candidate.runId !== p.runId
+      || p.semanticPlanRevision !== session.plan?.semanticRevision
+      || p.evidenceRevision !== session.advancedRun.evidenceRevision || candidate.evidenceRevision !== p.evidenceRevision
+      || "error" in confirmTupleMapping([...binding.leftOn], [...binding.rightOn], p.mapKey, candidate.outputValues)) continue;
     const cov = p.coverage;
     if (!cov) continue;
     if (cov.rightTruncated) continue;
     if (cov.competitorsUnknown > 0) continue;
     if (cov.competitorsScored < 1) continue;
+    if ((p.edges ?? []).some(e => e.score === null || !Number.isFinite(e.score)
+      || e.score < 0 || e.score > 1 || e.origins.some(o => o === "manual" || o === "llm"))) continue;
+    const best = [...(p.edges ?? [])].sort((a, b) => (b.score ?? -1) - (a.score ?? -1))[0];
+    if (best?.candidateId !== candidate.candidateId) continue;
     const scores = (p.edges ?? [])
       .map((e) => e.score)
       .filter((s): s is number => s !== null)

@@ -2,6 +2,10 @@
 
 ## Status
 
+Current batch location: [ADR-0051](0051-unified-matching-workspace.md) hosts full
+ordered JOIN-tuple review in the existing Matching tab. Legacy manual Mapping
+and Rust scalar/composite compatibility do not introduce a second batch UI.
+
 **Accepted** — OpenSpec merged under `openspec/specs/keymap-composite-*`
 
 Amended 2026-11-14 by [ADR-0050](0050-unified-batch-tuple-matching.md): §4's

@@ -657,6 +657,22 @@ export function joinKeyFuzzySuggest(
   });
 }
 
+/** ADR-0051: Host re-acquires Basic inputs and materializes exact selected tuples. */
+export function matchingVerifyJoinTuples(args: {
+  workspace: Workspace; hostQueryId: string; joinStepIndex: number;
+  connections: ConnectionDef[]; sources: SourceDef[]; projectRef?: ProjectRefContext;
+  verification: {
+    sessionId: string; runId: string; semanticRevision: number; expectedSemanticRevision: number;
+    evidenceRevision: number; expectedReport: JoinTupleReport;
+    decisions: { candidateId: string; sourceParts: (string | null)[]; outputValues: (string | null)[];
+      runId: string; evidenceRevision: number }[];
+  };
+}): Promise<{ sessionId: string; runId: string; evidenceRevision: number;
+  materialized: { sourceParts: string[]; outputValues: string[]; candidateId: string }[] }> {
+  const { projectRef, ...rest } = args;
+  return invoke("matching_verify_join_tuples", { ...rest, tuple: {}, ...refArgs(projectRef) });
+}
+
 export type LlmConfig = {
   base_url: string;
   model: string;
@@ -1358,7 +1374,47 @@ export type MatchingRetrieveResult = {
     localUniverse: number;
   };
   llmCandidateIdsByProposal: Record<string, string[]>;
+  candidateScoresByProposal?: Record<string, { candidateId: string; score: number | null; fieldScores: (number | null)[] }[]>;
 };
+
+/** ADR-0051: stateless, bounded live JOIN acquisition; never persisted. */
+export type MatchingJoinSnapshot = {
+  sessionId: string;
+  runId: string;
+  evidenceRevision: number;
+  plan: import("../app/matching/types").MatchingPlanDraft;
+  acquisition: {
+    queryId: string; joinIndex: number; rightQueryId: string; scope: "unmatched" | "all";
+    sourceFields: string[]; targetFields: string[];
+    sourceRows: { mapKey: string[]; fields: Record<string, string>; affectedSourceRows: number }[];
+    targetRows: { targetId: string; identityValues: string[]; fields: Record<string, string>; outputValues: string[]; occurrences: number }[];
+    sourceKeyCap: number; targetRowCap: number; targetOccurrences: number; complete: boolean;
+  };
+  retrieval: MatchingRetrieveResult;
+};
+
+export type MatchingAcquireJoinArgs = ProjectRefContext & {
+  workspace: Workspace; connections: ConnectionDef[]; sources: SourceDef[];
+  queryId: string; joinIndex: number; sessionId: string; runId: string; evidenceRevision: number;
+  plan: MatchingJoinSnapshot["plan"]; mode: "trial" | "mass"; scope: "unmatched" | "all";
+  sourceParts?: string[]; allowExpand: boolean; llmBudgetRemaining: number;
+};
+export type MatchingJoinVerifyDecision = {
+  candidateId: string; sourceParts: string[]; outputValues: string[]; runId: string; evidenceRevision: number;
+};
+export type MatchingJoinVerified = {
+  sessionId: string; runId: string; evidenceRevision: number;
+  materialized: { sourceParts: string[]; outputValues: string[]; candidateId: string }[];
+};
+
+export function matchingAcquireJoin(args: MatchingAcquireJoinArgs): Promise<MatchingJoinSnapshot> {
+  return invoke("matching_acquire_join", args);
+}
+export function matchingVerifyJoinCandidates(args: MatchingAcquireJoinArgs & {
+  verification: { expectedSemanticRevision: number; expectedSnapshot: MatchingJoinSnapshot; decisions: MatchingJoinVerifyDecision[] };
+}): Promise<MatchingJoinVerified> {
+  return invoke("matching_verify_join_candidates", args);
+}
 
 export function matchingRetrieve(
   args: Record<string, unknown>,

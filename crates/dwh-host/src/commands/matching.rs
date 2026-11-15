@@ -15,6 +15,143 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
 
+/// Narrow live JOIN RPC. All execution context is typed, like join_fuzzy.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MatchingAcquireJoinArgs {
+    pub workspace: dwh_pipeline::Workspace,
+    #[serde(default)]
+    pub connections: Vec<dwh_pipeline::ConnectionDef>,
+    #[serde(default)]
+    pub sources: Vec<dwh_pipeline::SourceDef>,
+    #[serde(default)]
+    pub project_file: Option<String>,
+    #[serde(default)]
+    pub project_uid: Option<String>,
+    #[serde(default)]
+    pub references: Vec<dwh_pipeline::ProjectReference>,
+    #[serde(default)]
+    pub connection_bindings: Vec<dwh_pipeline::ConnectionBinding>,
+    #[serde(default)]
+    pub execution_engine: Option<dwh_pipeline::WarehouseDialect>,
+    pub query_id: String,
+    pub join_index: usize,
+    pub session_id: String,
+    pub run_id: String,
+    pub evidence_revision: u64,
+    pub plan: MatchingPlan,
+    pub mode: dwh_engine::MatchingRunMode,
+    pub scope: dwh_engine::MatchingJoinScope,
+    #[serde(default)]
+    pub source_parts: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_expand: bool,
+    #[serde(default = "live_llm_budget")]
+    pub llm_budget_remaining: u32,
+    #[serde(default)]
+    pub verification: Option<MatchingJoinVerification>,
+}
+
+fn live_llm_budget() -> u32 { MAX_LLM_CALLS_PER_RUN as u32 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MatchingJoinSnapshot {
+    pub session_id: String,
+    pub run_id: String,
+    pub evidence_revision: u64,
+    pub plan: MatchingPlan,
+    pub acquisition: dwh_engine::MatchingJoinAcquisition,
+    pub retrieval: dwh_engine::MatchingRetrieveResult,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MatchingJoinVerification {
+    pub expected_semantic_revision: u64,
+    pub expected_snapshot: MatchingJoinSnapshot,
+    pub decisions: Vec<MatchingJoinVerifyDecision>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MatchingJoinVerifyDecision {
+    pub candidate_id: String,
+    pub source_parts: Vec<String>,
+    pub output_values: Vec<String>,
+    pub run_id: String,
+    pub evidence_revision: u64,
+}
+
+pub fn matching_acquire_join(
+    db: &dwh_engine::DbSession, args: &MatchingAcquireJoinArgs,
+    workspace: &dwh_pipeline::Workspace, sources: &[dwh_pipeline::SourceDef],
+) -> Result<MatchingJoinSnapshot, RpcError> {
+    if args.session_id.trim().is_empty() || !args.run_id.starts_with(&format!("{}:", args.session_id))
+        || args.run_id.len() <= args.session_id.len() + 1 || args.evidence_revision == 0 {
+        return Err(HostError::validation("Invalid live session/run/evidence identity").into());
+    }
+    let acquisition = dwh_engine::acquire_matching_join(db, workspace, &args.connections, sources,
+        &args.query_id, args.join_index, &args.plan, args.mode, args.scope, args.source_parts.as_deref())?;
+    let retrieval = matching_retrieve(MatchingRetrieveRequest {
+        session_id: args.session_id.clone(), plan: args.plan.clone(), mode: args.mode,
+        source_rows: acquisition.source_rows.clone(), target_rows: acquisition.retrieval_targets(),
+        llm_budget_remaining: args.llm_budget_remaining, allow_expand: args.allow_expand,
+    }).map_err(|e| RpcError::from(HostError::validation(e)))?;
+    Ok(MatchingJoinSnapshot { session_id: args.session_id.clone(), run_id: args.run_id.clone(),
+        evidence_revision: args.evidence_revision, plan: args.plan.clone(), acquisition, retrieval })
+}
+
+/// Stateless freshness check, NOT a durable registry or proof of historical receipt.
+/// Reacquisition + contextual reranking validates actual current selected evidence.
+pub fn matching_verify_join_candidates(
+    fresh: MatchingJoinSnapshot, verification: MatchingJoinVerification,
+) -> Result<Value, RpcError> {
+    let stale = || RpcError::from(HostError::validation("Stale, forged or changed Advanced evidence; refresh and review again"));
+    let expected = verification.expected_snapshot;
+    let stable_metrics = |result: &dwh_engine::MatchingRetrieveResult| -> Result<Value, RpcError> {
+        let mut metrics = serde_json::to_value(&result.metrics).map_err(|_| stale())?;
+        metrics.as_object_mut().ok_or_else(stale)?.remove("durationMs");
+        Ok(metrics)
+    };
+    // UI-only plan revisions do not change semantics.
+    let mut expected_plan = expected.plan.clone();
+    expected_plan.ui_revision = fresh.plan.ui_revision;
+    if verification.decisions.is_empty() || verification.expected_semantic_revision != fresh.plan.semantic_revision
+        || expected_plan != fresh.plan || expected.session_id != fresh.session_id
+        || expected.run_id != fresh.run_id || expected.evidence_revision != fresh.evidence_revision
+        || serde_json::to_value(&expected.acquisition).map_err(|_| stale())? != serde_json::to_value(&fresh.acquisition).map_err(|_| stale())?
+        || expected.retrieval.candidates != fresh.retrieval.candidates
+        || expected.retrieval.proposals != fresh.retrieval.proposals
+        || expected.retrieval.candidate_scores_by_proposal != fresh.retrieval.candidate_scores_by_proposal
+        || expected.retrieval.llm_candidate_ids_by_proposal != fresh.retrieval.llm_candidate_ids_by_proposal
+        || stable_metrics(&expected.retrieval)? != stable_metrics(&fresh.retrieval)? {
+        return Err(stale());
+    }
+    let mut seen = HashSet::new();
+    let mut materialized = Vec::new();
+    for decision in verification.decisions {
+        let source = fresh.acquisition.source_rows.iter().find(|r| r.map_key == decision.source_parts).ok_or_else(stale)?;
+        let candidate = fresh.retrieval.candidates.iter().find(|c| c.candidate_id == decision.candidate_id).ok_or_else(stale)?;
+        let target = fresh.acquisition.target_rows.iter().find(|r| r.target_id == candidate.target_id).ok_or_else(stale)?;
+        let proposal = fresh.retrieval.proposals.iter().find(|p| p.map_key == source.map_key).ok_or_else(stale)?;
+        // This first live slice permits only the actual contextual shortlist.
+        // Additional manual lookups outside it are explicitly unavailable here.
+        let scored = fresh.retrieval.candidate_scores_by_proposal.get(&proposal.proposal_id)
+            .map_or(false, |scores| scores.iter().any(|s| s.candidate_id == candidate.candidate_id));
+        if !scored || decision.output_values != target.output_values
+            || decision.run_id != fresh.run_id || decision.evidence_revision != fresh.evidence_revision
+            || !seen.insert(source.map_key.clone())
+            || source.map_key.iter().chain(target.output_values.iter()).any(|s| s.trim().is_empty()) {
+            return Err(stale());
+        }
+        materialized.push(serde_json::json!({"sourceParts": source.map_key,
+            "outputValues": target.output_values, "candidateId": candidate.candidate_id}));
+    }
+    Ok(serde_json::json!({"sessionId": fresh.session_id, "runId": fresh.run_id,
+        "evidenceRevision": fresh.evidence_revision, "materialized": materialized}))
+}
+
 fn map_err(e: MatchingValidateError) -> RpcError {
     HostError::validation(format!("{}: {}", e.code(), e.message())).into()
 }

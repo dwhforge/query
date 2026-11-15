@@ -31,7 +31,7 @@ import type { Workspace } from "../../types/pipeline";
   assert.equal(plan.sourceRef, "pos_invoices");
   assert.deepEqual(plan.mapKeyFields, ["vendor_label", "region"]);
   assert.deepEqual(plan.targetIdentityFields, ["vendor_id"]);
-  assert.deepEqual(plan.outputs, ["vendor_id"]);
+  assert.deepEqual(plan.outputs, ["vendor_name", "region"]);
   assert.deepEqual(plan.comparisons, [
     {
       sourceField: "vendor_label",

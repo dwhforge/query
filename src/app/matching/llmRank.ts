@@ -58,9 +58,9 @@ export function buildMatchingRankUserPrompt(args: {
   instruction: string;
   proposals: {
     proposalId: string;
-    mapKey: string[];
-    sourceValues: Record<string, string>;
-    candidates: { targetId: string; fields: Record<string, string> }[];
+    mapKey: (string | null)[];
+    sourceValues: Record<string, string | null>;
+    candidates: { targetId: string; fields: Record<string, string | null> }[];
   }[];
 }): string {
   const body = {
@@ -174,9 +174,9 @@ export type LlmRankProgress = {
 
 type RankPromptRow = {
   proposalId: string;
-  mapKey: string[];
-  sourceValues: Record<string, string>;
-  candidates: { targetId: string; fields: Record<string, string> }[];
+  mapKey: (string | null)[];
+  sourceValues: Record<string, string | null>;
+  candidates: { targetId: string; fields: Record<string, string | null> }[];
 };
 
 async function rankOneBatch(

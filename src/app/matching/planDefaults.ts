@@ -69,7 +69,7 @@ export function buildLensMatchingPlan(args: {
     targetIdentityFields: identity,
     comparisons,
     normalization: ["trim", "casefold"],
-    outputs: [...identity],
+    outputs: [...args.rightOn],
     ambiguity: "leave_for_manual",
     scope: args.scope,
     semanticRevision: 1,

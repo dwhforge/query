@@ -8,6 +8,7 @@ mod join_fuzzy;
 mod join_lens;
 mod join_near_miss;
 mod join_prepare;
+mod matching_join;
 mod key_map_delta;
 mod key_map_fuzzy;
 mod key_map_write;
@@ -53,12 +54,13 @@ pub use join_prepare::{
     JoinPrepareProgress, JoinPrepareResult, JoinPrepareStatus,
 };
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
+pub use matching_join::{acquire_matching_join, MatchingJoinAcquisition, MatchingJoinScope, MatchingJoinTarget};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use matching::{
     accept_draft_decision, bulk_saveable, classify_merge, commit_blocked_reason,
     detect_proposal_conflicts, gate_commit_write_policy, map_key_token, map_row_exists,
     matching_retrieve, plan_bulk_confirm, validate_llm_intake, LlmIntakeRequest,
-    MatchingAmbiguityPolicy, MatchingCandidate, MatchingDecision, MatchingDecisionKind,
+    MatchingAmbiguityPolicy, MatchingCandidate, MatchingCandidateScore, MatchingDecision, MatchingDecisionKind,
     MatchingFieldRole, MatchingMapRowSnapshot, MatchingMergeItem, MatchingMergeOutcome,
     MatchingPlan, MatchingPlanComparison, MatchingProposal, MatchingProposalState,
     MatchingProvenance, MatchingRetrieveRequest, MatchingRetrieveResult, MatchingRunMetrics,

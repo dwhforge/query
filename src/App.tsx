@@ -184,6 +184,11 @@ import { MappingCreateWizard } from "./components/MappingCreateWizard";
 import { importWriteRefusal } from "./lib/pgImport";
 import { planBatchTupleMapping, planTupleMapping } from "./app/keyMap/tupleMapping";
 import { batchContextFingerprint } from "./lib/joinLensBatch";
+import { joinKeyFuzzySuggest, matchingVerifyJoinTuples, matchingAcquireJoin, matchingVerifyJoinCandidates } from "./lib/bridge";
+import { acknowledgeBasicReceipt, adaptBasicReport, basicPlanCompatible, collectBasicDecisions, mergeBasicLlm, reconcileBasicContext } from "./app/matching/basic";
+import { commitAdvancedMatching as commitAdvancedMatchingSvc, reconcileAdvancedContext, runAdvancedMatching as runAdvancedMatchingSvc } from "./app/matching/advanced";
+import type { MatchingSaveResult } from "./app/matching/persistSave";
+import { matchingWriteRefusal } from "./app/matching/executionPolicy";
 import type { TupleBatchCommitResult, TupleBatchCommitReceipt } from "./lib/joinLensBatchCommit";
 import type { LensTupleMapping } from "./lib/joinLensConfirm";
 import {
@@ -798,6 +803,7 @@ function App() {
   const matchingDirty = matchingTabs.some((t) => t.hasUnsavedDecisions);
   const matchingTabsLiveRef = useRef(matchingTabs);
   matchingTabsLiveRef.current = matchingTabs;
+  const matchingOwnReceipts = useRef(new Map<string, TupleBatchCommitReceipt>());
 
   useEffect(() => {
     if (!matchingDirty) return;
@@ -1571,6 +1577,29 @@ function App() {
     );
   }
 
+  // Sticky invalidation prevents ABA resurrection. Permit only the exact private
+  // reducer transition owned by this pending Matching commit, even before callback.
+  useEffect(() => {
+    const identity = `${project.project_uid}:${querySessionGenerationRef.current}`;
+    const pending = pendingTupleBatchRef.current;
+    for (const tab of matchingTabsLiveRef.current) {
+      if (tab.commitLifecycle?.status !== "pending") matchingOwnReceipts.current.delete(tab.id);
+      else if (pending?.project === project && pending.receipt.projectIdentity === identity
+        && pending.receipt.matchingSessionId === tab.id && pending.receipt.matchingRunId === tab.commitLifecycle.runId) matchingOwnReceipts.current.set(tab.id, pending.receipt);
+    }
+    const ownReceipts = new Map(matchingOwnReceipts.current);
+    setMatchingTabs(tabs => tabs.map(tab => {
+      const b = tab.joinBinding;
+      if (!b || tab.commitLifecycle?.status === "stale") return tab;
+      const own = tab.commitLifecycle?.status === "pending" ? ownReceipts.get(tab.id) : undefined;
+      const index = own?.joinStepIndex ?? b.joinStepIndex;
+      const fingerprint = batchContextFingerprint(project.workspace, b.hostQueryId, index,
+        project.connections ?? [], project.sources ?? [], projectRefContext(project));
+      const reconciled = reconcileBasicContext(tab, identity, fingerprint, own);
+      return tab.advancedRun ? reconcileAdvancedContext(reconciled, identity, fingerprint, own) : reconciled;
+    }));
+  }, [project]);
+
   // Batch callbacks acknowledge the atomic reducer commit, not preparation.
   useEffect(() => {
     const receipt = projectBag.tupleBatchResult;
@@ -1583,7 +1612,7 @@ function App() {
       setTupleBatchAppliedContext(pending.receipt);
       patchKeyMapTab(pending.map.id, { map: pending.map, joinCtx: pending.joinCtx });
       const index = resolveJoinStepFromCtx(projectBag.project.workspace, pending.joinCtx);
-      if (index != null) setSelectedStepIndex(index);
+      if (index != null && !pending.receipt.matchingSessionId) setSelectedStepIndex(index);
       setExportMsg(`Applied ${pending.count} accepted tuple${pending.count === 1 ? "" : "s"} · ${pending.map.id}`);
     }
     // Resolve only after reducer acknowledgement, never inside a React updater.
@@ -3291,20 +3320,25 @@ function App() {
     selections: LensTupleMapping[],
     contextFingerprint: string,
     projectIdentity: string,
+    originalTarget?: NonNullable<typeof joinLensTarget>,
+    matchingOwner?: { sessionId: string; runId: string },
   ): Promise<TupleBatchCommitResult> {
     if (pendingTupleBatchRef.current) return { status: "error", error: "A tuple batch is already being applied. Wait for it to finish." };
     const atStart = projectRef.current;
     if (projectIdentity !== `${atStart.project_uid}:${querySessionGenerationRef.current}`) {
       return { status: "error", error: "Project session changed. Reopen Find Matches and review the batch again." };
     }
-    const target = joinLensTargetLiveRef.current;
+    const target = originalTarget ?? joinLensTargetLiveRef.current;
     if (!target) return { status: "error", error: "Join changed. Reopen Find Matches before applying a batch." };
-    if (frozenRemapLiveRef.current) return { status: "error", error: "Full tuple Mapping is unavailable in frozen Check remap. Open the live Join." };
+    if (!originalTarget && frozenRemapLiveRef.current) return { status: "error", error: "Full tuple Mapping is unavailable in frozen Check remap. Open the live Join." };
+    if (!originalTarget && mapWritesInFlight.current) return { status: "error", error: "A Mapping write is already in progress." };
     const fingerprint = batchContextFingerprint(atStart.workspace, target.hostQueryId, target.joinStepIndex,
       atStart.connections ?? [], atStart.sources ?? [], projectRefContext(atStart));
     if (fingerprint !== contextFingerprint) return { status: "error", error: "Join context changed. Reopen Find Matches and review the batch again." };
     const planned = planBatchTupleMapping(atStart.workspace, { ...target, probeSide: "left" }, selections);
     if ("error" in planned) return { status: "error", error: planned.error };
+    const writeRefusal = importWriteRefusal(atStart.pg_import, planned.map.id);
+    if (writeRefusal) return { status: "error", error: writeRefusal };
     const session = keyMapTabsLiveRef.current.find((tab) => tab.map.id === planned.map.id);
     if (session?.localDraft || session?.saveInFlight || session?.saveApi?.isSaving()
       || dirtyDeltaHasChanges(session?.dirtyDelta ?? null)) {
@@ -3323,6 +3357,7 @@ function App() {
     const resultingIndex = resolveJoinStepFromCtx(folded.project.workspace, planned.joinCtx);
     if (resultingIndex == null) return { status: "error", error: "Cannot locate the resulting Join. No batch changes were applied." };
     const receipt: TupleBatchCommitReceipt = { status: "applied", appliedCount: selections.length,
+      matchingSessionId: matchingOwner?.sessionId, matchingRunId: matchingOwner?.runId,
       projectIdentity: `${atStart.project_uid}:${querySessionGenerationRef.current}`, joinStepIndex: resultingIndex,
       contextFingerprint: batchContextFingerprint(folded.project.workspace, target.hostQueryId, resultingIndex,
         folded.project.connections ?? [], folded.project.sources ?? [], projectRefContext(folded.project)) };
@@ -3331,6 +3366,148 @@ function App() {
         joinCtx: planned.joinCtx, count: selections.length };
       dispatchProject({ type: "commit_tuple_batch", expectedProject: atStart, project: folded.project, token });
     });
+  }
+
+  function basicContextCurrent(session: MatchingTabSession) {
+    const current = projectRef.current, b = session.joinBinding;
+    return !!b && session.commitLifecycle?.status !== "stale" &&
+      b.projectIdentity === `${current.project_uid}:${querySessionGenerationRef.current}` &&
+      b.contextFingerprint === batchContextFingerprint(current.workspace, b.hostQueryId, b.joinStepIndex,
+        current.connections ?? [], current.sources ?? [], projectRefContext(current));
+  }
+
+  async function runBasicMatching(session: MatchingTabSession): Promise<MatchingTabSession> {
+    if (!basicPlanCompatible(session)) throw new Error("Advanced live matching is unavailable. Basic requires the original JOIN key plan.");
+    if (!basicContextCurrent(session) || !session.joinBinding || matchingWriteRefusal(session)) throw new Error("Original JOIN context changed. Reopen Find Matches.");
+    if (session.hasUnsavedDecisions) throw new Error("Review decisions are still dirty. Undo or finish this review before retrieving again.");
+    const before = projectRef.current, generation = session.generation, b = session.joinBinding;
+    const result = await joinKeyFuzzySuggest(before.workspace, b.hostQueryId, b.joinStepIndex,
+      before.connections ?? [], before.sources ?? [], null, null, projectRefContext(before), {});
+    const latest = matchingTabsLiveRef.current.find(s => s.id === session.id);
+    if (!latest || latest.generation !== generation || latest.hasUnsavedDecisions || before !== projectRef.current || !basicContextCurrent(latest)) {
+      throw new Error("Matching context changed while retrieving. No evidence was installed.");
+    }
+    if (!result.tuple_report) throw new Error("The Host did not return complete tuple evidence.");
+    return adaptBasicReport(latest, result.tuple_report, `${session.id}:${generation + 1}:${Date.now()}`, result.score_cutoff);
+  }
+
+  async function commitBasicMatching(session: MatchingTabSession): Promise<MatchingSaveResult> {
+    const refused = (message: string): MatchingSaveResult => ({ status: "refused", message });
+    if (matchingWriteRefusal(session)) return refused(matchingWriteRefusal(session)!);
+    if (mapWritesInFlight.current || !basicContextCurrent(session) || !session.basicRun || !session.joinBinding || !session.plan) return refused("Original JOIN or write context is unavailable. Reopen Find Matches.");
+    const selections = collectBasicDecisions(session);
+    if ("error" in selections) return refused(selections.error);
+    if (!selections.length) return refused("Confirm at least one complete tuple first.");
+    const before = projectRef.current, b = session.joinBinding, run = session.basicRun;
+    const revision = matchingSaveRevision(session);
+    const latestCurrent = () => {
+      const latest = matchingTabsLiveRef.current.find(s => s.id === session.id);
+      return latest && matchingSaveRevision(latest) === revision && basicContextCurrent(latest);
+    };
+    mapWritesInFlight.current++;
+    try {
+      const verified = await matchingVerifyJoinTuples({ workspace: before.workspace, hostQueryId: b.hostQueryId,
+        joinStepIndex: b.joinStepIndex, connections: before.connections ?? [], sources: before.sources ?? [], projectRef: projectRefContext(before),
+        verification: { sessionId: session.id, runId: run.id, semanticRevision: session.plan.semanticRevision,
+          expectedSemanticRevision: session.plan.semanticRevision, evidenceRevision: run.evidenceRevision, expectedReport: run.report,
+          decisions: session.decisions.filter(d => ["confirm_proposed", "choose_alternative"].includes(d.kind)).map(d => ({
+            candidateId: d.candidateId!, sourceParts: d.mapKey,
+            outputValues: session.candidates.find(c => c.candidateId === d.candidateId)!.outputValues,
+            runId: d.expectedRunId!, evidenceRevision: d.expectedEvidenceRevision!,
+          })) } });
+      if (before !== projectRef.current || !latestCurrent() || verified.sessionId !== session.id || verified.runId !== run.id
+        || verified.evidenceRevision !== run.evidenceRevision || verified.materialized.length !== selections.length) return refused("Context changed during live verification. Draft retained.");
+      const step = before.workspace.queries.find(q => q.id === b.hostQueryId)?.steps[b.joinStepIndex];
+      if (step?.type !== "Join") return refused("Original JOIN is no longer available.");
+      const materialized = verified.materialized.map(v => ({ leftOn: [...b.leftOn], rightOn: [...b.rightOn],
+        fromParts: v.sourceParts, outputValues: v.outputValues }));
+      const result = await handleAcceptTuplesFromLens(materialized, b.contextFingerprint, b.projectIdentity, {
+        hostQueryId: b.hostQueryId, joinStepIndex: b.joinStepIndex, rightQueryId: b.rightQueryId,
+        leftOn: [...b.leftOn], rightOn: [...b.rightOn], joinType: step.payload.join_type,
+      }, { sessionId: session.id, runId: run.id });
+      if (result.status === "error") return { status: "error", message: result.error };
+      const current = projectRef.current;
+      const latest = matchingTabsLiveRef.current.find(s => s.id === session.id);
+      if (!latest) return refused("Matching session was closed before acknowledgement. Inspect the project.");
+      const acknowledged = acknowledgeBasicReceipt(latest, result, `${current.project_uid}:${querySessionGenerationRef.current}`,
+        batchContextFingerprint(current.workspace, b.hostQueryId, result.joinStepIndex, current.connections ?? [], current.sources ?? [], projectRefContext(current)),
+        captureJoinTarget(current, b.hostQueryId, result.joinStepIndex));
+      if ("error" in acknowledged) return refused(acknowledged.error);
+      return { status: "saved", message: `Applied ${result.appliedCount} complete tuple mappings. Save the project file separately.`, session: acknowledged };
+    } catch (e) { return { status: "error", message: String(e) }; }
+    finally { mapWritesInFlight.current--; }
+  }
+
+  /** ADR-0051: the App only supplies the current execution context; all Advanced
+   * run/commit logic lives in app/matching/advanced.ts (mirrors Basic). */
+  function advancedExecutionContext() {
+    const before = projectRef.current;
+    return {
+      workspace: before.workspace, connections: before.connections ?? [], sources: before.sources ?? [],
+      projectFile: before.root_path, projectUid: before.project_uid, references: before.references ?? [],
+      connectionBindings: before.connection_bindings ?? [], executionEngine: before.execution_engine ?? before.target_dialect,
+    };
+  }
+
+  async function runAdvancedMatching(session: MatchingTabSession): Promise<MatchingTabSession> {
+    const b = session.joinBinding;
+    if (!b || !session.plan) throw new Error("Advanced requires a confirmed plan.");
+    const before = projectRef.current;
+    const step = before.workspace.queries.find(q => q.id === b.hostQueryId)?.steps[b.joinStepIndex];
+    if (step?.type !== "Join" || targetKey(step.payload.right_query_id) !== b.rightQueryId) throw new Error("Original JOIN is no longer available. Reopen Find Matches.");
+    return runAdvancedMatchingSvc(session, {
+      execution: advancedExecutionContext(),
+      targetRef: b.rightQueryId,
+      isContextCurrent: (s) => basicContextCurrent(s) && !matchingWriteRefusal(s),
+      acquire: matchingAcquireJoin,
+      latest: () => matchingTabsLiveRef.current.find(s => s.id === session.id),
+    });
+  }
+
+  async function commitAdvancedMatching(session: MatchingTabSession): Promise<MatchingSaveResult> {
+    if (matchingWriteRefusal(session)) return { status: "refused", message: matchingWriteRefusal(session)! };
+    if (mapWritesInFlight.current) return { status: "refused", message: "A Mapping write is already in progress. Retry after it finishes." };
+    const b = session.joinBinding;
+    if (!b) return { status: "refused", message: "Original JOIN is unavailable. Reopen Find Matches." };
+    const revision = matchingSaveRevision(session);
+    mapWritesInFlight.current++;
+    try {
+      let appliedReceipt: TupleBatchCommitReceipt | null = null;
+      const outcome = await commitAdvancedMatchingSvc(session, {
+        execution: advancedExecutionContext(),
+        isContextCurrent: (s) => {
+          const latest = matchingTabsLiveRef.current.find(x => x.id === s.id);
+          return !!latest && matchingSaveRevision(latest) === revision && basicContextCurrent(latest);
+        },
+        verify: matchingVerifyJoinCandidates,
+        write: async (s, materialized) => {
+          const step = projectRef.current.workspace.queries.find(q => q.id === b.hostQueryId)?.steps[b.joinStepIndex];
+          if (step?.type !== "Join") return { result: "error" as const, message: "Original JOIN is no longer available." };
+          const result = await handleAcceptTuplesFromLens(materialized.map(v => ({ leftOn: [...b.leftOn], rightOn: [...b.rightOn], fromParts: v.sourceParts, outputValues: v.outputValues })),
+            b.contextFingerprint, b.projectIdentity,
+            { hostQueryId: b.hostQueryId, joinStepIndex: b.joinStepIndex, rightQueryId: b.rightQueryId,
+              leftOn: [...b.leftOn], rightOn: [...b.rightOn], joinType: step.payload.join_type },
+            { sessionId: s.id, runId: s.advancedRun!.id });
+          if (result.status === "error") return { result: "error" as const, message: result.error };
+          appliedReceipt = result;
+          return { result: "applied" as const, message: `Applied ${result.appliedCount}`, receipt: result };
+        },
+        identity: () => `${projectRef.current.project_uid}:${querySessionGenerationRef.current}`,
+        fingerprint: () => {
+          const c = projectRef.current;
+          const index = appliedReceipt?.joinStepIndex ?? b.joinStepIndex;
+          return batchContextFingerprint(c.workspace, b.hostQueryId, index, c.connections ?? [], c.sources ?? [], projectRefContext(c));
+        },
+        navigationTarget: () => {
+          const index = appliedReceipt?.joinStepIndex ?? b.joinStepIndex;
+          return captureJoinTarget(projectRef.current, b.hostQueryId, index);
+        },
+        latest: () => matchingTabsLiveRef.current.find(s => s.id === session.id),
+      });
+      if (outcome.status === "saved" && outcome.session) return outcome as MatchingSaveResult;
+      return { status: outcome.status === "error" ? "error" : "refused", message: outcome.message, session: outcome.session };
+    } catch (e) { return { status: "error", message: String(e) }; }
+    finally { mapWritesInFlight.current--; }
   }
 
   function handleMapKeyFromLens(
@@ -5269,6 +5446,9 @@ function App() {
                 >
                   <MatchingWorkspace
                     session={tab}
+                    onRunBasic={tab.joinBinding ? (s) => (s.matchingMode === "advanced" ? runAdvancedMatching(s) : runBasicMatching(s)) : undefined}
+                    onMergeBasicLlm={tab.joinBinding ? (runId, text, sent) =>
+                      setMatchingTabs(tabs => tabs.map(s => s.id === tab.id ? mergeBasicLlm(s, runId, text, sent) : s)) : undefined}
                     onOpenDemo={() => {
                       const demo = createMatchingDemoSession();
                       openMatchingSession(demo);
@@ -5296,6 +5476,8 @@ function App() {
                         : null
                     }
                     onSaveToMap={async ({ session }) => {
+                      if (session.joinBinding && session.advancedRun) return commitAdvancedMatching(session);
+                      if (session.joinBinding) return commitBasicMatching(session);
                       if (mapWritesInFlight.current) {
                         return { status: "refused", message: "A Mapping write is already in progress. Retry after it finishes." };
                       }
@@ -5766,6 +5948,13 @@ function App() {
                             id,
                             title,
                             entry: "lens",
+                            joinBinding: {
+                              projectIdentity: `${project.project_uid}:${querySessionGenerationRef.current}`,
+                              contextFingerprint: batchContextFingerprint(project.workspace, opts.hostQueryId, opts.joinStepIndex,
+                                connections, sources, projectRefContext(project)),
+                              hostQueryId: opts.hostQueryId, joinStepIndex: opts.joinStepIndex,
+                              leftOn: [...opts.leftOn], rightOn: [...opts.rightOn], rightQueryId: opts.rightQueryId,
+                            },
                             scope: opts.scope,
                             lensCtx: {
                               hostQueryId: opts.hostQueryId,

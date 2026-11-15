@@ -216,7 +216,7 @@ fn result_from_handle(h: &JoinPrepareHandle, reused: bool) -> JoinPrepareResult 
 }
 
 /// Workspace with host truncated to steps before Join — deps of right Join are dropped.
-fn left_prefix_workspace(
+pub(crate) fn left_prefix_workspace(
     workspace: &Workspace,
     host_query_id: &str,
     join_step_index: usize,

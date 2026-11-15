@@ -1,7 +1,12 @@
 /** Pure Matching review / bulk / counters (ADR-0044). */
 import { proposalCascadeTier } from "./cascade";
+import { basicHighConfidenceIds } from "./basic";
+import { advancedHighConfidenceIds, sessionRun } from "./advanced";
+import { BATCH_AMBIGUITY_GAP, BATCH_HIGH_CONFIDENCE_SCORE } from "../../lib/joinLensBatch";
+import { confirmTupleMapping } from "../../lib/joinLensConfirm";
 import {
   mapKeyToken,
+  requireStringTuple,
   type MatchingCandidateView,
   type MatchingDecisionKind,
   type MatchingDecisionView,
@@ -183,6 +188,14 @@ export function previewBulkConfirm(
   const seenKeys = new Set<string>();
 
   for (const p of pool) {
+    if (session.basicRun && !basicHighConfidenceIds(session).includes(p.proposalId)) {
+      excluded.push({ proposalId: p.proposalId, reason: "not_high_confidence" });
+      continue;
+    }
+    if (session.advancedRun && !advancedHighConfidenceIds(session, BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP).includes(p.proposalId)) {
+      excluded.push({ proposalId: p.proposalId, reason: "not_high_confidence" });
+      continue;
+    }
     if (BULK_EXCLUDE_STATES.includes(p.state)) {
       excluded.push({ proposalId: p.proposalId, reason: p.state });
       continue;
@@ -225,6 +238,32 @@ export function applyBulkConfirm(
   session: MatchingTabSession,
   preview: BulkConfirmPreview,
 ): MatchingTabSession {
+  if (session.advancedRun) {
+    const eligible = new Set(advancedHighConfidenceIds(session, BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP));
+    const token = `bulk:${Date.now()}:${session.decisions.length}`;
+    let next = session;
+    for (const id of preview.includedProposalIds) {
+      const p = next.proposals.find(p => p.proposalId === id);
+      if (!p || !eligible.has(id)) continue;
+      next = applyDecision(next, id, "confirm_proposed", p.proposedCandidateId);
+      next = { ...next, decisions: next.decisions.map(d => d.proposalId === id
+        ? { ...d, origin: "high_confidence_bulk", bulkToken: token } : d) };
+    }
+    return next;
+  }
+  if (session.basicRun) {
+    const eligible = new Set(basicHighConfidenceIds(session));
+    const token = `bulk:${Date.now()}:${session.decisions.length}`;
+    let next = session;
+    for (const id of preview.includedProposalIds) {
+      const p = next.proposals.find(p => p.proposalId === id);
+      if (!p || !eligible.has(id)) continue;
+      next = applyDecision(next, id, "confirm_proposed", p.proposedCandidateId);
+      next = { ...next, decisions: next.decisions.map(d => d.proposalId === id
+        ? { ...d, origin: "high_confidence_bulk", bulkToken: token } : d) };
+    }
+    return next;
+  }
   const included = new Set(preview.includedProposalIds);
   const decisions = [...session.decisions];
   const proposals = session.proposals.map((p) => {
@@ -261,6 +300,16 @@ export function applyDecision(
   const proposal = session.proposals.find((p) => p.proposalId === proposalId);
   if (!proposal) return session;
   if (proposal.state === "stale") return session;
+  const run = sessionRun(session);
+  if (run) {
+    if (session.commitLifecycle) return session;
+    if (kind === "confirm_proposed" || kind === "choose_alternative") {
+      const c = candidateById(session, candidateId);
+      if (!c || !proposal.alternativeCandidateIds.includes(c.candidateId)
+        || !session.joinBinding || "error" in confirmTupleMapping([...session.joinBinding.leftOn],
+          [...session.joinBinding.rightOn], proposal.mapKey, c.outputValues)) return session;
+    }
+  }
 
   const decision: MatchingDecisionView = {
     mapKey: proposal.mapKey,
@@ -268,6 +317,10 @@ export function applyDecision(
     candidateId,
     proposalId,
     expectedSemanticRevision: proposal.semanticPlanRevision,
+    expectedEvidenceRevision: proposal.evidenceRevision,
+    expectedRunId: proposal.runId,
+    revision: Math.max(0, ...session.decisions.map(d => d.revision ?? 0)) + 1,
+    origin: "review",
   };
   const decisions = session.decisions.filter(
     (d) => mapKeyToken(d.mapKey) !== mapKeyToken(proposal.mapKey),
@@ -288,10 +341,7 @@ export function applyDecision(
         ? {
             ...p,
             state,
-            proposedCandidateId:
-              kind === "choose_alternative" && candidateId
-                ? candidateId
-                : p.proposedCandidateId,
+            userTouched: true,
           }
         : p,
     ),
@@ -305,6 +355,60 @@ export function candidateById(
 ): MatchingCandidateView | undefined {
   if (!id) return undefined;
   return session.candidates.find((c) => c.candidateId === id);
+}
+
+/** JOIN-bound status is a read projection, never another authority for confirmation. */
+export function deriveMatchingReview(session: MatchingTabSession): MatchingTabSession {
+  if (!sessionRun(session)) return session;
+  return { ...session, proposals: session.proposals.map(p => {
+    const d = session.decisions.find(d => mapKeyToken(d.mapKey) === mapKeyToken(p.mapKey));
+    const stale = session.commitLifecycle?.status === "stale" || (d && (d.expectedRunId !== p.runId
+      || d.expectedEvidenceRevision !== p.evidenceRevision || d.expectedSemanticRevision !== session.plan?.semanticRevision));
+    const state: MatchingProposalState = stale ? "stale" : !d ? p.suggestionState ?? p.state
+      : ["confirm_proposed", "choose_alternative"].includes(d.kind) ? "confirmed_in_draft" : d.kind === "defer" ? "deferred" : "rejected";
+    return { ...p, state };
+  }) };
+}
+
+/** Undo only the latest bulk's unchanged entries. Touched evidence stays touched. */
+export function undoMatchingBulk(session: MatchingTabSession): MatchingTabSession {
+  if (session.commitLifecycle) return session;
+  const token = [...session.decisions].reverse().find(d => d.bulkToken)?.bulkToken;
+  if (!token) return session;
+  const decisions = session.decisions.filter(d => d.bulkToken !== token);
+  return deriveMatchingReview({ ...session, decisions, hasUnsavedDecisions: decisions.length > 0 });
+}
+
+/** Explicit reviewed bulk is not an automatic confidence assertion. */
+export function previewReviewedConfirm(session: MatchingTabSession, ids: string[]): BulkConfirmPreview {
+  const included: MatchingProposalView[] = [], excluded: BulkConfirmPreview["excluded"] = [];
+  for (const p of session.proposals.filter(p => ids.includes(p.proposalId))) {
+    const c = candidateById(session, p.proposedCandidateId), b = session.joinBinding, run = sessionRun(session);
+    let reason: string | null = null;
+    if (session.commitLifecycle || p.state === "stale" || p.state === "saved") reason = "stale_or_locked";
+    else if (session.decisions.some(d => mapKeyToken(d.mapKey) === mapKeyToken(p.mapKey))) reason = "already_decided";
+    else if (!c) reason = "no_suggested_candidate";
+    else if (session.proposals.filter(o => mapKeyToken(o.mapKey) === mapKeyToken(p.mapKey)).length !== 1) reason = "duplicate_key";
+    else if (run && (!b || p.runId !== run.id || c.runId !== run.id
+      || p.semanticPlanRevision !== session.plan?.semanticRevision || p.evidenceRevision !== c.evidenceRevision
+      || "error" in confirmTupleMapping([...b.leftOn], [...b.rightOn], p.mapKey, c.outputValues))) reason = "unsafe_or_stale_tuple";
+    if (reason) excluded.push({ proposalId: p.proposalId, reason }); else included.push(p);
+  }
+  return { scope: "selection", keyCount: included.length, affectedSourceRows: included.reduce((n, p) => n + p.affectedSourceRows, 0),
+    includedProposalIds: included.map(p => p.proposalId), excluded };
+}
+
+export function confirmReviewedSelection(session: MatchingTabSession, ids: string[]): MatchingTabSession {
+  if (session.commitLifecycle) return session;
+  const token = `reviewed:${Date.now()}:${session.decisions.length}`;
+  let next = session;
+  for (const id of previewReviewedConfirm(session, ids).includedProposalIds) {
+    const p = next.proposals.find(p => p.proposalId === id);
+    if (!p || !p.proposedCandidateId || next.decisions.some(d => mapKeyToken(d.mapKey) === mapKeyToken(p.mapKey))) continue;
+    next = applyDecision(next, id, "confirm_proposed", p.proposedCandidateId);
+    next = { ...next, decisions: next.decisions.map(d => d.proposalId === id ? { ...d, bulkToken: token, origin: "reviewed_bulk" } : d) };
+  }
+  return deriveMatchingReview(next);
 }
 
 export function buildFinalDiff(
@@ -348,7 +452,7 @@ export function buildFinalDiff(
       continue;
     }
     const old = live.get(token) ?? null;
-    if (old && old.join("\0") === cand.outputValues.join("\0")) {
+    if (old && mapKeyToken(old) === mapKeyToken(cand.outputValues)) {
       rows.push({
         mapKey: d.mapKey,
         kind: "noop",
@@ -433,10 +537,10 @@ export function materializedFromSession(session: MatchingTabSession): {
     const proposal = session.proposals.find((p) => p.proposalId === d.proposalId);
     if (!cand || !proposal) continue;
     out.push({
-      mapKey: d.mapKey,
+      mapKey: requireStringTuple(d.mapKey),
       candidateId: cand.candidateId,
       targetId: cand.targetId,
-      outputValues: cand.outputValues,
+      outputValues: requireStringTuple(cand.outputValues),
       proposalId: d.proposalId,
       affectedSourceRows: proposal.affectedSourceRows,
     });

@@ -4,7 +4,7 @@ import {
   buildFinalDiff,
   summarizeFinalDiff,
 } from "./reviewLogic";
-import type { MatchingPlanDraft, MatchingTabSession } from "./types";
+import { requireStringTuple, type MatchingPlanDraft, type MatchingTabSession } from "./types";
 
 function planToWire(plan: MatchingPlanDraft) {
   return {
@@ -111,7 +111,7 @@ export async function commitMatchingSession(
     decisions: materialized,
     baseline: session.mapBaseline,
     live: session.mapLive,
-    explicitReplaceKeys: session.explicitReplaceKeys.map((t) => t.split("\0")),
+    explicitReplaceKeys: session.explicitReplaceKeys.map((t) => requireStringTuple(JSON.parse(t))),
     writeAllowed: opts.writeAllowed,
     writeRefusalReason: opts.writeRefusalReason ?? null,
   });

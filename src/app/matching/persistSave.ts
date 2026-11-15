@@ -4,7 +4,7 @@ import { fromColumnsEff, fromPartsEff, outputColumnsEff, outputValuesEff } from 
 import type { KeyMapDef, KeyMapEntry } from "../../types/pipeline";
 import { commitMatchingSession } from "./commitSave";
 import { matchingWriteRefusal } from "./executionPolicy";
-import { mapKeyToken, type MatchingTabSession } from "./types";
+import { mapKeyToken, requireStringTuple, type MatchingTabSession } from "./types";
 
 export type MatchingSaveResult =
   | { status: "saved" | "no_changes"; message: string; session: MatchingTabSession }
@@ -117,7 +117,7 @@ export async function persistMatchingSession(
     if (!current()) return refused("Matching context changed. Retry with the current draft.");
     const keys = session.decisions
       .filter((d) => d.kind === "confirm_proposed" || d.kind === "choose_alternative")
-      .map((d) => d.mapKey);
+      .map((d) => requireStringTuple(d.mapKey));
     const prior = kind === "source" && keys.length
       ? await deps.readSource(map, keys) : map.entries;
     if (!current()) return { status: "conflict", message: "Mapping or Matching context changed while reading. Retry." };

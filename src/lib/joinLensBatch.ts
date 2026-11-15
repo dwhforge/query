@@ -10,7 +10,10 @@ import { tupleIdentity, type TupleParts } from "./joinLensTuple";
  */
 export function batchContextFingerprint(workspace: Workspace, hostQueryId: string, joinStepIndex: number,
   connections: ConnectionDef[], sources: SourceDef[], projectRef?: ProjectRefContext): string {
-  return JSON.stringify({ workspace, hostQueryId, joinStepIndex, connections, sources, projectRef }, (_key, value) =>
+  // Focus is navigation, not a definition revision. A Matching session remains
+  // bound to its original JOIN when the user inspects another query/step.
+  const { focus_query_id: _focus, ...definitions } = workspace;
+  return JSON.stringify({ workspace: definitions, hostQueryId, joinStepIndex, connections, sources, projectRef }, (_key, value) =>
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
 }

@@ -89,6 +89,7 @@ assert.ok(tupleBatchLlmPrompt(capped, tupleBatchProposals(capped, 0.85)).prompt.
 const ws = { focus_query_id: "q", queries: [], key_maps: [] } as unknown as Workspace;
 const fingerprint = (w = ws, c: ConnectionDef[] = [], s: SourceDef[] = [], ref?: ProjectRefContext) => batchContextFingerprint(w, "q", 1, c, s, ref);
 assert.equal(fingerprint(ws), fingerprint(JSON.parse(JSON.stringify(ws))));
+assert.equal(fingerprint(ws), fingerprint({ ...ws, focus_query_id: "other" }), "navigation does not invalidate definitions");
 assert.equal(fingerprint(ws), fingerprint({ key_maps: [], queries: [], focus_query_id: "q" } as unknown as Workspace));
 assert.notEqual(fingerprint(), batchContextFingerprint(ws, "q", 2, [], []));
 assert.notEqual(fingerprint(), batchContextFingerprint(ws, "other", 1, [], []));

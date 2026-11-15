@@ -897,6 +897,9 @@ struct JoinDiagArgs {
     /// Read-only full-tuple retrieval; absent preserves legacy Auto behavior.
     #[serde(default)]
     tuple: Option<dwh_engine::JoinTupleRequest>,
+    /// ADR-0051: bounded re-acquisition, not a caller-owned candidate registry.
+    #[serde(default)]
+    verification: Option<JoinTupleVerification>,
     #[serde(default)]
     project_file: Option<String>,
     #[serde(default)]
@@ -907,6 +910,56 @@ struct JoinDiagArgs {
     connection_bindings: Vec<ConnectionBinding>,
     #[serde(default)]
     execution_engine: Option<WarehouseDialect>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinTupleVerification {
+    session_id: String,
+    run_id: String,
+    semantic_revision: u64,
+    expected_semantic_revision: u64,
+    evidence_revision: u64,
+    expected_report: dwh_engine::JoinTupleReport,
+    decisions: Vec<JoinTupleVerifyDecision>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinTupleVerifyDecision {
+    candidate_id: String,
+    source_parts: Vec<Option<String>>,
+    output_values: Vec<Option<String>>,
+    run_id: String,
+    evidence_revision: u64,
+}
+
+fn verify_join_tuple_evidence(out: &JoinKeyFuzzySuggest, v: JoinTupleVerification) -> Result<Value, RpcError> {
+    let report = out.tuple_report.as_ref().ok_or_else(|| RpcError::from("Missing live tuple report".to_string()))?;
+    if v.session_id.is_empty() || !v.run_id.starts_with(&format!("{}:", v.session_id))
+        || v.semantic_revision == 0 || v.semantic_revision != v.expected_semantic_revision
+        || v.evidence_revision == 0 || v.decisions.is_empty()
+        || report != &v.expected_report {
+        return Err(RpcError::from("Stale or changed live tuple evidence; refresh and review again".to_string()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut materialized = Vec::new();
+    for d in v.decisions {
+        let source = report.sources.iter().find(|g| g.source.parts == d.source_parts);
+        let target = report.right_universe.iter().find(|r| r.parts == d.output_values);
+        let id: Value = serde_json::from_str(&d.candidate_id).map_err(|_| RpcError::from("Unknown candidate identity".to_string()))?;
+        if source.is_none() || target.is_none() || id != serde_json::json!([v.run_id, d.output_values])
+            || d.run_id != v.run_id || d.evidence_revision != v.evidence_revision
+            || !seen.insert(d.source_parts.clone()) || d.source_parts.iter().any(Option::is_none)
+            || d.output_values.iter().any(Option::is_none)
+            || d.source_parts.iter().chain(d.output_values.iter()).any(|p| p.as_ref().map_or(true, |s| s.trim().is_empty())) {
+            return Err(RpcError::from("Unknown, mutated, wrong-run or unsafe live tuple decision".to_string()));
+        }
+        materialized.push(serde_json::json!({"sourceParts": source.unwrap().source.parts,
+            "outputValues": target.unwrap().parts, "candidateId": d.candidate_id}));
+    }
+    Ok(serde_json::json!({"sessionId": v.session_id, "runId": v.run_id,
+        "evidenceRevision": v.evidence_revision, "materialized": materialized}))
 }
 
 #[derive(Deserialize)]
@@ -1463,6 +1516,9 @@ impl HostState {
                 | "explain_join_rows"
                 | "blame_unmatched_key"
                 | "join_key_fuzzy_suggest"
+                | "matching_verify_join_tuples"
+                | "matching_acquire_join"
+                | "matching_verify_join_candidates"
                 | "prepare_join_inputs"
                 | "preview_prepared_join_side"
                 | "install_dbt_venv"
@@ -2124,8 +2180,32 @@ impl HostState {
                 )?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
-            "join_key_fuzzy_suggest" => {
+            "matching_acquire_join" | "matching_verify_join_candidates" => {
+                let mut a: commands::matching::MatchingAcquireJoinArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                let verification = a.verification.take();
+                if (cmd == "matching_verify_join_candidates") != verification.is_some() {
+                    return Err(HostError::validation("Verification is required only for matching_verify_join_candidates").into());
+                }
+                let (ws, sources) = lower_focused(&a.workspace, &a.query_id, &a.sources, &a.connections,
+                    a.project_file.as_deref(), a.project_uid.as_deref(), &a.references,
+                    &a.connection_bindings, a.execution_engine)?;
+                let fresh = commands::matching::matching_acquire_join(&db, &a, &ws, &sources)?;
+                if let Some(v) = verification {
+                    commands::matching::matching_verify_join_candidates(fresh, v)
+                } else {
+                    serde_json::to_value(fresh).map_err(|e| RpcError::from(e.to_string()))
+                }
+            }
+            "join_key_fuzzy_suggest" | "matching_verify_join_tuples" => {
                 let a: JoinDiagArgs = serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                let verification = if cmd == "matching_verify_join_tuples" {
+                    if a.key_index.is_some() || a.composite_indices.is_some() || a.composite_fuzzy_slot.is_some()
+                        || a.tuple.as_ref().map_or(true, |t| t.source_parts.is_some()) {
+                        return Err(RpcError::from("Verification requires the complete Basic tuple acquisition".to_string()));
+                    }
+                    Some(a.verification.ok_or_else(|| RpcError::from("Missing live tuple verification".to_string()))?)
+                } else { None };
                 let conns = a.connections.unwrap_or_default();
                 let sources = a.sources.unwrap_or_default();
                 let (ws, sources) = lower_focused(
@@ -2151,6 +2231,7 @@ impl HostState {
                     a.composite_fuzzy_slot,
                     a.tuple,
                 )?;
+                if let Some(v) = verification { return verify_join_tuple_evidence(&out, v); }
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
             "key_map_fuzzy_suggest" => {

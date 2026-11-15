@@ -6,6 +6,26 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn real_basic_fractional_scores_survive_rpc_roundtrip() {
+    let root = std::env::temp_dir().join(format!("dwh-basic-wire-f64-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let left = root.join("left.csv"); let right = root.join("right.csv");
+    fs::write(&left, "company,country\nAcme Corporaton,United Kingdm\nBeacon Industris,United Stats\nZXQ legacy,ZZ\n").unwrap();
+    fs::write(&right, "legal_name,nation\nAcme Corporation,United Kingdom\nBeacon Industries,United States\nOrion Holdings,Canada\n").unwrap();
+    let host = HostState::new().unwrap();
+    let args = json!({"workspace":{"focus_query_id":"fact", "key_maps":[], "queries":[
+        {"id":"fact","name":"fact","steps":[{"type":"LoadCsv","payload":{"path":left}},
+            {"type":"Join","payload":{"right_query_id":"dim","join_type":"left","left_on":["company","country"],"right_on":["legal_name","nation"]}}]},
+        {"id":"dim","name":"dim","steps":[{"type":"LoadCsv","payload":{"path":right}}]}
+    ]}, "hostQueryId":"fact", "joinStepIndex":1, "tuple":{}});
+    let reply = host.dispatch("join_key_fuzzy_suggest", args).unwrap();
+    let original: JoinTupleReport = serde_json::from_value(reply["tuple_report"].clone()).unwrap();
+    let wire: JoinTupleReport = serde_json::from_str(&serde_json::to_string(&reply["tuple_report"]).unwrap()).unwrap();
+    assert_eq!(original, wire, "Host must preserve fractional score evidence through JSON; no epsilon changes to tuple validation");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn existing_suggest_wire_supports_full_tuples_and_preserves_legacy_auto() {
     let root = std::env::temp_dir().join(format!("dwh-tuple-wire-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
@@ -122,8 +142,52 @@ fn existing_suggest_wire_supports_full_tuples_and_preserves_legacy_auto() {
 
         let mut all_args = args.clone();
         all_args["tuple"] = json!({});
-        let all = host.dispatch("join_key_fuzzy_suggest", all_args).unwrap();
+        let all = host.dispatch("join_key_fuzzy_suggest", all_args.clone()).unwrap();
         assert_eq!(all["tuple_report"]["left_distinct_total"], 2);
+
+        // ADR-0051: direct API calls must re-acquire real tuples, not trust bodies.
+        let run_id = "session:run1";
+        let target = &report.right_universe[best.right_index].parts;
+        let mut verified_args = all_args.clone();
+        verified_args["verification"] = json!({"sessionId": "session", "runId": run_id,
+            "semanticRevision": 1, "expectedSemanticRevision": 1, "evidenceRevision": 1,
+            "expectedReport": all["tuple_report"], "decisions": [{
+                "candidateId": serde_json::to_string(&json!([run_id, target])).unwrap(),
+                "sourceParts": source, "outputValues": target, "runId": run_id, "evidenceRevision": 1
+            }]});
+        let verified = host.dispatch("matching_verify_join_tuples", verified_args.clone()).unwrap();
+        assert_eq!(verified["materialized"][0]["outputValues"], json!(target));
+        assert_eq!(args["workspace"], original, "verification is read-only");
+        // Exercise real RPC number decoding, not only in-memory serde Values.
+        let wire_args: Value = serde_json::from_str(&serde_json::to_string(&verified_args).unwrap()).unwrap();
+        assert!(host.dispatch("matching_verify_join_tuples", wire_args).is_ok());
+        let mut js_numbers = verified_args.clone();
+        for group in js_numbers["verification"]["expectedReport"]["sources"].as_array_mut().unwrap() {
+            for candidate in group["candidates"].as_array_mut().unwrap() {
+                if candidate["score"].as_f64() == Some(0.0) { candidate["score"] = json!(0); }
+                for score in candidate["field_scores"].as_array_mut().unwrap() {
+                    if score.as_f64() == Some(0.0) { *score = json!(0); }
+                    else if score.as_f64() == Some(1.0) { *score = json!(1); }
+                }
+            }
+        }
+        assert!(host.dispatch("matching_verify_join_tuples", js_numbers).is_ok());
+        for (field, value) in [
+            ("candidateId", json!("unknown")), ("outputValues", json!(vec!["invented"; width])),
+            ("sourceParts", json!(vec!["wrong-source"; width])), ("runId", json!("session:old")),
+            ("evidenceRevision", json!(2)),
+        ] {
+            let mut bad = verified_args.clone();
+            bad["verification"]["decisions"][0][field] = value;
+            assert!(host.dispatch("matching_verify_join_tuples", bad).is_err(), "must reject {field}");
+        }
+        for (field, value) in [("sessionId", json!("other-session")), ("expectedSemanticRevision", json!(2))] {
+            let mut bad = verified_args.clone(); bad["verification"][field] = value;
+            assert!(host.dispatch("matching_verify_join_tuples", bad).is_err());
+        }
+        let mut bad = verified_args.clone();
+        bad["verification"]["expectedReport"]["right_universe"][0]["parts"][0] = json!("mutated-evidence");
+        assert!(host.dispatch("matching_verify_join_tuples", bad).is_err());
 
         let mut per_column = args.clone();
         per_column["keyIndex"] = json!(0);

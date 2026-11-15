@@ -3,6 +3,18 @@
  * Plan editor → fixture/retrieval proposals → review → final diff → Save.
  */
 import { Fragment, useMemo, useRef, useState } from "react";
+import { llmChat } from "../lib/bridge";
+import { tupleCell, tupleMappingBlock } from "../lib/joinLensTuple";
+import { basicPrompt, basicHighConfidenceIds, basicPlanCompatible } from "../app/matching/basic";
+import {
+  advancedPlanCompatible,
+  advancedHighConfidenceIds,
+  advancedRankAllowlist,
+  invalidateRunOnPlanChange,
+} from "../app/matching/advanced";
+import type { TupleBatchPrompt } from "../lib/joinLensBatch";
+import { BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP } from "../lib/joinLensBatch";
+import { undoMatchingBulk, confirmReviewedSelection, deriveMatchingReview, previewReviewedConfirm } from "../app/matching/reviewLogic";
 import { FIXTURE_PLAN } from "../app/matching/fixtures";
 import { buildLensMatchingPlan } from "../app/matching/planDefaults";
 import {
@@ -45,6 +57,8 @@ import { mapKeyToken } from "../app/matching/types";
 
 type Props = {
   session: MatchingTabSession;
+  onRunBasic?: (session: MatchingTabSession) => Promise<MatchingTabSession>;
+  onMergeBasicLlm?: (runId: string, text: string, sent: TupleBatchPrompt) => void;
   onChange: (next: MatchingTabSession) => void;
   onOpenLens?: () => void;
   lensUnavailableReason?: string | null;
@@ -304,6 +318,8 @@ function planBlockers(plan: MatchingPlanDraft): string[] {
 
 export function MatchingWorkspace({
   session,
+  onRunBasic,
+  onMergeBasicLlm,
   onChange,
   onOpenLens,
   lensUnavailableReason,
@@ -312,6 +328,11 @@ export function MatchingWorkspace({
   writeAllowed = true,
   writeRefusalReason = null,
 }: Props) {
+  session = deriveMatchingReview(session);
+  const latestSession = useRef(session);
+  latestSession.current = session;
+  const isBasic = !!session.joinBinding;
+  const acknowledged = session.commitLifecycle?.status === "acknowledged" ? session.commitLifecycle.receipt : null;
   const [chatOpen, setChatOpen] = useState(!session.chatCollapsed);
   const [busy, setBusy] = useState(false);
   const [llmPhase, setLlmPhase] = useState<"idle" | "expand" | "rank">("idle");
@@ -330,6 +351,12 @@ export function MatchingWorkspace({
 
   const plan = emptyPlan(session);
   const isDemo = session.executionMode === "demo";
+  /** ADR-0051: explicitly confirmed Advanced mode (disclosure alone never re-runs). */
+  const isAdvancedConfirmed = isBasic && session.matchingMode === "advanced";
+  /** Plan shape decides the producer: the Basic form keeps the Basic default;
+   * a confirmed non-Basic plan with the original JOIN key/output shape runs Advanced. */
+  const planRunsBasic = isBasic && basicPlanCompatible(session);
+  const planRunsAdvanced = isBasic && !planRunsBasic && advancedPlanCompatible(session);
   const originRefusal = matchingWriteRefusal(session);
   const blockers = useMemo(() => planBlockers(plan), [plan]);
   const sourceCols = session.lensCtx?.sourceColumns ?? [];
@@ -393,6 +420,7 @@ export function MatchingWorkspace({
     page[0] ??
     null;
   const bulkPreview = previewBulkConfirm(session, bulkScope, selectedIds);
+  const reviewedPreview = previewReviewedConfirm(session, selectedIds);
   const finalDiff = useMemo(() => buildFinalDiff(session), [session]);
   const finalSum = summarizeFinalDiff(finalDiff);
 
@@ -417,10 +445,33 @@ export function MatchingWorkspace({
       next.semanticRevision = 1;
       next.uiRevision = 0;
     }
-    onChange({ ...session, plan: next });
+    // ADR-0051: a semantic edit explicitly invalidates producer evidence and
+    // decisions (both producers). Disclosure alone never re-runs.
+    onChange(semantic && isBasic ? invalidateRunOnPlanChange({ ...session, plan: next }) : { ...session, plan: next });
   }
 
-  function applyPlanAndTrial() {
+  async function applyPlanAndTrial() {
+    if (isBasic && onRunBasic) {
+      // ADR-0051: the plan's shape decides the producer. The Basic form keeps
+      // the Basic default; a confirmed non-Basic plan with the original
+      // ordered JOIN keys → outputs explicitly runs the verified Advanced
+      // acquisition. The original key/output shape is never editable.
+      if (!planRunsBasic && !planRunsAdvanced) {
+        setError("The original JOIN key/output shape is locked for live matching. Restore it, then Find matches.");
+        return;
+      }
+      setBusy(true); setError(null); setCommitMsg(null);
+      try {
+        // Route on the plan's shape, never on a stale mode flag.
+        const target = planRunsAdvanced
+          ? { ...session, matchingMode: "advanced" as const }
+          : { ...session, matchingMode: "basic" as const };
+        onChange(await onRunBasic(target)); setSelectedIds([]); setShowFinal(false);
+      }
+      catch (e) { setError(String(e)); }
+      finally { setBusy(false); }
+      return;
+    }
     if (!isDemo) {
       setError(LIVE_TRIAL_UNAVAILABLE);
       setCommitMsg(null);
@@ -440,6 +491,71 @@ export function MatchingWorkspace({
   }
 
   async function rankWithLlm() {
+    if (isBasic && session.advancedRun) {
+      // ADR-0051: Advanced residue ranks within the verified acquisition's
+      // bounded allowlists. No semantic expand — the snapshot is the universe.
+      if (!session.llmPermissionGranted || !session.instructionText.trim()) {
+        openLlmRules("Allow sending matching fields and enter matching instructions first."); return;
+      }
+      if (session.commitLifecycle) return;
+      const allowlist = advancedRankAllowlist(session);
+      const eligible = Object.values(allowlist ?? {}).some((ids) => ids.length > 0);
+      if (!eligible) { setCommitMsg("No LLM-eligible residue in this verified snapshot — every key is resolved or has no bounded alternatives."); return; }
+      llmAbortRef.current?.abort();
+      const ac = new AbortController();
+      llmAbortRef.current = ac;
+      setBusy(true);
+      setLlmPhase("rank");
+      setLlmProgress({ percent: 20, label: "Choosing the best match", detail: `Ranking residue inside the verified snapshot…` });
+      setError(null);
+      setCommitMsg(null);
+      try {
+        const { session: next, error: rankErr, warning: rankWarn, picks, cancelled } = await applyLlmRankingToSession(session, {
+          instruction: session.instructionText,
+          llmCandidateIdsByProposal: allowlist,
+          maxProposals: Math.min(residue, MATCHING_CAPS.massRunUniqueKeys),
+          signal: ac.signal,
+          onProgress: (p) => {
+            setLlmProgress({ percent: 20 + Math.round(p.percent * 0.8), label: "Choosing the best match",
+              detail: `Batch ${p.batchIndex}/${p.batchTotal} · ${p.keysDone}/${p.keysTotal} keys · ${p.picksSoFar} picks` });
+          },
+        });
+        onChange(next);
+        if (cancelled) setCommitMsg(`LLM cancelled: kept ${picks} ranked pick(s). Open Ambiguous / LLM rows first.`);
+        else if (rankErr) { setError(rankErr); setCommitMsg(`LLM stopped: ranked ${picks}/${residue}.`); }
+        else {
+          const warn = rankWarn ? ` · ${rankWarn}` : "";
+          setLlmProgress({ percent: 100, label: "LLM complete", detail: `Ranked ${picks}/${residue}` });
+          setCommitMsg(`LLM done: ranked ${picks}/${residue} within the verified snapshot${warn}. Open Ready (Fuzzy+LLM) for the combined result; Ambiguous still needs you.`);
+        }
+      } catch (e) {
+        setError(typeof e === "string" ? e : String(e));
+      } finally {
+        if (llmAbortRef.current === ac) llmAbortRef.current = null;
+        setBusy(false);
+        setLlmPhase("idle");
+        setLlmProgress(null);
+      }
+      return;
+    }
+    if (isBasic) {
+      if (!onMergeBasicLlm) { setError("The authoritative Matching session owner is unavailable."); return; }
+      if (!session.llmPermissionGranted || !session.instructionText.trim()) {
+        openLlmRules("Allow sending matching fields and enter matching instructions first."); return;
+      }
+      if (!session.basicRun || session.commitLifecycle) return;
+      const sent = basicPrompt(session), runId = session.basicRun.id;
+      if (!sent.groups.length) { setError("No pending source groups fit the bounded prompt."); return; }
+      setBusy(true); setError(null);
+      try {
+        const reply = await llmChat([{ role: "system", content: sent.prompt }, { role: "user", content: session.instructionText.slice(0, 4000) }]);
+        if (reply.content.length > 12000) throw new Error("Oversized model response rejected as a whole.");
+        onMergeBasicLlm(runId, reply.content, sent);
+        setCommitMsg(`LLM alternatives merged without confirming decisions. Prompt omitted ${sent.omittedSources} source groups and ${sent.omittedCandidates} candidate slots.`);
+      } catch (e) { setError(String(e)); }
+      finally { setBusy(false); }
+      return;
+    }
     if (!session.proposals.length) {
       setError("Find matches first (step 1)");
       return;
@@ -592,11 +708,18 @@ export function MatchingWorkspace({
         setError(originRefusal ?? writeRefusalReason ?? "Mapping Save is unavailable. Confirmed decisions remain in draft.");
         return;
       }
+      // ADR-0051: both producers freeze the shared UI through the same pending
+      // lifecycle; the App resolves the exact producer run (Basic/Advanced).
+      if (isBasic && (session.basicRun ?? session.advancedRun)) onChange({ ...session, commitLifecycle: { status: "pending", runId: (session.basicRun ?? session.advancedRun)!.id } });
       const result = await onSaveToMap({ session });
       if (result.status !== "saved" && result.status !== "no_changes") {
         if (result.session) onChange(result.session);
+        else if (isBasic && latestSession.current.commitLifecycle?.status !== "stale") onChange({ ...latestSession.current, commitLifecycle: undefined });
         setError(`Save ${result.status}: ${result.message} Confirmed decisions remain in draft; retry when ready.`);
         return;
+      }
+      if (isBasic) {
+        onChange(result.session); setSelectedIds([]); setShowFinal(false); setCommitMsg(result.message); return;
       }
       const leftover = result.session.proposals.filter(
         (p) => p.state === "proposed" || p.state === "ambiguous",
@@ -621,14 +744,15 @@ export function MatchingWorkspace({
       );
       setShowFinal(true);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+     if (isBasic && latestSession.current.commitLifecycle?.status === "pending") onChange({ ...latestSession.current, commitLifecycle: undefined });
+     setError(typeof e === "string" ? e : String(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#0b1220] text-slate-200">
+    <div inert={session.commitLifecycle?.status === "pending"} className="flex h-full min-h-0 flex-col bg-[#0b1220] text-slate-200" data-testid="matching-workspace">
       <div
         className="shrink-0 border-b border-amber-900/50 bg-amber-950/40 px-3 py-2 text-[11px] leading-snug text-amber-100/95"
         role="status"
@@ -652,7 +776,9 @@ export function MatchingWorkspace({
       >
         {isDemo
           ? "Demo fixtures — sample data only, not your live query results. Writing to Mapping is blocked. The trial uses the fixed provider/region example."
-          : LIVE_TRIAL_UNAVAILABLE}
+          : isBasic && session.advancedRun
+            ? "Live Advanced matching — actual bounded JOIN fields, contextual similarity scores (not probabilities). Verified acquisition, no fixtures."
+            : isBasic ? "Live Basic matching — actual bounded JOIN tuples. Edit the plan and confirm it to use Advanced field matching." : LIVE_TRIAL_UNAVAILABLE}
         {!isDemo && onOpenDemo && (
           <button
             type="button"
@@ -665,6 +791,28 @@ export function MatchingWorkspace({
         )}
       </div>
 
+      {session.basicRun && <p role="status" data-testid="matching-basic-coverage" className="shrink-0 border-b border-slate-800 px-3 py-1 text-[11px] text-slate-400">
+        {session.basicRun.report.sources.length}/{session.basicRun.report.left_distinct_total} unmatched source tuples
+        {" · "}{session.basicRun.report.sources.reduce((n, g) => n + g.source.occurrences, 0)}/{session.basicRun.report.left_occurrences_total} source rows
+        {" · "}{session.basicRun.report.right_universe.length}/{session.basicRun.report.right_distinct_total} right tuples
+        {session.basicRun.report.left_truncated ? " · source retrieval truncated" : ""}
+        {session.basicRun.report.right_truncated ? " · right retrieval truncated; confidence bulk blocked" : ""}
+      </p>}
+
+      {session.advancedRun && <p role="status" data-testid="matching-advanced-coverage" className="shrink-0 border-b border-slate-800 px-3 py-1 text-[11px] text-slate-400">
+        Verified live acquisition · {session.advancedRun.snapshot.acquisition.sourceRows.length}/{session.advancedRun.snapshot.acquisition.sourceKeyCap} source tuples
+        {" · "}{session.advancedRun.snapshot.acquisition.targetRows.length}/{session.advancedRun.snapshot.acquisition.targetRowCap} right tuples
+        {session.advancedRun.snapshot.acquisition.complete ? "" : " · right retrieval truncated — confidence bulk blocked"}
+        {" · "}run {session.advancedRun.id}
+      </p>}
+
+      {session.commitLifecycle?.status === "stale" && <p role="alert" className="p-2 text-amber-200">{session.commitLifecycle.reason}</p>}
+      {acknowledged && <section aria-label="Matching commit receipt" className="p-3 text-teal-100">
+        <p role="status">Applied {acknowledged.appliedCount} complete tuple mappings.</p>
+        <p>Previous review decisions have been cleared. Save the project file separately.</p>
+        <button type="button" disabled={busy} onClick={() => void applyPlanAndTrial()}>Refresh remaining review</button>
+      </section>}
+
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 px-3 py-2">
         <h2 className="text-[13px] font-semibold text-teal-100">
           {session.title}
@@ -673,7 +821,7 @@ export function MatchingWorkspace({
           {scopeLabel}
         </span>
         <span className="text-[10px] text-slate-500">
-          {counters.sourceRows} invoice rows · {counters.uniqueKeys} unique
+          {counters.sourceRows} source rows · {counters.uniqueKeys} unique
           keys · {counters.confirmed} marked to save
         </span>
         <div className="ml-auto flex gap-2">
@@ -686,7 +834,7 @@ export function MatchingWorkspace({
               data-testid="matching-open-lens"
               className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-teal-700 hover:text-teal-100"
             >
-              Open Mapping in Lens
+              {isBasic ? "Open original JOIN in Lens" : "Open Mapping in Lens"}
             </button>
           )}
           {!isDemo && lensUnavailableReason && (
@@ -729,6 +877,17 @@ export function MatchingWorkspace({
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
               How matching works
             </div>
+            <details open={!isBasic}>
+              <summary className="cursor-pointer text-xs">Edit plan{isBasic ? (isAdvancedConfirmed ? " — confirmed Advanced live plan" : " — Basic locks the original JOIN keys") : ""}</summary>
+              {isBasic && !isAdvancedConfirmed && <p className="text-xs text-slate-400">Basic locks the original ordered LEFT keys → RIGHT outputs. Confirm this plan for Advanced live execution: the original JOIN key/output fields stay locked, comparison fields, roles and normalization are yours.</p>}
+              {isAdvancedConfirmed && (
+                <p className="text-xs text-teal-200/90" data-testid="matching-advanced-confirm-state">
+                  Confirmed Advanced plan. Find matches runs the verified live acquisition; comparing the same plan again does not re-run until you click it.
+                  {!advancedPlanCompatible(session) && " The plan no longer matches the original JOIN shape — restore it before Find matches."}
+                </p>
+              )}
+              <fieldset disabled={busy}>
+                <fieldset disabled={isBasic} data-testid="matching-plan-bindings">
             <div className="grid gap-2 sm:grid-cols-2">
               <FieldSelect
                 label="Source"
@@ -771,6 +930,7 @@ export function MatchingWorkspace({
                 onChange={(outputs) => patchPlan({ outputs }, true)}
               />
             </div>
+                </fieldset>
             <div className="mt-2 space-y-1">
               <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                 Fields to compare
@@ -881,12 +1041,18 @@ export function MatchingWorkspace({
                 ))}
               </ul>
             )}
+              </fieldset>
+            </details>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 data-testid="matching-apply-plan"
-                disabled={(isDemo && blockers.length > 0) || busy}
-                onClick={applyPlanAndTrial}
+                disabled={(isDemo && blockers.length > 0) || busy || !!session.commitLifecycle || (isBasic && session.hasUnsavedDecisions)
+                  || (isBasic && !planRunsBasic && !planRunsAdvanced)}
+                title={isBasic && !planRunsBasic && !planRunsAdvanced
+                  ? "The plan no longer matches the original ordered JOIN keys → outputs. Restore that shape, then Find matches."
+                  : undefined}
+                onClick={() => void applyPlanAndTrial()}
                 className="rounded border border-amber-600/70 bg-amber-500/15 px-3 py-1.5 text-[12px] font-medium text-amber-50 disabled:opacity-40"
               >
                 {isDemo ? "1. Run demo fixtures" : "1. Find matches"}
@@ -1042,7 +1208,7 @@ export function MatchingWorkspace({
             >
             {!hasProposals ? (
               <p className="p-3 text-[12px] text-slate-500">
-                Click <span className="text-amber-100">Find matches</span> to
+                {acknowledged ? "Use Refresh remaining review to retrieve again. " : ""}Click <span className="text-amber-100">Find matches</span> to
                 compare source keys with the dictionary (spelling first, no
                 LLM).
               </p>
@@ -1167,6 +1333,7 @@ export function MatchingWorkspace({
                     <table className="w-full text-left text-[11px]">
                       <thead className="sticky top-0 z-[1] bg-[#0b1220] text-slate-500">
                         <tr>
+                          <th className="px-2 py-1">Reviewed</th>
                           <th className="px-2 py-1">Tier</th>
                           <th className="px-2 py-1">Key</th>
                           <th className="px-2 py-1">Match</th>
@@ -1247,6 +1414,12 @@ export function MatchingWorkspace({
                             }`}
                           >
                             <td className="px-2 py-1">
+                              <input type="checkbox" aria-label={`Reviewed source ${JSON.stringify(p.mapKey)}`}
+                                checked={selectedIds.includes(p.proposalId)} disabled={saved || p.state === "stale" || !!session.commitLifecycle}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => setSelectedIds(ids => e.target.checked ? [...new Set([...ids, p.proposalId])] : ids.filter(id => id !== p.proposalId))} />
+                            </td>
+                            <td className="px-2 py-1">
                               <span
                                 className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
                                   saved
@@ -1264,10 +1437,10 @@ export function MatchingWorkspace({
                               </span>
                             </td>
                             <td className="px-2 py-1 font-mono">
-                              {p.mapKey.map((k) => (k === "" ? "∅" : k)).join(" · ")}
+                              {p.mapKey.map(tupleCell).join(" · ")}
                             </td>
                             <td className="px-2 py-1 font-mono">
-                              {candidateById(session, p.proposedCandidateId)
+                              {candidateById(session, session.decisions.find(d => d.proposalId === p.proposalId)?.candidateId ?? p.proposedCandidateId)
                                 ?.targetId ?? "—"}
                             </td>
                             <td
@@ -1348,8 +1521,24 @@ export function MatchingWorkspace({
                       }
                       className="rounded border border-slate-600 px-2 py-0.5 text-slate-200 disabled:opacity-40"
                     >
-                      Mark {bulkPreview.keyCount} {isDemo ? "in demo" : "to save"}
+                      {isBasic && (session.basicRun ?? session.advancedRun)
+                        ? `Accept high-confidence suggestions (${bulkPreview.keyCount})`
+                        : `Mark ${bulkPreview.keyCount} ${isDemo ? "in demo" : "to save"}`}
                     </button>
+                    {isBasic && <>
+                      <button type="button" data-testid="matching-reviewed-bulk" disabled={!reviewedPreview.keyCount || busy}
+                        onClick={() => onChange(confirmReviewedSelection(session, selectedIds))}>
+                        Confirm reviewed checked rows ({reviewedPreview.keyCount})
+                      </button>
+                      <span className="text-slate-500">{reviewedPreview.affectedSourceRows} source rows · checked rows confirm displayed suggested targets; use Choose for alternatives.</span>
+                      {session.decisions.some(d => d.bulkToken) && <button type="button" onClick={() => onChange(undoMatchingBulk(session))}>Undo bulk acceptance</button>}
+                      <span className="text-slate-500">
+                        {(session.advancedRun
+                          ? advancedHighConfidenceIds(session, BATCH_HIGH_CONFIDENCE_SCORE, BATCH_AMBIGUITY_GAP)
+                          : basicHighConfidenceIds(session)).length} eligible across this run;
+                        {session.advancedRun ? "contextual similarity scores are not probabilities" : "spelling scores are not probabilities"}.
+                      </span>
+                    </>}
                     <button
                       type="button"
                       onClick={() => setSelectedIds(page.map((p) => p.proposalId))}
@@ -1392,7 +1581,7 @@ export function MatchingWorkspace({
                     >
                       {finalDiff.map((r, i) => (
                         <div key={i} className="font-mono text-slate-300">
-                          [{r.kind}] {r.mapKey.map((k) => k || "∅").join("|")}{" "}
+                          [{r.kind}] {r.mapKey.map(tupleCell).join("|")}{" "}
                           {r.oldOutputs?.join(",") ?? "∅"} →{" "}
                           {r.newOutputs?.join(",") ?? "∅"} ({r.origin}, rows=
                           {r.affectedSourceRows})
@@ -1515,7 +1704,7 @@ function DetailPanel({
       <div className="font-semibold text-slate-200">
         Source:{" "}
         <span className="font-mono">
-          {proposal.mapKey.map((k) => k || "∅").join(" / ")}
+          {proposal.mapKey.map(tupleCell).join(" / ")}
         </span>
       </div>
       <div className="text-slate-500">
@@ -1555,10 +1744,28 @@ function DetailPanel({
         ))}
       </ul>
 
+      {(session.basicRun ?? session.advancedRun) && <section aria-label="Candidate evidence" className="space-y-2">
+        <p>{proposal.coverage?.rightRetrieved}/{proposal.coverage?.rightTotal ?? "unknown"} retrieved right tuples · {proposal.coverage?.shortlistOmitted ?? 0} alternatives omitted from display · {proposal.coverage?.competitorsUnknown ?? "unknown"} unknown competitors</p>
+        {session.advancedRun && <p className="text-slate-400">Verified live acquisition, run {session.advancedRun.id.slice(0, 24)}… · {proposal.coverage?.sourceRetrieved} source tuples · right retrieval {proposal.coverage?.rightTruncated ? "truncated — incomplete coverage blocks confidence bulk" : "complete"}</p>}
+        {tupleMappingBlock(proposal.mapKey) && <p role="note" className="text-amber-200">{tupleMappingBlock(proposal.mapKey)}</p>}
+        {alts.map(c => {
+          if (!c) return null;
+          const edge = proposal.edges?.find(e => e.candidateId === c.candidateId);
+          return <div key={c.candidateId} className="rounded border border-slate-700 p-1">
+            <div className="font-mono">{c.outputValues.map(tupleCell).join(" · ")}</div>
+            <div>{edge?.origins.join(" + ") ?? "unknown origin"} · mean {edge?.score == null ? "unknown" : `${(edge.score * 100).toFixed(1)}%`} · {c.occurrences ?? "unknown"} target rows</div>
+            {(c.occurrences ?? 0) > 1 && <p className="text-amber-200">Repeated target tuple: the JOIN may multiply rows.</p>}
+            <div>Field scores: {edge?.fieldScores.map(s => s == null ? "unknown" : `${(s * 100).toFixed(1)}%`).join(" / ") ?? "unknown"}</div>
+            {edge?.rationale && <p>{edge.rationale}</p>}
+            {tupleMappingBlock(c.outputValues) && <p className="text-amber-200">{tupleMappingBlock(c.outputValues)}</p>}
+          </div>;
+        })}
+      </section>}
+
       <div className="flex flex-wrap gap-1">
         <button
           type="button"
-          disabled={!proposed}
+          disabled={!proposed || ((session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(proposed.outputValues))) || !!session.commitLifecycle}
           onClick={() =>
             onChange(
               applyDecision(
@@ -1579,6 +1786,7 @@ function DetailPanel({
               key={a.candidateId}
               type="button"
               data-testid={`matching-choose-${a.targetId}`}
+              disabled={!!session.commitLifecycle || (!!(session.basicRun ?? session.advancedRun) && (!!tupleMappingBlock(proposal.mapKey) || !!tupleMappingBlock(a.outputValues)))}
               onClick={() =>
                 onChange(
                   applyDecision(

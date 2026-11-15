@@ -17,6 +17,8 @@ path = "src/bin/export_ts_host.rs"
 dwh-engine = { path = "../dwh-engine" }
 dwh-pipeline = { path = "../dwh-pipeline" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Matching evidence is compared exactly after an Electron/JSON round trip.
+# The fast default float parser may change fractional scores by one ULP.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 ureq = { version = "2.12", features = ["json"] }
 ts-rs = { version = "10.1", features = ["serde-compat"] }

@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchingFieldRole {
-    /// Must hold for a candidate to remain eligible.
+    /// Strict nonblank equality after plan normalization; never relaxed by expansion.
     HardConstraint,
     /// Soft ranking / evidence signal.
     SoftSignal,
-    /// Shown for context; not a filter unless promoted.
+    /// Shown for context only; neither filters nor contributes to scores.
     ReferenceContext,
 }
 
@@ -51,7 +51,10 @@ pub struct MatchingPlan {
     /// Target identity field(s) used as candidate id.
     pub target_identity_fields: Vec<String>,
     pub comparisons: Vec<MatchingPlanComparison>,
-    /// Allowed normalization ops (opaque tokens for now).
+    /// Ordered operations applied to comparison values only: trim, lower, upper,
+    /// collapse_space, ltrim_zeros, casefold (the canonical plan token: trim +
+    /// case fold). Retrieval refuses all unsupported tokens. An empty list
+    /// preserves comparison values; identity/outputs are never normalized.
     #[serde(default)]
     pub normalization: Vec<String>,
     /// Map output columns (aligned with registered candidate outputs).

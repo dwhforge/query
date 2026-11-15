@@ -2192,7 +2192,7 @@ function JoinLensImpl({
             </button>
           </div>
           {noMatchAccessory}
-          <button
+          {!onOpenMatching && <button
             type="button"
             onClick={() => switchMode("auto")}
             title="Using current Lens fields and rules — fast batch, no separate contextual plan"
@@ -2203,14 +2203,14 @@ function JoinLensImpl({
             }`}
           >
             Find Matches
-          </button>
+          </button>}
           {onOpenMatching && (
             <button
               type="button"
               data-testid="lens-open-matching"
               onClick={() =>
                 onOpenMatching({
-                  scope: selectedProbeSide != null ? "selected" : "cohort",
+                  scope: "cohort",
                   hostQueryId,
                   joinStepIndex,
                   leftOn,
@@ -2231,10 +2231,10 @@ function JoinLensImpl({
                   ).map((c) => c.name),
                 })
               }
-              title="Multiple fields, extra constraints, and comparing alternatives"
+              title="Review complete JOIN tuples in the Matching workspace"
               className="rounded border border-slate-700 px-2 py-1 text-[11px] font-medium text-slate-300 hover:border-teal-700/70 hover:text-teal-100"
             >
-              Contextual matching…
+              Find Matches
             </button>
           )}
           <span
@@ -2296,7 +2296,7 @@ function JoinLensImpl({
           </div>
         )}
 
-        {sideMode === "auto" ? (
+        {sideMode === "auto" && !onOpenMatching ? (
           <JoinLensAuto
             workspace={workspace}
             hostQueryId={hostQueryId}

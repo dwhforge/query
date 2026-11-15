@@ -1,5 +1,12 @@
 # OpenSpec
 
+Approved next change: [Unified Matching Workspace](changes/unified-matching-workspace/proposal.md)
+under [ADR-0051](../docs/adr/0051-unified-matching-workspace.md) — architecture
+approved 2026-11-15, implementation not started. One existing Matching review for Basic
+batch and Advanced contextual evidence; both JOIN-origin paths preserve ordered
+LEFT keys → RIGHT outputs and atomic Mapping + Apply. Review proposal → specs →
+design → tasks. Current merged contracts below still describe shipped behavior.
+
 Current batch decision: [ADR-0050](../docs/adr/0050-unified-batch-tuple-matching.md).
 ~~[unified-batch-tuple-matching](changes/unified-batch-tuple-matching/)~~ —
 **implemented; contract merged** → [merged batch spec](specs/unified-batch-tuple-matching/spec.md).

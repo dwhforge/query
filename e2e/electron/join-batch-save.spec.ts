@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { launchApp, closeIsolatedSession } from "./helpers/launch.mjs";
 
-const tupleLabel = (parts: string[]) => parts.map(part => JSON.stringify(part)).join("; ");
+
 
 // Real Electron, CSV, sidecar retrieval/scoring, Apply, Save and cold execution.
 // Only the external model is replaced, by an actual loopback HTTP provider.
@@ -13,7 +13,7 @@ async function projectState(page: Page) {
   return page.evaluate(() => (window as any).__dwhE2eGetProject());
 }
 
-async function execute(page: Page) {
+async function executeOnce(page: Page) {
   return page.evaluate(async () => {
     const w = window as any;
     const p = w.__dwhE2eGetProject();
@@ -31,10 +31,23 @@ async function execute(page: Page) {
   });
 }
 
+async function execute(page: Page) {
+  // Initial UI preview and this independent execution share the existing Host
+  // lane. Retry only explicit supersession, never SQL/Apply/validation failures.
+  for (let attempt = 0; ; attempt++) {
+    try { return await executeOnce(page); }
+    catch (e) {
+      if (attempt >= 5 || !String(e).includes("Preview superseded")) throw e;
+      await page.waitForTimeout(200);
+    }
+  }
+}
+
 for (const width of [1, 2, 3, 4, 5]) {
-  test(`Unified batch ${width}-key fuzzy + LLM queue, one write, execution and cold Save/Reopen`, async ({}, info) => {
+  test(`Unified Matching Basic ${width}-key real fuzzy + LLM, atomic write and cold Save/Reopen`, async ({}, info) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dwh-batch-ui-"));
     let session: Awaited<ReturnType<typeof launchApp>> | undefined;
+    let completed = false;
     const requests: { url?: string; body: any }[] = [];
     const serverErrors: string[] = [];
     const leftOn = ["company", "country", "channel", "status", "revision"].slice(0, width);
@@ -84,7 +97,7 @@ for (const width of [1, 2, 3, 4, 5]) {
       const left = path.join(dir, "left.csv"), right = path.join(dir, "right.csv");
       fs.writeFileSync(left, `row_id,${leftOn.join(",")}\n` + rows.map((r, i) => `row${i},${r.join(",")}`).join("\n") + "\n");
       // Physical column order deliberately opposes Join ON order.
-      fs.writeFileSync(right, `partner,${[...rightOn].reverse().join(",")}\n` + targets.map((r, i) => `partner${i},${[...r].reverse().join(",")}`).join("\n") + "\n");
+      fs.writeFileSync(right, `target_id,partner,${[...rightOn].reverse().join(",")}\n` + targets.map((r, i) => `id${i},partner${i},${[...r].reverse().join(",")}`).join("\n") + "\n");
       const project = JSON.parse(fs.readFileSync("e2e/electron/fixtures/mapping-create/smoke.dwhproj.json", "utf8"));
       project.workspace = { focus_query_id: "fact", key_maps: [], queries: [
         { id: "fact", name: "fact", execution: "local", steps: [
@@ -126,141 +139,122 @@ for (const width of [1, 2, 3, 4, 5]) {
       });
       const retrievalCount = () => session!.app.evaluate(() => (globalThis as any).__batchRetrievals as number);
       await page.getByRole("button", { name: "Find Matches", exact: true }).click();
-      const batch = page.locator('[aria-label="Find Matches"]');
-      const queue = batch.getByRole("navigation", { name: "Tuple review queue" });
-      await expect(queue.getByRole("button")).toHaveCount(5);
-      await expect(batch).toContainText("5/5 unmatched source tuples (6 rows)");
+      const batch = page.locator('[data-testid="matching-workspace"]:visible');
+      await expect(batch).toBeVisible();
+      await expect(page.locator('[aria-label="Find Matches"]')).toHaveCount(0);
+      expect(await retrievalCount()).toBe(0); // Entry does not auto-run.
+      await batch.getByTestId("matching-apply-plan").click();
+      const row = (parts: string[]) => batch.getByTestId(`matching-row-${JSON.stringify(parts)}`);
+      await expect(batch.locator('tr[data-testid^="matching-row-"]')).toHaveCount(5);
+      const sessions = () => page.evaluate(() => (window as any).__dwhE2eGetMatchingSessions());
+      const prepared = (await sessions())[0];
+      expect(prepared.plan.outputs).toEqual(rightOn);
+      expect(prepared.plan.targetIdentityFields).toEqual(["target_id"]);
+      expect(prepared.decisions).toEqual([]);
+      expect(prepared.proposals.find((p: any) => JSON.stringify(p.mapKey) === JSON.stringify(sources[0])).affectedSourceRows).toBe(2);
       expect(await retrievalCount()).toBe(1);
-      await expect(batch.getByRole("button", { name: "Write Mapping (0)", exact: true })).toBeDisabled();
-      // Never fabricate qualifying scores. Some real scorer/arity combinations
-      // conservatively disable bulk review because the full ranking is unavailable.
-      const bulk = batch.getByRole("button", { name: /^Accept high-confidence suggestions \(\d+\)$/ });
+      await expect(batch.getByTestId("matching-save")).toBeDisabled();
+      const bulk = batch.getByRole("button", { name: /^Accept high-confidence suggestions/ });
       const bulkCount = Number((await bulk.innerText()).match(/\((\d+)\)/)![1]);
       console.log(`${width}-key real host bulk eligibility: ${bulkCount}`);
       if (bulkCount > 0) {
-        const report = await session.app.evaluate(() => (globalThis as any).__batchReports[0]);
-        expect(report.right_truncated).toBe(false);
-        const qualifying = report.sources.filter((source: any) => {
-          const ranked = [...source.candidates].sort((a: any, b: any) => b.score - a.score);
-          return ranked.length === report.right_universe.length && ranked[0]?.score >= 0.88 &&
-            (!ranked[1] || ranked[0].score - ranked[1].score >= 0.03);
-        });
-        expect(qualifying).toHaveLength(bulkCount);
-        await expect(bulk).toBeEnabled();
         await bulk.click();
-        await expect(batch.getByRole("button", { name: `Write Mapping (${bulkCount})`, exact: true })).toBeEnabled();
-        await expect(queue.getByRole("button").filter({ hasText: "accepted ·" })).toHaveCount(bulkCount);
+        expect((await sessions())[0].decisions).toHaveLength(bulkCount);
         expect((await projectState(page)).workspace).toEqual(before);
         expect(await execute(page)).toEqual(baseline);
-        await batch.getByRole("button", { name: `Undo bulk acceptance (${bulkCount})`, exact: true }).click();
-        await expect(batch.getByRole("button", { name: "Write Mapping (0)", exact: true })).toBeDisabled();
-        await expect(queue.getByRole("button").filter({ hasText: "pending ·" })).toHaveCount(5);
-        await expect(batch.getByRole("button", { name: /^Undo bulk acceptance/ })).toHaveCount(0);
-        for (const radio of await batch.getByRole("radio").all()) await expect(radio).not.toBeChecked();
-        expect((await projectState(page)).workspace).toEqual(before);
+        await batch.getByRole("button", { name: "Undo bulk acceptance", exact: true }).click();
+        expect((await sessions())[0].decisions).toEqual([]);
+        await expect(bulk).toBeDisabled(); // sticky user-touched records stay excluded
       } else {
         await expect(bulk).toBeDisabled();
-        info.annotations.push({ type: "bulk eligibility", description: `${width}-key real host results: no qualifying untouched full-ranking suggestions; no bulk acceptance manufactured.` });
+        info.annotations.push({ type: "bulk eligibility", description: `${width}-key real scorer: no qualifying full-ranking suggestions; no scores manufactured.` });
       }
+      // Explicit reviewed bulk uses the SAME table/ledger, and is not confidence auto-accept.
+      for (const i of [0, 1]) await row(sources[i]).getByRole("checkbox").check();
+      await batch.getByTestId("matching-reviewed-bulk").click();
+      console.log(`${width}-key reviewed bulk complete`);
+      expect((await sessions())[0].decisions).toHaveLength(2);
       for (const i of [0, 1]) {
-        await queue.getByRole("button").filter({ hasText: tupleLabel(sources[i]) }).click();
-        const alternatives = batch.getByRole("region", { name: "Proposed alternatives" });
-        // A radio in this section exists only if real Rust's full-field mean
-        // cleared the fuzzy cutoff; manual search is never used here.
-        await alternatives.getByRole("radio", { name: new RegExp(tupleLabel(targets[i])) }).check();
-        await expect(alternatives).toContainText("fuzzy");
-        await batch.getByRole("button", { name: "Accept selected", exact: true }).click();
+        const decision = (await sessions())[0].decisions.find((d: any) => JSON.stringify(d.mapKey) === JSON.stringify(sources[i]));
+        const candidate = (await sessions())[0].candidates.find((c: any) => c.candidateId === decision.candidateId);
+        expect(candidate.outputValues).toEqual(targets[i]);
       }
-      await queue.getByRole("button").filter({ hasText: tupleLabel(sources[2]) }).click();
-      await expect(batch.getByRole("region", { name: "Proposed alternatives" }).getByRole("radio")).toHaveCount(0);
-      await batch.getByRole("button", { name: "Open LLM chat", exact: true }).click();
-      const chat = batch.getByRole("region", { name: "LLM batch chat" });
-      await chat.getByLabel("base_url", { exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
-      await chat.getByLabel("model", { exact: true }).fill("local-batch-fixture");
-      await chat.getByRole("button", { name: "Save", exact: true }).click();
-      await batch.getByRole("button", { name: "Ask LLM to rank candidates", exact: true }).click();
-      await expect(batch).toContainText("LLM: 2 alternatives added");
-      expect(serverErrors).toEqual([]);
-      expect(requests).toHaveLength(1);
+      await row(sources[2]).click();
+      await page.evaluate(async ({ port }) => {
+        const reply = await (window as any).dwh.invoke("set_llm_config", { baseUrl: `http://127.0.0.1:${port}/v1`, model: "local-batch-fixture", apiKey: "", clearApiKey: false });
+        if (!reply.ok) throw new Error(JSON.stringify(reply));
+      }, { port: address.port });
+      await batch.getByRole("button", { name: /Hide how to match|How to match/ }).evaluate((el: HTMLButtonElement) => {
+        if (el.textContent?.includes("How to match")) el.click();
+      });
+      await batch.getByRole("checkbox", { name: "Allow sending matching fields to external LLM" }).check();
+      await batch.locator("textarea").fill("Review these complete tuples using the supplied migration evidence. Keep source groups independent.");
+      await batch.getByTestId("matching-rank-llm").click();
+      await expect(batch).toContainText("LLM alternatives merged without confirming decisions");
+      console.log(`${width}-key real loopback LLM merged`);
+      expect(serverErrors).toEqual([]); expect(requests).toHaveLength(1);
       expect(requests[0].url).toBe("/v1/chat/completions");
       expect(requests[0].body.model).toBe("local-batch-fixture");
       const prompt = requests[0].body.messages[0].content;
       expect(prompt).toContain(JSON.stringify(sources[2]));
       expect(prompt).toContain(JSON.stringify(targets[2]));
       expect(prompt).toContain(JSON.stringify(regionGuard));
-      expect(prompt).not.toContain(JSON.stringify(sources[1])); // accepted decisions excluded
-      await queue.getByRole("button").filter({ hasText: tupleLabel(regionGuard) }).click();
-      const secondAlternatives = batch.getByRole("region", { name: "Proposed alternatives" });
-      await expect(secondAlternatives).toContainText("Second source for independent review");
-      for (const radio of await secondAlternatives.getByRole("radio").all()) await expect(radio).not.toBeChecked();
-      await expect(batch.getByRole("button", { name: "Accept selected", exact: true })).toBeDisabled();
-      await expect(queue.getByRole("button").filter({ hasText: tupleLabel(regionGuard) })).toContainText("pending");
-      await queue.getByRole("button").filter({ hasText: tupleLabel(sources[2]) }).click();
-      const llmAlternatives = batch.getByRole("region", { name: "Proposed alternatives" });
-      await expect(llmAlternatives).toContainText("llm");
-      await expect(llmAlternatives.getByRole("radio")).toHaveCount(1);
-      await expect(llmAlternatives.getByRole("radio")).not.toBeChecked();
-      await llmAlternatives.getByRole("radio").check();
-      await batch.getByRole("button", { name: "Accept selected", exact: true }).click();
-      await expect(batch.getByRole("button", { name: "Write Mapping (3)", exact: true })).toBeEnabled();
-      // Review is not mutation; accepted fuzzy and LLM decisions share one queue.
+      expect(prompt).not.toContain(JSON.stringify(sources[1]));
+      expect((await sessions())[0].decisions).toHaveLength(2);
+      await row(regionGuard).click();
+      await expect(batch.getByTestId("matching-detail")).toContainText("Second source for independent review");
+      expect((await sessions())[0].decisions.some((d: any) => JSON.stringify(d.mapKey) === JSON.stringify(regionGuard))).toBe(false);
+      await row(sources[2]).click();
+      await expect(batch.getByTestId("matching-detail")).toContainText("llm");
+      await expect(batch.getByTestId("matching-detail")).not.toContainText("INVENTED");
+      await batch.getByTestId(`matching-choose-${JSON.stringify(targets[2])}`).click();
+      expect((await sessions())[0].decisions).toHaveLength(3);
       expect((await projectState(page)).workspace).toEqual(before);
       expect(await execute(page)).toEqual(baseline);
+      // Leaving/re-entering the tab retains its ledger; current selected step is
+      // deliberately NOT a JOIN when Write Mapping resolves the original binding.
+      await batch.getByTestId("matching-open-lens").click();
+      await page.getByRole("separator", { name: "Show inspector", exact: true }).dblclick();
+      await page.locator('[data-step-type="LoadCsv"] > [role="button"]').click();
+      await page.getByRole("tab", { name: "Matching: fact → dim", exact: true }).click();
+      await expect(batch).toBeVisible();
+      expect((await sessions())[0].decisions).toHaveLength(3);
+      console.log(`${width}-key tab retention and original-JOIN navigation complete`);
       await page.evaluate(() => {
-        const w = window as any;
-        w.__batchSnapshots = [];
+        const w = window as any; w.__batchSnapshots = [];
         w.__batchTimer = setInterval(() => {
           const ws = w.__dwhE2eGetProject().workspace;
           w.__batchSnapshots.push([ws.key_maps.length, ws.key_maps[0]?.entries.length ?? 0,
             ws.queries[0].steps.filter((s: any) => s.type === "ApplyKeyMap").length]);
         }, 0);
       });
-      // Exactly one user commit, no per-row Apply or separate Mapping editor hop.
-      await batch.getByRole("button", { name: "Write Mapping (3)", exact: true }).click();
-      await info.attach("post-commit-review", { contentType: "application/json", body: JSON.stringify({
-        retrievals: await retrievalCount(),
-        review: await batch.allTextContents(),
-        stepTypes: (await projectState(page)).workspace.queries[0].steps.map((s: any) => s.type),
-      }, null, 2) });
-      const summary = batch.getByRole("status");
-      await expect(summary).toHaveText("Applied 3 complete tuple mappings.");
-      await expect(batch).toContainText("Previous review decisions have been cleared.");
-      await expect(queue).toHaveCount(0);
-      await expect(batch.getByRole("button", { name: /^Write Mapping/ })).toHaveCount(0);
+      await batch.getByTestId("matching-save").click();
+      console.log(`${width}-key commit requested`);
+      const receipt = batch.getByRole("region", { name: "Matching commit receipt" });
+      await expect(receipt.getByRole("status")).toHaveText("Applied 3 complete tuple mappings.");
+      await expect(receipt).toContainText("Previous review decisions have been cleared.");
+      expect((await sessions())[0].decisions).toEqual([]);
       await expect.poll(() => execute(page)).toEqual(expected);
-      // Execution observes the committed Mapping AND inserted Apply; the Join's
-      // new index/context must not silently remount/retrieve the review session.
       expect((await projectState(page)).workspace.queries[0].steps.map((s: any) => s.type))
         .toEqual(["LoadCsv", "ApplyKeyMap", "Join"]);
-      await expect(summary).toHaveText("Applied 3 complete tuple mappings.");
-      expect(await retrievalCount()).toBe(1);
+      expect(await retrievalCount()).toBe(1); // Host verification is a separate read, no unsolicited rerun.
       const snapshots = await page.evaluate(() => {
         const w = window as any; clearInterval(w.__batchTimer); return w.__batchSnapshots;
       });
       expect(snapshots.length).toBeGreaterThan(0);
       for (const snapshot of snapshots) expect([[0, 0, 0], [1, 3, 1]]).toContainEqual(snapshot);
-      // Give unsolicited effects/replies a bounded observation window. Only the
-      // subsequent explicit refresh may retrieve the remaining unmatched queue.
       await page.waitForTimeout(500);
-      await expect(summary).toHaveText("Applied 3 complete tuple mappings.");
+      await expect(receipt.getByRole("status")).toHaveText("Applied 3 complete tuple mappings.");
       expect(await retrievalCount()).toBe(1);
       const committedWorkspace = (await projectState(page)).workspace;
-      await batch.getByRole("button", { name: "Refresh remaining review", exact: true }).click();
-      await expect(queue.getByRole("button")).toHaveCount(2);
-      await expect(batch).toContainText("2/2 unmatched source tuples (2 rows)");
-      await expect(queue.getByRole("button").filter({ hasText: "pending ·" })).toHaveCount(2);
-      for (const guard of [regionGuard, thirdGuard]) {
-        await expect(queue.getByRole("button").filter({ hasText: tupleLabel(guard) })).toHaveCount(1);
-      }
-      for (const source of sources) {
-        await expect(queue.getByRole("button").filter({ hasText: tupleLabel(source) })).toHaveCount(0);
-      }
-      await expect(batch.getByRole("button", { name: "Write Mapping (0)", exact: true })).toBeDisabled();
-      await expect(batch.getByRole("button", { name: "Refresh remaining review", exact: true })).toHaveCount(0);
-      await expect(batch.getByRole("button", { name: /^Undo bulk acceptance/ })).toHaveCount(0);
-      for (const radio of await batch.getByRole("radio").all()) await expect(radio).not.toBeChecked();
-      expect(await retrievalCount()).toBe(2);
-      expect(requests).toHaveLength(1); // Refresh never asks the model implicitly.
+      await receipt.getByRole("button", { name: "Refresh remaining review", exact: true }).click();
+      await expect(batch.locator('tr[data-testid^="matching-row-"]')).toHaveCount(2);
+      for (const guard of [regionGuard, thirdGuard]) await expect(row(guard)).toHaveCount(1);
+      for (const source of sources) await expect(row(source)).toHaveCount(0);
+      expect((await sessions())[0].decisions).toEqual([]);
+      await expect(batch.getByTestId("matching-save")).toBeDisabled();
+      await expect(receipt).toHaveCount(0);
+      expect(await retrievalCount()).toBe(2); expect(requests).toHaveLength(1);
       expect((await projectState(page)).workspace).toEqual(committedWorkspace);
       expect(await execute(page)).toEqual(expected);
       await page.evaluate(p => (window as any).__dwhE2eSaveProject(p), savedPath);
@@ -286,8 +280,33 @@ for (const width of [1, 2, 3, 4, 5]) {
       expect(await execute(page)).toEqual(expected);
       expect((await projectState(page)).workspace.key_maps).toEqual(saved.workspace.key_maps);
       await page.screenshot({ path: info.outputPath(`batch-${width}-cold-reopened.png`) });
+      completed = true;
     } finally {
+      // Failure cleanup must not wait for the product's intentional dirty-draft
+      // beforeunload warning. Successful cold-reopen still closes normally.
+      if (session && !completed) {
+        await info.attach("failed-matching-review", { contentType: "text/plain", body: await session.page.locator('[data-testid="matching-workspace"]:visible').innerText({ timeout: 1000 }).catch(() => "Review unavailable") });
+        const diagnostic = await session.page.evaluate(async () => {
+          const w = window as any, s = w.__dwhE2eGetMatchingSessions()[0], p = w.__dwhE2eGetProject();
+          if (!s?.basicRun) return "No actionable run";
+          const reply = await w.dwh.invoke("join_key_fuzzy_suggest", { workspace: p.workspace, connections: p.connections,
+            sources: p.sources, projectFile: p.root_path, hostQueryId: s.joinBinding.hostQueryId, joinStepIndex: s.joinBinding.joinStepIndex, tuple: {} });
+          if (!reply.ok) return JSON.stringify(reply);
+          const differences: string[] = [];
+          const compare = (a: any, b: any, path: string) => {
+            if (a === b) return;
+            if (a && b && typeof a === "object" && typeof b === "object") {
+              for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) compare(a[key], b[key], `${path}.${key}`);
+            } else differences.push(`${path}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`);
+          };
+          compare(s.basicRun.report, reply.result.tuple_report, "report");
+          return differences.length ? differences.slice(0, 12).join("\n") : "Fresh and retained reports are equal as JavaScript values";
+        }).catch(String);
+        console.log(`Failure-only tuple evidence diagnostic: ${diagnostic}`);
+        await session.app.evaluate(({ app }) => { app.quit(); app.exit(0); }).catch(() => {});
+      }
       await closeIsolatedSession(session);
+      server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       fs.rmSync(dir, { recursive: true, force: true });
     }

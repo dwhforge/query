@@ -9,6 +9,7 @@ import { llmChat } from "../../lib/bridge";
 import { MATCHING_CAPS } from "../../lib/matchingCaps";
 import { abortable, isAbortError, throwIfAborted } from "./abortable";
 import { isDeterministicResolved, residueProposals } from "./cascade";
+import { requireStringFields } from "./types";
 import type {
   MatchingCandidateView,
   MatchingPlanDraft,
@@ -520,6 +521,6 @@ export function targetSnapshotFromSession(
 ): TargetSnapshotRow[] {
   return session.candidates.map((c) => ({
     targetId: c.targetId,
-    fields: c.fields,
+    fields: requireStringFields(c.fields),
   }));
 }

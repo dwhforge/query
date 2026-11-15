@@ -17,7 +17,7 @@ import type {
   MatchingTabSession,
 } from "./types";
 
-function planToWire(plan: MatchingPlanDraft) {
+export function planToWire(plan: MatchingPlanDraft) {
   return {
     sourceRef: plan.sourceRef,
     targetRef: plan.targetRef,
@@ -56,16 +56,66 @@ function mapHostProposal(
   };
 }
 
+/** Lossless live-field enrichment for the shared trial projection. Built from a
+ * verified Host acquisition snapshot (actual fields, identity, occurrences and
+ * per-source candidate scores). Never fabricates values: unknowns stay unknown. */
+export type TrialEnrichment = {
+  sourceValuesByKey?: Record<string, Record<string, string | null>>;
+  targetByTargetId?: Record<string, {
+    outputValues: string[];
+    identityParts?: string[];
+    occurrences?: number;
+    fields: Record<string, string | null>;
+  }>;
+  scoresByProposal?: Record<string, { candidateId: string; score: number | null; fieldScores: (number | null)[] }[]>;
+  allowlistByProposal?: Record<string, string[]>;
+};
+
 function mapHostCandidate(
   c: MatchingRetrieveResult["candidates"][number],
+  en?: TrialEnrichment,
 ): MatchingCandidateView {
+  const t = en?.targetByTargetId?.[c.targetId];
   return {
     candidateId: c.candidateId,
     targetId: c.targetId,
-    outputValues: c.outputValues,
-    fields: { id: c.targetId },
+    outputValues: t ? [...t.outputValues] : c.outputValues,
+    identityParts: t?.identityParts ? [...t.identityParts] : undefined,
+    occurrences: t?.occurrences,
+    fields: t ? { ...t.fields } : { id: c.targetId },
     evidenceRevision: c.evidenceRevision,
   };
+}
+
+/** Add per-source contextual score edges / allowlists to a proposal, keeping
+ * whatever display data was already adapted. Unknowns stay unknown. */
+function applyProposalEnrichment(
+  p: MatchingProposalView,
+  en: TrialEnrichment | undefined,
+): MatchingProposalView {
+  const key = p.mapKey.join("\0");
+  const sourceValues = en?.sourceValuesByKey?.[key];
+  // Host evidence maps are keyed by Host proposal id, not by source key.
+  const scores = en?.scoresByProposal?.[p.proposalId];
+  const allowlist = en?.allowlistByProposal?.[p.proposalId];
+  const next: MatchingProposalView = { ...p };
+  if (sourceValues) next.sourceValues = { ...sourceValues };
+  if (allowlist?.length) {
+    const alts = allowlist.filter((id) => id !== p.proposedCandidateId);
+    next.alternativeCandidateIds = [...new Set([...p.alternativeCandidateIds, ...alts])];
+    if (!next.proposedCandidateId && allowlist.length) next.proposedCandidateId = allowlist[0];
+    if (allowlist.length && next.state === "no_candidates") next.state = "proposed";
+  }
+  if (scores?.length) {
+    next.edges = scores.map((s) => ({
+      candidateId: s.candidateId,
+      metric: "contextual" as const,
+      score: s.score,
+      fieldScores: [...s.fieldScores],
+      origins: ["fuzzy" as const],
+    }));
+  }
+  return next;
 }
 
 export function loadFixtureTrial(session: MatchingTabSession): MatchingTabSession {
@@ -154,6 +204,15 @@ export async function runMatchingTrial(
     llmBudgetRemaining: MATCHING_CAPS.maxLlmCallsPerRun,
     allowExpand: true,
   });
+  return installMatchingRetrieval(session, out);
+}
+
+/** Shared trial projection also consumes Host acquisition's already-run retrieval. */
+export function installMatchingRetrieval(
+  session: MatchingTabSession,
+  out: MatchingRetrieveResult,
+  enrichment?: TrialEnrichment,
+): MatchingTabSession {
   const metrics: MatchingRunMetrics = {
     mode: "trial",
     keysRequested: out.metrics.keysRequested,
@@ -172,10 +231,10 @@ export async function runMatchingTrial(
       localUniverse: out.metrics.localUniverse,
     },
   };
-  const proposals = out.proposals.map(mapHostProposal);
+  const proposals = out.proposals.map(mapHostProposal).map((p) => applyProposalEnrichment(p, enrichment));
   return {
     ...session,
-    candidates: out.candidates.map(mapHostCandidate),
+    candidates: out.candidates.map((c) => mapHostCandidate(c, enrichment)),
     proposals,
     decisions: [],
     runMetrics: metrics,

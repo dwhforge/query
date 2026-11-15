@@ -5,5 +5,8 @@ export type TupleBatchCommitReceipt = {
   projectIdentity: string;
   joinStepIndex: number;
   appliedCount: number;
+  /** Present only for the session-bound Matching transaction. */
+  matchingSessionId?: string;
+  matchingRunId?: string;
 };
 export type TupleBatchCommitResult = TupleBatchCommitReceipt | { status: "error"; error: string };

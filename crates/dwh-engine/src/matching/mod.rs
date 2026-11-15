@@ -19,8 +19,8 @@ pub use merge::{
     plan_bulk_confirm, MatchingMergeItem, MatchingMergeOutcome,
 };
 pub use retrieve::{
-    matching_retrieve, MatchingRetrieveRequest, MatchingRetrieveResult, MatchingRunMetrics,
-    MatchingRunMode, MatchingSourceRow, MatchingTargetRow,
+    matching_retrieve, MatchingCandidateScore, MatchingRetrieveRequest, MatchingRetrieveResult,
+    MatchingRunMetrics, MatchingRunMode, MatchingSourceRow, MatchingTargetRow,
 };
 pub use types::{
     map_key_token, map_row_exists, MatchingAmbiguityPolicy, MatchingCandidate, MatchingDecision,

@@ -8,8 +8,11 @@ Candidates are implemented; delivered contracts are merged into
 [No match](specs/join-lens-no-match/spec.md).
 The [implementation report](changes/unified-matching-workspace/report.md) records
 actual verification and revisions. The [change](changes/unified-matching-workspace/tasks.md)
-remains **open for residual acceptance**: Advanced beyond-shortlist extra lookup,
-full adversarial App interleavings and unverified integration cases are not done.
+remains **open for product acceptance/P2 risks**. Bounded beyond-shortlist verified
+lookup and the requested critical App/Electron interleavings are now delivered;
+[P1 evidence](changes/unified-matching-workspace/p1-residual-report.md) records
+actual results. Dictionary-scale performance, confidence-bulk coverage and the
+historical preview-flake cause remain unresolved.
 
 Current batch decision: [ADR-0050](../docs/adr/0050-unified-batch-tuple-matching.md).
 ~~[unified-batch-tuple-matching](changes/unified-batch-tuple-matching/)~~ —

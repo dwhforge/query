@@ -13,7 +13,7 @@ async function joinedRows(page: Page) {
       workspace: p.workspace, connections: p.connections, sources: p.sources,
       projectFile: p.root_path, rowLimit: 50,
     });
-    if (!reply.ok) throw new Error(JSON.stringify(reply.error));
+    if (!reply.ok) throw new Error(JSON.stringify(reply));
     return reply.result;
   });
 }

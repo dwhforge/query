@@ -1399,7 +1399,19 @@ export type MatchingAcquireJoinArgs = ProjectRefContext & {
   plan: MatchingJoinSnapshot["plan"]; mode: "trial" | "mass"; scope: "unmatched" | "all";
   sourceParts?: string[]; allowExpand: boolean; llmBudgetRemaining: number;
 };
+export type MatchingLookupPage = { text: string; offset: number };
+export type MatchingJoinLookupResult = {
+  sessionId: string; runId: string; evidenceRevision: number; sourceParts: string[];
+  page: MatchingLookupPage; total: number; pageSize: number; universeCount: number; universeCap: number;
+  candidates: { candidateId: string; targetId: string; outputValues: string[]; identityParts: string[];
+    fields: Record<string, string>; occurrences: number; score: number | null; fieldScores: (number | null)[] }[];
+};
+export function matchingLookupJoinCandidates(args: MatchingAcquireJoinArgs & { lookup: {
+  expectedSnapshot: MatchingJoinSnapshot; sourceParts: string[]; page: MatchingLookupPage;
+} }): Promise<MatchingJoinLookupResult> { return invoke("matching_lookup_join_candidates", args); }
+
 export type MatchingJoinVerifyDecision = {
+  manualLookup?: MatchingLookupPage;
   candidateId: string; sourceParts: string[]; outputValues: string[]; runId: string; evidenceRevision: number;
 };
 export type MatchingJoinVerified = {

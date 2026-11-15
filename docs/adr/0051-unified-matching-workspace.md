@@ -10,6 +10,19 @@ verification. Approved implementation packet:
 [design](../../openspec/changes/unified-matching-workspace/design.md), and
 [tasks](../../openspec/changes/unified-matching-workspace/tasks.md).
 
+## Implementation amendment — residual P1, 2026-11-15
+
+Advanced manual lookup may search beyond shortlist and soft cutoff within the
+explicit bounded acquired RIGHT universe. The existing Review/ledger accepts a
+human's admissible zero-score choice only after Host source-scoped field/identity
+lookup. Final write reacquires the frozen run configuration and replays the exact
+lookup page, materializing real outputs and preserving every hard constraint.
+Manual evidence never grants confidence-bulk eligibility. No dictionary-scale
+or external snapshot-isolation claim follows from the 10,000-row ceiling.
+Mapping Save and pending Matching write are serialized; critical App/Electron
+race evidence and residual P2 risks are in the
+[P1 report](../../openspec/changes/unified-matching-workspace/p1-residual-report.md).
+
 ## Context and explicit supersession
 
 [ADR-0044](0044-matching-workspace.md) §2 and the separate-workspace statement in

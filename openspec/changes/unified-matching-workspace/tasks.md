@@ -27,10 +27,11 @@ before runtime changes. No commits requested.
       coverage into MatchingWorkflow tests; pure helpers and Electron tests remain.
 - [x] Integrate pending/acknowledged commit lifecycle into Matching with exact receipt context, shifted JOIN index, ABA invalidation and explicit Refresh remaining review; retain failure drafts and separate project Save.
 - [x] Validate Basic using real CSV/Rust fuzzy plus loopback-provider LLM in Electron for arities 1–5: shared review, multiple source decisions, atomic publication, real Apply/Join execution, Save and cold-process reopen.
-- [ ] Validate Basic negative guard matrix, Mapping-origin Save and unchanged Suggest Right; record exact commands/results/gaps. Stop before Advanced unless Basic real integration passes.
+- [x] Validate Basic negative guard matrix, Mapping-origin Save and unchanged Suggest Right; record exact commands/results/gaps. Stop before Advanced unless Basic real integration passes.
       Layered unit/browser/native negative tests and adjacent Electron regressions
-      pass; the complete adversarial App-level interleaving matrix is not yet covered.
-      See [Basic report](phase2-basic-report.md) for precise remaining cases.
+      pass. The requested critical real-App interleavings now run for both Basic
+      and Advanced: JOIN deletion, upstream edits, project/context ABA, both
+      Mapping Save orders and private Apply failure/retry. See [P1 report](p1-residual-report.md).
 
 ## Phase 2B — Advanced after Basic gate
 
@@ -73,10 +74,11 @@ Advanced is required within this same change, not deferred to a separate change.
       semantics are proven at the engine level
       (`expansion_relaxes_soft_cutoff_but_never_any_hard_constraint`) but not
       separately asserted as a distinct e2e candidate add.
-- [ ] Lazy-load/render active-source right candidate details in existing review; verified extra lookup candidates share the ledger and commit path, with stale-request guards and honest browsing scope.
-      Shared-review verified extra lookup remains open. The Phase 4 Lens selector
-      is a distinct read-only inspection surface with no ledger or commit route;
-      its completion does not prove this broader item.
+- [x] Lazy-load/render active-source right candidate details in existing review; verified extra lookup candidates share the ledger and commit path, with stale-request guards and honest browsing scope.
+      Explicit Host lookup now searches beyond shortlist/soft cutoff within the
+      bounded acquired RIGHT universe, with actual hard constraints, paged results,
+      stale guards and exact page replay at commit. Real zero-score and empty-soft
+      expansion Save/Reopen journeys pass; this is not large-dictionary scalability.
 - [x] Validate Advanced on real additional fields and same JOIN-bound atomic Mapping + Apply, identity distinct from outputs, constraints, completeness/caps, forged/stale API calls, execute/Save/cold reopen and adjacent regressions.
       Proven by the live e2e (verified Host reacquisition write, atomic
       `ApplyKeyMap`+`Join`, real execution, Save, cold-process reopen) and the
@@ -99,12 +101,28 @@ Advanced is required within this same change, not deferred to a separate change.
 - [x] Record precise test evidence and unresolved gaps, including native parallel crash and unverified connector/provider cases; do not infer coverage from historical reports or synthetic save sessions.
 - [x] Amend superseded ADR cross-references and product/help copy; reconcile affected in-place-confirm/composite capability wording without changing Suggest Right behavior.
 - [x] Merge delivered Matching, batch and Lens Candidates requirements into capability SoT. The complete change remains open for residual acceptance, not prematurely archived.
-- [ ] Complete the residual Advanced beyond-shortlist verified lookup extension and real App adversarial interleaving matrix; only then reassess full acceptance.
+- [x] Complete bounded Advanced beyond-shortlist verified lookup and the requested critical real App/Electron interleaving cases; preserve precise limits rather than claiming all races are proven.
+- [ ] P2: define and validate dictionary-scale retrieval/performance and useful confidence-bulk coverage without weakening conservative safety.
+- [ ] P2: reproduce and establish the historical cold-reopen preview failure cause; retain risk until then.
+- [ ] Final product acceptance of the bounded increment and remaining P2 scope; no unconditional full-scale closure is claimed.
 
-## Final cleanup evidence — 2026-11-15
+## Residual P1 verification — 2026-11-15
 
-- Final HEAD 5820b99aad33f31c52927a323ee9daa51b79d2d5 plus working-tree changes;
-  original requested baseline 30ead1dfd6e30b76865ca19d7b7d696134a4db18 preserved.
+- 16 real Electron cases cover two manual lookup/cold-reopen journeys, two late
+  lookup cases and twelve Basic/Advanced concurrency cases. Final combined run:
+  **39 passed (3.6m)**, including accepted Basic/Suggest 1–5, Advanced, Candidates,
+  Mapping-origin persistence and tabs.
+- Serial engine 38 and Host/tuple lifecycle 19 passed; 49 unit files and browser
+  Matching 41 / Candidates 23 / Suggest 13 passed; generated types fresh.
+- Actual HEAD remains 342ecfd plus uncommitted residual work. Failures/history and
+  exact commands: [P1 residual report](p1-residual-report.md).
+
+## Final cleanup evidence — 2026-11-15 (historical accepted increment)
+
+- Historical pre-publication run: HEAD 5820b99aad33f31c52927a323ee9daa51b79d2d5
+  plus working-tree changes. Published accepted increment: HEAD
+  342ecfdc78353c5b74bd41b212f95b306558ba1e, clean checkout rechecked. Original
+  baseline 30ead1dfd6e30b76865ca19d7b7d696134a4db18 remains in history.
 - 49 unit files; browser Matching 41, Candidates 23, Suggest Right 13; serial
   contextual engine 38 and Host/tuple lifecycle 18; typecheck/build/generated wire passed.
 - Fresh-build combined Electron: **36 passed (2.8m)**, including Basic 1–5,

@@ -19,7 +19,7 @@ pub use merge::{
     plan_bulk_confirm, MatchingMergeItem, MatchingMergeOutcome,
 };
 pub use retrieve::{
-    matching_retrieve, MatchingCandidateScore, MatchingRetrieveRequest, MatchingRetrieveResult,
+    matching_pair_evidence, matching_retrieve, MatchingCandidateScore, MatchingRetrieveRequest, MatchingRetrieveResult,
     MatchingRunMetrics, MatchingRunMode, MatchingSourceRow, MatchingTargetRow,
 };
 pub use types::{

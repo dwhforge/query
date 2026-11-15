@@ -1,5 +1,21 @@
 # Proposal: Unified Matching Workspace
 
+## Residual P1 increment — 2026-11-15
+
+Published baseline: 342ecfdc78353c5b74bd41b212f95b306558ba1e. Preserve the
+accepted Basic/Advanced live/shared Review/Candidates increment. Add explicit
+source-scoped Host lookup beyond the contextual shortlist within the bounded
+acquired RIGHT universe, with literal field search, stable pages, actual plan
+hard-constraint validation, and manual provenance in the same decision ledger.
+Commit must revalidate the actual source/target and lookup evidence, not accept
+renderer-supplied output bodies or require fuzzy-shortlist membership for a
+manual choice. Unknown competitors still prohibit confidence bulk.
+
+Separately prove critical real App/Electron interleavings: deleted original JOIN,
+changed upstream, project ABA, concurrent Mapping Save and failed Apply preparation.
+Do not infer million-row scalability from this increment or close the preview
+flake without a reproduced cause.
+
 Status: architecture approved on 2026-11-15 / implementation not started.
 Phase 1 is documentation only. Baseline supplied by parent:
 30ead1dfd6e30b76865ca19d7b7d696134a4db18. No implementation or new tests claimed.

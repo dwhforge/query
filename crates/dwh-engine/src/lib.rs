@@ -57,7 +57,7 @@ pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSo
 pub use matching_join::{acquire_matching_join, MatchingJoinAcquisition, MatchingJoinScope, MatchingJoinTarget};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use matching::{
-    accept_draft_decision, bulk_saveable, classify_merge, commit_blocked_reason,
+    matching_pair_evidence, accept_draft_decision, bulk_saveable, classify_merge, commit_blocked_reason,
     detect_proposal_conflicts, gate_commit_write_policy, map_key_token, map_row_exists,
     matching_retrieve, plan_bulk_confirm, validate_llm_intake, LlmIntakeRequest,
     MatchingAmbiguityPolicy, MatchingCandidate, MatchingCandidateScore, MatchingDecision, MatchingDecisionKind,

@@ -10,6 +10,7 @@ import {
   advancedRunIdentity,
   acknowledgeAdvancedReceipt,
   collectAdvancedDecisions,
+  lookupAdvancedMatching,
   commitAdvancedMatching,
   invalidateAdvancedOnJoinChange,
   invalidateRunOnPlanChange,
@@ -96,6 +97,29 @@ function snapshot(planRev = 2): MatchingJoinSnapshot {
 
 // ── Lossless adapter ────────────────────────────────────────────────────────
 const adapted = adaptAdvancedSnapshot(boundSession(advancedPlan()), snapshot());
+// Manual lookup is evidence only. Late replies cannot enter a changed review,
+// project ABA or closed session, and frozen source/page identity is checked.
+for (const change of ["none", "decision", "stale", "closed", "plan", "source-reply", "run-reply"] as const) {
+  let latest: MatchingTabSession | undefined = structuredClone(adapted);
+  const pending = lookupAdvancedMatching(latest, "prop:0", { text: "Widget", offset: 0 }, {
+    execution: {} as never, latest: () => latest, isContextCurrent: s => s.commitLifecycle?.status !== "stale",
+    lookup: async args => {
+      assert.deepEqual(args.lookup.sourceParts, ["Acme", "US"]);
+      assert.deepEqual(args.lookup.page, { text: "Widget", offset: 0 });
+      if (change === "decision") latest = applyDecision(latest!, "prop:0", "defer", null);
+      if (change === "stale") latest = { ...latest!, commitLifecycle: { status: "stale", reason: "ABA" } };
+      if (change === "closed") latest = undefined;
+      if (change === "plan") latest = invalidateRunOnPlanChange(latest!);
+      return { sessionId: adapted.id, runId: change === "run-reply" ? "foreign" : adapted.advancedRun!.id,
+        evidenceRevision: 1, sourceParts: change === "source-reply" ? ["foreign"] : ["Acme", "US"],
+        page: { offset: args.lookup.page.offset, text: args.lookup.page.text }, total: 0, pageSize: 20, universeCount: 2, universeCap: 10000, candidates: [] };
+    },
+  });
+  if (change === "none") {
+    assert.equal((await pending).total, 0);
+    assert.deepEqual(latest!.decisions, [], "lookup never confirms or mutates ledger");
+  } else await assert.rejects(pending, /context changed/);
+}
 {
   assert.equal(adapted.matchingMode, "advanced");
   assert.ok(adapted.advancedRun && adapted.advancedRun.id === "adv-test:1");
@@ -152,6 +176,8 @@ assert.throws(() => adaptAdvancedSnapshot(boundSession(advancedPlan()), { ...sna
     latest: () => s,
   });
   const out = await run();
+  assert.equal(out.advancedRun!.request.allowExpand, true, "lookup/commit replay actual initial expansion policy");
+  assert.equal(out.advancedRun!.request.llmBudgetRemaining, 220, "lookup/commit replay actual run budget");
   assert.equal(out.advancedRun?.id, acquired!.runId);
   assert.equal(out.matchingMode, "advanced");
   // Stale generation after acquisition refuses the install.

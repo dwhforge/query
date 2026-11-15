@@ -221,6 +221,34 @@ fn key_cap(mode: MatchingRunMode) -> usize {
     }
 }
 
+/// The same comparison contract for shortlist ranking and explicit human lookup.
+/// Soft cutoff is a retrieval policy, never an admissibility constraint.
+pub fn matching_pair_evidence(plan: &MatchingPlan, src: &MatchingSourceRow, target: &MatchingTargetRow)
+    -> Result<Option<MatchingCandidateScore>, String> {
+    for op in &plan.normalization {
+        if !matches!(op.as_str(), "trim" | "lower" | "upper" | "collapse_space" | "ltrim_zeros" | "casefold") {
+            return Err(format!("refused: unsupported normalization operation {op:?}"));
+        }
+    }
+    let mut total = 0.0;
+    let mut n = 0;
+    let mut field_scores = Vec::new();
+    for c in &plan.comparisons {
+        let sv = src.fields.get(&c.source_field).ok_or("Missing source comparison field")?;
+        let tv = target.fields.get(&c.target_field).ok_or("Missing target comparison field")?;
+        let sv = normalize(sv, &plan.normalization);
+        let tv = normalize(tv, &plan.normalization);
+        if c.role == MatchingFieldRole::HardConstraint && (sv.trim().is_empty() || tv.trim().is_empty() || sv != tv) {
+            return Ok(None);
+        }
+        field_scores.push(if c.role == MatchingFieldRole::SoftSignal {
+            let value = field_score(&sv, &tv); total += value; n += 1; Some(value)
+        } else { None });
+    }
+    Ok(Some(MatchingCandidateScore { candidate_id: format!("cand:{}", target.target_id),
+        score: (n > 0).then(|| total / n as f64), field_scores }))
+}
+
 /// Retrieve bounded candidates/proposals. Refuses silent full download over universe cap.
 pub fn matching_retrieve(req: MatchingRetrieveRequest) -> Result<MatchingRetrieveResult, String> {
     let started = std::time::Instant::now();
@@ -277,13 +305,8 @@ pub fn matching_retrieve(req: MatchingRetrieveRequest) -> Result<MatchingRetriev
         (req.source_rows.as_slice(), 0)
     };
 
-    let hard: Vec<_> = req
-        .plan
-        .comparisons
-        .iter()
-        .filter(|c| matches!(c.role, MatchingFieldRole::HardConstraint))
-        .collect();
-
+    let hard: Vec<_> = req.plan.comparisons.iter()
+        .filter(|c| c.role == MatchingFieldRole::HardConstraint).collect();
     let mut candidates: Vec<MatchingCandidate> = Vec::new();
     let mut cand_index: HashMap<String, String> = HashMap::new(); // target_id → candidate_id
     for t in &req.target_rows {
@@ -330,37 +353,10 @@ pub fn matching_retrieve(req: MatchingRetrieveRequest) -> Result<MatchingRetriev
         let mut ranks: Vec<Rank> = Vec::new();
         for t in &req.target_rows {
             scored += 1;
-            let hard_ok = hard.iter().all(|h| {
-                let sv = normalize(&src.fields[&h.source_field], &req.plan.normalization);
-                let tv = normalize(&t.fields[&h.target_field], &req.plan.normalization);
-                !sv.trim().is_empty() && !tv.trim().is_empty() && sv == tv
-            });
-            if !hard_ok {
-                continue;
+            if let Some(evidence) = matching_pair_evidence(&req.plan, src, t)? {
+                ranks.push(Rank { target_id: t.target_id.clone(), score: evidence.score,
+                    field_scores: evidence.field_scores });
             }
-            let mut score = 0.0;
-            let mut n = 0;
-            let field_scores = req
-                .plan
-                .comparisons
-                .iter()
-                .map(|s| {
-                    if s.role != MatchingFieldRole::SoftSignal {
-                        return None;
-                    }
-                    let sv = normalize(&src.fields[&s.source_field], &req.plan.normalization);
-                    let tv = normalize(&t.fields[&s.target_field], &req.plan.normalization);
-                    let value = field_score(&sv, &tv);
-                    score += value;
-                    n += 1;
-                    Some(value)
-                })
-                .collect();
-            ranks.push(Rank {
-                target_id: t.target_id.clone(),
-                score: (n > 0).then(|| score / n as f64),
-                field_scores,
-            });
         }
 
         ranks.sort_by(|a, b| {

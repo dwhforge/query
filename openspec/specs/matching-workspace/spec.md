@@ -418,10 +418,33 @@ refuse rather than claiming a partial successful run.
 The existing review detail SHALL load/render the active source's real right tuple
 candidates lazily, retain exact identity, fields, counts, score availability and
 pagination/omissions, and cancel/ignore stale selection requests. Basic browsing
-remains within its retrieved universe. Advanced currently browses only its verified
-retrieved shortlist; an extra-lookup action beyond that shortlist remains unfinished.
-Any future additional lookup SHALL verify candidates before selection/acceptance.
-Neither current browsing path implies dataset-wide search.
+remains within its retrieved universe. Advanced SHALL provide explicit Host lookup
+beyond shortlist and soft cutoff, with literal field/identity search and stable
+20-result pages inside the bounded acquired RIGHT universe. Results SHALL retain
+source/plan/run/evidence identity, real target identity/fields/outputs, occurrence
+counts and comparison evidence. Normalized hard constraints SHALL still hold.
+A human MAY explicitly confirm an admissible zero-score candidate in the same
+ledger without granting confidence-bulk eligibility. Lookup never auto-confirms.
+Neither browsing path implies dataset-wide or large-dictionary scalability.
+
+Late replies after source/query/run/context changes or ABA SHALL NOT install
+evidence. Commit SHALL reacquire the frozen run configuration and replay the exact
+source/query/page, checking real candidate membership and actual outputs. Forged
+pages/IDs/outputs, stale snapshots and failed hard constraints SHALL refuse.
+
+#### Scenario: Correct candidate absent from shortlist
+- GIVEN an admissible real RIGHT object with zero soft score outside the shortlist
+- WHEN the user finds it through existing Review lookup and explicitly confirms
+- THEN one manual-provenance decision joins the same authoritative ledger
+- AND verified Mapping + Apply, execution, Save and cold reopen preserve it
+
+#### Scenario: Critical real App interleavings
+- WHEN JOIN deletion, upstream changes or project/context ABA occur during verification
+- THEN no stale Mapping, Apply or success receipt is published
+- WHEN private Apply preparation fails
+- THEN no partial project is published and unchanged-context decisions remain retryable
+- WHEN Mapping Save and Matching write race in either order
+- THEN the conflicting write refuses rather than overlapping persistence/publication
 
 ### Requirement: JOIN-bound atomic commit and acknowledged refresh
 

@@ -184,9 +184,9 @@ import { MappingCreateWizard } from "./components/MappingCreateWizard";
 import { importWriteRefusal } from "./lib/pgImport";
 import { planBatchTupleMapping, planTupleMapping } from "./app/keyMap/tupleMapping";
 import { batchContextFingerprint } from "./lib/joinLensBatch";
-import { joinKeyFuzzySuggest, matchingVerifyJoinTuples, matchingAcquireJoin, matchingVerifyJoinCandidates } from "./lib/bridge";
+import { joinKeyFuzzySuggest, matchingVerifyJoinTuples, matchingAcquireJoin, matchingLookupJoinCandidates, matchingVerifyJoinCandidates } from "./lib/bridge";
 import { acknowledgeBasicReceipt, adaptBasicReport, basicPlanCompatible, collectBasicDecisions, mergeBasicLlm, reconcileBasicContext } from "./app/matching/basic";
-import { commitAdvancedMatching as commitAdvancedMatchingSvc, reconcileAdvancedContext, runAdvancedMatching as runAdvancedMatchingSvc } from "./app/matching/advanced";
+import { lookupAdvancedMatching, commitAdvancedMatching as commitAdvancedMatchingSvc, reconcileAdvancedContext, runAdvancedMatching as runAdvancedMatchingSvc } from "./app/matching/advanced";
 import type { MatchingSaveResult } from "./app/matching/persistSave";
 import { matchingWriteRefusal } from "./app/matching/executionPolicy";
 import type { TupleBatchCommitResult, TupleBatchCommitReceipt } from "./lib/joinLensBatchCommit";
@@ -2701,6 +2701,9 @@ function App() {
     map: KeyMapDef,
     opts?: Parameters<typeof saveKeyMapToProjectImpl>[1],
   ): Promise<KeyMapSaveResult> {
+    if (matchingTabsLiveRef.current.some(s => s.commitLifecycle?.status === "pending")) {
+      return sourceSaveSkipped("A Matching write is in progress. Retry Mapping Save after it finishes.");
+    }
     mapWritesInFlight.current += 1;
     try {
       return await saveKeyMapToProjectImpl(map, opts);
@@ -3352,6 +3355,11 @@ function App() {
     }, withMap.workspace);
     if ("error" in plan) return { status: "error", error: plan.error };
     const folded = applyKeyMapOntoProject(withMap, intentFromApplyPlan(plan));
+    if (String(import.meta.env.DWH_E2E ?? "") === "1" && (window as unknown as { __dwhE2eFailTupleApply?: boolean }).__dwhE2eFailTupleApply) {
+      delete (window as unknown as { __dwhE2eFailTupleApply?: boolean }).__dwhE2eFailTupleApply;
+      // E2E-only fault after real private fold, before the common failure/publication gate.
+      folded.result = { status: "join_gone", mapId: planned.map.id, reason: "Injected Apply preparation failure" };
+    }
     if (folded.result.status !== "ok") return { status: "error", error: folded.result.reason || "Join changed. No batch changes were applied." };
     const token = {};
     const resultingIndex = resolveJoinStepFromCtx(folded.project.workspace, planned.joinCtx);
@@ -3415,7 +3423,7 @@ function App() {
             outputValues: session.candidates.find(c => c.candidateId === d.candidateId)!.outputValues,
             runId: d.expectedRunId!, evidenceRevision: d.expectedEvidenceRevision!,
           })) } });
-      if (before !== projectRef.current || !latestCurrent() || verified.sessionId !== session.id || verified.runId !== run.id
+      if (mapWritesInFlight.current !== 1 || before !== projectRef.current || !latestCurrent() || verified.sessionId !== session.id || verified.runId !== run.id
         || verified.evidenceRevision !== run.evidenceRevision || verified.materialized.length !== selections.length) return refused("Context changed during live verification. Draft retained.");
       const step = before.workspace.queries.find(q => q.id === b.hostQueryId)?.steps[b.joinStepIndex];
       if (step?.type !== "Join") return refused("Original JOIN is no longer available.");
@@ -3477,7 +3485,7 @@ function App() {
         execution: advancedExecutionContext(),
         isContextCurrent: (s) => {
           const latest = matchingTabsLiveRef.current.find(x => x.id === s.id);
-          return !!latest && matchingSaveRevision(latest) === revision && basicContextCurrent(latest);
+          return mapWritesInFlight.current === 1 && !!latest && matchingSaveRevision(latest) === revision && basicContextCurrent(latest);
         },
         verify: matchingVerifyJoinCandidates,
         write: async (s, materialized) => {
@@ -3709,6 +3717,9 @@ function App() {
     await openProjectPath(path);
   }
 
+  const e2eSaveMappingRef = useRef(saveKeyMapToProject);
+  e2eSaveMappingRef.current = saveKeyMapToProject;
+
   /**
    * Electron Playwright / website-capture hooks — only when built with
    * `DWH_E2E=1` or `DWH_CAPTURE=1` (both set `import.meta.env.DWH_E2E`).
@@ -3754,6 +3765,7 @@ function App() {
           __dwhE2eGetProject?: () => Project;
           __dwhE2eOpenMatchingSession?: (session: MatchingTabSession) => void;
           __dwhE2eGetMatchingSessions?: () => MatchingTabSession[];
+          __dwhE2eSaveMapping?: (mapId: string) => Promise<KeyMapSaveResult>;
           __dwhE2eOpenMapping?: (mapId: string) => void;
           __dwhE2eGetMappingDrafts?: () => { map: KeyMapDef; dirty: boolean }[];
           __dwhE2eArmDescribeHold?: () => void;
@@ -3769,6 +3781,11 @@ function App() {
         w.__dwhE2eOpenProject = openPath;
         w.__dwhE2ePatchProject = (updater) => {
           setProject((p) => updater(p));
+        };
+        w.__dwhE2eSaveMapping = (mapId) => {
+          const map = projectRef.current.workspace.key_maps?.find(m => m.id === mapId);
+          if (!map) return Promise.reject(new Error("Missing Mapping"));
+          return e2eSaveMappingRef.current(map);
         };
         w.__dwhE2eGetProject = () => projectRef.current;
         w.__dwhE2eOpenMatchingSession = (session) => {
@@ -3803,6 +3820,7 @@ function App() {
           delete w.__dwhE2eOpenProject;
           delete w.__dwhE2ePatchProject;
           delete w.__dwhE2eSaveProject;
+          delete w.__dwhE2eSaveMapping;
           delete w.__dwhE2eGetProject;
           delete w.__dwhE2eOpenMatchingSession;
           delete w.__dwhE2eGetMatchingSessions;
@@ -5447,6 +5465,15 @@ function App() {
                   <MatchingWorkspace
                     session={tab}
                     onRunBasic={tab.joinBinding ? (s) => (s.matchingMode === "advanced" ? runAdvancedMatching(s) : runBasicMatching(s)) : undefined}
+                    onLookupAdvanced={tab.advancedRun ? (proposalId, page) => {
+                      const latest = matchingTabsLiveRef.current.find(s => s.id === tab.id);
+                      if (!latest) return Promise.reject(new Error("Matching session closed"));
+                      return lookupAdvancedMatching(latest, proposalId, page, {
+                        execution: advancedExecutionContext(), lookup: matchingLookupJoinCandidates,
+                        latest: () => matchingTabsLiveRef.current.find(s => s.id === tab.id),
+                        isContextCurrent: s => basicContextCurrent(s) && !matchingWriteRefusal(s),
+                      });
+                    } : undefined}
                     onMergeBasicLlm={tab.joinBinding ? (runId, text, sent) =>
                       setMatchingTabs(tabs => tabs.map(s => s.id === tab.id ? mergeBasicLlm(s, runId, text, sent) : s)) : undefined}
                     onOpenDemo={() => {

@@ -7,17 +7,30 @@ verified. Delivered contracts are merged into capability SoT. **The change remai
 open for residual acceptance**, not an assertion that every planned extension or
 adversarial race has been tested. See the unchecked [tasks](tasks.md).
 
+**Residual P1 update:** bounded Host-verified Advanced lookup beyond shortlist and
+the requested critical real App/Electron interleavings are now implemented and
+verified. Final combined matching/persistence run: **39 passed (3.6 minutes)**,
+including 16 new residual cases. Details, exact commands and failure history are
+in the [P1 residual report](p1-residual-report.md). Remaining P2 concerns are
+dictionary-scale performance, practical confidence-bulk coverage and the still
+unproven cause of the historical preview failure. This does not claim full-scale
+product acceptance or complete proof of every possible race.
+
 - Requested and initially verified baseline: **30ead1dfd6e30b76865ca19d7b7d696134a4db18**,
   branch **feature/redesign**; initial working tree clean.
 - The requested origin fetch failed because no origin remote exists. Fetching the
   configured query remote succeeded and initially matched that exact baseline.
-- Actual final HEAD: **5820b99aad33f31c52927a323ee9daa51b79d2d5**. A commit containing
-  the Phase 1–3 work appeared between delegated phases; it was preserved, not reset
-  or overwritten. This discrepancy is independently recorded in the
-  [Phase 4 report](phase4-candidates-report.md).
-- Candidates, final cleanup, migrated tests and documentation are working-tree
-  changes beyond that HEAD. The final workspace is intentionally not clean;
-  HEAD alone is not a hash of the delivered working tree. No final commit was made.
+- Published accepted-increment HEAD: **342ecfdc78353c5b74bd41b212f95b306558ba1e**.
+  Rechecked on 2026-11-15 after fetching the configured query remote: local HEAD
+  and remote feature/redesign matched, with a clean working tree. This commit
+  contains the Candidates, cleanup, migrated tests and documentation described
+  below; they are no longer described as unpublished changes.
+- Historical pre-publication verification used HEAD
+  **5820b99aad33f31c52927a323ee9daa51b79d2d5** plus working-tree changes. That was
+  the actual state when the earlier run was recorded, not the published result.
+- Residual P1 implementation now proceeds from **342ecfd**. New lookup/concurrency
+  edits are uncommitted until explicitly recorded otherwise; earlier test counts
+  below remain evidence for the accepted increment, not claims about new edits.
 
 ## Architecture and reused capabilities
 
@@ -156,13 +169,16 @@ than turning one source name into a global scalar alias.
 
 ## Remaining work and known limitations
 
-1. **Advanced extra lookup beyond the retrieved verified shortlist is unfinished.**
-   Current active-source detail and Basic manual universe browsing work; no separate
-   Advanced lookup action or dataset-wide search is claimed.
-2. The full adversarial **real App** interleaving matrix is not Electron-tested:
-   held verification plus original-JOIN deletion/upstream edits, Mapping Save races,
-   project replacement ABA and injected Apply failures. Layered unit/browser/Host
-   tests cover many gates but are not substitutes for those App-level journeys.
+1. **Bounded Advanced extra lookup is now delivered**, superseding the earlier
+   unfinished item: actual Host field/identity lookup, hard constraints, exact
+   page replay, one ledger and real execute/Save/cold-reopen evidence. This still
+   does not provide acquisition/search beyond the 10,000-row universe ceiling or
+   prove performance on hundreds of thousands/millions of dictionary records.
+2. The requested critical **real App/Electron** matrix now passes for both Basic
+   and Advanced: held verification with JOIN deletion/upstream edits, project and
+   context ABA, both orders of Mapping Save, and private Apply failure with retry.
+   This is concrete evidence for those cases, not a mathematical proof of every
+   possible interleaving or external warehouse transaction isolation.
 3. LLM rank is proven live; a distinct live LLM expansion-added-candidate journey
    remains unverified. Engine expansion/hard-constraint tests pass.
 4. Paid providers, PostgreSQL/Parquet matching, connector-scale behavior and parallel

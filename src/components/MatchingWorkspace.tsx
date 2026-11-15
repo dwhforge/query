@@ -3,7 +3,7 @@
  * Plan editor → fixture/retrieval proposals → review → final diff → Save.
  */
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { llmChat } from "../lib/bridge";
+import { llmChat, type MatchingJoinLookupResult, type MatchingLookupPage } from "../lib/bridge";
 import { tupleCell, tupleMappingBlock } from "../lib/joinLensTuple";
 import { basicPrompt, basicHighConfidenceIds, basicPlanCompatible } from "../app/matching/basic";
 import {
@@ -57,6 +57,7 @@ import { mapKeyToken } from "../app/matching/types";
 
 type Props = {
   session: MatchingTabSession;
+  onLookupAdvanced?: (proposalId: string, page: MatchingLookupPage) => Promise<MatchingJoinLookupResult>;
   onRunBasic?: (session: MatchingTabSession) => Promise<MatchingTabSession>;
   onMergeBasicLlm?: (runId: string, text: string, sent: TupleBatchPrompt) => void;
   onChange: (next: MatchingTabSession) => void;
@@ -319,6 +320,7 @@ function planBlockers(plan: MatchingPlanDraft): string[] {
 export function MatchingWorkspace({
   session,
   onRunBasic,
+  onLookupAdvanced,
   onMergeBasicLlm,
   onChange,
   onOpenLens,
@@ -1507,6 +1509,7 @@ export function MatchingWorkspace({
                   <DetailPanel
                     key={(session.basicRun ?? session.advancedRun)?.id ?? session.id}
                     session={session}
+                    onLookupAdvanced={onLookupAdvanced}
                     proposal={selected}
                     onChange={onChange}
                     onAgreeReplace={(token) =>
@@ -1688,11 +1691,13 @@ export function MatchingWorkspace({
 
 function DetailPanel({
   session,
+  onLookupAdvanced,
   proposal,
   onChange,
   onAgreeReplace,
 }: {
   session: MatchingTabSession;
+  onLookupAdvanced?: Props["onLookupAdvanced"];
   proposal: MatchingProposalView | null;
   onChange: (s: MatchingTabSession) => void;
   onAgreeReplace: (token: string) => void;
@@ -1703,6 +1708,26 @@ function DetailPanel({
   const [candidateSearch, setCandidateSearch] = useState("");
   const [candidatePage, setCandidatePage] = useState(0);
   const [candidateSort, setCandidateSort] = useState<"score" | "values">("score");
+  const [lookupResult, setLookupResult] = useState<MatchingJoinLookupResult | null>(null);
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupError, setLookupError] = useState("");
+  const lookupGeneration = useRef(0);
+  const lookupOwner = JSON.stringify([session.id, session.advancedRun?.id, proposal?.proposalId, session.commitLifecycle, session.joinBinding]);
+  const ownerRef = useRef(lookupOwner); ownerRef.current = lookupOwner;
+  useEffect(() => { lookupGeneration.current++; setLookupResult(null); setLookupBusy(false); setLookupError("");
+    return () => { lookupGeneration.current++; };
+  }, [lookupOwner]);
+  async function findAdvanced(page: MatchingLookupPage) {
+    if (!proposal || !onLookupAdvanced) return;
+    const generation = ++lookupGeneration.current, owner = lookupOwner;
+    setLookupBusy(true); setLookupResult(null); setLookupError("");
+    try {
+      const result = await onLookupAdvanced(proposal.proposalId, page);
+      if (generation === lookupGeneration.current && ownerRef.current === owner) { setLookupResult(result); setCandidatePage(0); }
+    } catch (e) {
+      if (generation === lookupGeneration.current && ownerRef.current === owner) setLookupError(String(e));
+    } finally { if (generation === lookupGeneration.current && ownerRef.current === owner) setLookupBusy(false); }
+  }
   useEffect(() => { setCandidateSearch(""); setCandidatePage(0); }, [proposal?.proposalId]);
   if (!proposal) {
     return (
@@ -1724,14 +1749,16 @@ function DetailPanel({
   const picked = candidateById(session, picks[proposal.proposalId]);
   const sourceBlock = tupleMappingBlock(proposal.mapKey);
   // Basic can browse its full verified retrieved universe, not just its shortlist.
-  // Advanced remains constrained to this source's Host-verified shortlist: no
-  // fabricated registration or new out-of-shortlist lookup authority.
-  const universe = session.basicRun ? session.candidates : alts.filter(c => !!c);
+  // Advanced manual results were source/plan verified by Host, beyond the shortlist.
+  const lookupRows = lookupResult?.candidates ?? [];
+  const universe = session.basicRun ? session.candidates : lookupResult
+    ? lookupRows.map(row => candidateById(session, row.candidateId)).filter(c => !!c) : alts.filter(c => !!c);
   const query = candidateSearch.toLocaleLowerCase();
   const candidates = universe.filter(c => [...c.outputValues, ...Object.values(c.fields)]
     .some(v => tupleCell(v).toLocaleLowerCase().includes(query))).sort((a, b) => {
       if (candidateSort === "values") return mapKeyToken(a.outputValues).localeCompare(mapKeyToken(b.outputValues));
-      const score = (id: string) => proposal.edges?.find(e => e.candidateId === id)?.score ?? -1;
+      const score = (id: string) => lookupRows.find(r => r.candidateId === id)?.score
+        ?? proposal.edges?.find(e => e.candidateId === id)?.score ?? -1;
       return score(b.candidateId) - score(a.candidateId);
     });
   const pageCount = Math.max(1, Math.ceil(candidates.length / 20));
@@ -1740,6 +1767,7 @@ function DetailPanel({
 
   function confirmPicked() {
     if (!proposal || !picked || candidateLocked || sourceBlock || tupleMappingBlock(picked.outputValues)) return;
+    if (session.advancedRun && lookupResult && !lookupRows.some(r => r.candidateId === picked.candidateId)) return;
     // Register a manual Basic alternative from the already retrieved universe
     // only on explicit confirmation. Scores stay Host-owned or unknown.
     const next = session.basicRun ? { ...session, proposals: session.proposals.map(p => {
@@ -1751,6 +1779,16 @@ function DetailPanel({
       const manual = { ...edge, origins: [...new Set([...edge.origins, "manual" as const])] };
       if (index < 0) edges.push(manual); else edges[index] = manual;
       return { ...p, edges, alternativeCandidateIds: [...new Set([...p.alternativeCandidateIds, picked.candidateId])] };
+    }) } : lookupResult ? { ...session, proposals: session.proposals.map(p => {
+      if (p.proposalId !== proposal.proposalId) return p;
+      const row = lookupRows.find(r => r.candidateId === picked.candidateId);
+      if (!row || JSON.stringify(row.outputValues) !== JSON.stringify(picked.outputValues)) return p;
+      return { ...p, userTouched: true,
+        manualLookups: { ...p.manualLookups, [picked.candidateId]: lookupResult.page },
+        edges: [...(p.edges ?? []).filter(e => e.candidateId !== picked.candidateId), {
+          candidateId: picked.candidateId, metric: "contextual" as const, score: row.score,
+          fieldScores: row.fieldScores, origins: ["manual" as const] }],
+        alternativeCandidateIds: [...new Set([...p.alternativeCandidateIds, picked.candidateId])] };
     }) } : session;
     onChange(applyDecision(next, proposal.proposalId, "choose_alternative", picked.candidateId));
   }
@@ -1856,10 +1894,20 @@ function DetailPanel({
         <summary>Search other records</summary>
         <section aria-label="Manual right search" className="space-y-2">
           <p>{session.basicRun ? "Search all retrieved RIGHT tuples only, not the full dataset."
-            : "Search this source's verified Advanced shortlist only. Additional live lookups are unavailable."}</p>
+            : "Search the bounded RIGHT universe through Host, beyond the shortlist. Hard constraints still apply; no dataset-wide scalability claim."}</p>
           <input type="search" aria-label="Search right candidates" placeholder="Search all fields"
             className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1"
-            value={candidateSearch} onChange={e => { setCandidateSearch(e.target.value); setCandidatePage(0); }} />
+            value={candidateSearch} onChange={e => { lookupGeneration.current++; setLookupBusy(false); setLookupResult(null); setLookupError(""); setCandidateSearch(e.target.value); setCandidatePage(0); }} />
+          {session.advancedRun && <>
+            <button type="button" data-testid="matching-advanced-lookup" disabled={lookupBusy || candidateLocked || !!decision || !onLookupAdvanced}
+              onClick={() => void findAdvanced({ text: candidateSearch, offset: 0 })}>{lookupBusy ? "Searching…" : "Find right records"}</button>
+            {lookupError && <p role="alert">{lookupError}</p>}
+            {lookupResult && <p role="status">{lookupResult.total} admissible matches in {lookupResult.universeCount}/{lookupResult.universeCap} bounded RIGHT records · Host page {lookupResult.page.offset / 20 + 1}</p>}
+            {lookupResult && <>
+              <button type="button" disabled={lookupBusy || lookupResult.page.offset === 0} onClick={() => void findAdvanced({ ...lookupResult.page, offset: lookupResult.page.offset - 20 })}>Previous lookup page</button>
+              <button type="button" disabled={lookupBusy || lookupResult.page.offset + 20 >= lookupResult.total} onClick={() => void findAdvanced({ ...lookupResult.page, offset: lookupResult.page.offset + 20 })}>Next lookup page</button>
+            </>}
+          </>}
           <select aria-label="Sort right candidates" value={candidateSort}
             className="w-full rounded border border-slate-700 bg-slate-950"
             onChange={e => { setCandidateSort(e.target.value as "score" | "values"); setCandidatePage(0); }}>
@@ -1869,7 +1917,8 @@ function DetailPanel({
           <p>{candidates.length} retrieved matches · page {visiblePage + 1}/{pageCount}</p>
           {!candidates.length && <p>No retrieved right tuples match this search.</p>}
           {candidates.slice(visiblePage * 20, (visiblePage + 1) * 20).map(c => {
-            const edge = proposal.edges?.find(e => e.candidateId === c.candidateId);
+            const lookupRow = lookupRows.find(r => r.candidateId === c.candidateId);
+            const edge = lookupRow ? { ...lookupRow, metric: "contextual" } : proposal.edges?.find(e => e.candidateId === c.candidateId);
             const block = tupleMappingBlock(c.outputValues);
             return <label key={c.candidateId} className="block rounded border border-slate-700 p-1">
               <input type="radio" name={`candidate-${proposal.proposalId}`} checked={picked?.candidateId === c.candidateId}

@@ -1,5 +1,23 @@
 # Design: Unified Matching Workspace
 
+## Residual P1 lookup contract — 2026-11-15
+
+Use the existing bounded JOIN acquisition and contextual comparison functions.
+An explicit Host lookup request carries frozen run/session/semantic/evidence
+identity, exact source parts, literal text, and bounded offset/page size. It
+reacquires and compares the original snapshot before searching actual admissible
+RIGHT rows. Results retain actual fields/identity/ordered outputs, scores and
+field evidence, with honest total and universe cap. Search is not limited by
+soft cutoff or shortlist. Hard constraints are never relaxed. The same shared
+review registers the selected candidate and manual provenance; no second ledger.
+
+At commit, a manually chosen candidate carries the frozen lookup query/page
+identity. Host replays that source-scoped lookup against fresh acquisition and
+checks membership/actual outputs; fuzzy shortlist membership remains required
+for ordinary non-manual choices. A lookup is not a durable authenticated registry
+or an external snapshot guarantee. Current bounded acquisition remains capped
+at 10,000 RIGHT rows; server-side dictionary-scale acquisition is not claimed.
+
 Status: architecture approved on 2026-11-15, runtime not implemented. Decision:
 [ADR-0051](../../../docs/adr/0051-unified-matching-workspace.md).
 No new tests were executed for this packet. Locations below describe inspected

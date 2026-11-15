@@ -1517,6 +1517,7 @@ impl HostState {
                 | "blame_unmatched_key"
                 | "join_key_fuzzy_suggest"
                 | "matching_verify_join_tuples"
+                | "matching_lookup_join_candidates"
                 | "matching_acquire_join"
                 | "matching_verify_join_candidates"
                 | "prepare_join_inputs"
@@ -2180,10 +2181,14 @@ impl HostState {
                 )?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
-            "matching_acquire_join" | "matching_verify_join_candidates" => {
+            "matching_acquire_join" | "matching_verify_join_candidates" | "matching_lookup_join_candidates" => {
                 let mut a: commands::matching::MatchingAcquireJoinArgs = serde_json::from_value(args)
                     .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
                 let verification = a.verification.take();
+                let lookup = a.lookup.take();
+                if (cmd == "matching_lookup_join_candidates") != lookup.is_some() {
+                    return Err(HostError::validation("Lookup is required only for matching_lookup_join_candidates").into());
+                }
                 if (cmd == "matching_verify_join_candidates") != verification.is_some() {
                     return Err(HostError::validation("Verification is required only for matching_verify_join_candidates").into());
                 }
@@ -2191,7 +2196,9 @@ impl HostState {
                     a.project_file.as_deref(), a.project_uid.as_deref(), &a.references,
                     &a.connection_bindings, a.execution_engine)?;
                 let fresh = commands::matching::matching_acquire_join(&db, &a, &ws, &sources)?;
-                if let Some(v) = verification {
+                if let Some(l) = lookup {
+                    commands::matching::matching_lookup_join_candidates(fresh, l)
+                } else if let Some(v) = verification {
                     commands::matching::matching_verify_join_candidates(fresh, v)
                 } else {
                     serde_json::to_value(fresh).map_err(|e| RpcError::from(e.to_string()))

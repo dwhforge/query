@@ -50,6 +50,8 @@ pub struct MatchingAcquireJoinArgs {
     pub llm_budget_remaining: u32,
     #[serde(default)]
     pub verification: Option<MatchingJoinVerification>,
+    #[serde(default)]
+    pub lookup: Option<MatchingJoinLookup>,
 }
 
 fn live_llm_budget() -> u32 { MAX_LLM_CALLS_PER_RUN as u32 }
@@ -76,6 +78,8 @@ pub struct MatchingJoinVerification {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MatchingJoinVerifyDecision {
+    #[serde(default)]
+    pub manual_lookup: Option<MatchingLookupPage>,
     pub candidate_id: String,
     pub source_parts: Vec<String>,
     pub output_values: Vec<String>,
@@ -108,26 +112,8 @@ pub fn matching_verify_join_candidates(
     fresh: MatchingJoinSnapshot, verification: MatchingJoinVerification,
 ) -> Result<Value, RpcError> {
     let stale = || RpcError::from(HostError::validation("Stale, forged or changed Advanced evidence; refresh and review again"));
-    let expected = verification.expected_snapshot;
-    let stable_metrics = |result: &dwh_engine::MatchingRetrieveResult| -> Result<Value, RpcError> {
-        let mut metrics = serde_json::to_value(&result.metrics).map_err(|_| stale())?;
-        metrics.as_object_mut().ok_or_else(stale)?.remove("durationMs");
-        Ok(metrics)
-    };
-    // UI-only plan revisions do not change semantics.
-    let mut expected_plan = expected.plan.clone();
-    expected_plan.ui_revision = fresh.plan.ui_revision;
-    if verification.decisions.is_empty() || verification.expected_semantic_revision != fresh.plan.semantic_revision
-        || expected_plan != fresh.plan || expected.session_id != fresh.session_id
-        || expected.run_id != fresh.run_id || expected.evidence_revision != fresh.evidence_revision
-        || serde_json::to_value(&expected.acquisition).map_err(|_| stale())? != serde_json::to_value(&fresh.acquisition).map_err(|_| stale())?
-        || expected.retrieval.candidates != fresh.retrieval.candidates
-        || expected.retrieval.proposals != fresh.retrieval.proposals
-        || expected.retrieval.candidate_scores_by_proposal != fresh.retrieval.candidate_scores_by_proposal
-        || expected.retrieval.llm_candidate_ids_by_proposal != fresh.retrieval.llm_candidate_ids_by_proposal
-        || stable_metrics(&expected.retrieval)? != stable_metrics(&fresh.retrieval)? {
-        return Err(stale());
-    }
+    if verification.decisions.is_empty() { return Err(stale()); }
+    validate_join_snapshot(&fresh, &verification.expected_snapshot, verification.expected_semantic_revision)?;
     let mut seen = HashSet::new();
     let mut materialized = Vec::new();
     for decision in verification.decisions {
@@ -135,10 +121,13 @@ pub fn matching_verify_join_candidates(
         let candidate = fresh.retrieval.candidates.iter().find(|c| c.candidate_id == decision.candidate_id).ok_or_else(stale)?;
         let target = fresh.acquisition.target_rows.iter().find(|r| r.target_id == candidate.target_id).ok_or_else(stale)?;
         let proposal = fresh.retrieval.proposals.iter().find(|p| p.map_key == source.map_key).ok_or_else(stale)?;
-        // This first live slice permits only the actual contextual shortlist.
-        // Additional manual lookups outside it are explicitly unavailable here.
-        let scored = fresh.retrieval.candidate_scores_by_proposal.get(&proposal.proposal_id)
-            .map_or(false, |scores| scores.iter().any(|s| s.candidate_id == candidate.candidate_id));
+        let scored = if let Some(page) = &decision.manual_lookup {
+            matching_lookup_page(&fresh, &decision.source_parts, page)?["candidates"]
+                .as_array().ok_or_else(stale)?.iter().any(|c| c["candidateId"] == decision.candidate_id)
+        } else {
+            fresh.retrieval.candidate_scores_by_proposal.get(&proposal.proposal_id)
+                .map_or(false, |scores| scores.iter().any(|s| s.candidate_id == candidate.candidate_id))
+        };
         if !scored || decision.output_values != target.output_values
             || decision.run_id != fresh.run_id || decision.evidence_revision != fresh.evidence_revision
             || !seen.insert(source.map_key.clone())
@@ -150,6 +139,78 @@ pub fn matching_verify_join_candidates(
     }
     Ok(serde_json::json!({"sessionId": fresh.session_id, "runId": fresh.run_id,
         "evidenceRevision": fresh.evidence_revision, "materialized": materialized}))
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MatchingLookupPage {
+    pub text: String,
+    pub offset: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MatchingJoinLookup {
+    pub expected_snapshot: MatchingJoinSnapshot,
+    pub source_parts: Vec<String>,
+    pub page: MatchingLookupPage,
+}
+
+fn validate_join_snapshot(fresh: &MatchingJoinSnapshot, expected: &MatchingJoinSnapshot, semantic_revision: u64) -> Result<(), RpcError> {
+    let stale = || RpcError::from(HostError::validation("Stale, forged or changed Advanced evidence; refresh and review again"));
+    let stable_metrics = |result: &dwh_engine::MatchingRetrieveResult| -> Result<Value, RpcError> {
+        let mut metrics = serde_json::to_value(&result.metrics).map_err(|_| stale())?;
+        metrics.as_object_mut().ok_or_else(stale)?.remove("durationMs");
+        Ok(metrics)
+    };
+    // UI-only plan revisions do not change semantics.
+    let mut expected_plan = expected.plan.clone();
+    expected_plan.ui_revision = fresh.plan.ui_revision;
+    if semantic_revision != fresh.plan.semantic_revision
+        || expected_plan != fresh.plan || expected.session_id != fresh.session_id
+        || expected.run_id != fresh.run_id || expected.evidence_revision != fresh.evidence_revision
+        || serde_json::to_value(&expected.acquisition).map_err(|_| stale())? != serde_json::to_value(&fresh.acquisition).map_err(|_| stale())?
+        || expected.retrieval.candidates != fresh.retrieval.candidates
+        || expected.retrieval.proposals != fresh.retrieval.proposals
+        || expected.retrieval.candidate_scores_by_proposal != fresh.retrieval.candidate_scores_by_proposal
+        || expected.retrieval.llm_candidate_ids_by_proposal != fresh.retrieval.llm_candidate_ids_by_proposal
+        || stable_metrics(&expected.retrieval)? != stable_metrics(&fresh.retrieval)? {
+        return Err(stale());
+    }
+    Ok(())
+}
+
+fn matching_lookup_page(fresh: &MatchingJoinSnapshot, source_parts: &[String], page: &MatchingLookupPage) -> Result<Value, RpcError> {
+    if page.text.chars().count() > 200 || page.offset > LOCAL_TARGET_UNIVERSE_ROWS || page.offset % 20 != 0 {
+        return Err(HostError::validation("Lookup text/page exceeds bounded search limits").into());
+    }
+    let source = fresh.acquisition.source_rows.iter().find(|r| r.map_key == source_parts)
+        .ok_or_else(|| HostError::validation("Unknown lookup source tuple"))?;
+    let text = page.text.to_lowercase();
+    let mut rows = Vec::new();
+    for t in &fresh.acquisition.target_rows {
+        if !t.fields.values().chain(t.identity_values.iter()).chain(t.output_values.iter()).any(|v| v.to_lowercase().contains(&text)) { continue; }
+        let target = dwh_engine::MatchingTargetRow { target_id: t.target_id.clone(), fields: t.fields.clone(), output_values: t.output_values.clone() };
+        let score = dwh_engine::matching_pair_evidence(&fresh.plan, source, &target)
+            .map_err(|e| HostError::validation(e))?;
+        if let Some(score) = score {
+            rows.push(serde_json::json!({"candidateId": score.candidate_id, "targetId": t.target_id,
+                "outputValues": t.output_values, "identityParts": t.identity_values, "fields": t.fields,
+                "occurrences": t.occurrences, "score": score.score, "fieldScores": score.field_scores}));
+        }
+    }
+    rows.sort_by(|a,b| a["candidateId"].as_str().cmp(&b["candidateId"].as_str()));
+    let total = rows.len();
+    let rows: Vec<_> = rows.into_iter().skip(page.offset).take(20).collect();
+    Ok(serde_json::json!({"sessionId": fresh.session_id, "runId": fresh.run_id,
+        "evidenceRevision": fresh.evidence_revision, "sourceParts": source_parts,
+        "page": page, "total": total, "pageSize": 20, "universeCount": fresh.acquisition.target_rows.len(),
+        "universeCap": fresh.acquisition.target_row_cap, "candidates": rows}))
+}
+
+pub fn matching_lookup_join_candidates(fresh: MatchingJoinSnapshot, lookup: MatchingJoinLookup) -> Result<Value, RpcError> {
+    validate_join_snapshot(&fresh, &lookup.expected_snapshot, lookup.expected_snapshot.plan.semantic_revision)?;
+    matching_lookup_page(&fresh, &lookup.source_parts, &lookup.page)
 }
 
 fn map_err(e: MatchingValidateError) -> RpcError {

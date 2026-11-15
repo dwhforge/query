@@ -18,6 +18,7 @@
  */
 import type {
   MatchingAcquireJoinArgs,
+  MatchingLookupPage, MatchingJoinLookupResult, MatchingJoinVerifyDecision,
   MatchingJoinSnapshot,
   MatchingJoinVerified,
 } from "../../lib/bridge";
@@ -267,7 +268,35 @@ export async function runAdvancedMatching(
     || snapshot.acquisition.scope !== request.scope) {
     throw new Error("Advanced retrieval returned evidence for a different session, run or scope. No evidence was installed.");
   }
-  return adaptAdvancedSnapshot(latest, snapshot);
+  const installed = adaptAdvancedSnapshot(latest, snapshot);
+  return { ...installed, advancedRun: { ...installed.advancedRun!, request: {
+    mode: request.mode, scope: request.scope, sourceParts: request.sourceParts,
+    allowExpand: request.allowExpand, llmBudgetRemaining: request.llmBudgetRemaining,
+  } } };
+}
+
+/** Explicit bounded source-scoped manual lookup. A shortlist is not a dictionary. */
+export async function lookupAdvancedMatching(session: MatchingTabSession, proposalId: string, page: MatchingLookupPage,
+  ctx: { execution: AdvancedExecutionContext; latest: () => MatchingTabSession | undefined;
+    isContextCurrent: (s: MatchingTabSession) => boolean;
+    lookup: (args: MatchingAcquireJoinArgs & { lookup: { expectedSnapshot: MatchingJoinSnapshot; sourceParts: string[]; page: MatchingLookupPage } }) => Promise<MatchingJoinLookupResult>;
+  }): Promise<MatchingJoinLookupResult> {
+  const run = session.advancedRun, b = session.joinBinding;
+  const proposal = session.proposals.find(p => p.proposalId === proposalId);
+  if (!run || !b || !proposal || session.commitLifecycle || !ctx.isContextCurrent(session)) throw new Error("Lookup requires a current unlocked Advanced run.");
+  const revision = advancedReviewRevision(session);
+  const snapshot = run.snapshot;
+  const result = await ctx.lookup({ ...ctx.execution, queryId: b.hostQueryId, joinIndex: b.joinStepIndex,
+    sessionId: session.id, runId: run.id, evidenceRevision: run.evidenceRevision, plan: snapshot.plan,
+    mode: snapshot.retrieval.metrics.mode === "mass" ? "mass" : "trial", scope: snapshot.acquisition.scope,
+    allowExpand: run.request.allowExpand, llmBudgetRemaining: run.request.llmBudgetRemaining,
+    lookup: { expectedSnapshot: snapshot, sourceParts: requireStringTuple(proposal.mapKey), page } });
+  const latest = ctx.latest();
+  if (!latest || latest.commitLifecycle || advancedReviewRevision(latest) !== revision || !ctx.isContextCurrent(latest)
+    || result.sessionId !== session.id || result.runId !== run.id || result.evidenceRevision !== run.evidenceRevision
+    || mapKeyToken(result.sourceParts) !== mapKeyToken(proposal.mapKey)
+    || (result.page.text !== page.text || result.page.offset !== page.offset)) throw new Error("Lookup context changed; no candidates installed.");
+  return result;
 }
 
 /** Explicit Advanced invalidation: a JOIN change clears old evidence and
@@ -335,14 +364,14 @@ export function reconcileAdvancedContext(
  * exact ordered LEFT keys → RIGHT outputs tuple shape. */
 export function collectAdvancedDecisions(
   session: MatchingTabSession,
-): { error: string } | { sourceParts: string[]; outputValues: string[]; candidateId: string }[] {
+): { error: string } | { sourceParts: string[]; outputValues: string[]; candidateId: string; manualLookup?: MatchingLookupPage }[] {
   const binding = session.joinBinding;
   const run = session.advancedRun;
   if (session.commitLifecycle?.status === "stale") return { error: "Stale Matching review cannot be written. Reopen Find Matches." };
   if (!binding || !run || !session.plan) return { error: "Missing original JOIN run or advanced session." };
   if (session.scope !== "full" || session.plan.scope !== "full" || run.snapshot.plan.scope !== "full")
     return { error: "Advanced selected/cohort scope is unsupported. Retrieve and review an explicitly full-scope session before writing." };
-  const result: { sourceParts: string[]; outputValues: string[]; candidateId: string }[] = [];
+  const result: { sourceParts: string[]; outputValues: string[]; candidateId: string; manualLookup?: MatchingLookupPage }[] = [];
   const seen = new Set<string>();
   for (const d of session.decisions) {
     if (!["confirm_proposed", "choose_alternative"].includes(d.kind)) continue;
@@ -358,7 +387,8 @@ export function collectAdvancedDecisions(
       if (sourceParts.length !== binding.leftOn.length || outputValues.length !== binding.rightOn.length)
         return { error: "Advanced decision does not match the original JOIN key/output arity." };
       seen.add(mapKeyToken(d.mapKey));
-      result.push({ sourceParts, outputValues, candidateId: d.candidateId! });
+      const manualLookup = p.manualLookups?.[c.candidateId];
+      result.push({ sourceParts, outputValues, candidateId: d.candidateId!, ...(manualLookup ? { manualLookup } : {}) });
     } catch (e) {
       return { error: `Advanced decision cannot be written: ${e instanceof Error ? e.message : String(e)}` };
     }
@@ -378,7 +408,7 @@ export async function commitAdvancedMatching(
       verification: {
         expectedSemanticRevision: number;
         expectedSnapshot: MatchingJoinSnapshot;
-        decisions: { candidateId: string; sourceParts: string[]; outputValues: string[]; runId: string; evidenceRevision: number }[];
+        decisions: MatchingJoinVerifyDecision[];
       };
     }) => Promise<MatchingJoinVerified>;
     /** App atomic write: returns the reducer-acknowledged receipt + new binding. */
@@ -417,11 +447,11 @@ export async function commitAdvancedMatching(
     runId: snapshot.runId, evidenceRevision: snapshot.evidenceRevision,
     plan: snapshot.plan,
     mode: snapshotMode, scope: snapshot.acquisition.scope,
-    allowExpand: false, llmBudgetRemaining: MATCHING_CAPS.maxLlmCallsPerRun,
+    allowExpand: run.request.allowExpand, llmBudgetRemaining: run.request.llmBudgetRemaining,
   };
   const verified = await ctx.verify({ ...request,
     verification: { expectedSemanticRevision: snapshot.plan.semanticRevision, expectedSnapshot: snapshot,
-      decisions: selections.map((d) => ({ candidateId: d.candidateId, sourceParts: d.sourceParts, outputValues: d.outputValues, runId: run.id, evidenceRevision: run.evidenceRevision })) } });
+      decisions: selections.map((d) => ({ candidateId: d.candidateId, manualLookup: d.manualLookup, sourceParts: d.sourceParts, outputValues: d.outputValues, runId: run.id, evidenceRevision: run.evidenceRevision })) } });
   const latest = ctx.latest();
   if (!latest || advancedReviewRevision(latest) !== revision || latest.commitLifecycle?.status !== "pending"
     || latest.commitLifecycle.runId !== run.id || !ctx.isContextCurrent(latest) || verified.sessionId !== session.id || verified.runId !== run.id

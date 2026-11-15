@@ -102,6 +102,8 @@ export type MatchingProposalView = {
   searchIncomplete: boolean;
   evidence: MatchingEvidenceNote[];
   edges?: MatchingEdge[];
+  /** Source/run-bound manual lookup evidence, never another decision ledger. */
+  manualLookups?: Record<string, { text: string; offset: number }>;
   coverage?: {
     sourceTotal: number | null; sourceRetrieved: number; sourceTruncated: boolean;
     rightTotal: number | null; rightRetrieved: number; rightTruncated: boolean;

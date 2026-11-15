@@ -23,6 +23,62 @@ fn simple() -> Value {
         "select 'vendor-1' as id, 'canonical' as out, 'Acme Corporation' as label, 'UK' as region, 'right note' as note")
 }
 
+#[test]
+fn manual_lookup_beyond_shortlist_replays_actual_admissible_page_at_commit() {
+    let host = HostState::new().unwrap();
+    let mut sql = (0..55).map(|i| format!("select 'id{i}' as id, 'out{i}' as out, 'Acme Corporation' as label, 'UK' as region, 'note' as note"))
+        .collect::<Vec<_>>().join(" UNION ALL ");
+    sql.push_str(" UNION ALL select 'wanted', 'manual-canonical', 'Zebra Opaque Trading', 'UK', 'special-reference'");
+    sql.push_str(" UNION ALL select 'forbidden', 'bad-output', 'Zebra Opaque Trading', 'US', 'hard-fails'");
+    let a = args("select 'alias' as key, 'Acme Corporation' as name, 'UK' as region, 'note' as note", &sql);
+    let snapshot = host.dispatch("matching_acquire_join", a.clone()).unwrap();
+    let pid = snapshot["retrieval"]["proposals"][0]["proposalId"].as_str().unwrap();
+    assert_eq!(snapshot["retrieval"]["candidateScoresByProposal"][pid].as_array().unwrap().len(), 40);
+    let mut lookup = a.clone();
+    lookup["lookup"] = json!({"expectedSnapshot":snapshot, "sourceParts":["alias"], "page":{"text":"Zebra", "offset":0}});
+    let result = host.dispatch("matching_lookup_join_candidates", lookup.clone()).unwrap();
+    assert_eq!(result["total"], 1);
+    assert_eq!(result["candidates"][0]["score"], 0.0);
+    assert_eq!(result["candidates"][0]["outputValues"], json!(["manual-canonical"]));
+    let mut verify = a.clone();
+    verify["verification"] = json!({"expectedSemanticRevision":3,"expectedSnapshot":snapshot,
+        "decisions":[{"candidateId":result["candidates"][0]["candidateId"],"sourceParts":["alias"],
+        "outputValues":["manual-canonical"],"runId":"advanced:1","evidenceRevision":7,
+        "manualLookup":{"text":"Zebra","offset":0}}]});
+    assert!(host.dispatch("matching_verify_join_candidates", verify.clone()).is_ok());
+    for (pointer, value) in [
+        ("/verification/decisions/0/manualLookup/text", json!("no-such-record")),
+        ("/verification/decisions/0/manualLookup/offset", json!(20)),
+        ("/verification/decisions/0/candidateId", json!("cand:invented")),
+        ("/verification/decisions/0/sourceParts", json!(["other"])),
+        ("/verification/decisions/0/outputValues", json!(["forged"])),
+        ("/verification/decisions/0/runId", json!("advanced:other")),
+        ("/verification/decisions/0/evidenceRevision", json!(8)),
+        ("/verification/expectedSnapshot/sessionId", json!("another")),
+        ("/verification/expectedSnapshot/plan/semanticRevision", json!(8)),
+    ] {
+        let mut forged = verify.clone(); *forged.pointer_mut(pointer).unwrap() = value;
+        assert!(host.dispatch("matching_verify_join_candidates", forged).is_err(), "accepted {pointer}");
+    }
+    let mut ordinary = verify.clone(); ordinary["verification"]["decisions"][0].as_object_mut().unwrap().remove("manualLookup");
+    assert!(host.dispatch("matching_verify_join_candidates", ordinary).is_err());
+    lookup["lookup"]["page"] = json!({"text":"", "offset":0});
+    let page0 = host.dispatch("matching_lookup_join_candidates", lookup.clone()).unwrap();
+    assert_eq!(page0["total"], 56); assert_eq!(page0["candidates"].as_array().unwrap().len(), 20);
+    lookup["lookup"]["page"]["offset"] = json!(20);
+    let page1 = host.dispatch("matching_lookup_join_candidates", lookup.clone()).unwrap();
+    assert_ne!(page0["candidates"][0]["candidateId"], page1["candidates"][0]["candidateId"]);
+    lookup["lookup"]["page"]["offset"] = json!(1);
+    assert!(host.dispatch("matching_lookup_join_candidates", lookup.clone()).is_err());
+    lookup["lookup"]["page"] = json!({"text":"x".repeat(201), "offset":0});
+    assert!(host.dispatch("matching_lookup_join_candidates", lookup.clone()).is_err());
+    lookup["lookup"]["page"] = json!({"text":"forbidden", "offset":0});
+    assert_eq!(host.dispatch("matching_lookup_join_candidates", lookup.clone()).unwrap()["total"], 0);
+    lookup["lookup"]["expectedSnapshot"]["acquisition"]["targetRows"][0]["fields"]["note"] = json!("mutated");
+    assert!(host.dispatch("matching_lookup_join_candidates", lookup).is_err());
+    assert!(HostState::is_heavy_rpc("matching_lookup_join_candidates"));
+}
+
 fn verify_args(mut args: Value, snapshot: &Value) -> Value {
     let candidate = &snapshot["retrieval"]["candidates"][0];
     args["verification"] = json!({"expectedSemanticRevision":args["plan"]["semanticRevision"],

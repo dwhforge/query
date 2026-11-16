@@ -20,12 +20,10 @@ import { buildLensMatchingPlan } from "../app/matching/planDefaults";
 import {
   applyBulkConfirm,
   buildFinalDiff,
-  candidateById,
   filterProposals,
   matchingCounters,
   pageSlice,
   previewBulkConfirm,
-  readyTierSplit,
   summarizeFinalDiff,
   type BulkConfirmScope,
 } from "../app/matching/reviewLogic";
@@ -50,9 +48,9 @@ import type {
   MatchingTabSession,
 } from "../app/matching/types";
 import { RelationshipInspector } from "./matching/RelationshipInspector";
-import { RecordValues } from "./matching/RecordValues";
-import { RelationshipBrowser } from "./matching/RelationshipBrowser";
-import { nextUnresolved, type MappingProjection } from "../app/matching/relationships";
+import { LeftExplorer } from "./matching/LeftExplorer";
+import { RightExplorer } from "./matching/RightExplorer";
+import { nextUnresolved, buildRelationshipIndex, type MappingProjection } from "../app/matching/relationships";
 import type { MatchingCandidateView } from "../app/matching/types";
 import type { ExplainJoinKeyResult } from "../lib/bridge";
 
@@ -91,73 +89,7 @@ const ROLE_HINTS: Record<MatchingFieldRole, string> = {
     "Shown to you and the LLM (e.g. category) — not used to filter",
 };
 
-const FILTERS: {
-  id: MatchingTabSession["reviewFilter"];
-  label: string;
-  title: string;
-}[] = [
-  {
-    id: "ready",
-    label: "To confirm",
-    title: "Suggested matches — Fuzzy plus any LLM picks. Not in Mapping yet.",
-  },
-  {
-    id: "needs_decision",
-    label: "Still open",
-    title: "Anything not confirmed or saved yet.",
-  },
-  {
-    id: "ambiguous",
-    label: "Unclear",
-    title: "Several possible matches, or the model was unsure.",
-  },
-  {
-    id: "incomplete_search",
-    label: "Search cut off",
-    title: "Candidate search stopped early — needs LLM or a manual pick.",
-  },
-  {
-    id: "confirmed",
-    label: "Marked to save",
-    title: "You confirmed these. Click Write to Mapping to keep them.",
-  },
-  {
-    id: "saved",
-    label: "In Mapping",
-    title: "Already written to the Mapping. Use for comparison.",
-  },
-  {
-    id: "stale",
-    label: "Out of date",
-    title: "Plan changed after this suggestion was made.",
-  },
-  { id: "all", label: "All keys", title: "Every key in this matching run." },
-];
-
-function stateLabel(state: MatchingProposalView["state"]): string {
-  switch (state) {
-    case "proposed":
-      return "suggested";
-    case "ambiguous":
-      return "unclear";
-    case "no_candidates":
-      return "no match";
-    case "incomplete_search":
-      return "search cut off";
-    case "confirmed_in_draft":
-      return "marked to save";
-    case "saved":
-      return "in Mapping";
-    case "deferred":
-      return "skipped";
-    case "rejected":
-      return "rejected";
-    case "stale":
-      return "out of date";
-    default:
-      return state;
-  }
-}
+// stateLabel moved to LeftExplorer.tsx
 
 function emptyPlan(session: MatchingTabSession): MatchingPlanDraft {
   if (session.plan) return session.plan;
@@ -359,11 +291,17 @@ export function MatchingWorkspace({
   const [showFinal, setShowFinal] = useState(false);
   const [commitMsg, setCommitMsg] = useState<string | null>(null);
   const [showSavedContext, setShowSavedContext] = useState(true);
-  const [targetFocus, setTargetFocus] = useState<MatchingCandidateView | null>(null);
+  const [rightFocus, setRightFocus] = useState<MatchingCandidateView | null>(null);
+  const [actualJoinFacts, setActualJoinFacts] = useState<ExplainJoinKeyResult | null>(null);
   const [focusEpoch, setFocusEpoch] = useState(0);
+  const baselineForExplorers: MappingProjection = baseline ?? { rows: [], complete: false, coverage: "Mapping baseline not acquired." };
+  // Relationship index is rebuilt by the LeftExplorer (owned by the LEFT column).
+  void buildRelationshipIndex;
+  void baselineForExplorers;
   const [advanceAfterConfirm, setAdvanceAfterConfirm] = useState(false);
-  function inspectTarget(candidate: MatchingCandidateView) { setFocusEpoch(e => e + 1); setTargetFocus(candidate); }
-  function focusSource(id: string) { setFocusEpoch(e => e + 1); setTargetFocus(null); onChange({ ...session, selectedProposalId: id }); }
+  function inspectRight(candidate: MatchingCandidateView | null) { setRightFocus(candidate); setActualJoinFacts(null); }
+  function returnToLeftReview() { setRightFocus(null); setActualJoinFacts(null); }
+  function focusSource(id: string) { setRightFocus(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }
   const [reviewSearch, setReviewSearch] = useState("");
   const [reviewSort, setReviewSort] = useState<"workflow" | "score">("workflow");
 
@@ -387,10 +325,6 @@ export function MatchingWorkspace({
   );
   const tiers = useMemo(
     () => cascadeTierCounts(session.proposals),
-    [session.proposals],
-  );
-  const readySplit = useMemo(
-    () => readyTierSplit(session.proposals),
     [session.proposals],
   );
   const llmTouched = session.proposals.some((p) => p.provenance === "llm");
@@ -454,11 +388,11 @@ export function MatchingWorkspace({
       !session.decisions.some(old => old.proposalId === d.proposalId));
     if (advanceAfterConfirm && confirmedNow) {
       const id = nextUnresolved(next, sequenceIds, selected?.proposalId ?? null, 1);
-      if (id) { next = { ...next, selectedProposalId: id }; setTargetFocus(null); setFocusEpoch(e => e + 1); }
+      if (id) { next = { ...next, selectedProposalId: id }; setRightFocus(null); setFocusEpoch(e => e + 1); }
     }
     onChange(next);
   }
-  useEffect(() => { setTargetFocus(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
+  useEffect(() => { setRightFocus(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
   const bulkPreview = previewBulkConfirm(session, "selection", bulkScope === "selection" ? selectedIds
     : (bulkScope === "page" ? page : filtered).map(p => p.proposalId));
   const reviewedPreview = previewReviewedConfirm(session, selectedIds);
@@ -808,26 +742,15 @@ export function MatchingWorkspace({
 
   return (
     <div inert={session.commitLifecycle?.status === "pending"} className="flex h-full min-h-0 flex-col bg-[#0b1220] text-slate-200" data-testid="matching-workspace">
-      <div
-        className="shrink-0 border-b border-amber-900/50 bg-amber-950/40 px-3 py-2 text-[11px] leading-snug text-amber-100/95"
-        role="status"
-        data-testid="matching-session-banner"
-      >
-        {isDemo ? (
-          "Demo decisions are temporary and cannot be written to a Mapping. Restarting the app clears this demo."
-        ) : (
-          <>
-            Suggestions here are temporary until you write them to the Mapping.
-            Restarting the app clears this draft. After writing to Mapping, save the
-            project file to keep local Mapping changes.
-          </>
-        )}
-      </div>
+      <details className="shrink-0 border-b border-slate-800 px-3 py-1 text-[10px] text-slate-400" data-testid="matching-session-banner">
+        <summary className="cursor-pointer">Draft status · {isDemo ? "Demo cannot write to Mapping" : "Not saved to the project file"}</summary>
+        <p className="py-1">{isDemo ? "Demo decisions are temporary and cannot be written to a Mapping." : "Draft decisions are temporary until written to Mapping. Restarting clears this draft; save the project file separately after Mapping changes."}</p>
+      </details>
 
       <div
         role="status"
         data-testid="matching-data-origin"
-        className="shrink-0 border-b border-amber-900/50 px-3 py-2 text-[11px] text-amber-100"
+        className="shrink-0 border-b border-slate-800 px-3 py-1 text-[10px] text-slate-400"
       >
         {isDemo
           ? "Demo fixtures — sample data only, not your live query results. Writing to Mapping is blocked. The trial uses the fixed provider/region example."
@@ -846,20 +769,20 @@ export function MatchingWorkspace({
         )}
       </div>
 
-      {session.basicRun && <p role="status" data-testid="matching-basic-coverage" className="shrink-0 border-b border-slate-800 px-3 py-1 text-[11px] text-slate-400">
+      {session.basicRun && <details className="shrink-0 border-b border-slate-800 px-3 py-0.5 text-[10px] text-slate-400"><summary>Evidence &amp; coverage · {session.basicRun.report.sources.length} LEFT keys · {session.basicRun.report.right_universe.length} RIGHT tuples{session.basicRun.report.right_truncated ? " · partial" : ""}</summary><p data-testid="matching-basic-coverage" role="status">
         {session.basicRun.report.sources.length}/{session.basicRun.report.left_distinct_total} unmatched source tuples
         {" · "}{session.basicRun.report.sources.reduce((n, g) => n + g.source.occurrences, 0)}/{session.basicRun.report.left_occurrences_total} source rows
         {" · "}{session.basicRun.report.right_universe.length}/{session.basicRun.report.right_distinct_total} right tuples
         {session.basicRun.report.left_truncated ? " · source retrieval truncated" : ""}
         {session.basicRun.report.right_truncated ? " · right retrieval truncated; confidence bulk blocked" : ""}
-      </p>}
+      </p></details>}
 
-      {session.advancedRun && <p role="status" data-testid="matching-advanced-coverage" className="shrink-0 border-b border-slate-800 px-3 py-1 text-[11px] text-slate-400">
+      {session.advancedRun && <details className="shrink-0 border-b border-slate-800 px-3 py-0.5 text-[10px] text-slate-400"><summary>Evidence &amp; coverage · verified live acquisition{session.advancedRun.snapshot.acquisition.complete ? " · complete" : " · partial"}</summary><p data-testid="matching-advanced-coverage" role="status">
         Verified live acquisition · {session.advancedRun.snapshot.acquisition.sourceRows.length}/{session.advancedRun.snapshot.acquisition.sourceKeyCap} source tuples
         {" · "}{session.advancedRun.snapshot.acquisition.targetRows.length}/{session.advancedRun.snapshot.acquisition.targetRowCap} right tuples
         {session.advancedRun.snapshot.acquisition.complete ? "" : " · right retrieval truncated — confidence bulk blocked"}
         {" · "}run {session.advancedRun.id}
-      </p>}
+      </p></details>}
 
       {session.commitLifecycle?.status === "stale" && <p role="alert" className="p-2 text-amber-200">{session.commitLifecycle.reason}</p>}
       {acknowledged && <section aria-label="Matching commit receipt" className="p-3 text-teal-100">
@@ -870,14 +793,13 @@ export function MatchingWorkspace({
 
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 px-3 py-2">
         <h2 className="text-[13px] font-semibold text-teal-100">
-          {session.title}
+          MATCHING: {plan.sourceRef || session.title} → {plan.targetRef || "target"}
         </h2>
         <span className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">
           {scopeLabel}
         </span>
         <span className="text-[10px] text-slate-500">
-          {counters.sourceRows} source rows · {counters.uniqueKeys} unique
-          keys · {counters.confirmed} marked to save
+          {counters.uniqueKeys} LEFT · {counters.confirmed} confirmed · {session.proposals.length} acquired
         </span>
         <div className="ml-auto flex gap-2">
           {!isDemo && onOpenLens && (
@@ -907,7 +829,7 @@ export function MatchingWorkspace({
                 : "border-slate-700 text-slate-400"
             }`}
           >
-            {chatOpen ? "Hide how to match (LLM)" : "How to match (LLM)"}
+              {chatOpen ? "Hide how to match (LLM)" : "How to match (LLM)"}
           </button>
         </div>
       </header>
@@ -926,13 +848,13 @@ export function MatchingWorkspace({
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <section
-            className="max-h-[40%] shrink-0 overflow-auto border-b border-slate-800 p-3"
+            className="max-h-[18%] shrink-0 overflow-auto border-b border-slate-800 p-2"
             aria-label="Matching plan"
           >
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-              How matching works
+              Matching Rules
             </div>
-            <details open={!isBasic}>
+            <details>
               <summary className="cursor-pointer text-xs">Edit plan{isBasic ? (isAdvancedConfirmed ? " — confirmed Advanced live plan" : " — Basic locks the original JOIN keys") : ""}</summary>
               {isBasic && !isAdvancedConfirmed && <p className="text-xs text-slate-400">Basic locks the original ordered LEFT keys → RIGHT outputs. Confirm this plan for Advanced live execution: the original JOIN key/output fields stay locked, comparison fields, roles and normalization are yours.</p>}
               {isAdvancedConfirmed && (
@@ -1262,173 +1184,70 @@ export function MatchingWorkspace({
               }`}
             >
             {!hasProposals ? (
-              <p className="p-3 text-[12px] text-slate-500">
-                {acknowledged ? "Use Refresh remaining review to retrieve again. " : ""}Click <span className="text-amber-100">Find matches</span> to
-                compare source keys with the dictionary (spelling first, no
-                LLM).
-              </p>
+              <>
+                <div className="grid min-h-[250px] flex-1 grid-cols-2 overflow-hidden">
+                  <section aria-label="Source explorer" className="flex min-h-0 flex-col border-r border-slate-800">
+                    <header className="border-b border-slate-800 px-3 py-2 text-[12px] font-semibold text-teal-100">LEFT · {plan.sourceRef || session.title}</header>
+                    <input type="search" aria-label="Search source keys" placeholder="Search LEFT records" disabled className="m-2 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px]" />
+                    <p className="m-auto p-4 text-center text-[11px] text-slate-500">{acknowledged ? "Use Refresh remaining review to acquire source records." : "No LEFT records acquired yet. Use Find matches to retrieve the current source keys."}</p>
+                  </section>
+                  <RightExplorer session={session} baseline={baselineForExplorers} focused={rightFocus} focusEpoch={focusEpoch} onSetFocus={inspectRight} onInspectJoin={onInspectJoin} onJoinFacts={setActualJoinFacts} />
+                </div>
+                <section aria-label="Relationship comparison" className="flex h-[150px] shrink-0 items-center justify-between border-t border-slate-800 px-3">
+                  <span className="text-[12px] text-slate-400">Select an acquired LEFT record to inspect a relationship.</span>
+                  <button type="button" disabled className="rounded border border-teal-700 px-3 py-1 text-[12px] opacity-50">Confirm match</button>
+                </section>
+                <div className="flex shrink-0 items-center gap-2 border-t border-slate-800 p-2 text-[11px]">
+                  <span>0 confirmed · Mapping unchanged</span>
+                  <button type="button" disabled className="ml-auto rounded border border-slate-700 px-3 py-1 opacity-50">Review Changes</button>
+                  <button type="button" disabled className="rounded border border-amber-700 px-3 py-1 opacity-50">Write to Mapping</button>
+                  <span className="text-[10px] text-slate-500">Project Save is separate</span>
+                </div>
+              </>
             ) : (
               <>
-                <div className="flex shrink-0 flex-wrap gap-1 border-b border-slate-800 px-2 py-1.5">
-                  <input type="search" aria-label="Search source keys" value={reviewSearch}
-                    placeholder="Search source keys"
-                    className="min-w-0 rounded border border-slate-700 bg-slate-950 px-2 text-[11px]"
-                    onChange={e => { setReviewSearch(e.target.value); onChange({ ...session, pageIndex: 0 }); }} />
-                  <select aria-label="Sort source keys" value={reviewSort}
-                    className="rounded border border-slate-700 bg-slate-950 text-[11px]"
-                    onChange={e => { setReviewSort(e.target.value as "workflow" | "score"); onChange({ ...session, pageIndex: 0 }); }}>
-                    <option value="workflow">Workflow order</option>
-                    <option value="score">Suggested score: high to low (unknown last)</option>
-                  </select>
-                  {FILTERS.map((f) => {
-                    const n = filterProposals(session.proposals, f.id).length;
-                    return (
-                    <button
-                      key={f.id}
-                      type="button"
-                      title={f.title}
-                      onClick={() =>
-                        onChange({
-                          ...session,
-                          reviewFilter: f.id,
-                          pageIndex: 0,
-                        })
-                      }
-                      className={`rounded px-2 py-0.5 text-[10px] ${
-                        session.reviewFilter === f.id
-                          ? "bg-amber-500/20 text-amber-50"
-                          : "text-slate-500 hover:text-slate-300"
-                      }`}
-                    >
-                      {f.label}
-                      {n > 0 ? ` · ${n}` : ""}
-                    </button>
-                    );
-                  })}
-                  {savedRows.length > 0 &&
-                  session.reviewFilter !== "saved" &&
-                  session.reviewFilter !== "all" ? (
-                    <label className="ml-2 flex items-center gap-1 text-[10px] text-teal-200/90">
-                      <input
-                        type="checkbox"
-                        checked={showSavedContext}
-                        onChange={(e) => setShowSavedContext(e.target.checked)}
-                      />
-                      Show {savedRows.length} already in Mapping
-                    </label>
-                  ) : null}
-                  {!skipPaging ? (
-                    <div className="ml-auto flex items-center gap-1 text-[10px] text-slate-500">
-                      <button
-                        type="button"
-                        aria-label="Previous source page"
-                        disabled={pageIndex <= 0}
-                        onClick={() =>
-                          onChange({
-                            ...session,
-                            pageIndex: Math.max(0, pageIndex - 1),
-                          })
-                        }
-                        className="rounded border border-slate-700 px-1.5 disabled:opacity-30"
-                      >
-                        ‹
-                      </button>
-                      page {pageIndex + 1}
-                      <button
-                        type="button"
-                        aria-label="Next source page"
-                        disabled={
-                          (pageIndex + 1) * session.pageSize >=
-                          filtered.length
-                        }
-                        onClick={() =>
-                          onChange({
-                            ...session,
-                            pageIndex: pageIndex + 1,
-                          })
-                        }
-                        className="rounded border border-slate-700 px-1.5 disabled:opacity-30"
-                      >
-                        ›
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="ml-auto text-[10px] text-slate-400">
-                      scroll the list — all groups are here
-                    </div>
-                  )}
+                {/* ADR-0052 mandatory composition: LEFT and RIGHT Explorers are
+                    sibling primary columns (equal width), Relationship Inspector
+                    lives BELOW both. The reverse-relationship list lives inside the
+                    LEFT Explorer when RIGHT-focused (rightFocus is set). */}
+                <div className="grid min-h-[250px] flex-1 grid-cols-2 overflow-hidden">
+                  <LeftExplorer
+                    session={session} baseline={baselineForExplorers} plan={plan} selected={selected}
+                    page={page} filteredCount={filtered.length} filter={session.reviewFilter}
+                    reviewSearch={reviewSearch} reviewSort={reviewSort} savedRows={savedRows}
+                    savedContext={showSavedContext} skipPaging={skipPaging} pageIndex={pageIndex}
+                    selectedHidden={selectedHidden} rightFocus={rightFocus}
+                    actualJoinFacts={actualJoinFacts}
+                    onPick={focusSource}
+                    onNavigate={navigate}
+                    onSetSearch={v => { setReviewSearch(v); onChange({ ...session, pageIndex: 0 }); }}
+                    onSetFilter={id => onChange({ ...session, reviewFilter: id, pageIndex: 0 })}
+                    onSetSort={setReviewSort}
+                    onSetPage={p => onChange({ ...session, pageIndex: p })}
+                    onSetSavedContext={setShowSavedContext}
+                    onAdvanceAfterConfirm={setAdvanceAfterConfirm}
+                    advanceAfterConfirm={advanceAfterConfirm}
+                    selectedIds={selectedIds}
+                    onToggleSelected={id => setSelectedIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...new Set([...ids, id])])}
+                    onCheckVisible={() => setSelectedIds(page.map(p => p.proposalId))}
+                    onInvestigate={id => { setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }}
+                    onReturn={returnToLeftReview}
+                    canNavigatePrev={!!nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, -1)}
+                    canNavigateNext={!!nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, 1)}
+                    bulkSelectable={hasProposals}
+                  />
+                  <RightExplorer
+                    session={session} baseline={baselineForExplorers} focused={rightFocus} focusEpoch={focusEpoch}
+                    onSetFocus={inspectRight} onInspectJoin={onInspectJoin} onJoinFacts={setActualJoinFacts}
+                  />
                 </div>
-
-                {isReadyView ? (
-                  <div
-                    className="shrink-0 border-b border-slate-800 bg-slate-950/60 px-2 py-1 text-[10px] text-slate-300"
-                    data-testid="matching-ready-banner"
-                  >
-                    Suggested matches (not in Mapping yet):{" "}
-                    <span className="text-emerald-200">
-                      string {readySplit.fuzzy}
-                    </span>
-                    {readySplit.leftover > 0 ? (
-                      <>
-                        {" · "}
-                        <span className="text-amber-200">
-                          unmatched {readySplit.leftover}
-                        </span>
-                      </>
-                    ) : null}
-                    {readySplit.llm > 0 ? (
-                      <>
-                        {" · "}
-                        <span className="text-violet-200">
-                          LLM {readySplit.llm}
-                        </span>
-                      </>
-                    ) : null}
-                    {readySplit.other > 0 ? (
-                      <>
-                        {" · "}
-                        <span className="text-slate-200">
-                          you decide {readySplit.other}
-                        </span>
-                      </>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-700 p-2 text-[11px]" aria-label="Sequential review">
-                  <button type="button" disabled={!nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, -1)} onClick={() => navigate(-1)}>Previous unresolved</button>
-                  <button type="button" disabled={!nextUnresolved(session, sequenceIds, selected?.proposalId ?? null, 1)} onClick={() => navigate(1)}>Next unresolved</button>
-                  <label><input type="checkbox" checked={advanceAfterConfirm} onChange={e => setAdvanceAfterConfirm(e.target.checked)} /> Advance after confirm</label>
-                  {selectedHidden && <span role="status">Pinned source is outside this page/filter. <button type="button" onClick={() => { setReviewSearch(""); onChange({ ...session, reviewFilter: "all", pageIndex: Math.floor(session.proposals.findIndex(p => p.proposalId === selected?.proposalId) / session.pageSize) }); }}>Reveal source</button></span>}
-                </div>
-                <div className="grid min-h-0 flex-1 grid-cols-1 overflow-auto xl:grid-cols-2">
-                  <section className="min-w-0 overflow-auto" aria-label="Source explorer">
-                    <h3 className="p-2 font-semibold">LEFT records · {plan.sourceRef}</h3>
-                    {!targetFocus && <table className="w-full text-left text-[11px]">
-                      <thead className="sticky top-0 bg-slate-950 text-slate-400"><tr><th>Reviewed</th><th>Source record</th><th>Suggested / draft target</th><th>Status</th></tr></thead>
-                      <tbody>{page.map(p => {
-                        const target = candidateById(session, session.decisions.find(d => d.proposalId === p.proposalId)?.candidateId ?? p.proposedCandidateId);
-                        return <tr key={p.proposalId} data-testid={`matching-row-${p.proposalId}`} onClick={() => focusSource(p.proposalId)}
-                          className={`cursor-pointer border-t border-slate-800 ${selected?.proposalId === p.proposalId ? "bg-amber-950/30" : "hover:bg-slate-900"}`}>
-                          <td className="p-2"><input type="checkbox" aria-label={`Reviewed source ${JSON.stringify(p.mapKey)}`}
-                            checked={selectedIds.includes(p.proposalId)} disabled={p.state === "saved" || p.state === "stale" || !!session.commitLifecycle}
-                            onClick={e => e.stopPropagation()} onChange={e => setSelectedIds(ids => e.target.checked ? [...new Set([...ids, p.proposalId])] : ids.filter(id => id !== p.proposalId))} /></td>
-                          <td className="p-2"><button type="button" onClick={e => { e.stopPropagation(); focusSource(p.proposalId); }}><RecordValues fields={plan.mapKeyFields} values={p.mapKey} /></button><span className="text-slate-500">{p.affectedSourceRows} source rows</span></td>
-                          <td className="p-2">{target ? <RecordValues fields={plan.outputs} values={target.outputValues} /> : "No suggestion"}</td>
-                          <td className="p-2">{stateLabel(p.state)}</td>
-                        </tr>;
-                      })}</tbody>
-                    </table>}
-                    <RelationshipBrowser session={session} baseline={baseline} target={targetFocus} onFocusTarget={inspectTarget}
-                      onInspectJoin={onInspectJoin} focusEpoch={focusEpoch} onInvestigate={id => { setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }}
-                      onReturn={() => { setTargetFocus(null); setFocusEpoch(e => e + 1); }} />
-                  </section>
+                <div className="flex h-[190px] max-h-[23%] min-h-[145px] shrink-0 flex-col overflow-hidden border-t border-slate-800">
                   <RelationshipInspector key={(session.basicRun ?? session.advancedRun)?.id ?? session.id} session={session} baseline={baseline}
-                    focusEpoch={focusEpoch} browsedTarget={targetFocus} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectTarget}
+                    focusEpoch={focusEpoch} browsedTarget={rightFocus} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectRight}
                     onAgreeReplace={token => onChange({ ...session, explicitReplaceKeys: Array.from(new Set([...session.explicitReplaceKeys, token])) })} />
                 </div>
 
-                <div className="shrink-0 space-y-2 border-t border-slate-800 p-2">
+                <div className="shrink-0 space-y-1 border-t border-slate-800 p-1.5">
                   <details><summary className="cursor-pointer text-[11px]">Review actions — explicit counted bulk</summary>
                   <div className="flex flex-wrap items-center gap-2 text-[11px]">
                     <span className="text-slate-500">Mark as OK</span>
@@ -1486,13 +1305,6 @@ export function MatchingWorkspace({
                         {session.advancedRun ? "contextual similarity scores are not probabilities" : "spelling scores are not probabilities"}.
                       </span>
                     </>}
-                    <button
-                      type="button"
-                      onClick={() => setSelectedIds(page.map((p) => p.proposalId))}
-                      className="text-slate-500 hover:underline"
-                    >
-                      Check visible rows
-                    </button>
                   </div>
 
                   </details>
@@ -1502,11 +1314,10 @@ export function MatchingWorkspace({
                       onClick={() => setShowFinal((v) => !v)}
                       className="rounded border border-teal-800/60 px-2 py-1 text-[11px] text-teal-100"
                     >
-                      {showFinal ? "Hide" : "Show"} {isDemo ? "demo decisions (no writes)" : "what will be written"}
+                      {showFinal ? "Close Review" : "Review Changes"}
                     </button>
                     <span className="text-[10px] text-slate-500">
-                      New {finalSum.adds} · change {finalSum.changes} · still
-                      open {finalSum.unresolved}
+                      {counters.confirmed} confirmed · new {finalSum.adds} · change {finalSum.changes} · still open {finalSum.unresolved}
                     </span>
                     <button
                       type="button"
@@ -1521,6 +1332,7 @@ export function MatchingWorkspace({
                         : `Write ${session.decisions.filter((d) => d.kind === "confirm_proposed" || d.kind === "choose_alternative").length} to Mapping`}
                     </button>
                   </div>
+                  <span className="text-[9px] text-slate-500">Project file Save is separate.</span>
 
                   {showFinal && (
                     <div

@@ -97,7 +97,9 @@ export function RelationshipInspector({
   const universe = session.basicRun ? session.candidates : lookupResult
     ? lookupRows.map(row => candidateById(session, row.candidateId)).filter(c => !!c) : [...new Map([proposed, ...alts].filter(c => !!c).map(c => [c.candidateId, c])).values()];
   const query = candidateSearch.toLocaleLowerCase();
-  const candidates = universe.filter(c => [...c.outputValues, ...Object.values(c.fields)]
+  // Keep Host-verified identity-only Advanced hits even if identity columns are
+  // not duplicated into the display-fields object.
+  const candidates = universe.filter(c => [...c.outputValues, ...(c.identityParts ?? []), ...Object.values(c.fields)]
     .some(v => tupleCell(v).toLocaleLowerCase().includes(query))).sort((a, b) => {
       if (candidateSort === "values") return mapKeyToken(a.outputValues).localeCompare(mapKeyToken(b.outputValues));
       const score = (id: string) => lookupRows.find(r => r.candidateId === id)?.score
@@ -182,26 +184,46 @@ export function RelationshipInspector({
               ? { ...p, state: p.suggestionState ?? "proposed", userTouched: true } : p) });
         }}>Undo decision</button>
       </section>}
-      <div className="rounded border border-slate-800 bg-slate-950/50 px-2 py-1 text-[10px] text-slate-300">
-        {proposalEvidenceSummary(proposal)}
+      {/* ADR-0052: the selected relationship is the most prominent thing in this
+          panel. It is stable: opening/closing Details never changes it. */}
+      <div className="rounded border border-teal-800 bg-teal-950/30 p-3">
+        <div className="flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-teal-200/80">
+          Selected relationship
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-100">
+          <span className="min-w-0 break-words font-mono">
+            {proposal.mapKey.map(tupleCell).join(" / ")}
+          </span>
+          <span className="text-teal-300">→</span>
+          <span className="min-w-0 break-words font-mono">
+            {comparison
+              ? comparison.outputValues.map(tupleCell).join(" / ")
+              : "no RIGHT selected"}
+          </span>
+        </div>
+        <div className="mt-1 text-[11px] text-slate-400">
+          {picked ? "Selected for confirmation" : decided ? "Confirmed draft" : "Suggested — not yet confirmed"}
+        </div>
       </div>
 
-      <section aria-label="Relationship comparison" className="rounded border border-slate-700 p-2 space-y-2">
-        <h3 className="font-semibold">Relationship — {picked ? "selected for inspection only" : decided ? "confirmed draft" : "suggestion, not selected"}</h3>
+      <section aria-label="Relationship comparison" className="space-y-1">
         <div className="grid grid-cols-2 gap-3">
-          <div><h4>LEFT</h4><RecordValues fields={session.plan?.mapKeyFields ?? []} values={proposal.mapKey} /></div>
-          <div><h4>RIGHT outputs</h4>{comparison ? <RecordValues fields={session.plan?.outputs ?? []} values={comparison.outputValues} /> : "No target selected"}</div>
+          <div><h4 className="text-[9px] uppercase text-slate-500">LEFT</h4><RecordValues fields={session.plan?.mapKeyFields ?? []} values={proposal.mapKey} /></div>
+          <div><h4 className="text-[9px] uppercase text-slate-500">RIGHT</h4>{comparison ? <RecordValues fields={session.plan?.outputs ?? []} values={comparison.outputValues} /> : "No target selected"}</div>
         </div>
+        <details><summary>Details · {proposalEvidenceSummary(proposal)}</summary><div className="max-h-24 overflow-auto">
         {session.plan?.comparisons.map((field, i) => <div key={i}>
           <span>{field.sourceField} → {field.targetField} · {field.role.replace(/_/g, " ")}: </span>
           <span>{recordValue(proposal.sourceValues[field.sourceField])} → {recordValue(comparison?.fields[field.targetField])}</span>
           <span> · {field.role === "reference_context" ? "reference / unscored" : `Host field score: ${proposal.edges?.find(e => e.candidateId === comparison?.candidateId)?.fieldScores[i] ?? "unknown"}; no inferred constraint pass`}</span>
         </div>)}
-        <p>{consequence}. Confirm stages a draft only; Write Mapping verifies and atomically binds all outputs before the original JOIN. Save project separately. Result-row changes require execution.</p>
+        <p>{consequence}. Confirm stages a draft only; Write Mapping verifies the original JOIN. Save the project separately.</p>
+        {proposal.evidence.map((e, i) => <p key={i}><span className="text-slate-500">{e.field}:</span> {e.note}</p>)}
+        </div></details>
         {comparison && <button type="button" className="rounded border border-slate-600 px-2 py-1" onClick={() => onInspectTarget(comparison)}>Inspect RIGHT relationships</button>}
       </section>
 
-      <section aria-label="Explicit relationship actions" className="sticky top-0 z-10 space-y-2 rounded border border-teal-900 bg-[#0b1220] p-2">
+      <section aria-label="Explicit relationship actions" className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-1">
         <button type="button" disabled={!proposed || candidateLocked || !!decision || !!sourceBlock || !!tupleMappingBlock(proposed.outputValues)}
           onClick={() => proposed && setPicks({ ...picks, [proposal.proposalId]: proposed.candidateId })}>Select suggested candidate</button>
       {browsedTarget && <section aria-label="Inspected RIGHT pair" className="rounded border border-slate-700 p-2">
@@ -213,16 +235,7 @@ export function RelationshipInspector({
       <button type="button" className="rounded border border-teal-700 p-2 disabled:opacity-40"
         disabled={!picked || candidateLocked || !!decision || !!sourceBlock || !!tupleMappingBlock(picked.outputValues) || (!!browsedTarget && picked.candidateId !== browsedTarget.candidateId)}
         onClick={confirmPicked}>Confirm selected candidate</button>
-      <p>Selection only inspects. Tab to Confirm and press Enter/Space to stage a decision; arrow keys in the candidate list only select.</p>
       </section>
-      <ul className="list-disc pl-4 text-slate-400">
-        {proposal.evidence.map((e, i) => (
-          <li key={i}>
-            <span className="text-slate-500">{e.field}:</span> {e.note}
-          </li>
-        ))}
-      </ul>
-
       {(session.basicRun ?? session.advancedRun) && <section aria-label="Candidate evidence" className="space-y-2">
         <p>{proposal.coverage?.rightRetrieved}/{proposal.coverage?.rightTotal ?? "unknown"} retrieved right tuples · {proposal.coverage?.shortlistOmitted ?? 0} alternatives omitted from display · {proposal.coverage?.competitorsUnknown ?? "unknown"} unknown competitors</p>
         {session.advancedRun && <p className="text-slate-400">Verified live acquisition, run {session.advancedRun.id.slice(0, 24)}… · {proposal.coverage?.sourceRetrieved} source tuples · right retrieval {proposal.coverage?.rightTruncated ? "truncated — incomplete coverage blocks confidence bulk" : "complete"}</p>}
@@ -241,7 +254,7 @@ export function RelationshipInspector({
         </details>
       </section>}
 
-      {(session.candidates.length > 0 || session.basicRun || session.advancedRun) && <details open>
+      {(session.candidates.length > 0 || session.basicRun || session.advancedRun) && <details>
         <summary>Search other records</summary>
         <section aria-label="Manual right search" className="space-y-2">
           <p>{session.basicRun ? "Search all retrieved RIGHT tuples only, not the full dataset."

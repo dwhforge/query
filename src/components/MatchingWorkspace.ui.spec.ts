@@ -4,12 +4,11 @@ import { mount } from "./MatchingWorkspace.testHarness";
 test("keyboard pick and explicit confirmation are separate; sequential review preserves picks and filters", async ({ page }) => {
   await mount(page, 2);
   const detail = page.getByTestId("matching-detail");
-  const radio = detail.getByRole("radio").nth(1);
-  await radio.focus(); await page.keyboard.press("Space");
+  await detail.getByRole("button", { name: "Select suggested candidate" }).click();
   expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
   await page.getByRole("button", { name: "Next unresolved", exact: true }).click();
   await page.getByRole("button", { name: "Previous unresolved", exact: true }).click();
-  await expect(detail.getByRole("radio").nth(1)).toBeChecked();
+  await expect(detail).toContainText("Selected for confirmation");
   expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
   await page.getByRole("checkbox", { name: "Advance after confirm", exact: true }).check();
   const confirm = detail.getByRole("button", { name: "Confirm selected candidate", exact: true });
@@ -23,20 +22,60 @@ test("RIGHT browsing never selects or confirms and uses one provenance-filtered 
   await mount(page, 2);
   const browser = page.getByRole("region", { name: "RIGHT relationship explorer" });
   await browser.getByTestId("matching-browse-target").first().click();
-  await expect(browser.getByRole("list", { name: "Unified related LEFT records" })).toHaveCount(1);
+  const related = page.getByRole("region", { name: "LEFT records related to selected RIGHT" });
+  await expect(related.getByRole("list", { name: "Unified related LEFT records" })).toHaveCount(1);
   await expect(page.getByTestId("matching-detail").getByRole("radio", { checked: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Confirm selected candidate", exact: true })).toBeDisabled();
   await expect(browser).toContainText("Actual JOIN: not inspected");
-  await browser.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Confirmed draft");
-  await expect(browser.getByRole("listitem")).toHaveCount(0);
-  await browser.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Suggested");
-  await browser.getByRole("listitem").last().getByRole("button").click();
+  await related.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Confirmed draft");
+  await expect(related.getByRole("listitem")).toHaveCount(0);
+  await related.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Suggested");
+  await related.getByRole("listitem").last().getByRole("button", { name: /Investigate this source/ }).click();
   await expect(page.getByTestId("matching-detail")).toContainText("source1/0");
   await page.getByRole("button", { name: "Select this relationship for inspection", exact: true }).click();
   expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
   await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
-  await expect(browser.getByRole("listitem").last()).toContainText("Confirmed draft");
+  await expect(related.getByRole("listitem").last()).toContainText("Confirmed draft");
   expect(await page.evaluate(() => (window as any).calls.filter((c: any) => c.cmd === "retrieve").length)).toBe(1);
+});
+
+test("the two primary explorers are siblings above a compact relationship inspector", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mount(page, 2);
+  const left = page.getByRole("region", { name: "Source explorer" });
+  const right = page.getByRole("region", { name: "RIGHT relationship explorer" });
+  expect(await page.evaluate(() => {
+    const leftEl = document.querySelector('[aria-label="Source explorer"]');
+    const rightEl = document.querySelector('[aria-label="RIGHT relationship explorer"]');
+    return !!leftEl && !!rightEl && leftEl.parentElement === rightEl.parentElement;
+  })).toBe(true);
+  const [l, r, inspector, footer] = await Promise.all([
+    left.boundingBox(), right.boundingBox(), page.getByRole("region", { name: "Relationship comparison" }).boundingBox(), page.getByTestId("matching-save").boundingBox(),
+  ]);
+  expect(l && r && inspector && footer).toBeTruthy();
+  expect(l!.x).toBeLessThan(r!.x);
+  expect(inspector!.y).toBeGreaterThan(Math.max(l!.y + l!.height, r!.y + r!.height) - 3);
+  await expect(left).toContainText("source0/0");
+  await expect(right).toContainText("target0/0");
+  await expect(page.getByTestId("matching-detail").getByRole("button", { name: "Confirm selected candidate" })).toBeVisible();
+  await expect(page.getByTestId("matching-save")).toBeVisible();
+});
+
+test("RIGHT Explorer and manual candidate search find independent target identity-only values", async ({ page }) => {
+  await mount(page, 2);
+  await page.evaluate(() => {
+    const s = (window as any).session;
+    s.candidates = s.candidates.map((c: any, i: number) => ({ ...c, identityParts: [`independent-id-${i}`], fields: {} }));
+    (window as any).patchSession({ candidates: s.candidates });
+  });
+  const right = page.getByRole("region", { name: "RIGHT relationship explorer" });
+  await right.getByRole("searchbox", { name: "Search acquired targets" }).fill("independent-id-1");
+  await expect(right.getByTestId("matching-browse-target")).toHaveCount(1);
+  await right.getByRole("searchbox", { name: "Search acquired targets" }).fill("");
+  await page.getByText("Search other records", { exact: true }).evaluate(el => { (el.parentElement as HTMLDetailsElement).open = true; });
+  const manual = page.getByRole("region", { name: "Manual right search" });
+  await manual.getByRole("searchbox", { name: "Search right candidates" }).fill("independent-id-1");
+  await expect(manual.getByRole("radio")).toHaveCount(1);
 });
 
 test("compatible baseline shows no-op, conflict and saved-only aliases with merged non-additive provenance", async ({ page }) => {
@@ -45,20 +84,23 @@ test("compatible baseline shows no-op, conflict and saved-only aliases with merg
     { fromParts: ["source1/0", "source1/1"], outputValues: ["other", "outputs"] },
     { fromParts: ["saved alias", "DE"], outputValues: ["target0/0", "target0/1"] },
   ] } });
+  await page.getByText(/Details ·/).click();
   await expect(page.getByRole("region", { name: "Relationship comparison" })).toContainText("Already matches / no-op");
   await page.getByRole("button", { name: "Select suggested candidate", exact: true }).click();
   await page.getByRole("button", { name: "Confirm selected candidate", exact: true }).click();
   const browser = page.getByRole("region", { name: "RIGHT relationship explorer" });
   await browser.getByTestId("matching-browse-target").first().click();
-  const same = browser.getByRole("listitem").filter({ hasText: "source0/0" });
+  const related = page.getByRole("region", { name: "LEFT records related to selected RIGHT" });
+  const same = related.getByRole("listitem").filter({ hasText: "source0/0" });
   await expect(same).toContainText("Suggested");
   await expect(same).toContainText("Confirmed draft");
   await expect(same).toContainText("Existing Mapping");
-  const saved = browser.getByRole("listitem").filter({ hasText: "saved alias" });
+  const saved = related.getByRole("listitem").filter({ hasText: "saved alias" });
   await expect(saved).toContainText("outside this run — read-only");
   await expect(saved.getByRole("button")).toHaveCount(0);
-  await expect(browser).toContainText("counts are non-additive");
-  await browser.getByRole("button", { name: "Return to LEFT review", exact: true }).click();
+  await browser.getByText(/Evidence & Coverage/).click();
+  await expect(browser.getByRole("region", { name: "Relationship authority coverage" })).toContainText("counts are non-additive");
+  await page.getByRole("button", { name: "Return to LEFT review", exact: true }).click();
   await page.locator('tr[data-testid^="matching-row-"]').last().click();
   await expect(page.getByRole("region", { name: "Relationship comparison" })).toContainText("Conflict: existing outputs differ");
   expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
@@ -149,6 +191,7 @@ test("Advanced live run: semantic edit confirms, disclosure never re-runs, edits
   // Find matches now routes to the verified Advanced acquisition (not the Basic retrieve).
   // Await the Advanced coverage signal so the async acquisition has settled before counting.
   await page.getByRole("button", { name: "1. Find matches", exact: true }).click();
+  await page.getByText(/Evidence & coverage · verified live acquisition/).click();
   await expect(page.getByTestId("matching-advanced-coverage")).toBeVisible();
   expect(await page.evaluate(() => (window as any).calls.filter((c: any) => c.cmd === "retrieve").length)).toBe(2);
   expect(await page.evaluate(() => (window as any).calls.filter((c: any) => c.cmd === "acquire").length)).toBe(1);

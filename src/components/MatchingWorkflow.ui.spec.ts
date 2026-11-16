@@ -221,6 +221,7 @@ test("normal full-scope default stays Basic until a semantic edit; dirty plan ed
   await expect(page.getByText(/Plan changed: previous evidence and draft decisions were cleared/)).toBeVisible();
   expect(await page.evaluate("calls.filter(c => c.cmd === 'retrieve').length")).toBe(1);
   await page.getByTestId("matching-apply-plan").click();
+  await page.getByText(/Evidence & coverage · verified live acquisition/).click();
   await expect(page.getByTestId("matching-advanced-coverage")).toBeVisible();
   expect(await page.evaluate("calls.find(c => c.cmd === 'acquire').args.plan.scope")).toBe("full");
 });

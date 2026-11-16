@@ -36,6 +36,25 @@ async function focusGermanTarget(page: Page) {
   return browser;
 }
 
+async function captureWorkbenchEvidence(page: Page) {
+  const dir = path.resolve("test-results/adr0052-matching-workbench");
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [width, height] of [[1440, 900], [1700, 1200], [1280, 800]]) {
+    await page.setViewportSize({ width, height });
+    await page.screenshot({ path: path.join(dir, `left-review-${width}x${height}.png`), animations: "disabled" });
+    const browser = review(page).getByRole("region", { name: "RIGHT relationship explorer" });
+    await browser.getByRole("searchbox", { name: "Search acquired targets" }).fill("ComputerParts LLC");
+    const item = browser.getByTestId("matching-browse-target").first();
+    if (await item.count()) {
+      await item.click();
+      await page.screenshot({ path: path.join(dir, `right-focus-${width}x${height}.png`), animations: "disabled" });
+      await review(page).getByRole("button", { name: "Return to LEFT review", exact: true }).click();
+    }
+    await browser.getByRole("searchbox", { name: "Search acquired targets" }).fill("");
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+}
+
 test("existing vendor Help Lab: sequential review, unified reverse evidence, real Host counts, atomic write and cold reopen", async () => {
   let app: Awaited<ReturnType<typeof launchApp>> = await launchIsolatedSession();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dwh-workbench-"));
@@ -47,6 +66,7 @@ test("existing vendor Help Lab: sequential review, unified reverse evidence, rea
     const title = catalog.find((c: any) => c.id === "name_region_match").title;
     await page.locator("article").filter({ has: page.getByRole("heading", { name: title, exact: true }) }).getByRole("button", { name: "Open lab", exact: true }).click();
     await openMatching(page);
+    await captureWorkbenchEvidence(page);
     const originalSeed = (await project(page)).workspace.key_maps.find((m: any) => m.id === "map_pos_to_vendor");
     expect(originalSeed).toBeDefined();
     const before = (await project(page)).workspace;
@@ -54,20 +74,22 @@ test("existing vendor Help Lab: sequential review, unified reverse evidence, rea
     const source = ["CPC LLC", "Germany"];
     const row = review(page).getByTestId(`matching-row-${JSON.stringify(source)}`);
     await row.click();
-    await review(page).getByRole("radio").first().check();
+    await review(page).getByRole("button", { name: "Select suggested candidate" }).click();
     // Explicit pick is not confirmation, and sequential navigation preserves it.
     expect((await sessions(page))[0].decisions).toEqual([]);
     await review(page).getByRole("button", { name: "Next unresolved", exact: true }).click();
     await review(page).getByRole("button", { name: "Previous unresolved", exact: true }).click();
     expect((await sessions(page))[0].decisions).toEqual([]);
     let browser = await focusGermanTarget(page);
+    const relatedLeft = review(page).getByRole("region", { name: "LEFT records related to selected RIGHT" });
+    await browser.getByText(/Evidence & Coverage/).click();
     await expect(browser.getByRole("region", { name: "Relationship authority coverage" })).toContainText("No compatible Mapping selected");
     await browser.getByTestId("matching-inspect-join").click();
     await expect(browser).toContainText("2 LEFT input rows · 1 RIGHT input rows · 2 result rows");
-    await expect(browser.getByRole("list", { name: "Unified related LEFT records" })).toHaveCount(1);
-    await expect(browser).toContainText("executed input values, not recovered original aliases");
+    await expect(relatedLeft.getByRole("list", { name: "Unified related LEFT records" })).toHaveCount(1);
+    await expect(relatedLeft).toContainText("executed values, not recovered original aliases");
     expect((await sessions(page))[0].decisions).toEqual([]);
-    const related = browser.getByRole("listitem").filter({ hasText: "CPC LLC" });
+    const related = relatedLeft.getByRole("listitem").filter({ hasText: "CPC LLC" });
     await related.getByRole("button", { name: "Investigate this source (no decision)" }).click();
     await review(page).getByRole("button", { name: "Select this relationship for inspection", exact: true }).click();
     expect((await sessions(page))[0].decisions).toEqual([]);
@@ -95,10 +117,11 @@ test("existing vendor Help Lab: sequential review, unified reverse evidence, rea
     await review(page).getByRole("button", { name: "Refresh remaining review", exact: true }).click();
     await expect.poll(async () => (await sessions(page))[0]?.proposals.length).toBeGreaterThan(0);
     browser = await focusGermanTarget(page);
-    const savedAlias = browser.getByRole("listitem").filter({ hasText: "CPC LLC" });
+    const nextRelatedLeft = review(page).getByRole("region", { name: "LEFT records related to selected RIGHT" });
+    const savedAlias = nextRelatedLeft.getByRole("listitem").filter({ hasText: "CPC LLC" });
     await expect(savedAlias).toContainText("Existing Mapping");
     await expect(savedAlias).toContainText("outside this run — read-only");
-    const nextAlias = browser.getByRole("listitem").filter({ hasText: "Federal Republic of Germany" });
+    const nextAlias = nextRelatedLeft.getByRole("listitem").filter({ hasText: "Federal Republic of Germany" });
     await nextAlias.getByRole("button", { name: "Investigate this source (no decision)" }).click();
     await review(page).getByRole("button", { name: "Select this relationship for inspection", exact: true }).click();
     await review(page).getByRole("checkbox", { name: "Advance after confirm", exact: true }).uncheck();
@@ -152,10 +175,12 @@ test("actual reverse inspection keeps full row counts separate from 50-row sampl
     const before = (await project(page)).workspace;
     await expect(browser).toContainText("Actual JOIN: not inspected");
     await browser.getByTestId("matching-inspect-join").click();
+    await browser.getByText(/Evidence & Coverage/).click();
     await expect(browser).toContainText("60 LEFT input rows · 2 RIGHT input rows · 120 result rows");
     await expect(browser).toContainText("Showing 50/60 LEFT input rows; sample limit 50");
     await expect(browser).toContainText("Complete arbitrary-large reverse enumeration unsupported");
-    const list = browser.getByRole("list", { name: "Unified related LEFT records" });
+    const relatedLeft = review(page).getByRole("region", { name: "LEFT records related to selected RIGHT" });
+    const list = relatedLeft.getByRole("list", { name: "Unified related LEFT records" });
     await expect(list).toHaveCount(1);
     await expect(list).toContainText("50 displayed input rows");
     await browser.getByRole("combobox", { name: "Relationship provenance" }).selectOption("Actual JOIN");

@@ -292,6 +292,9 @@ export function MatchingWorkspace({
   const [commitMsg, setCommitMsg] = useState<string | null>(null);
   const [showSavedContext, setShowSavedContext] = useState(true);
   const [rightFocus, setRightFocus] = useState<MatchingCandidateView | null>(null);
+  // An inspected pair is not a confirmed decision. RIGHT-focused reverse browsing
+  // remains a separate explicit action and never stages a Mapping decision.
+  const [selectedRight, setSelectedRight] = useState<MatchingCandidateView | null>(null);
   const [actualJoinFacts, setActualJoinFacts] = useState<ExplainJoinKeyResult | null>(null);
   const [focusEpoch, setFocusEpoch] = useState(0);
   const baselineForExplorers: MappingProjection = baseline ?? { rows: [], complete: false, coverage: "Mapping baseline not acquired." };
@@ -299,9 +302,15 @@ export function MatchingWorkspace({
   void buildRelationshipIndex;
   void baselineForExplorers;
   const [advanceAfterConfirm, setAdvanceAfterConfirm] = useState(false);
-  function inspectRight(candidate: MatchingCandidateView | null) { setRightFocus(candidate); setActualJoinFacts(null); }
-  function returnToLeftReview() { setRightFocus(null); setActualJoinFacts(null); }
-  function focusSource(id: string) { setRightFocus(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }
+  function inspectRight(candidate: MatchingCandidateView | null) { setRightFocus(candidate); setActualJoinFacts(null); setFocusEpoch(e => e + 1); }
+  function selectRight(candidate: MatchingCandidateView) {
+    setSelectedRight(candidate);
+    setRightFocus(null);
+    setActualJoinFacts(null);
+    setFocusEpoch(e => e + 1);
+  }
+  function returnToLeftReview() { setRightFocus(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); }
+  function focusSource(id: string) { setRightFocus(null); setSelectedRight(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }
   const [reviewSearch, setReviewSearch] = useState("");
   const [reviewSort, setReviewSort] = useState<"workflow" | "score">("workflow");
 
@@ -388,11 +397,11 @@ export function MatchingWorkspace({
       !session.decisions.some(old => old.proposalId === d.proposalId));
     if (advanceAfterConfirm && confirmedNow) {
       const id = nextUnresolved(next, sequenceIds, selected?.proposalId ?? null, 1);
-      if (id) { next = { ...next, selectedProposalId: id }; setRightFocus(null); setFocusEpoch(e => e + 1); }
+      if (id) { next = { ...next, selectedProposalId: id }; setRightFocus(null); setSelectedRight(null); setFocusEpoch(e => e + 1); }
     }
     onChange(next);
   }
-  useEffect(() => { setRightFocus(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
+  useEffect(() => { setRightFocus(null); setSelectedRight(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
   const bulkPreview = previewBulkConfirm(session, "selection", bulkScope === "selection" ? selectedIds
     : (bulkScope === "page" ? page : filtered).map(p => p.proposalId));
   const reviewedPreview = previewReviewedConfirm(session, selectedIds);
@@ -1238,12 +1247,14 @@ export function MatchingWorkspace({
                   />
                   <RightExplorer
                     session={session} baseline={baselineForExplorers} focused={rightFocus} focusEpoch={focusEpoch}
-                    onSetFocus={inspectRight} onInspectJoin={onInspectJoin} onJoinFacts={setActualJoinFacts}
+                    activeSource={selected} selectedTargetId={selectedRight?.targetId}
+                    onSelectCandidate={selectRight} onSetFocus={inspectRight}
+                    onInspectJoin={onInspectJoin} onJoinFacts={setActualJoinFacts}
                   />
                 </div>
                 <div className="flex h-[190px] max-h-[23%] min-h-[145px] shrink-0 flex-col overflow-hidden border-t border-slate-800">
                   <RelationshipInspector key={(session.basicRun ?? session.advancedRun)?.id ?? session.id} session={session} baseline={baseline}
-                    focusEpoch={focusEpoch} browsedTarget={rightFocus} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectRight}
+                    focusEpoch={focusEpoch} browsedTarget={rightFocus ?? selectedRight} autoPickedTargetId={!rightFocus ? selectedRight?.targetId : undefined} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectRight}
                     onAgreeReplace={token => onChange({ ...session, explicitReplaceKeys: Array.from(new Set([...session.explicitReplaceKeys, token])) })} />
                 </div>
 

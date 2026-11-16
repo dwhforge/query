@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ExplainJoinKeyResult } from "../../lib/bridge";
 import { advancedCandidateId } from "../../app/matching/advanced";
 import { buildRelationshipIndex, relatedSources, type MappingProjection } from "../../app/matching/relationships";
-import { mapKeyToken, type MatchingCandidateView, type MatchingTabSession } from "../../app/matching/types";
+import { mapKeyToken, type MatchingCandidateView, type MatchingProposalView, type MatchingTabSession } from "../../app/matching/types";
 import { RecordValues, recordValue } from "./RecordValues";
 
 type Props = {
@@ -22,6 +22,12 @@ type Props = {
   /** The RIGHT record currently under inspection (RIGHT-focused mode). */
   focused: MatchingCandidateView | null;
   focusEpoch: number;
+  /** Current LEFT row, if any; only its acquired proposal edges count as suggestions. */
+  activeSource?: MatchingProposalView | null;
+  selectedTargetId?: string;
+  /** Selects a pair for inspection, without confirming or changing the ledger. */
+  onSelectCandidate?: (candidate: MatchingCandidateView) => void;
+  /** Opens the separate RIGHT -> LEFT relationship investigation mode. */
   onSetFocus: (candidate: MatchingCandidateView | null) => void;
   onInspectJoin?: (outputs: (string | null)[]) => Promise<ExplainJoinKeyResult>;
   onJoinFacts?: (facts: ExplainJoinKeyResult | null) => void;
@@ -30,7 +36,7 @@ type Props = {
 type InspectedFacts = ExplainJoinKeyResult & { inspectedAt: string };
 const unavailable: MappingProjection = { rows: [], complete: false, coverage: "Mapping baseline not acquired." };
 
-export function RightExplorer({ session, baseline = unavailable, focused, focusEpoch, onSetFocus, onInspectJoin, onJoinFacts }: Props) {
+export function RightExplorer({ session, baseline = unavailable, focused, focusEpoch, activeSource, selectedTargetId, onSelectCandidate, onSetFocus, onInspectJoin, onJoinFacts }: Props) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [facts, setFacts] = useState<InspectedFacts | null>(null);
@@ -56,8 +62,16 @@ export function RightExplorer({ session, baseline = unavailable, focused, focusE
     });
     return [...rows.values()];
   }, [session.candidates, session.advancedRun]);
-  const visibleTargets = useMemo(() => targets.filter(c => [...c.outputValues, ...(c.identityParts ?? []), ...Object.values(c.fields)].some(v => recordValue(v).toLocaleLowerCase().includes(search.toLocaleLowerCase()))),
-    [targets, search]);
+  const proposedIds = useMemo(() => new Set([
+    activeSource?.proposedCandidateId,
+    ...(activeSource?.alternativeCandidateIds ?? []),
+    ...(activeSource?.edges ?? []).map(e => e.candidateId),
+  ].filter((id): id is string => !!id)), [activeSource]);
+  const visibleTargets = useMemo(() => targets
+    .filter(c => [...c.outputValues, ...(c.identityParts ?? []), ...Object.values(c.fields)]
+      .some(v => recordValue(v).toLocaleLowerCase().includes(search.toLocaleLowerCase())))
+    .sort((a, b) => Number(proposedIds.has(b.candidateId)) - Number(proposedIds.has(a.candidateId))),
+    [targets, search, proposedIds]);
   const targetPage = Math.min(page, Math.max(0, Math.ceil(visibleTargets.length / 20) - 1));
   const related = useMemo(() => focused ? relatedSources(index, focused.targetId, focused.outputValues) : [], [index, focused]);
   const count = (badge: string) => related.filter(r => r.badges.includes(badge as never)).length;
@@ -98,22 +112,40 @@ export function RightExplorer({ session, baseline = unavailable, focused, focusE
         <input aria-label="Search acquired targets" type="search" placeholder="Search acquired targets" value={search}
           className="w-full rounded border border-slate-700 bg-slate-950 p-1 text-[11px]" onChange={e => { setSearch(e.target.value); setPage(0); }} />
       </div>
+      {activeSource && (
+        <p className="shrink-0 px-3 pb-1 text-[10px] text-slate-400" role="status">
+          {proposedIds.size ? "Highlighted: candidates suggested for the active LEFT; other records are still available." :
+            "No suggested candidates for this LEFT. Select an acquired RIGHT manually."}
+        </p>
+      )}
       <ul aria-label="Acquired RIGHT records" className="flex-1 overflow-auto">
         {!visibleTargets.length && <li className="p-3 text-[11px] text-slate-400">{search ? "No acquired RIGHT records match this search." : "No acquired RIGHT records. Manual lookup remains available in Relationship Details."}</li>}
-        {visibleTargets.slice(targetPage * 20, (targetPage + 1) * 20).map(c => (
-          <li key={c.targetId} className={focused?.targetId === c.targetId ? "bg-teal-950/30" : ""}>
-            <button type="button" data-testid="matching-browse-target"
-              className="block w-full rounded border border-slate-700 px-3 py-2 text-left text-[11px] hover:bg-slate-900"
-              onClick={() => onSetFocus(c)}>
-              <RecordValues fields={session.plan?.outputs ?? []} values={c.outputValues} />
-              {c.identityParts && (
-                <div className="mt-1">{session.basicRun ? "Identity (exact RIGHT tuple)" : "Target identity"}:
-                  <RecordValues fields={session.basicRun ? session.plan?.outputs ?? [] : session.plan?.targetIdentityFields ?? []} values={c.identityParts} />
-                </div>
-              )}
-            </button>
+        {visibleTargets.slice(targetPage * 20, (targetPage + 1) * 20).map(c => {
+          const suggested = proposedIds.has(c.candidateId);
+          const selected = selectedTargetId === c.targetId;
+          const independentIdentity = !session.basicRun && c.identityParts?.length &&
+            mapKeyToken(c.identityParts) !== mapKeyToken(c.outputValues);
+          return (
+          <li key={c.targetId} className={`border-b border-slate-800 ${selected ? "bg-teal-950/50" : ""}`}>
+            <div className={`flex items-start gap-2 border-l-2 px-2 py-1.5 ${selected ? "border-teal-400" : suggested ? "border-teal-700" : "border-transparent"}`}>
+              <button type="button" data-testid="matching-select-target"
+                aria-pressed={selected} aria-label={`Select RIGHT ${c.outputValues.map(recordValue).join(" / ")}`}
+                className="min-w-0 flex-1 rounded p-1 text-left text-[11px] hover:bg-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal-400"
+                onClick={() => onSelectCandidate ? onSelectCandidate(c) : onSetFocus(c)}>
+                <RecordValues fields={session.plan?.outputs ?? []} values={c.outputValues} />
+                {independentIdentity ? <div className="mt-1 text-slate-400">Target identity:
+                  <RecordValues fields={session.plan?.targetIdentityFields ?? []} values={c.identityParts!} />
+                </div> : null}
+                {suggested && <span className="mt-1 inline-block rounded border border-teal-700 px-1 text-[10px] text-teal-200">Suggested candidate</span>}
+                {selected && <span className="ml-1 text-[10px] text-teal-200">Selected for inspection</span>}
+              </button>
+              <button type="button" className="shrink-0 rounded border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:border-teal-700"
+                onClick={() => onSetFocus(c)} data-testid="matching-browse-target" aria-label={`Related LEFT for ${c.outputValues.map(recordValue).join(" / ")}`}>
+                Related LEFT<span className="sr-only">{c.outputValues.map((value, i) => <span key={i}>{recordValue(value)}</span>)}</span>
+              </button>
+            </div>
           </li>
-        ))}
+        );})}
       </ul>
       <p className="shrink-0 border-t border-slate-800 px-3 py-1 text-[10px] text-slate-500">{visibleTargets.length} of {targets.length} acquired RIGHT records · browsing is inspection only</p>
       {visibleTargets.length > 20 && (

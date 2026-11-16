@@ -18,6 +18,7 @@ export function RelationshipInspector({
   baseline,
   focusEpoch,
   browsedTarget,
+  autoPickedTargetId,
 }: {
   session: MatchingTabSession;
   onLookupAdvanced?: (proposalId: string, page: MatchingLookupPage) => Promise<MatchingJoinLookupResult>;
@@ -25,6 +26,8 @@ export function RelationshipInspector({
   baseline?: MappingProjection;
   focusEpoch: number;
   browsedTarget?: MatchingCandidateView | null;
+  /** Only a direct click on the RIGHT candidate may preselect a temporary pair. */
+  autoPickedTargetId?: string;
   proposal: MatchingProposalView | null;
   onChange: (s: MatchingTabSession) => void;
   onAgreeReplace: (token: string) => void;
@@ -84,7 +87,13 @@ export function RelationshipInspector({
   const tier = proposalCascadeTier(proposal);
   const decision = session.decisions.find(d => d.proposalId === proposal.proposalId);
   const decided = candidateById(session, decision?.candidateId);
-  const picked = candidateById(session, picks[proposal.proposalId]);
+  // A click on an acquired RIGHT selects a temporary inspection pair, not a
+  // decision. Advanced still requires source-scoped candidate/lookup authority.
+  const browsedAdmissible = !!browsedTarget && autoPickedTargetId === browsedTarget.targetId && (session.basicRun ||
+    proposal.alternativeCandidateIds.includes(browsedTarget.candidateId) ||
+    proposal.proposedCandidateId === browsedTarget.candidateId ||
+    lookupResult?.candidates.some(r => r.candidateId === browsedTarget.candidateId));
+  const picked = (browsedAdmissible ? browsedTarget : null) ?? candidateById(session, picks[proposal.proposalId]);
   const comparison = browsedTarget ?? picked ?? decided ?? proposed;
   const baselineRows = baseline?.rows.filter(r => mapKeyToken(r.fromParts) === mapKeyToken(proposal.mapKey)) ?? [];
   const consequence = !baseline?.complete ? "Baseline not acquired — final verification still required" : baselineRows.length > 1
@@ -140,7 +149,7 @@ export function RelationshipInspector({
 
   return (
     <aside
-      className="flex min-w-0 flex-1 flex-col gap-2 overflow-auto border-l border-slate-800 p-3 text-[11px]"
+      className="flex min-w-0 flex-1 flex-col gap-1.5 overflow-auto border-l border-slate-800 p-2 text-[11px]"
       data-testid="matching-detail"
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -186,7 +195,7 @@ export function RelationshipInspector({
       </section>}
       {/* ADR-0052: the selected relationship is the most prominent thing in this
           panel. It is stable: opening/closing Details never changes it. */}
-      <div className="rounded border border-teal-800 bg-teal-950/30 p-3">
+      <div className="order-[-2] shrink-0 rounded border border-teal-800 bg-teal-950/30 px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-teal-200/80">
           Selected relationship
         </div>
@@ -223,7 +232,7 @@ export function RelationshipInspector({
         {comparison && <button type="button" className="rounded border border-slate-600 px-2 py-1" onClick={() => onInspectTarget(comparison)}>Inspect RIGHT relationships</button>}
       </section>
 
-      <section aria-label="Explicit relationship actions" className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-1">
+      <section aria-label="Explicit relationship actions" className="order-[-1] sticky top-0 z-10 flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-700 bg-[#0b1220] px-2 py-1.5">
         <button type="button" disabled={!proposed || candidateLocked || !!decision || !!sourceBlock || !!tupleMappingBlock(proposed.outputValues)}
           onClick={() => proposed && setPicks({ ...picks, [proposal.proposalId]: proposed.candidateId })}>Select suggested candidate</button>
       {browsedTarget && <section aria-label="Inspected RIGHT pair" className="rounded border border-slate-700 p-2">

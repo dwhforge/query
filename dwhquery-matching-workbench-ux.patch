@@ -1,0 +1,172 @@
+diff --git a/src/components/MatchingWorkspace.tsx b/src/components/MatchingWorkspace.tsx
+--- a/src/components/MatchingWorkspace.tsx
++++ b/src/components/MatchingWorkspace.tsx
+@@ -294,2 +294,5 @@
+   const [rightFocus, setRightFocus] = useState<MatchingCandidateView | null>(null);
++  // An inspected pair is not a confirmed decision. RIGHT-focused reverse browsing
++  // remains a separate explicit action and never stages a Mapping decision.
++  const [selectedRight, setSelectedRight] = useState<MatchingCandidateView | null>(null);
+   const [actualJoinFacts, setActualJoinFacts] = useState<ExplainJoinKeyResult | null>(null);
+@@ -302,3 +305,9 @@
+-  function inspectRight(candidate: MatchingCandidateView | null) { setRightFocus(candidate); setActualJoinFacts(null); }
+-  function returnToLeftReview() { setRightFocus(null); setActualJoinFacts(null); }
+-  function focusSource(id: string) { setRightFocus(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }
++  function inspectRight(candidate: MatchingCandidateView | null) { setRightFocus(candidate); setActualJoinFacts(null); setFocusEpoch(e => e + 1); }
++  function selectRight(candidate: MatchingCandidateView) {
++    setSelectedRight(candidate);
++    setRightFocus(null);
++    setActualJoinFacts(null);
++    setFocusEpoch(e => e + 1);
++  }
++  function returnToLeftReview() { setRightFocus(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); }
++  function focusSource(id: string) { setRightFocus(null); setSelectedRight(null); setActualJoinFacts(null); setFocusEpoch(e => e + 1); onChange({ ...session, selectedProposalId: id }); }
+@@ -364,1 +373,1 @@
+-      if (id) { next = { ...next, selectedProposalId: id }; setRightFocus(null); setFocusEpoch(e => e + 1); }
++      if (id) { next = { ...next, selectedProposalId: id }; setRightFocus(null); setSelectedRight(null); setFocusEpoch(e => e + 1); }
+@@ -368,1 +377,1 @@
+-  useEffect(() => { setRightFocus(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
++  useEffect(() => { setRightFocus(null); setSelectedRight(null); setFocusEpoch(e => e + 1); }, [session.basicRun?.id, session.advancedRun?.id, session.commitLifecycle]);
+@@ -1240,2 +1249,4 @@
+                     session={session} baseline={baselineForExplorers} focused={rightFocus} focusEpoch={focusEpoch}
+-                    onSetFocus={inspectRight} onInspectJoin={onInspectJoin} onJoinFacts={setActualJoinFacts}
++                    activeSource={selected} selectedTargetId={selectedRight?.targetId}
++                    onSelectCandidate={selectRight} onSetFocus={inspectRight}
++                    onInspectJoin={onInspectJoin} onJoinFacts={setActualJoinFacts}
+@@ -1245,2 +1256,2 @@
+                   <RelationshipInspector key={(session.basicRun ?? session.advancedRun)?.id ?? session.id} session={session} baseline={baseline}
+-                    focusEpoch={focusEpoch} browsedTarget={rightFocus} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectRight}
++                    focusEpoch={focusEpoch} browsedTarget={rightFocus ?? selectedRight} autoPickedTargetId={!rightFocus ? selectedRight?.targetId : undefined} onLookupAdvanced={onLookupAdvanced} proposal={selected} onChange={changeReview} onInspectTarget={inspectRight}
+diff --git a/src/components/matching/RightExplorer.tsx b/src/components/matching/RightExplorer.tsx
+--- a/src/components/matching/RightExplorer.tsx
++++ b/src/components/matching/RightExplorer.tsx
+@@ -13,1 +13,1 @@
+-import { mapKeyToken, type MatchingCandidateView, type MatchingTabSession } from "../../app/matching/types";
++import { mapKeyToken, type MatchingCandidateView, type MatchingProposalView, type MatchingTabSession } from "../../app/matching/types";
+@@ -25,2 +25,8 @@
+   focusEpoch: number;
++  /** Current LEFT row, if any; only its acquired proposal edges count as suggestions. */
++  activeSource?: MatchingProposalView | null;
++  selectedTargetId?: string;
++  /** Selects a pair for inspection, without confirming or changing the ledger. */
++  onSelectCandidate?: (candidate: MatchingCandidateView) => void;
++  /** Opens the separate RIGHT -> LEFT relationship investigation mode. */
+   onSetFocus: (candidate: MatchingCandidateView | null) => void;
+@@ -40,1 +46,1 @@
+-export function RightExplorer({ session, baseline = unavailable, focused, focusEpoch, onSetFocus, onInspectJoin, onJoinFacts }: Props) {
++export function RightExplorer({ session, baseline = unavailable, focused, focusEpoch, activeSource, selectedTargetId, onSelectCandidate, onSetFocus, onInspectJoin, onJoinFacts }: Props) {
+@@ -59,2 +65,10 @@
+-  const visibleTargets = useMemo(() => targets.filter(c => [...c.outputValues, ...(c.identityParts ?? []), ...Object.values(c.fields)].some(v => recordValue(v).toLocaleLowerCase().includes(search.toLocaleLowerCase()))),
+-    [targets, search]);
++  const proposedIds = useMemo(() => new Set([
++    activeSource?.proposedCandidateId,
++    ...(activeSource?.alternativeCandidateIds ?? []),
++    ...(activeSource?.edges ?? []).map(e => e.candidateId),
++  ].filter((id): id is string => !!id)), [activeSource]);
++  const visibleTargets = useMemo(() => targets
++    .filter(c => [...c.outputValues, ...(c.identityParts ?? []), ...Object.values(c.fields)]
++      .some(v => recordValue(v).toLocaleLowerCase().includes(search.toLocaleLowerCase())))
++    .sort((a, b) => Number(proposedIds.has(b.candidateId)) - Number(proposedIds.has(a.candidateId))),
++    [targets, search, proposedIds]);
+@@ -97,1 +111,7 @@
++      {activeSource && (
++        <p className="shrink-0 px-3 pb-1 text-[10px] text-slate-400" role="status">
++          {proposedIds.size ? "Highlighted: candidates suggested for the active LEFT; other records are still available." :
++            "No suggested candidates for this LEFT. Select an acquired RIGHT manually."}
++        </p>
++      )}
+       <ul aria-label="Acquired RIGHT records" className="flex-1 overflow-auto">
+@@ -102,14 +122,26 @@
+-        {visibleTargets.slice(targetPage * 20, (targetPage + 1) * 20).map(c => (
+-          <li key={c.targetId} className={focused?.targetId === c.targetId ? "bg-teal-950/30" : ""}>
+-            <button type="button" data-testid="matching-browse-target"
+-              className="block w-full rounded border border-slate-700 px-3 py-2 text-left text-[11px] hover:bg-slate-900"
+-              onClick={() => onSetFocus(c)}>
+-              <RecordValues fields={session.plan?.outputs ?? []} values={c.outputValues} />
+-              {c.identityParts && (
+-                <div className="mt-1">{session.basicRun ? "Identity (exact RIGHT tuple)" : "Target identity"}:
+-                  <RecordValues fields={session.basicRun ? session.plan?.outputs ?? [] : session.plan?.targetIdentityFields ?? []} values={c.identityParts} />
+-                </div>
+-              )}
+-            </button>
++        {visibleTargets.slice(targetPage * 20, (targetPage + 1) * 20).map(c => {
++          const suggested = proposedIds.has(c.candidateId);
++          const selected = selectedTargetId === c.targetId;
++          const independentIdentity = !session.basicRun && c.identityParts?.length &&
++            mapKeyToken(c.identityParts) !== mapKeyToken(c.outputValues);
++          return (
++          <li key={c.targetId} className={`border-b border-slate-800 ${selected ? "bg-teal-950/50" : ""}`}>
++            <div className={`flex items-start gap-2 border-l-2 px-2 py-1.5 ${selected ? "border-teal-400" : suggested ? "border-teal-700" : "border-transparent"}`}>
++              <button type="button" data-testid="matching-select-target"
++                aria-pressed={selected} aria-label={`Select RIGHT ${c.outputValues.map(recordValue).join(" / ")}`}
++                className="min-w-0 flex-1 rounded p-1 text-left text-[11px] hover:bg-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal-400"
++                onClick={() => onSelectCandidate ? onSelectCandidate(c) : onSetFocus(c)}>
++                <RecordValues fields={session.plan?.outputs ?? []} values={c.outputValues} />
++                {independentIdentity ? <div className="mt-1 text-slate-400">Target identity:
++                  <RecordValues fields={session.plan?.targetIdentityFields ?? []} values={c.identityParts!} />
++                </div> : null}
++                {suggested && <span className="mt-1 inline-block rounded border border-teal-700 px-1 text-[10px] text-teal-200">Suggested candidate</span>}
++                {selected && <span className="ml-1 text-[10px] text-teal-200">Selected for inspection</span>}
++              </button>
++              <button type="button" className="shrink-0 rounded border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:border-teal-700"
++                onClick={() => onSetFocus(c)} data-testid="matching-browse-target" aria-label={`Related LEFT for ${c.outputValues.map(recordValue).join(" / ")}`}>
++                Related LEFT<span className="sr-only">{c.outputValues.map((value, i) => <span key={i}>{recordValue(value)}</span>)}</span>
++              </button>
++            </div>
+           </li>
+-        ))}
++        );})}
+diff --git a/src/components/matching/RelationshipInspector.tsx b/src/components/matching/RelationshipInspector.tsx
+--- a/src/components/matching/RelationshipInspector.tsx
++++ b/src/components/matching/RelationshipInspector.tsx
+@@ -22,2 +22,3 @@
+   browsedTarget,
++  autoPickedTargetId,
+ }: {
+@@ -35,2 +36,4 @@
+   browsedTarget?: MatchingCandidateView | null;
++  /** Only a direct click on the RIGHT candidate may preselect a temporary pair. */
++  autoPickedTargetId?: string;
+   proposal: MatchingProposalView | null;
+@@ -87,2 +90,8 @@
+-  const picked = candidateById(session, picks[proposal.proposalId]);
++  // A click on an acquired RIGHT selects a temporary inspection pair, not a
++  // decision. Advanced still requires source-scoped candidate/lookup authority.
++  const browsedAdmissible = !!browsedTarget && autoPickedTargetId === browsedTarget.targetId && (session.basicRun ||
++    proposal.alternativeCandidateIds.includes(browsedTarget.candidateId) ||
++    proposal.proposedCandidateId === browsedTarget.candidateId ||
++    lookupResult?.candidates.some(r => r.candidateId === browsedTarget.candidateId));
++  const picked = (browsedAdmissible ? browsedTarget : null) ?? candidateById(session, picks[proposal.proposalId]);
+   const comparison = browsedTarget ?? picked ?? decided ?? proposed;
+@@ -141,1 +150,1 @@
+-      className="flex min-w-0 flex-1 flex-col gap-2 overflow-auto border-l border-slate-800 p-3 text-[11px]"
++      className="flex min-w-0 flex-1 flex-col gap-1.5 overflow-auto border-l border-slate-800 p-2 text-[11px]"
+@@ -178,1 +187,1 @@
+-      <div className="rounded border border-teal-800 bg-teal-950/30 p-3">
++      <div className="order-[-2] shrink-0 rounded border border-teal-800 bg-teal-950/30 px-3 py-1.5">
+@@ -226,1 +235,1 @@
+-      <section aria-label="Explicit relationship actions" className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-1">
++      <section aria-label="Explicit relationship actions" className="order-[-1] sticky top-0 z-10 flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-700 bg-[#0b1220] px-2 py-1.5">
+diff --git a/src/components/MatchingWorkspace.ui.spec.ts b/src/components/MatchingWorkspace.ui.spec.ts
+--- a/src/components/MatchingWorkspace.ui.spec.ts
++++ b/src/components/MatchingWorkspace.ui.spec.ts
+@@ -2,1 +2,20 @@
+ import { mount } from "./MatchingWorkspace.testHarness";
++
++test("one click selects a RIGHT candidate without deciding, then Confirm stages it", async ({ page }) => {
++  await page.setViewportSize({ width: 1440, height: 900 });
++  await mount(page, 2);
++  const right = page.getByRole("region", { name: "RIGHT relationship explorer" });
++  const select = right.getByTestId("matching-select-target").first();
++  await select.click();
++  await expect(select).toHaveAttribute("aria-pressed", "true");
++  expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
++  const confirm = page.getByRole("button", { name: "Confirm selected candidate", exact: true });
++  await expect(confirm).toBeEnabled();
++  const inspector = page.getByTestId("matching-detail");
++  const [box, action] = await Promise.all([inspector.boundingBox(), confirm.boundingBox()]);
++  expect(box && action).toBeTruthy();
++  expect(action!.y).toBeGreaterThanOrEqual(box!.y);
++  expect(action!.y + action!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
++  await confirm.click();
++  expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
++});

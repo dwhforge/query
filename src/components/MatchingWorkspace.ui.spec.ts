@@ -1,6 +1,25 @@
 import { test, expect } from "@playwright/test";
 import { mount } from "./MatchingWorkspace.testHarness";
 
+test("one click selects a RIGHT candidate without deciding, then Confirm stages it", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mount(page, 2);
+  const right = page.getByRole("region", { name: "RIGHT relationship explorer" });
+  const select = right.getByTestId("matching-select-target").first();
+  await select.click();
+  await expect(select).toHaveAttribute("aria-pressed", "true");
+  expect(await page.evaluate(() => (window as any).session.decisions)).toEqual([]);
+  const confirm = page.getByRole("button", { name: "Confirm selected candidate", exact: true });
+  await expect(confirm).toBeEnabled();
+  const inspector = page.getByTestId("matching-detail");
+  const [box, action] = await Promise.all([inspector.boundingBox(), confirm.boundingBox()]);
+  expect(box && action).toBeTruthy();
+  expect(action!.y).toBeGreaterThanOrEqual(box!.y);
+  expect(action!.y + action!.height).toBeLessThanOrEqual(box!.y + box!.height + 1);
+  await confirm.click();
+  expect(await page.evaluate(() => (window as any).session.decisions.length)).toBe(1);
+});
+
 test("keyboard pick and explicit confirmation are separate; sequential review preserves picks and filters", async ({ page }) => {
   await mount(page, 2);
   const detail = page.getByTestId("matching-detail");

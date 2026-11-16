@@ -125,6 +125,9 @@ import { KeyMapEditor } from "./components/KeyMapEditor";
 import { projectMatchingBaseline } from "./app/matching/relationships";
 import { explainJoinKey } from "./lib/bridge";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
+import { DatasetMatchingWorkspace } from "./components/matching/DatasetMatchingWorkspace";
+import { matchingDatasetApprovedPage } from "./lib/bridge";
+import { fromColumnsEff, outputColumnsEff, fromPartsEff, outputValuesEff } from "./lib/keyMap";
 import { createMatchingDemoSession } from "./app/matching/executionPolicy";
 import { buildLensMatchingPlan } from "./app/matching/planDefaults";
 import { matchingSaveRevision, persistMatchingSession } from "./app/matching/persistSave";
@@ -5198,6 +5201,14 @@ function App() {
                   ◈ Mapping quality
                 </button>
               )}
+              <button type="button" className="shrink-0 border-r border-[var(--line)] px-3 py-2 text-[12px] text-teal-300 hover:bg-slate-900/50"
+                onClick={() => openMatchingSession(emptyMatchingSession({
+                  id: newMatchingSessionId(), title: "Matching", entry: "query", scope: "full",
+                  queryOptions: (project.workspace.queries ?? []).map(q => q.id),
+                  instructionText: "", plan: null, hasUnsavedDecisions: false, chatCollapsed: false,
+                }))}>
+                + Matching
+              </button>
               {matchingTabs.map((tab) => {
                 const key = tabKey(matchingTab(tab.id));
                 const on = sameTab(centerTab, matchingTab(tab.id));
@@ -5467,6 +5478,70 @@ function App() {
                   className={on ? "flex min-h-0 flex-1 flex-col" : "hidden"}
                   aria-hidden={!on}
                 >
+                  {!tab.joinBinding && !tab.targetMapId ? (
+                    <DatasetMatchingWorkspace
+                      workspace={project.workspace}
+                      connections={connections}
+                      sources={sources}
+                      projectRef={projectRefContext(project)}
+                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
+                    onStageToMapping={async (runId, targetMapId, plan) => {
+                      // Staging is a draft-only operation; never bypass KeyMapEditor Save/Apply.
+                      const projectNow = projectRef.current;
+                      const map = projectNow.workspace.key_maps?.find(m => m.id === targetMapId);
+                      if (!map) throw new Error("Selected Mapping no longer exists.");
+                      if ((map.storage?.kind ?? "seed") !== "seed" || map.time_mode === "range_scd") throw new Error("Only seed Mapping can be staged here; source/ref/query/range authoring must use its dedicated guarded editor.");
+                      const tab = keyMapTabsLiveRef.current.find(t => t.map.id === map.id);
+                      if (tab?.localDraft || dirtyDeltaHasChanges(tab?.dirtyDelta) || tab?.saveInFlight) throw new Error("Save or discard existing Mapping editor changes before staging.");
+                      const fromCols = fromColumnsEff(map);
+                      const toCols = outputColumnsEff(map);
+                      if (fromCols.length !== plan.mapKeyFields.length || toCols.length !== plan.outputs.length) {
+                        throw new Error("Selected Mapping From/To arity is incompatible with the evaluated plan.");
+                      }
+                      // Paged RPC reads ALL confirmed rows, not the current UI page.
+                      const approved = [] as { mapKey: string; outputs: string; targetIdentity: string }[];
+                      for (let index = 0; ; index++) {
+                        const page = await matchingDatasetApprovedPage(runId, index, 200);
+                        approved.push(...page.rows);
+                        if (approved.length >= page.total) break;
+                        if (page.rows.length === 0) throw new Error("Confirmed Mapping export incomplete: Host returned a short page.");
+                      }
+                      if (!approved.length) throw new Error("No confirmed pairs to stage.");
+                      const staged = new Map<string, string[]>();
+                      for (const row of approved) {
+                        const from = JSON.parse(row.mapKey) as unknown;
+                        const outs = JSON.parse(row.outputs) as unknown;
+                        if (!Array.isArray(from) || !Array.isArray(outs) || from.length !== fromCols.length || outs.length !== toCols.length ||
+                            !from.every(x => typeof x === "string") || !outs.every(x => typeof x === "string")) {
+                          throw new Error("Invalid/NULL Mapping identity or outputs in confirmed evaluation.");
+                        }
+                        const token = JSON.stringify(from);
+                        const old = staged.get(token);
+                        if (old && JSON.stringify(old) !== JSON.stringify(outs)) throw new Error(`Conflicting confirmed target for ${token}`);
+                        staged.set(token, outs as string[]);
+                      }
+                      const original = new Map(map.entries.map(entry => [JSON.stringify(fromPartsEff(entry)), outputValuesEff(entry)]));
+                      for (const [token, next] of staged) {
+                        const prior = original.get(token);
+                        if (prior && prior.some(x => x.trim()) && JSON.stringify(prior) !== JSON.stringify(next)) {
+                          throw new Error(`Existing filled Mapping entry differs for ${token}; explicit replacement required in Mapping editor.`);
+                        }
+                      }
+                      if (projectRef.current !== projectNow) throw new Error("Project changed while preparing Matching Mapping draft; reevaluate against current context.");
+                      const entries = [...map.entries];
+                      for (const [token, outs] of staged) {
+                        const parts = JSON.parse(token) as string[];
+                        const index = entries.findIndex(entry => JSON.stringify(fromPartsEff(entry)) === token);
+                        const entry = { from: parts[0]!, from_parts: parts, to: outs[0]!, output_values: outs };
+                        if (index >= 0) entries[index] = { ...entries[index]!, ...entry };
+                        else entries.push(entry);
+                      }
+                      const draft = { ...map, entries };
+                      openKeyMapEditor(draft);
+                      patchKeyMapTab(map.id, current => ({ ...current, map: draft, localDraft: true }));
+                    }}
+                    />
+                  ) : (
                   <MatchingWorkspace
                     session={tab}
                     baseline={matchingBaselines.get(tab.id)}
@@ -5568,6 +5643,7 @@ function App() {
                       }
                     }}
                   />
+                  )}
                 </div>
               );
             })}

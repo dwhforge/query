@@ -20,6 +20,11 @@ use dwh_engine::{
     preview_prepared_join_side_filtered as run_preview_prepared_join_side_filtered,
     preview_workspace_limited as run_preview_workspace_limited,
     set_extensions_dir, set_prepare_progress, test_postgres_connection as run_test_postgres_connection,
+    DatasetMatchingRequest, estimate_dataset_matching, evaluate_dataset_matching,
+    dataset_matching_page, dataset_matching_candidates, drop_dataset_matching_run,
+    DatasetReviewRequest, dataset_matching_decide,
+    dataset_matching_confirm_unambiguous, dataset_matching_review_stats,
+    dataset_matching_approved_page, compare_dataset_matching,
     BlameUnmatchedKeyResult,
     DbSession, ExplainJoinKeyResult, ExplainJoinRowsResult, JoinDiagnostics, JoinKeyFuzzySuggest,
     JoinKeyNearMiss, JoinKeySide, JoinKeyTuple, JoinPrepareProgress, JoinPrepareResult,
@@ -833,6 +838,32 @@ fn load_demo_workspace(name: &str) -> Result<Workspace, String> {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MatchingDatasetArgs {
+    workspace: Workspace,
+    #[serde(default)] connections: Vec<ConnectionDef>,
+    #[serde(default)] sources: Vec<SourceDef>,
+    #[serde(default)] project_file: Option<String>,
+    #[serde(default)] project_uid: Option<String>,
+    #[serde(default)] references: Vec<ProjectReference>,
+    #[serde(default)] connection_bindings: Vec<ConnectionBinding>,
+    #[serde(default)] execution_engine: Option<WarehouseDialect>,
+    request: DatasetMatchingRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MatchingDatasetPageArgs {
+    run_id: String,
+    #[serde(default)] page: u64,
+    #[serde(default = "matching_default_page_size")] page_size: u64,
+    #[serde(default)] left_id: Option<i64>,
+    #[serde(default)] other_run_id: Option<String>,
+    #[serde(default)] filter: Option<String>,
+}
+fn matching_default_page_size() -> u64 { 50 }
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PreviewArgs {
     workspace: Option<Workspace>,
@@ -1519,6 +1550,16 @@ impl HostState {
                 | "matching_verify_join_tuples"
                 | "matching_lookup_join_candidates"
                 | "matching_acquire_join"
+                | "matching_dataset_estimate"
+                | "matching_dataset_evaluate"
+                | "matching_dataset_page"
+                | "matching_dataset_candidates"
+                | "matching_dataset_drop"
+                | "matching_dataset_decide"
+                | "matching_dataset_confirm_clear"
+                | "matching_dataset_review_stats"
+                | "matching_dataset_approved_page"
+                | "matching_dataset_compare"
                 | "matching_verify_join_candidates"
                 | "prepare_join_inputs"
                 | "preview_prepared_join_side"
@@ -1533,7 +1574,9 @@ impl HostState {
             "preview_workspace" | "preview_pipeline" | "describe_workspace" => {
                 HeavyLane::Preview
             }
-            "read_key_map" | "write_key_map" => HeavyLane::Mutation,
+            "read_key_map" | "write_key_map" |
+            "matching_dataset_decide" | "matching_dataset_confirm_clear" |
+            "matching_dataset_drop" => HeavyLane::Mutation,
             _ => HeavyLane::Analysis,
         }
     }
@@ -2180,6 +2223,67 @@ impl HostState {
                     a.join_step_index,
                 )?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
+            }
+            "matching_dataset_estimate" | "matching_dataset_evaluate" => {
+                let a: MatchingDatasetArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                // Preview lowering visits only the focused query, so independent RIGHT
+                // queries (especially external project references) would be missing.
+                // Resolve both selected roots before compiling either side.
+                let mut both_ws = a.workspace.clone();
+                both_ws.focus_query_id = a.request.plan.source_ref.clone();
+                let lowered = lower_for_operation(
+                    &both_ws, &a.sources, &a.connections,
+                    a.project_file.as_deref(), a.project_uid.as_deref(), &a.references,
+                    &a.connection_bindings, a.execution_engine,
+                    ResolveKind::Export { published_ids: vec![a.request.plan.source_ref.clone(), a.request.plan.target_ref.clone()] },
+                    Vec::new(),
+                )?;
+                let (ws, sources) = (lowered.workspace, lowered.sources);
+                if cmd == "matching_dataset_estimate" {
+                    let out = estimate_dataset_matching(&db, &ws, &a.connections, &sources, &a.request)?;
+                    serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
+                } else {
+                    let out = evaluate_dataset_matching(&db, &ws, &a.connections, &sources, &a.request)?;
+                    serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
+                }
+            }
+            "matching_dataset_page" | "matching_dataset_candidates" | "matching_dataset_drop" => {
+                let a: MatchingDatasetPageArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                match cmd {
+                    "matching_dataset_page" => serde_json::to_value(
+                        dataset_matching_page(&db, &a.run_id, a.page, a.page_size, a.filter.as_deref())?
+                    ).map_err(|e| RpcError::from(e.to_string())),
+                    "matching_dataset_candidates" => serde_json::to_value(
+                        dataset_matching_candidates(&db, &a.run_id, a.left_id.ok_or("leftId required")?, a.page, a.page_size)?
+                    ).map_err(|e| RpcError::from(e.to_string())),
+                    _ => { drop_dataset_matching_run(&db, &a.run_id)?; Ok(serde_json::json!({"released": true})) }
+                }
+            }
+            "matching_dataset_compare" => {
+                let a: MatchingDatasetPageArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                serde_json::to_value(compare_dataset_matching(&db, &a.run_id, &a.other_run_id.ok_or("otherRunId required")?)?)
+                    .map_err(|e| RpcError::from(e.to_string()))
+            }
+            "matching_dataset_decide" => {
+                let a: DatasetReviewRequest = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                serde_json::to_value(dataset_matching_decide(&db, &a)?)
+                    .map_err(|e| RpcError::from(e.to_string()))
+            }
+            "matching_dataset_confirm_clear" | "matching_dataset_review_stats" | "matching_dataset_approved_page" => {
+                let a: MatchingDatasetPageArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                match cmd {
+                    "matching_dataset_confirm_clear" => serde_json::to_value(dataset_matching_confirm_unambiguous(&db, &a.run_id)?)
+                        .map_err(|e| RpcError::from(e.to_string())),
+                    "matching_dataset_approved_page" => serde_json::to_value(dataset_matching_approved_page(&db, &a.run_id, a.page, a.page_size)?)
+                        .map_err(|e| RpcError::from(e.to_string())),
+                    _ => serde_json::to_value(dataset_matching_review_stats(&db, &a.run_id)?)
+                        .map_err(|e| RpcError::from(e.to_string())),
+                }
             }
             "matching_acquire_join" | "matching_verify_join_candidates" | "matching_lookup_join_candidates" => {
                 let mut a: commands::matching::MatchingAcquireJoinArgs = serde_json::from_value(args)

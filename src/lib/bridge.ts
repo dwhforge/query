@@ -24,6 +24,87 @@ import type { SaveProjectArgs } from "../types/generated/SaveProjectArgs";
 export type { InvokeReply };
 
 export type DbtTarget = "v1" | "v2";
+// Universal dataset Matching: all source/target computation stays in DuckDB Host.
+export type DatasetMatchingPlan = {
+  sourceRef: string; targetRef: string; mapKeyFields: string[];
+  targetIdentityFields: string[];
+  outputs: string[];
+  comparisons: { sourceField: string; targetField: string; role: "hard_constraint" | "soft_signal" | "reference_context" }[];
+  normalization: string[];
+  ambiguity: "leave_for_manual" | "prefer_best_soft";
+  scope: "full" | "selected" | "cohort";
+  semanticRevision: number;
+  uiRevision: number;
+};
+export type DatasetMatchingRequest = {
+  plan: DatasetMatchingPlan;
+  samplePercent: number;
+  maxCandidatePairs: number;
+  minimumScore: number;
+};
+export type DatasetMatchingEstimate = {
+  samplePercent: number; sampledLeft: number; leftTotal: number; rightTotal: number;
+  sampledCandidatePairs: number; estimatedCandidatePairs: number;
+  candidatePolicy: string; complete: false; warning: string;
+};
+export type DatasetMatchingRun = {
+  runId: string; leftTotal: number; rightTotal: number; candidatePairs: number;
+  reusedTargets: number; proposedSources: number; ambiguousSources: number; unmatchedSources: number;
+  candidatePolicy: string; sourceCoverage: string; candidateSearchExhaustive: boolean;
+  inputsTransactionallySnapshotted: boolean; minimumScore: number;
+};
+export type DatasetMatchRow = {
+  leftId: number; mapKey: string; rightId: number | null;
+  targetIdentity: string | null; outputs: string | null; score: number | null;
+  alternatives: number; state: "proposed" | "ambiguous" | "unmatched" | "confirm" | "reject" | "defer" | "no_target";
+};
+export type DatasetMatchingPage = { rows: DatasetMatchRow[]; page: number; pageSize: number; total: number };
+export type DatasetReviewStats = { reviewed: number; confirmed: number; deferred: number; rejected: number };
+export type DatasetApprovedMappingPage = {
+  rows: { mapKey: string; outputs: string; targetIdentity: string }[];
+  page: number; pageSize: number; total: number;
+};
+function datasetContext(workspace: Workspace, connections: ConnectionDef[], sources: SourceDef[], projectRef: ProjectRefContext, request: DatasetMatchingRequest) {
+  return { workspace, connections, sources, projectFile: projectRef.projectFile,
+    projectUid: projectRef.projectUid, references: projectRef.references ?? [],
+    connectionBindings: projectRef.connectionBindings ?? [],
+    executionEngine: projectRef.executionEngine, request };
+}
+export function matchingDatasetEstimate(workspace: Workspace, connections: ConnectionDef[], sources: SourceDef[], projectRef: ProjectRefContext, request: DatasetMatchingRequest): Promise<DatasetMatchingEstimate> {
+  return invoke<DatasetMatchingEstimate>("matching_dataset_estimate", datasetContext(workspace, connections, sources, projectRef, request));
+}
+export function matchingDatasetEvaluate(workspace: Workspace, connections: ConnectionDef[], sources: SourceDef[], projectRef: ProjectRefContext, request: DatasetMatchingRequest): Promise<DatasetMatchingRun> {
+  return invoke<DatasetMatchingRun>("matching_dataset_evaluate", datasetContext(workspace, connections, sources, projectRef, request));
+}
+export function matchingDatasetPage(runId: string, page = 0, pageSize = 50, filter = "all"): Promise<DatasetMatchingPage> {
+  return invoke<DatasetMatchingPage>("matching_dataset_page", { runId, page, pageSize, filter });
+}
+export function matchingDatasetCandidates(runId: string, leftId: number, page = 0, pageSize = 50): Promise<DatasetMatchingPage> {
+  return invoke<DatasetMatchingPage>("matching_dataset_candidates", { runId, leftId, page, pageSize });
+}
+export function matchingDatasetDrop(runId: string): Promise<{ released: boolean }> {
+  return invoke<{ released: boolean }>("matching_dataset_drop", { runId });
+}
+export function matchingDatasetDecide(args: { runId: string; leftId: number; rightId?: number | null; action: "confirm" | "reject" | "defer" | "no_target" }): Promise<DatasetReviewStats> {
+  return invoke<DatasetReviewStats>("matching_dataset_decide", args);
+}
+export function matchingDatasetConfirmClear(runId: string): Promise<DatasetReviewStats> {
+  return invoke<DatasetReviewStats>("matching_dataset_confirm_clear", { runId });
+}
+export function matchingDatasetReviewStats(runId: string): Promise<DatasetReviewStats> {
+  return invoke<DatasetReviewStats>("matching_dataset_review_stats", { runId });
+}
+export function matchingDatasetApprovedPage(runId: string, page = 0, pageSize = 200): Promise<DatasetApprovedMappingPage> {
+  return invoke<DatasetApprovedMappingPage>("matching_dataset_approved_page", { runId, page, pageSize });
+}
+export type DatasetMatchingComparison = {
+  firstRun: string; secondRun: string; commonKeys: number; changedTarget: number;
+  becameMatched: number; becameUnmatched: number; firstOnly: number; secondOnly: number;
+  snapshotVerified: false;
+};
+export function matchingDatasetCompare(runId: string, otherRunId: string): Promise<DatasetMatchingComparison> {
+  return invoke<DatasetMatchingComparison>("matching_dataset_compare", { runId, otherRunId });
+}
 
 /** Root project identity for ADR-0025 reference lowering. */
 export type ProjectRefContext = {

@@ -3,6 +3,8 @@
  * Plan editor → fixture/retrieval proposals → review → final diff → Save.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MatchingSetView } from "./matching/MatchingSetView";
+import type { SetEvaluation } from "../app/matching/setEvaluation";
 import { llmChat, type MatchingJoinLookupResult, type MatchingLookupPage } from "../lib/bridge";
 import { tupleCell } from "../lib/joinLensTuple";
 import { basicPrompt, basicHighConfidenceIds, basicPlanCompatible } from "../app/matching/basic";
@@ -289,6 +291,7 @@ export function MatchingWorkspace({
   const [bulkScope, setBulkScope] = useState<BulkConfirmScope>("filter");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showFinal, setShowFinal] = useState(false);
+  const [pinnedEvaluation, setPinnedEvaluation] = useState<SetEvaluation | null>(null);
   const [commitMsg, setCommitMsg] = useState<string | null>(null);
   const [showSavedContext, setShowSavedContext] = useState(true);
   const [rightFocus, setRightFocus] = useState<MatchingCandidateView | null>(null);
@@ -1192,7 +1195,19 @@ export function MatchingWorkspace({
                   : ""
               }`}
             >
-            {!hasProposals ? (
+            {(session.basicRun || session.advancedRun) ? (
+              <MatchingSetView
+                session={session}
+                checked={selectedIds}
+                onChecked={setSelectedIds}
+                onChange={changeReview}
+                onCommit={() => void onCommit()}
+                commitBlocked={busy || !!session.commitLifecycle || !!originRefusal || !session.hasUnsavedDecisions}
+                commitReason={originRefusal}
+                previous={pinnedEvaluation}
+                onPin={setPinnedEvaluation}
+              />
+            ) : !hasProposals ? (
               <>
                 <div className="grid min-h-[250px] flex-1 grid-cols-2 overflow-hidden">
                   <section aria-label="Source explorer" className="flex min-h-0 flex-col border-r border-slate-800">

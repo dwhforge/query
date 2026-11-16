@@ -9,6 +9,7 @@ mod join_lens;
 mod join_near_miss;
 mod join_prepare;
 mod matching_join;
+mod matching_dataset;
 mod key_map_delta;
 mod key_map_fuzzy;
 mod key_map_write;
@@ -55,6 +56,15 @@ pub use join_prepare::{
 };
 pub use key_map_fuzzy::{key_map_fuzzy_suggest, KeyMapFuzzySuggest, KeyMapMatchSource};
 pub use matching_join::{acquire_matching_join, MatchingJoinAcquisition, MatchingJoinScope, MatchingJoinTarget};
+pub use matching_dataset::{
+    DatasetMatchingRequest, DatasetMatchingEstimate, DatasetMatchingRun, DatasetMatchingPage,
+    DatasetMatchRow, estimate_dataset_matching, evaluate_dataset_matching,
+    dataset_matching_page, dataset_matching_candidates, drop_dataset_matching_run,
+    DatasetReviewRequest, DatasetReviewStats, dataset_matching_decide,
+    dataset_matching_confirm_unambiguous, dataset_matching_review_stats,
+    DatasetApprovedMappingPage, DatasetApprovedMappingRow, dataset_matching_approved_page,
+    DatasetMatchingComparison, compare_dataset_matching,
+};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use matching::{
     matching_pair_evidence, accept_draft_decision, bulk_saveable, classify_merge, commit_blocked_reason,

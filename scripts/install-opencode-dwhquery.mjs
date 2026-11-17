@@ -1,5 +1,6 @@
 /** Install a local OpenCode V2 plugin + skill into a business workspace. */
 import { existsSync, lstatSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { copyFile, mkdir, readFile, realpath, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -13,9 +14,11 @@ if (argv.length !== 1 || argv[0] === "--help") {
 const destination = resolve(argv[0])
 const cli = resolve(process.env.DWHQ_CLI_BIN || join(repo, "dist/dwhq.mjs"))
 const host = resolve(process.env.DWHQ_HOST_BIN || join(repo, "target/release", process.platform === "win32" ? "dwh-host.exe" : "dwh-host"))
+// The installer runs under Node; OpenCode itself runs under Bun and must never be reused as the CLI runtime.
+const node = resolve(process.env.DWHQ_NODE_BIN || process.execPath)
 const plugin = join(repo, "integrations/opencode/plugins/dwhquery.js")
 const skill = join(repo, "integrations/opencode/skills/dwhquery/SKILL.md")
-for (const file of [cli, host, plugin, skill]) {
+for (const file of [node, cli, host, plugin, skill]) {
   if (!existsSync(file)) throw new Error(`Missing ${file}. Build CLI/Host before installing.`)
 }
 if (!existsSync(destination)) throw new Error(`Business workspace must already exist: ${destination}`)
@@ -29,15 +32,24 @@ for (const part of [".opencode", ".opencode/plugins", ".opencode/skills", ".open
 const toolsPath = join(destination, ".opencode/plugins/dwhquery.js")
 const skillPath = join(destination, ".opencode/skills/dwhquery/SKILL.md")
 const configPath = join(destination, ".opencode/dwhquery-adapter.json")
+// Pinned SHA-256 of the first published adapter (ADR-0053). Upgrade only that exact
+// adapter; never clobber user-customized plugins, config, or skills.
+const legacyPluginSha256 = "a21b30fdfb42509e74e2a702311c84e6d6f4415ca5ec02c93b2414b75c2b9b48"
+const cliPath = await realpath(cli)
+const hostPath = await realpath(host)
+const nodePath = await realpath(node)
+const legacyCfg = `${JSON.stringify({ version: 1, cli: cliPath, host: hostPath }, null, 2)}\n`
+const cfg = `${JSON.stringify({ version: 1, cli: cliPath, host: hostPath, node: nodePath }, null, 2)}\n`
 const ownFile = async (path, expected) => {
   if (!existsSync(path)) return
-  if ((await readFile(path, "utf8")) !== expected) {
-    throw new Error(`Refusing to overwrite an existing custom file: ${path}`)
-  }
+  const current = await readFile(path, "utf8")
+  if (current === expected) return
+  if (path === configPath && current === legacyCfg) return
+  if (path === toolsPath && createHash("sha256").update(current).digest("hex") === legacyPluginSha256) return
+  throw new Error(`Refusing to overwrite an existing custom file: ${path}`)
 }
 await mkdir(dirname(toolsPath), { recursive: true })
 await mkdir(dirname(skillPath), { recursive: true })
-const cfg = `${JSON.stringify({ version: 1, cli: await realpath(cli), host: await realpath(host) }, null, 2)}\n`
 await ownFile(configPath, cfg)
 await ownFile(toolsPath, await readFile(plugin, "utf8"))
 await ownFile(skillPath, await readFile(skill, "utf8"))

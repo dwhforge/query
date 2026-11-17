@@ -23,8 +23,9 @@ function toolSpec(editor, name, description, input, execute) {
 function config() {
   if (!existsSync(CONFIG)) throw new Error("DWHQuery adapter is not installed. Run scripts/install-opencode-dwhquery.mjs against this workspace.")
   const cfg = JSON.parse(readFileSync(CONFIG, "utf8"))
-  if (cfg.version !== 1 || typeof cfg.cli !== "string" || typeof cfg.host !== "string" ||
-      !isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !existsSync(cfg.cli) || !existsSync(cfg.host)) {
+  if (cfg.version !== 1 || typeof cfg.cli !== "string" || typeof cfg.host !== "string" || typeof cfg.node !== "string" ||
+      !isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !isAbsolute(cfg.node) ||
+      !existsSync(cfg.cli) || !existsSync(cfg.host) || !existsSync(cfg.node)) {
     throw new Error("DWHQuery CLI/Host missing. Rebuild and reinstall the OpenCode adapter.")
   }
   return cfg
@@ -75,7 +76,7 @@ function run(argv, signal) {
     const env = { ...process.env, DWHQ_HOST_BIN: cfg.host }
     // The OpenCode Web password is not a credential the CLI should ever receive.
     delete env.OPENCODE_PASSWORD
-    const child = spawn(process.execPath, [cfg.cli, ...argv], {
+    const child = spawn(cfg.node, [cfg.cli, ...argv], {
       cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"], signal,
     })
     const timer = setTimeout(() => child.kill("SIGKILL"), MAX_DURATION_MS)

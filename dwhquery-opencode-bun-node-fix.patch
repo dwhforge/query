@@ -1,0 +1,176 @@
+diff --git a/docs/OPENCODE_INTEGRATION.md b/docs/OPENCODE_INTEGRATION.md
+index 94c8555..a2a6cee 100644
+--- a/docs/OPENCODE_INTEGRATION.md
++++ b/docs/OPENCODE_INTEGRATION.md
+@@ -19,7 +19,7 @@ cp examples/opencode-sales/*.csv /tmp/dwhq-business-test/
+ node scripts/install-opencode-dwhquery.mjs /tmp/dwhq-business-test
+ ```
+ 
+-The installer copies a **V2 server plugin** and a discoverable `dwhquery` skill into that business workspace under `.opencode/`. It writes `.opencode/dwhquery-adapter.json` with absolute CLI and Host paths. It refuses mismatched existing adapter files and symlinked `.opencode` paths. It does **not** install OpenCode or select a model. Override binary locations with `DWHQ_CLI_BIN` and `DWHQ_HOST_BIN` when installing.
++The installer copies a **V2 server plugin** and a discoverable `dwhquery` skill into that business workspace under `.opencode/`. It writes `.opencode/dwhquery-adapter.json` with absolute CLI and Host paths. It refuses mismatched existing adapter files and symlinked `.opencode` paths, but upgrades the exact first published version in place. It records the actual Node executable used by the installer (`node` in config, overridable with `DWHQ_NODE_BIN`). It does **not** install OpenCode or select a model. Override binary locations with `DWHQ_CLI_BIN` and `DWHQ_HOST_BIN` when installing.
+ 
+ ## Start the browser UI securely
+ 
+@@ -64,7 +64,7 @@ The fixture intentionally has an unmatched sale (see `examples/opencode-sales/RE
+ 
+ The V2 server plugin registers 14 tools under the `dwhquery` namespace: `capabilities`, `project_create`, `project_inspect`, `connection_add`, `query_add`, `query_derive`, `query_step`, `query_join`, `query_focus`, `query_describe`, `query_preview`, `join_diagnose`, `project_validate`, `project_export`. It follows the official `ctx.tool.transform` plugin API: <https://opencode.ai/docs/build/plugins/server/>.
+ 
+-Each tool calls `spawn(process.execPath, [cli, ...argv])` with **no shell**. Inputs use JSON Schemas; paths are constrained to the business workspace (including symlink resolution). No agent can call arbitrary Rust Host RPC through these tools. Results are bounded in size/time and operations support cancellation. IDs should be read from `project_inspect`; generated IDs must not be guessed.
++Each tool calls `spawn(configuredNodeBinary, [cli, ...argv])` with **no shell**; OpenCode runs under Bun, so `process.execPath` must **not** be used to launch the Node CLI. Inputs use JSON Schemas; paths are constrained to the business workspace (including symlink resolution). No agent can call arbitrary Rust Host RPC through these tools. Results are bounded in size/time and operations support cancellation. IDs should be read from `project_inspect`; generated IDs must not be guessed.
+ 
+ - Project writes: only projects created by the CLI can be modified by default, via its UID ownership marker. Editing any other project requires **operator-set** `DWHQ_ALLOW_EXISTING_PROJECT_EDITS=1`. The CLI uses a file lock/checksum but does not provide a transaction against a concurrently open Electron session.
+ - SQL expressions: `Filter`, SQL-mode `DeriveColumn` etc. require **operator-set** `DWHQ_ALLOW_SQL=1`; that is an opt-in, **not** SQL sandboxing. Use read-only external database credentials.
+@@ -86,3 +86,14 @@ Adapter tests use a fake CLI and mock OpenCode V2 tool editor; web-launcher test
+ ### Not implemented
+ 
+ No automatic Mapping correction, external database writes, `dbt build`, project-wide ChangeSet, cross-process atomic Save, multi-tenant server isolation, durable agent task state or MCP transport. Those require their own product/permission contracts and real E2E verification.
++
++## Upgrade from the first adapter release
++
++The initial adapter mistakenly used `process.execPath`, which points to OpenCode/Bun rather than Node when tools execute inside OpenCode. This made even the `capabilities` tool fail with `invalid JSON (exit 1)`. Upgrade the adapter from the current DWHQuery checkout:
++
++```bash
++node scripts/install-opencode-dwhquery.mjs /tmp/dwhq-business-test
++node dist/dwhq.mjs tools
++```
++
++Restart the OpenCode server to reload the copied plugin. The installer only updates unmodified installations of the original adapter; manually modified files are deliberately refused. The tool config's `node` path is now explicit; do not replace it with OpenCode's `process.execPath`.
+diff --git a/integrations/opencode/plugins/dwhquery.js b/integrations/opencode/plugins/dwhquery.js
+index 674b1c4..e457984 100644
+--- a/integrations/opencode/plugins/dwhquery.js
++++ b/integrations/opencode/plugins/dwhquery.js
+@@ -23,8 +23,9 @@ function toolSpec(editor, name, description, input, execute) {
+ function config() {
+   if (!existsSync(CONFIG)) throw new Error("DWHQuery adapter is not installed. Run scripts/install-opencode-dwhquery.mjs against this workspace.")
+   const cfg = JSON.parse(readFileSync(CONFIG, "utf8"))
+-  if (cfg.version !== 1 || typeof cfg.cli !== "string" || typeof cfg.host !== "string" ||
+-      !isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !existsSync(cfg.cli) || !existsSync(cfg.host)) {
++  if (cfg.version !== 1 || typeof cfg.cli !== "string" || typeof cfg.host !== "string" || typeof cfg.node !== "string" ||
++      !isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !isAbsolute(cfg.node) ||
++      !existsSync(cfg.cli) || !existsSync(cfg.host) || !existsSync(cfg.node)) {
+     throw new Error("DWHQuery CLI/Host missing. Rebuild and reinstall the OpenCode adapter.")
+   }
+   return cfg
+@@ -75,7 +76,7 @@ function run(argv, signal) {
+     const env = { ...process.env, DWHQ_HOST_BIN: cfg.host }
+     // The OpenCode Web password is not a credential the CLI should ever receive.
+     delete env.OPENCODE_PASSWORD
+-    const child = spawn(process.execPath, [cfg.cli, ...argv], {
++    const child = spawn(cfg.node, [cfg.cli, ...argv], {
+       cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"], signal,
+     })
+     const timer = setTimeout(() => child.kill("SIGKILL"), MAX_DURATION_MS)
+diff --git a/scripts/install-opencode-dwhquery.mjs b/scripts/install-opencode-dwhquery.mjs
+index c52cbda..db1e6e4 100644
+--- a/scripts/install-opencode-dwhquery.mjs
++++ b/scripts/install-opencode-dwhquery.mjs
+@@ -1,5 +1,6 @@
+ /** Install a local OpenCode V2 plugin + skill into a business workspace. */
+ import { existsSync, lstatSync } from "node:fs"
++import { createHash } from "node:crypto"
+ import { copyFile, mkdir, readFile, realpath, writeFile } from "node:fs/promises"
+ import { dirname, isAbsolute, join, resolve } from "node:path"
+ import { fileURLToPath } from "node:url"
+@@ -13,9 +14,11 @@ if (argv.length !== 1 || argv[0] === "--help") {
+ const destination = resolve(argv[0])
+ const cli = resolve(process.env.DWHQ_CLI_BIN || join(repo, "dist/dwhq.mjs"))
+ const host = resolve(process.env.DWHQ_HOST_BIN || join(repo, "target/release", process.platform === "win32" ? "dwh-host.exe" : "dwh-host"))
++// The installer runs under Node; OpenCode itself runs under Bun and must never be reused as the CLI runtime.
++const node = resolve(process.env.DWHQ_NODE_BIN || process.execPath)
+ const plugin = join(repo, "integrations/opencode/plugins/dwhquery.js")
+ const skill = join(repo, "integrations/opencode/skills/dwhquery/SKILL.md")
+-for (const file of [cli, host, plugin, skill]) {
++for (const file of [node, cli, host, plugin, skill]) {
+   if (!existsSync(file)) throw new Error(`Missing ${file}. Build CLI/Host before installing.`)
+ }
+ if (!existsSync(destination)) throw new Error(`Business workspace must already exist: ${destination}`)
+@@ -29,15 +32,24 @@ for (const part of [".opencode", ".opencode/plugins", ".opencode/skills", ".open
+ const toolsPath = join(destination, ".opencode/plugins/dwhquery.js")
+ const skillPath = join(destination, ".opencode/skills/dwhquery/SKILL.md")
+ const configPath = join(destination, ".opencode/dwhquery-adapter.json")
++// Pinned SHA-256 of the first published adapter (ADR-0053). Upgrade only that exact
++// adapter; never clobber user-customized plugins, config, or skills.
++const legacyPluginSha256 = "a21b30fdfb42509e74e2a702311c84e6d6f4415ca5ec02c93b2414b75c2b9b48"
++const cliPath = await realpath(cli)
++const hostPath = await realpath(host)
++const nodePath = await realpath(node)
++const legacyCfg = `${JSON.stringify({ version: 1, cli: cliPath, host: hostPath }, null, 2)}\n`
++const cfg = `${JSON.stringify({ version: 1, cli: cliPath, host: hostPath, node: nodePath }, null, 2)}\n`
+ const ownFile = async (path, expected) => {
+   if (!existsSync(path)) return
+-  if ((await readFile(path, "utf8")) !== expected) {
+-    throw new Error(`Refusing to overwrite an existing custom file: ${path}`)
+-  }
++  const current = await readFile(path, "utf8")
++  if (current === expected) return
++  if (path === configPath && current === legacyCfg) return
++  if (path === toolsPath && createHash("sha256").update(current).digest("hex") === legacyPluginSha256) return
++  throw new Error(`Refusing to overwrite an existing custom file: ${path}`)
+ }
+ await mkdir(dirname(toolsPath), { recursive: true })
+ await mkdir(dirname(skillPath), { recursive: true })
+-const cfg = `${JSON.stringify({ version: 1, cli: await realpath(cli), host: await realpath(host) }, null, 2)}\n`
+ await ownFile(configPath, cfg)
+ await ownFile(toolsPath, await readFile(plugin, "utf8"))
+ await ownFile(skillPath, await readFile(skill, "utf8"))
+diff --git a/tests/opencode-dwhquery.spec.mjs b/tests/opencode-dwhquery.spec.mjs
+index 56fc87b..8485865 100644
+--- a/tests/opencode-dwhquery.spec.mjs
++++ b/tests/opencode-dwhquery.spec.mjs
+@@ -60,6 +60,7 @@ test("installer installs into an independent workspace and refuses conflicting o
+     const config = JSON.parse(readFileSync(join(f.business, ".opencode/dwhquery-adapter.json"), "utf8"))
+     assert.equal(config.cli, f.cli)
+     assert.equal(config.host, f.host)
++    assert.equal(config.node, process.execPath)
+     assert.match(readFileSync(join(f.business, ".opencode/skills/dwhquery/SKILL.md"), "utf8"), /natural-language|business/i)
+     writeFileSync(join(f.business, ".opencode/plugins/dwhquery.js"), "// keep existing file\n")
+     const second = spawnSync(process.execPath, [install, f.business], { env: { ...process.env, DWHQ_CLI_BIN: f.cli, DWHQ_HOST_BIN: f.host }, encoding: "utf8" })
+@@ -84,11 +85,46 @@ test("OpenCode V2 tools use exact typed CLI argv with no shell and suppress row-
+     assert.deepEqual(JSON.parse(joinRes.argv[joinRes.argv.indexOf("--on")+1]), [{ left: "customer_id", right: "id" }])
+     const preview = JSON.parse((await call(tools, "query_preview", {project: "exists.json", query: "q_sales"})).content)
+     assert.equal(preview.argv.includes("--include-rows"), false)
+-    const caps = JSON.parse((await call(tools, "capabilities", {})).content)
+-    assert.deepEqual(caps.argv, ["tools"])
++    // OpenCode's process.execPath is its Bun/OpenCode executable, not node.
++    // Simulate that distinction so tests cannot pass by accidentally spawning the host runtime.
++    const realExecPath = process.execPath
++    try {
++      process.execPath = "/bin/false"
++      const caps = JSON.parse((await call(tools, "capabilities", {})).content)
++      assert.deepEqual(caps.argv, ["tools"])
++      const created = JSON.parse((await call(tools, "project_create", {project: "fresh.json", name: "Monthly sales"})).content)
++      assert.deepEqual(created.argv.slice(0, 4), ["project", "create", "--project", join(f.business, "fresh.json")])
++    } finally {
++      process.execPath = realExecPath
++    }
+   } finally { rmSync(f.work, { recursive: true, force: true }) }
+ })
+ 
++
++test("installer upgrades only the exact first published adapter and preserves custom files", () => {
++  const f = fixture()
++  try {
++    const dir = join(f.business, ".opencode")
++    const pluginFile = join(dir, "plugins/dwhquery.js")
++    const configFile = join(dir, "dwhquery-adapter.json")
++    const newest = readFileSync(pluginFile, "utf8")
++    const legacy = newest
++      .replace('typeof cfg.host !== "string" || typeof cfg.node !== "string" ||', 'typeof cfg.host !== "string" ||')
++      .replace('!isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !isAbsolute(cfg.node) ||\n      !existsSync(cfg.cli) || !existsSync(cfg.host) || !existsSync(cfg.node)', '!isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !existsSync(cfg.cli) || !existsSync(cfg.host)')
++      .replace('spawn(cfg.node, [cfg.cli, ...argv]', 'spawn(process.execPath, [cfg.cli, ...argv]')
++    assert.notEqual(legacy, newest)
++    writeFileSync(pluginFile, legacy)
++    writeFileSync(configFile, `${JSON.stringify({ version: 1, cli: f.cli, host: f.host }, null, 2)}\n`)
++    const result = spawnSync(process.execPath, [install, f.business], { env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8" })
++    assert.equal(result.status, 0, result.stderr)
++    assert.equal(readFileSync(pluginFile, "utf8"), newest)
++    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).node, process.execPath)
++    // Reinstalling the current version remains idempotent.
++    const again = spawnSync(process.execPath, [install, f.business], { env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8" })
++    assert.equal(again.status, 0, again.stderr)
++  } finally { rmSync(f.work, {recursive: true, force: true}) }
++})
++
+ test("path controls reject traversal, symlink escape, and .opencode writes", async () => {
+   const f = fixture()
+   try {

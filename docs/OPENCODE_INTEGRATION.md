@@ -19,7 +19,7 @@ cp examples/opencode-sales/*.csv /tmp/dwhq-business-test/
 node scripts/install-opencode-dwhquery.mjs /tmp/dwhq-business-test
 ```
 
-The installer copies a **V2 server plugin** and a discoverable `dwhquery` skill into that business workspace under `.opencode/`. It writes `.opencode/dwhquery-adapter.json` with absolute CLI and Host paths. It refuses mismatched existing adapter files and symlinked `.opencode` paths. It does **not** install OpenCode or select a model. Override binary locations with `DWHQ_CLI_BIN` and `DWHQ_HOST_BIN` when installing.
+The installer copies a **V2 server plugin** and a discoverable `dwhquery` skill into that business workspace under `.opencode/`. It writes `.opencode/dwhquery-adapter.json` with absolute CLI and Host paths. It refuses mismatched existing adapter files and symlinked `.opencode` paths, but upgrades the exact first published version in place. It records the actual Node executable used by the installer (`node` in config, overridable with `DWHQ_NODE_BIN`). It does **not** install OpenCode or select a model. Override binary locations with `DWHQ_CLI_BIN` and `DWHQ_HOST_BIN` when installing.
 
 ## Start the browser UI securely
 
@@ -64,7 +64,7 @@ The fixture intentionally has an unmatched sale (see `examples/opencode-sales/RE
 
 The V2 server plugin registers 14 tools under the `dwhquery` namespace: `capabilities`, `project_create`, `project_inspect`, `connection_add`, `query_add`, `query_derive`, `query_step`, `query_join`, `query_focus`, `query_describe`, `query_preview`, `join_diagnose`, `project_validate`, `project_export`. It follows the official `ctx.tool.transform` plugin API: <https://opencode.ai/docs/build/plugins/server/>.
 
-Each tool calls `spawn(process.execPath, [cli, ...argv])` with **no shell**. Inputs use JSON Schemas; paths are constrained to the business workspace (including symlink resolution). No agent can call arbitrary Rust Host RPC through these tools. Results are bounded in size/time and operations support cancellation. IDs should be read from `project_inspect`; generated IDs must not be guessed.
+Each tool calls `spawn(configuredNodeBinary, [cli, ...argv])` with **no shell**; OpenCode runs under Bun, so `process.execPath` must **not** be used to launch the Node CLI. Inputs use JSON Schemas; paths are constrained to the business workspace (including symlink resolution). No agent can call arbitrary Rust Host RPC through these tools. Results are bounded in size/time and operations support cancellation. IDs should be read from `project_inspect`; generated IDs must not be guessed.
 
 - Project writes: only projects created by the CLI can be modified by default, via its UID ownership marker. Editing any other project requires **operator-set** `DWHQ_ALLOW_EXISTING_PROJECT_EDITS=1`. The CLI uses a file lock/checksum but does not provide a transaction against a concurrently open Electron session.
 - SQL expressions: `Filter`, SQL-mode `DeriveColumn` etc. require **operator-set** `DWHQ_ALLOW_SQL=1`; that is an opt-in, **not** SQL sandboxing. Use read-only external database credentials.
@@ -86,3 +86,14 @@ Adapter tests use a fake CLI and mock OpenCode V2 tool editor; web-launcher test
 ### Not implemented
 
 No automatic Mapping correction, external database writes, `dbt build`, project-wide ChangeSet, cross-process atomic Save, multi-tenant server isolation, durable agent task state or MCP transport. Those require their own product/permission contracts and real E2E verification.
+
+## Upgrade from the first adapter release
+
+The initial adapter mistakenly used `process.execPath`, which points to OpenCode/Bun rather than Node when tools execute inside OpenCode. This made even the `capabilities` tool fail with `invalid JSON (exit 1)`. Upgrade the adapter from the current DWHQuery checkout:
+
+```bash
+node scripts/install-opencode-dwhquery.mjs /tmp/dwhq-business-test
+node dist/dwhq.mjs tools
+```
+
+Restart the OpenCode server to reload the copied plugin. The installer only updates unmodified installations of the original adapter; manually modified files are deliberately refused. The tool config's `node` path is now explicit; do not replace it with OpenCode's `process.execPath`.

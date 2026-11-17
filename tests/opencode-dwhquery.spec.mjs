@@ -60,6 +60,7 @@ test("installer installs into an independent workspace and refuses conflicting o
     const config = JSON.parse(readFileSync(join(f.business, ".opencode/dwhquery-adapter.json"), "utf8"))
     assert.equal(config.cli, f.cli)
     assert.equal(config.host, f.host)
+    assert.equal(config.node, process.execPath)
     assert.match(readFileSync(join(f.business, ".opencode/skills/dwhquery/SKILL.md"), "utf8"), /natural-language|business/i)
     writeFileSync(join(f.business, ".opencode/plugins/dwhquery.js"), "// keep existing file\n")
     const second = spawnSync(process.execPath, [install, f.business], { env: { ...process.env, DWHQ_CLI_BIN: f.cli, DWHQ_HOST_BIN: f.host }, encoding: "utf8" })
@@ -84,9 +85,44 @@ test("OpenCode V2 tools use exact typed CLI argv with no shell and suppress row-
     assert.deepEqual(JSON.parse(joinRes.argv[joinRes.argv.indexOf("--on")+1]), [{ left: "customer_id", right: "id" }])
     const preview = JSON.parse((await call(tools, "query_preview", {project: "exists.json", query: "q_sales"})).content)
     assert.equal(preview.argv.includes("--include-rows"), false)
-    const caps = JSON.parse((await call(tools, "capabilities", {})).content)
-    assert.deepEqual(caps.argv, ["tools"])
+    // OpenCode's process.execPath is its Bun/OpenCode executable, not node.
+    // Simulate that distinction so tests cannot pass by accidentally spawning the host runtime.
+    const realExecPath = process.execPath
+    try {
+      process.execPath = "/bin/false"
+      const caps = JSON.parse((await call(tools, "capabilities", {})).content)
+      assert.deepEqual(caps.argv, ["tools"])
+      const created = JSON.parse((await call(tools, "project_create", {project: "fresh.json", name: "Monthly sales"})).content)
+      assert.deepEqual(created.argv.slice(0, 4), ["project", "create", "--project", join(f.business, "fresh.json")])
+    } finally {
+      process.execPath = realExecPath
+    }
   } finally { rmSync(f.work, { recursive: true, force: true }) }
+})
+
+
+test("installer upgrades only the exact first published adapter and preserves custom files", () => {
+  const f = fixture()
+  try {
+    const dir = join(f.business, ".opencode")
+    const pluginFile = join(dir, "plugins/dwhquery.js")
+    const configFile = join(dir, "dwhquery-adapter.json")
+    const newest = readFileSync(pluginFile, "utf8")
+    const legacy = newest
+      .replace('typeof cfg.host !== "string" || typeof cfg.node !== "string" ||', 'typeof cfg.host !== "string" ||')
+      .replace('!isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !isAbsolute(cfg.node) ||\n      !existsSync(cfg.cli) || !existsSync(cfg.host) || !existsSync(cfg.node)', '!isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !existsSync(cfg.cli) || !existsSync(cfg.host)')
+      .replace('spawn(cfg.node, [cfg.cli, ...argv]', 'spawn(process.execPath, [cfg.cli, ...argv]')
+    assert.notEqual(legacy, newest)
+    writeFileSync(pluginFile, legacy)
+    writeFileSync(configFile, `${JSON.stringify({ version: 1, cli: f.cli, host: f.host }, null, 2)}\n`)
+    const result = spawnSync(process.execPath, [install, f.business], { env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8" })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(pluginFile, "utf8"), newest)
+    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).node, process.execPath)
+    // Reinstalling the current version remains idempotent.
+    const again = spawnSync(process.execPath, [install, f.business], { env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8" })
+    assert.equal(again.status, 0, again.stderr)
+  } finally { rmSync(f.work, {recursive: true, force: true}) }
 })
 
 test("path controls reject traversal, symlink escape, and .opencode writes", async () => {

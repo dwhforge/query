@@ -45,6 +45,17 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
     current.rows.map(r => [r.sourceKey, r.outcome, r.searchIncomplete, r.candidateId])]);
   const activeEstimate = estimateRun === estimateIdentity ? estimate : null;
   const stats = current.stats;
+  // Count *evaluated/scored* evidence separately from eligible suggestions.
+  // A candidate displayed below threshold is evidence, not a proposed Mapping.
+  const evidenceCounts = new Map(session.proposals.map(p => {
+    const scored = p.edges?.filter(edge => edge.score != null && Number.isFinite(edge.score)) ?? [];
+    const above = session.basicRun
+      ? scored.filter(edge => edge.score! >= session.basicRun!.scoreCutoff).length : null;
+    return [p.proposalId, { scored: scored.length, above, unknown: p.coverage?.competitorsUnknown ?? 0 }] as const;
+  }));
+  const totalScored = [...evidenceCounts.values()].reduce((sum, counts) => sum + counts.scored, 0);
+  const totalAbove = session.basicRun
+    ? [...evidenceCounts.values()].reduce((sum, counts) => sum + (counts.above ?? 0), 0) : null;
   const inspected = inspectedId ? session.proposals.find(p => p.proposalId === inspectedId) : undefined;
   const inspectedDecision = inspected && session.decisions.find(d => d.proposalId === inspected.proposalId);
   const availableCandidates = inspected?.alternativeCandidateIds.flatMap(id => {
@@ -90,6 +101,11 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
         {complete ? "Acquisition complete for the requested, bounded scope." : "Incomplete or unknown acquisition coverage."}
         {stats.notAcquired == null ? " Unacquired LEFT count unknown." : stats.notAcquired ? ` ${stats.notAcquired} LEFT groups not acquired.` : ""}
         {" "}Results describe proposed relationships, NOT executed JOIN impact or saved Mapping.
+      </p>
+      <p className="mt-1 text-slate-400" data-testid="matching-set-evidence-totals">
+        {totalScored} scored candidate pairs across acquired LEFT keys
+        {totalAbove != null ? ` · ${totalAbove} above the Basic suggestion threshold` : ""}
+        {` · ${stats.proposed} LEFT keys with a proposed relationship`}. These are different counts.
       </p>
     </div>
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 px-3 py-1.5 text-[11px]" aria-label="Sample Estimate settings">
@@ -154,8 +170,12 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
           <td className="p-2 font-mono">{row.right ? tuple(row.right) : <span className="text-slate-500">—</span>}</td>
           <td className="p-2">{row.score === null ? "Unknown" : row.score.toFixed(3)}</td>
           <td className="p-2"><span className={category(row) === "proposed" ? "text-teal-200" : category(row) === "incomplete" ? "text-amber-200" : "text-slate-300"}>
-            {labels[category(row)]} {row.alternatives > 1 ? `· ${row.alternatives} alternatives` : ""}
-          </span></td>
+            {labels[category(row)]}
+          </span><div className="mt-0.5 text-[10px] text-slate-500">
+            {evidenceCounts.get(row.id)?.scored ?? 0} scored
+            {evidenceCounts.get(row.id)?.above != null ? ` · ${evidenceCounts.get(row.id)!.above} above threshold` : ""}
+            {(evidenceCounts.get(row.id)?.unknown ?? 0) > 0 ? ` · ${evidenceCounts.get(row.id)!.unknown} unknown` : ""}
+          </div></td>
           <td className="p-2"><button type="button" className="rounded border border-slate-700 px-2 py-1 text-teal-100"
             onClick={() => { setInspectedId(row.id); setSelectedCandidateId(null); }}>Details</button></td>
         </tr>)}</tbody>

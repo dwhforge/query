@@ -49,6 +49,8 @@ export type DatasetMatchingEstimate = {
 };
 export type DatasetMatchingRun = {
   runId: string; leftTotal: number; rightTotal: number; candidatePairs: number;
+  /** Evaluated pairs reaching the user-selected minimum score; not confirmations. */
+  aboveThresholdPairs: number;
   reusedTargets: number; proposedSources: number; ambiguousSources: number; belowThresholdSources: number; unmatchedSources: number;
   candidatePolicy: string; sourceCoverage: string; candidateSearchExhaustive: boolean;
   inputsTransactionallySnapshotted: boolean; minimumScore: number;

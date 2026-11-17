@@ -50,6 +50,7 @@ import type {
   MatchingTabSession,
 } from "../app/matching/types";
 import { RelationshipInspector } from "./matching/RelationshipInspector";
+import { suggestSharedDescriptiveField } from "../app/matching/attributeSuggestions";
 import { LeftExplorer } from "./matching/LeftExplorer";
 import { RightExplorer } from "./matching/RightExplorer";
 import { nextUnresolved, buildRelationshipIndex, type MappingProjection } from "../app/matching/relationships";
@@ -329,6 +330,7 @@ export function MatchingWorkspace({
   const blockers = useMemo(() => planBlockers(plan), [plan]);
   const sourceCols = session.lensCtx?.sourceColumns ?? [];
   const targetCols = session.lensCtx?.targetColumns ?? [];
+  const attributeSuggestion = suggestSharedDescriptiveField(sourceCols, targetCols);
   const queryOpts = session.queryOptions ?? [];
   const hasProposals = session.proposals.length > 0;
   const { resolvedDeterministic, residue } = useMemo(
@@ -1032,6 +1034,17 @@ export function MatchingWorkspace({
             )}
               </fieldset>
             </details>
+            {isBasic && planRunsBasic && attributeSuggestion && !isDemo && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                <span>JOIN codes identify Mapping keys; descriptive fields can rank the actual entities.</span>
+                <button type="button" data-testid="matching-use-entity-attributes"
+                  className="rounded border border-teal-700 px-2 py-1 text-teal-200 disabled:opacity-40"
+                  disabled={busy || !!session.commitLifecycle || session.hasUnsavedDecisions}
+                  onClick={() => patchPlan({ comparisons: [{ ...attributeSuggestion }] }, true)}>
+                  Compare {attributeSuggestion.sourceField} ↔ {attributeSuggestion.targetField} (Advanced)
+                </button>
+              </div>
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
                 type="button"

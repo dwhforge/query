@@ -46,6 +46,9 @@ pub struct DatasetMatchingRun {
     pub left_total: u64,
     pub right_total: u64,
     pub candidate_pairs: u64,
+    /// Number of evaluated pairs reaching the configured suggestion threshold.
+    /// Not the number of distinct LEFT suggestions or approvals.
+    pub above_threshold_pairs: u64,
     pub reused_targets: u64,
     pub proposed_sources: u64,
     pub ambiguous_sources: u64,
@@ -249,13 +252,15 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
             "CREATE TEMP TABLE __dwh_match_d_{suffix} (left_id BIGINT PRIMARY KEY, right_id BIGINT, action VARCHAR NOT NULL);"
         )).map_err(|e| e.to_string()))?;
         let candidate_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs}"))?;
+        let above_threshold_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs} WHERE score >= {}", req.minimum_score))?;
+        if above_threshold_pairs > candidate_pairs { return Err("matching candidate score invariant violated".into()); }
         let reused_targets = scalar(db, &format!("SELECT count(*) FROM (SELECT target_identity FROM {results} WHERE state IN ('proposed', 'ambiguous') GROUP BY target_identity HAVING count(*) > 1) reused"))?;
         let proposed_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'proposed'"))?;
         let ambiguous_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'ambiguous'"))?;
         let below_threshold_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'below_threshold'"))?;
         let unmatched_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'unmatched'"))?;
         if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources != left_total { return Err("matching coverage invariant violated".into()); }
-        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
+        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
             source_coverage: "complete".into(), candidate_search_exhaustive:
                 !req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint),
@@ -497,6 +502,7 @@ mod tests {
         assert_eq!(run.unmatched_sources, 0);
         assert_eq!(run.below_threshold_sources, 0);
         assert_eq!(run.candidate_pairs, 500);
+        assert_eq!(run.above_threshold_pairs, 500);
         let p0 = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
         let p9 = dataset_matching_page(&db, &run.run_id, 9, 50, None).unwrap();
         assert_eq!(p0.total, 500);
@@ -573,6 +579,7 @@ R3,X2,Gamma
         let run = evaluate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
         assert_eq!(run.left_total, 3);
         assert_eq!(run.candidate_pairs, 3);
+        assert_eq!(run.above_threshold_pairs, 2);
         assert_eq!(run.below_threshold_sources, 1);
         assert_eq!(run.ambiguous_sources, 1);
         assert_eq!(run.unmatched_sources, 1);

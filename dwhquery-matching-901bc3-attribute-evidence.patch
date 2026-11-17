@@ -1,0 +1,211 @@
+--- a/crates/dwh-engine/src/matching_dataset.rs
++++ b/crates/dwh-engine/src/matching_dataset.rs
+@@ -46,6 +46,9 @@
+     pub left_total: u64,
+     pub right_total: u64,
+     pub candidate_pairs: u64,
++    /// Number of evaluated pairs reaching the configured suggestion threshold.
++    /// Not the number of distinct LEFT suggestions or approvals.
++    pub above_threshold_pairs: u64,
+     pub reused_targets: u64,
+     pub proposed_sources: u64,
+     pub ambiguous_sources: u64,
+@@ -249,13 +252,15 @@
+             "CREATE TEMP TABLE __dwh_match_d_{suffix} (left_id BIGINT PRIMARY KEY, right_id BIGINT, action VARCHAR NOT NULL);"
+         )).map_err(|e| e.to_string()))?;
+         let candidate_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs}"))?;
++        let above_threshold_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs} WHERE score >= {}", req.minimum_score))?;
++        if above_threshold_pairs > candidate_pairs { return Err("matching candidate score invariant violated".into()); }
+         let reused_targets = scalar(db, &format!("SELECT count(*) FROM (SELECT target_identity FROM {results} WHERE state IN ('proposed', 'ambiguous') GROUP BY target_identity HAVING count(*) > 1) reused"))?;
+         let proposed_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'proposed'"))?;
+         let ambiguous_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'ambiguous'"))?;
+         let below_threshold_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'below_threshold'"))?;
+         let unmatched_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'unmatched'"))?;
+         if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources != left_total { return Err("matching coverage invariant violated".into()); }
+-        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
++        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
+             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
+             source_coverage: "complete".into(), candidate_search_exhaustive:
+                 !req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint),
+@@ -497,6 +502,7 @@
+         assert_eq!(run.unmatched_sources, 0);
+         assert_eq!(run.below_threshold_sources, 0);
+         assert_eq!(run.candidate_pairs, 500);
++        assert_eq!(run.above_threshold_pairs, 500);
+         let p0 = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
+         let p9 = dataset_matching_page(&db, &run.run_id, 9, 50, None).unwrap();
+         assert_eq!(p0.total, 500);
+@@ -573,6 +579,7 @@
+         let run = evaluate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
+         assert_eq!(run.left_total, 3);
+         assert_eq!(run.candidate_pairs, 3);
++        assert_eq!(run.above_threshold_pairs, 2);
+         assert_eq!(run.below_threshold_sources, 1);
+         assert_eq!(run.ambiguous_sources, 1);
+         assert_eq!(run.unmatched_sources, 1);
+--- a/src/components/matching/DatasetMatchingWorkspace.tsx
++++ b/src/components/matching/DatasetMatchingWorkspace.tsx
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+ import type { ConnectionDef, SourceDef, Workspace } from "../../types/pipeline";
++import { suggestSharedDescriptiveField } from "../../app/matching/attributeSuggestions";
+ import {
+   describeWorkspace,
+   matchingDatasetEstimate, matchingDatasetEvaluate, matchingDatasetPage,
+@@ -78,6 +79,8 @@
+     return () => { live = false; };
+   }, [left, right, workspace, connections, sources, projectRef.projectFile, projectRef.projectUid]);
+ 
++  const attributeSuggestion = useMemo(() => suggestSharedDescriptiveField(leftColumns, rightColumns), [leftColumns, rightColumns]);
++
+   const plan = useMemo<DatasetMatchingRequest["plan"]>(() => ({
+     sourceRef: left,
+     targetRef: right,
+@@ -185,6 +188,11 @@
+         <datalist id="match-left-cols">{leftColumns.map(c => <option key={c} value={c} />)}</datalist>
+         <datalist id="match-right-cols">{rightColumns.map(c => <option key={c} value={c} />)}</datalist>
+         <div className="flex items-center justify-between"><strong className="uppercase text-slate-400">Rules</strong><button className={btn} type="button" onClick={() => setComparisons(cs => [...cs, { ...INITIAL_RULE }])}>+ Rule</button></div>
++        <p className="text-slate-400">Identity fields form Mapping keys and outputs. Comparison fields provide matching evidence; they need not be keys.</p>
++        {attributeSuggestion && <button type="button" className={`${btn} w-full border-teal-700 text-teal-200`} onClick={() => setComparisons([{ ...attributeSuggestion }])}
++          title="Use the shared descriptive field for similarity while leaving Mapping identities and outputs unchanged">
++          Compare by {attributeSuggestion.sourceField} ↔ {attributeSuggestion.targetField}
++        </button>}
+         {comparisons.map((rule, i) => <div key={i} className="space-y-1 rounded border border-slate-700 p-2">
+           <select aria-label={`LEFT field ${i + 1}`} className={`w-full ${cn}`} value={rule.sourceField} onChange={e => editRule(i, { sourceField: e.target.value })}><option value="">LEFT field</option>{leftColumns.map(f => <option key={f} value={f}>{f}</option>)}</select>
+           <select aria-label={`RIGHT field ${i + 1}`} className={`w-full ${cn}`} value={rule.targetField} onChange={e => editRule(i, { targetField: e.target.value })}><option value="">RIGHT field</option>{rightColumns.map(f => <option key={f} value={f}>{f}</option>)}</select>
+@@ -203,7 +211,7 @@
+         {message && <div role="status" className="border-b border-teal-800 p-2 text-xs text-teal-200">{message}</div>}
+         {!run ? <div className="m-auto max-w-lg p-8 text-center text-sm text-slate-500">Select two queries, choose identity and comparison rules, then Evaluate. UI previews cannot limit the requested scope.</div> : <>
+           <div className="shrink-0 border-b border-slate-700 p-3">
+-            <div className="flex flex-wrap gap-4 text-sm"><strong className="text-teal-200">{run.leftTotal.toLocaleString()} LEFT</strong><span>{run.rightTotal.toLocaleString()} RIGHT</span><span>{run.proposedSources} proposed</span><span className="text-amber-300">{run.ambiguousSources} ambiguous</span><span className="text-amber-200">{run.belowThresholdSources} below threshold</span><span>{run.unmatchedSources} no candidates</span><span>{run.candidatePairs} scored candidate pairs (including below threshold)</span><span className="text-amber-200">{run.reusedTargets} reused RIGHT identities</span></div>
++            <div className="flex flex-wrap gap-4 text-sm"><strong className="text-teal-200">{run.leftTotal.toLocaleString()} LEFT</strong><span>{run.rightTotal.toLocaleString()} RIGHT</span><span>{run.proposedSources} proposed</span><span className="text-amber-300">{run.ambiguousSources} ambiguous</span><span className="text-amber-200">{run.belowThresholdSources} below threshold</span><span>{run.unmatchedSources} no candidates</span><span>{run.candidatePairs} candidate pairs evaluated</span><span>{run.aboveThresholdPairs} pairs above threshold</span><span className="text-amber-200">{run.reusedTargets} reused RIGHT identities</span></div>
+             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>
+             {previousRun && <div className="mt-1 text-xs text-slate-400">Previous run: {previousRun.proposedSources} proposed → {run.proposedSources}; {previousRun.ambiguousSources} ambiguous → {run.ambiguousSources}. Different source snapshots may invalidate comparison.</div>}
+             {comparison && <div className="mt-1 text-xs text-amber-300">Indicative relationship A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys. Snapshot verified: no.</div>}
+@@ -217,7 +225,7 @@
+           </div>
+           <div className="flex min-h-0 flex-1">
+             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+-              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Candidates</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}</td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.alternatives}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state}</td></tr>)}</tbody></table></div>
++              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Candidates evaluated</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}</td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.alternatives}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state}</td></tr>)}</tbody></table></div>
+               <div className="flex shrink-0 items-center justify-between border-t border-slate-700 p-2 text-xs"><span>Rows {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows?.total ?? 0)} / {rows?.total ?? 0}</span><div className="flex gap-2"><button className={btn} disabled={page === 0 || working} onClick={() => void reload(run, page - 1)}>Previous</button><button className={btn} disabled={!rows || (page + 1) * PAGE_SIZE >= rows.total || working} onClick={() => void reload(run, page + 1)}>Next</button></div></div>
+             </div>
+             {selected && <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-slate-700 p-3 text-xs"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside>}
+--- /dev/null
++++ b/src/app/matching/attributeSuggestions.ts
+@@ -0,0 +1,21 @@
++/** Pure UI assistance: compare descriptive attributes without changing Mapping keys.
++ * No fuzzy guess or scoring authority; the user must explicitly select the rule. */
++export type SuggestedMatchingRule = {
++  sourceField: string;
++  targetField: string;
++  role: "soft_signal";
++};
++const descriptiveNames = [
++  "name", "product_name", "description", "title", "label", "display_name", "item_name", "vendor_name",
++] as const;
++
++export function suggestSharedDescriptiveField(
++  leftColumns: readonly string[], rightColumns: readonly string[],
++): SuggestedMatchingRule | null {
++  for (const name of descriptiveNames) {
++    const sourceField = leftColumns.find(column => column.toLowerCase() === name);
++    const targetField = rightColumns.find(column => column.toLowerCase() === name);
++    if (sourceField && targetField) return { sourceField, targetField, role: "soft_signal" };
++  }
++  return null;
++}
+--- /dev/null
++++ b/src/app/matching/attributeSuggestions.test.ts
+@@ -0,0 +1,10 @@
++import assert from "node:assert/strict";
++import { suggestSharedDescriptiveField } from "./attributeSuggestions";
++assert.deepEqual(suggestSharedDescriptiveField(["crm_id", "name"], ["erp_id", "name"]),
++  { sourceField: "name", targetField: "name", role: "soft_signal" });
++assert.deepEqual(suggestSharedDescriptiveField(["NAME"], ["name"]),
++  { sourceField: "NAME", targetField: "name", role: "soft_signal" });
++assert.equal(suggestSharedDescriptiveField(["crm_id"], ["erp_id"]), null);
++assert.equal(suggestSharedDescriptiveField(["name"], ["description"]), null,
++  "different semantic fields must not be guessed automatically");
++console.log("Shared descriptive matching field suggestion tests passed");
+--- a/src/components/MatchingWorkspace.tsx
++++ b/src/components/MatchingWorkspace.tsx
+@@ -52,2 +52,3 @@
+ import { RelationshipInspector } from "./matching/RelationshipInspector";
++import { suggestSharedDescriptiveField } from "../app/matching/attributeSuggestions";
+ import { LeftExplorer } from "./matching/LeftExplorer";
+@@ -330,3 +331,4 @@
+   const sourceCols = session.lensCtx?.sourceColumns ?? [];
+   const targetCols = session.lensCtx?.targetColumns ?? [];
++  const attributeSuggestion = suggestSharedDescriptiveField(sourceCols, targetCols);
+   const queryOpts = session.queryOptions ?? [];
+@@ -1033,3 +1035,14 @@
+               </fieldset>
+             </details>
++            {isBasic && planRunsBasic && attributeSuggestion && !isDemo && (
++              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
++                <span>JOIN codes identify Mapping keys; descriptive fields can rank the actual entities.</span>
++                <button type="button" data-testid="matching-use-entity-attributes"
++                  className="rounded border border-teal-700 px-2 py-1 text-teal-200 disabled:opacity-40"
++                  disabled={busy || !!session.commitLifecycle || session.hasUnsavedDecisions}
++                  onClick={() => patchPlan({ comparisons: [{ ...attributeSuggestion }] }, true)}>
++                  Compare {attributeSuggestion.sourceField} ↔ {attributeSuggestion.targetField} (Advanced)
++                </button>
++              </div>
++            )}
+             <div className="mt-2 flex flex-wrap items-center gap-2">
+--- a/src/lib/bridge.ts
++++ b/src/lib/bridge.ts
+@@ -50,3 +50,5 @@
+ export type DatasetMatchingRun = {
+   runId: string; leftTotal: number; rightTotal: number; candidatePairs: number;
++  /** Evaluated pairs reaching the user-selected minimum score; not confirmations. */
++  aboveThresholdPairs: number;
+   reusedTargets: number; proposedSources: number; ambiguousSources: number; belowThresholdSources: number; unmatchedSources: number;
+--- a/src/components/matching/MatchingSetView.tsx
++++ b/src/components/matching/MatchingSetView.tsx
+@@ -45,6 +45,17 @@
+     current.rows.map(r => [r.sourceKey, r.outcome, r.searchIncomplete, r.candidateId])]);
+   const activeEstimate = estimateRun === estimateIdentity ? estimate : null;
+   const stats = current.stats;
++  // Count *evaluated/scored* evidence separately from eligible suggestions.
++  // A candidate displayed below threshold is evidence, not a proposed Mapping.
++  const evidenceCounts = new Map(session.proposals.map(p => {
++    const scored = p.edges?.filter(edge => edge.score != null && Number.isFinite(edge.score)) ?? [];
++    const above = session.basicRun
++      ? scored.filter(edge => edge.score! >= session.basicRun!.scoreCutoff).length : null;
++    return [p.proposalId, { scored: scored.length, above, unknown: p.coverage?.competitorsUnknown ?? 0 }] as const;
++  }));
++  const totalScored = [...evidenceCounts.values()].reduce((sum, counts) => sum + counts.scored, 0);
++  const totalAbove = session.basicRun
++    ? [...evidenceCounts.values()].reduce((sum, counts) => sum + (counts.above ?? 0), 0) : null;
+   const inspected = inspectedId ? session.proposals.find(p => p.proposalId === inspectedId) : undefined;
+   const inspectedDecision = inspected && session.decisions.find(d => d.proposalId === inspected.proposalId);
+   const availableCandidates = inspected?.alternativeCandidateIds.flatMap(id => {
+@@ -91,6 +102,11 @@
+         {stats.notAcquired == null ? " Unacquired LEFT count unknown." : stats.notAcquired ? ` ${stats.notAcquired} LEFT groups not acquired.` : ""}
+         {" "}Results describe proposed relationships, NOT executed JOIN impact or saved Mapping.
+       </p>
++      <p className="mt-1 text-slate-400" data-testid="matching-set-evidence-totals">
++        {totalScored} scored candidate pairs across acquired LEFT keys
++        {totalAbove != null ? ` · ${totalAbove} above the Basic suggestion threshold` : ""}
++        {` · ${stats.proposed} LEFT keys with a proposed relationship`}. These are different counts.
++      </p>
+     </div>
+     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 px-3 py-1.5 text-[11px]" aria-label="Sample Estimate settings">
+       <span className="font-medium text-slate-200">Estimate · sample</span>
+@@ -154,8 +170,12 @@
+           <td className="p-2 font-mono">{row.right ? tuple(row.right) : <span className="text-slate-500">—</span>}</td>
+           <td className="p-2">{row.score === null ? "Unknown" : row.score.toFixed(3)}</td>
+           <td className="p-2"><span className={category(row) === "proposed" ? "text-teal-200" : category(row) === "incomplete" ? "text-amber-200" : "text-slate-300"}>
+-            {labels[category(row)]} {row.alternatives > 1 ? `· ${row.alternatives} alternatives` : ""}
+-          </span></td>
++            {labels[category(row)]}
++          </span><div className="mt-0.5 text-[10px] text-slate-500">
++            {evidenceCounts.get(row.id)?.scored ?? 0} scored
++            {evidenceCounts.get(row.id)?.above != null ? ` · ${evidenceCounts.get(row.id)!.above} above threshold` : ""}
++            {(evidenceCounts.get(row.id)?.unknown ?? 0) > 0 ? ` · ${evidenceCounts.get(row.id)!.unknown} unknown` : ""}
++          </div></td>
+           <td className="p-2"><button type="button" className="rounded border border-slate-700 px-2 py-1 text-teal-100"
+             onClick={() => { setInspectedId(row.id); setSelectedCandidateId(null); }}>Details</button></td>
+         </tr>)}</tbody>

@@ -45,27 +45,16 @@ async function tests() {
   assert.deepEqual(h.calls[0]!.map.entries.map(row => row.output_values), [["R1"], ["R2"]]);
   assert.equal(h.opened.length, 1);
 
-  const inserted = harness(source());
-  await saveDatasetMatching(intent("m_source"), inserted.ports);
-  assert.deepEqual((inserted.calls[0]!.delta as {upserts: KeyMapEntry[]}).upserts.map(e => e.to), ["R1", "R2"]);
-  const bs = (inserted.calls[0]!.delta as {baselines: {existed:boolean}[]}).baselines;
-  assert.deepEqual(bs.map(b => b.existed), [false, false]);
+  // The old renderer delta path is intentionally refused for Source Mapping.
+  // Streaming Host publication never accumulates all confirmed keys in React.
+  const sourceMap = harness(source());
+  await assert.rejects(saveDatasetMatching(intent("m_source"), sourceMap.ports), /Host-side bounded publisher/);
+  assert.equal(sourceMap.calls.length, 0);
 
-  const unchanged = harness(source());
-  unchanged.setRows([{from:"A",from_parts:["A"],to:"R1",output_values:["R1"]},
-    {from:"B",from_parts:["B"],to:"R2",output_values:["R2"]}]);
-  const same = await saveDatasetMatching(intent("m_source"), unchanged.ports);
-  assert.equal(unchanged.calls.length, 0);
-  assert.match(same.message, /no table changes/i);
-
-  const conflict = harness(source());
-  conflict.setRows([{from:"A",from_parts:["A"],to:"WRONG",output_values:["WRONG"]}]);
-  await assert.rejects(saveDatasetMatching(intent("m_source"), conflict.ports), /overwrite/i);
-  assert.equal(conflict.calls.length, 0);
-
-  const dirty = harness(source());
-  dirty.ports.editorBusy = () => true;
-  await assert.rejects(saveDatasetMatching(intent("m_source"), dirty.ports), /unsaved or in-flight/i);
+  const hugeSeed = harness(seed());
+  hugeSeed.ports.approvedPage = async () => ({ rows: [], page: 0, pageSize: 200, total: 10_001 });
+  await assert.rejects(saveDatasetMatching(intent("m1"), hugeSeed.ports), /at most 10000 approved keys/);
+  assert.equal(hugeSeed.calls.length, 0);
 
   const malformed = harness(seed());
   malformed.ports.approvedPage = async (_id, page) => page === 0
@@ -86,6 +75,6 @@ async function tests() {
   assert.equal(made.mapName, "Product relationships");
   assert.deepEqual(created.calls[0]!.map.from_columns, ["sku"]);
   assert.deepEqual(created.calls[0]!.map.output_columns, ["erp_id"]);
-  console.log("Dataset Matching Save: seed/new, source delta, exact baselines, no-op, conflict, dirty editor, pagination, duplicate output passed");
+  console.log("Dataset Matching Save: seed/new, Source renderer refusal, seed memory cap, pagination and duplicate output passed");
 }
 void tests();

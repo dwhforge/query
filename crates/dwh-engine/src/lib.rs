@@ -10,6 +10,8 @@ mod join_near_miss;
 mod join_prepare;
 mod matching_join;
 mod matching_dataset;
+mod matching_progress;
+mod matching_publication;
 mod key_map_delta;
 mod key_map_fuzzy;
 mod key_map_write;
@@ -65,6 +67,11 @@ pub use matching_dataset::{
     DatasetApprovedMappingPage, DatasetApprovedMappingRow, dataset_matching_approved_page,
     DatasetMatchingComparison, compare_dataset_matching,
 };
+pub use matching_progress::{MatchingCheckpoint, MatchingProgressSummary,
+    checkpoint_dataset_matching, restore_dataset_matching, list_matching_progress};
+pub use matching_publication::{MatchingPublicationReceipt,
+    ensure_matching_publication_journal, publish_confirmed_source,
+    MatchingPublicationHistoryRow, matching_publication_history};
 pub use key_match::{FuzzyPair, KeyMatchOptions};
 pub use matching::{
     matching_pair_evidence, accept_draft_decision, bulk_saveable, classify_merge, commit_blocked_reason,

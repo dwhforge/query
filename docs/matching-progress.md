@@ -1,0 +1,6 @@
+- Checkpoints contain four Parquet tables: results, scored pairs, review decisions and publication ledger.
+- Immutable generation + atomic current pointer; previous generations remain on disk.
+- Hand-off: transfer saved project + sibling .matching directory; operator must review map bindings and connection credentials locally.
+- A publication writes one PostgreSQL transaction per 200 approved keys. There is deliberately no false whole-run atomicity claim.
+- A failure before the journal write is idempotent on retry via exact source-row comparison.
+- Persistence is local filesystem, not a multi-user coordinator: simultaneous editors require an external lock/ownership workflow.

@@ -127,7 +127,7 @@ import { explainJoinKey } from "./lib/bridge";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
 import { DatasetMatchingWorkspace } from "./components/matching/DatasetMatchingWorkspace";
 import { fullJoinContext } from "./app/matching/fullJoinContext";
-import { matchingDatasetApprovedPage } from "./lib/bridge";
+import { matchingDatasetApprovedPage, matchingDatasetPublishSource } from "./lib/bridge";
 import { saveDatasetMatching } from "./app/matching/saveDatasetMapping";
 import { createMatchingDemoSession } from "./app/matching/executionPolicy";
 import { buildLensMatchingPlan } from "./app/matching/planDefaults";
@@ -5489,7 +5489,39 @@ function App() {
                       initialPlan={fullJoin?.plan}
                       lockedBindings={fullJoin?.locked}
                       initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
-                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
+                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id, kind: m.storage?.kind ?? "seed" }))}
+                      onOpenSavedMap={mapId => {
+                        const map = projectRef.current.workspace.key_maps?.find(m => m.id === mapId);
+                        if (map) openKeyMapEditor(map);
+                      }}
+                      onPublishSource={async (runId, mapId, maxBatches) => {
+                        const snapshot = projectRef.current;
+                        const owner = matchingTabsLiveRef.current.find(s => s.id === tab.id);
+                        if (!owner || (owner.joinBinding && (!basicContextCurrent(owner) || matchingWriteRefusal(owner)))) {
+                          throw new Error("Matching context changed; reopen and evaluate before publishing.");
+                        }
+                        const map = snapshot.workspace.key_maps?.find(m => m.id === mapId);
+                        if (!map || map.storage?.kind !== "source" || map.time_mode === "range_scd") {
+                          throw new Error("Bulk publication requires a writable source Mapping.");
+                        }
+                        const editor = keyMapTabsLiveRef.current.find(t => t.map.id === map.id);
+                        if (editor && (editor.localDraft || dirtyDeltaHasChanges(editor.dirtyDelta) || editor.saveInFlight)) {
+                          throw new Error("Save or discard unsaved Mapping editor changes before publishing.");
+                        }
+                        const refusal = importWriteRefusal(snapshot.pg_import, map.id);
+                        if (refusal) throw new Error(refusal);
+                        const resolved = resolveKeyMapConnection(snapshot, map, snapshot.connections ?? [], true);
+                        if (!resolved.ok) throw new Error(resolved.error);
+                        const receipt = await matchingDatasetPublishSource({
+                          runId, workspace: snapshot.workspace, keyMapId: map.id,
+                          connectionString: resolved.dsn, importRegistry: snapshot.pg_import,
+                          maxBatches,
+                        });
+                        if (projectRef.current !== snapshot) {
+                          throw new Error("Project changed during publication. Some source batches may already be committed; resume after verifying the destination.");
+                        }
+                        return receipt;
+                      }}
                       onSaveMapping={async intent => {
                         const snapshot = projectRef.current;
                         const owner = matchingTabsLiveRef.current.find(s => s.id === tab.id);

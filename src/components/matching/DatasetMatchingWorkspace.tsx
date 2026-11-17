@@ -6,9 +6,11 @@ import {
   matchingDatasetEstimate, matchingDatasetEvaluate, matchingDatasetPage,
   matchingDatasetCandidates, matchingDatasetDrop, matchingDatasetDecide,
   matchingDatasetConfirmClear, matchingDatasetReviewStats, matchingDatasetCompare,
+  matchingProgressSave, matchingProgressList, matchingProgressRestore,
+  matchingDatasetPublicationHistory, type MatchingPublicationHistoryRow,
   type DatasetMatchingRequest, type DatasetMatchingRun, type DatasetMatchingEstimate,
   type DatasetMatchingPage, type DatasetMatchRow, type DatasetReviewStats,
-  type DatasetMatchingComparison,
+  type DatasetMatchingComparison, type MatchingProgressSummary, type MatchingCheckpoint,
   type ProjectRefContext,
 } from "../../lib/bridge";
 
@@ -20,7 +22,11 @@ type Props = {
   projectRef: ProjectRefContext;
   onSaveMapping?: (args: { runId: string; targetMapId: string | null; newMapName: string | null;
     plan: DatasetMatchingRequest["plan"] }) => Promise<{ mapId: string; mapName: string; count: number; destination: string; message: string }>;
-  mapOptions?: { id: string; name: string }[];
+  mapOptions?: { id: string; name: string; kind?: string }[];
+  onOpenSavedMap?: (mapId: string) => void;
+  onPublishSource?: (runId: string, mapId: string, maxBatches: number) => Promise<{
+    eligible: number; newlyPublished: number; previouslyPublished: number; rowsWritten: number; complete: boolean;
+  }>;
   /** Original JOIN binding is preserved while comparisons may be edited. */
   initialPlan?: DatasetMatchingRequest["plan"];
   lockedBindings?: { sourceRef: string; targetRef: string; mapKeyFields: string[]; outputs: string[] };
@@ -37,7 +43,7 @@ function displayTuple(raw: string | null | undefined) {
 function safeMessage(e: unknown) { return e instanceof Error ? e.message : String(e); }
 
 /** Independent Matching uses full Host-evaluated datasets. No UI page is ever an engine input. */
-export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, initialPlan, lockedBindings, initialMapId }: Props) {
+export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, onPublishSource, onOpenSavedMap, initialPlan, lockedBindings, initialMapId }: Props) {
   const queries = workspace.queries ?? [];
   const [left, setLeft] = useState(initialPlan?.sourceRef ?? queries[0]?.id ?? "");
   const [right, setRight] = useState(initialPlan?.targetRef ?? queries[1]?.id ?? "");
@@ -74,6 +80,17 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [taskSlot, setTaskSlot] = useState("matching_review");
+  const [progressRevision, setProgressRevision] = useState<string | null>(null);
+  const [taskLabel, setTaskLabel] = useState("Matching review");
+  const [savedTasks, setSavedTasks] = useState<MatchingProgressSummary[]>([]);
+  const [resumeSlot, setResumeSlot] = useState("");
+  const [publishedCount, setPublishedCount] = useState(0);
+  const [publicationHistory, setPublicationHistory] = useState<MatchingPublicationHistoryRow[]>([]);
+  const [reviewFinished, setReviewFinished] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const continuePublish = useRef(true);
+  const sourceMap = mapOptions.find(m => m.id === mapId)?.kind === "source";
 
   useEffect(() => {
     let live = true;
@@ -142,7 +159,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     setStats(await matchingDatasetReviewStats(active.runId));
   }, [filter]);
   async function execute(kind: "estimate" | "evaluate") {
-    if (!valid || working) return;
+    if (!valid || working || publishing) return;
     setWorking(true); setError(null); setMessage("");
     try {
       if (kind === "estimate") {
@@ -159,7 +176,11 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
         liveRuns.current.push(next.runId);
         setEvaluatedPlan(JSON.parse(JSON.stringify(plan)) as DatasetMatchingRequest["plan"]);
         setEvaluatedFingerprint(evaluationFingerprint);
-        setRun(next); setSelected(null); setCandidatePage(null); setSaved(null); candidateFetchEpoch.current++;
+        setRun(next); setReviewFinished(false); setSelected(null); setCandidatePage(null);
+        setTaskSlot(`matching_${Date.now().toString(36)}_${next.runId}`);
+        setProgressRevision(null);
+        setTaskLabel(`${left} → ${right}`);
+        setPublicationHistory([]); setPublishedCount(0); setSaved(null); candidateFetchEpoch.current++;
         await reload(next, 0);
       }
     } catch (e) { setError(safeMessage(e)); }
@@ -185,7 +206,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     catch (e) { setError(safeMessage(e)); }
   }
   async function decide(action: "confirm" | "reject" | "defer" | "no_target", target?: number) {
-    if (!run || !runCurrent || !selected || working) return;
+    if (!run || !runCurrent || !selected || working || publishing || reviewFinished) return;
     setWorking(true); setError(null);
     try {
       const updated = await matchingDatasetDecide({ runId: run.runId, leftId: selected.leftId, rightId: action === "confirm" ? target : null, action });
@@ -197,7 +218,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     finally { setWorking(false); }
   }
   async function confirmClear() {
-    if (!run || !runCurrent || working || !eligibleBulk) return;
+    if (!run || !runCurrent || working || reviewFinished || !eligibleBulk) return;
     setWorking(true); setError(null);
     try {
       const before = stats?.confirmed ?? 0;
@@ -227,12 +248,116 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     finally { setWorking(false); }
   }
 
+  const progressLocation = projectRef.projectFile && projectRef.projectUid
+    ? { projectFile: projectRef.projectFile, projectUid: projectRef.projectUid } : null;
+  const reloadTasks = useCallback(async () => {
+    if (!progressLocation) return;
+    const tasks = await matchingProgressList(progressLocation);
+    setSavedTasks(tasks);
+  }, [projectRef.projectFile, projectRef.projectUid]);
+  useEffect(() => { void reloadTasks().catch(() => undefined); }, [reloadTasks]);
+
+  async function saveProgress(finished = false) {
+    if (!run || !runCurrent || !progressLocation || working || publishing) return;
+    setWorking(true); setError(null);
+    try {
+      if (finished && ((stats?.reviewed ?? 0) < run.leftTotal || (stats?.deferred ?? 0) > 0)) throw new Error("Finish Review requires decisions for all LEFT Mapping keys with no deferred rows; Save Progress does not.");
+      const checkpoint = await matchingProgressSave({ ...progressLocation, run, slot: taskSlot, label: taskLabel,
+        plan: { matchingPlan: evaluatedPlan ?? plan, inputFingerprint: evaluatedFingerprint, targetMapId: mapId }, finished: finished || reviewFinished,
+        expectedRevision: progressRevision });
+      setProgressRevision(checkpoint.revision);
+      if (finished) setReviewFinished(true);
+      setMessage(`${finished ? "Review finished" : "Progress saved"}: ${checkpoint.reviewed}/${checkpoint.run.leftTotal} decisions. Transfer the project file and its sibling .matching directory for handoff.`);
+      await reloadTasks();
+    } catch (e) { setError(safeMessage(e)); }
+    finally { setWorking(false); }
+  }
+  async function resumeProgress() {
+    if (!progressLocation || !resumeSlot || working || publishing) return;
+    setWorking(true); setError(null);
+    try {
+      const snapshot: MatchingCheckpoint = await matchingProgressRestore({ ...progressLocation, slot: resumeSlot });
+      const stored = snapshot.plan.matchingPlan;
+      if (!stored || !snapshot.plan.inputFingerprint) throw new Error("Checkpoint missing its Matching plan or input fingerprint.");
+      setLeft(stored.sourceRef); setRight(stored.targetRef);
+      setMapKeys(stored.mapKeyFields.join(", ")); setTargetKeys(stored.targetIdentityFields.join(", "));
+      setOutputs(stored.outputs.join(", ")); setComparisons(stored.comparisons.map(c => ({ ...c })));
+      setScore(snapshot.run.minimumScore);
+      setEvaluatedPlan(stored); setEvaluatedFingerprint(snapshot.plan.inputFingerprint);
+      liveRuns.current.push(snapshot.run.runId);
+      setRun(snapshot.run); setSelected(null); setCandidatePage(null); setCandidateIndex(0);
+      setPreviousRun(null); setComparison(null); setEstimate(null); setSaved(null);
+      setFilter("all");
+      const page = await matchingDatasetPage(snapshot.run.runId, 0, PAGE_SIZE, "all");
+      setRows(page); setPage(0);
+      setStats(await matchingDatasetReviewStats(snapshot.run.runId));
+      setTaskSlot(resumeSlot); setTaskLabel(snapshot.label); setReviewFinished(snapshot.finished);
+      setMapId(snapshot.plan.targetMapId ?? "");
+      setProgressRevision(snapshot.revision);
+      setPublicationHistory(await matchingDatasetPublicationHistory(snapshot.run.runId));
+      setMessage(`Resumed '${snapshot.label}': ${snapshot.reviewed} decisions restored. Verify current source/Mapping context before publishing.`);
+    } catch (e) { setError(safeMessage(e)); }
+    finally { setWorking(false); }
+  }
+  async function publishSource() {
+    if (!run || !runCurrent || !sourceMap || !mapId || !onPublishSource || publishing || working) return;
+    if (!progressLocation) { setError("Save the project file first: durable publication needs a checkpoint and journal."); return; }
+    continuePublish.current = true;
+    setPublishing(true); setError(null);
+    let total = 0;
+    let revision = progressRevision;
+    const savePublicationState = async () => {
+      const snapshot = await matchingProgressSave({ ...progressLocation, run, slot: taskSlot, label: taskLabel,
+        plan: { matchingPlan: evaluatedPlan ?? plan, inputFingerprint: evaluatedFingerprint, targetMapId: mapId },
+        finished: reviewFinished, expectedRevision: revision });
+      revision = snapshot.revision;
+      setProgressRevision(revision);
+    };
+    try {
+      // Persist the reviewed snapshot BEFORE the first external write. If the
+      // app crashes between PostgreSQL commit and ledger checkpoint, the task
+      // still resumes and source equality makes the retry idempotent.
+      await savePublicationState();
+      for (;;) {
+        if (!continuePublish.current) break;
+        // Entire publication RPC contains no approved pairs, only progress metrics.
+        // Host processes up to 25 x 200 rows per call, journaling each success.
+        const result = await onPublishSource(run.runId, mapId, 25);
+        total += result.newlyPublished;
+        setPublishedCount(result.previouslyPublished + result.newlyPublished);
+        setPublicationHistory(await matchingDatasetPublicationHistory(run.runId));
+        setMessage(`${result.previouslyPublished + result.newlyPublished}/${result.eligible} confirmed keys published to source Mapping. ${result.rowsWritten} source rows changed in this RPC.`);
+        // Keep each RPC bounded; do not re-export millions of scored pairs
+        // after every 5,000 published rows. The initial checkpoint ensures a
+        // crash can be resumed idempotently even before the final checkpoint.
+        if (result.complete) { onOpenSavedMap?.(mapId); break; }
+        if (result.newlyPublished === 0) break;
+      }
+      await savePublicationState(); // one final snapshot, not O(number of batches) copies
+      await reloadTasks();
+    } catch (e) {
+      if (revision) {
+        try { await savePublicationState(); } catch { /* initial checkpoint is recoverable */ }
+      }
+      setError(`Publication stopped after ${total} new acknowledgements in this action: ${safeMessage(e)}. Previously committed batches remain in the source table; retry safely.`); }
+    finally { setPublishing(false); }
+  }
+
   const cn = "rounded border border-slate-600 bg-slate-900/70 px-2 py-1 text-xs text-slate-100";
   const btn = "rounded border border-slate-600 px-3 py-1.5 text-xs hover:bg-slate-800 disabled:opacity-40";
   return <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#0a111a] text-slate-200">
     <header className="shrink-0 border-b border-slate-700 px-4 py-3">
       <h2 className="text-base font-semibold text-teal-100">Matching <span className="ml-2 text-xs font-normal text-slate-400">{lockedBindings ? "Original pre-JOIN LEFT → RIGHT · full scope" : "Dataset → Dataset · full scope"}</span></h2>
       <p className="mt-1 text-xs text-slate-400">Estimate is sampled. Evaluate reads every source row and every target row; pagination affects display only.</p>
+      <div className="mt-2 flex flex-wrap items-end gap-2 text-xs" aria-label="Matching progress controls">
+        <label>Task ID<input aria-label="Matching task ID" className="ml-1 w-32 rounded border border-slate-600 bg-slate-900 px-2 py-1" value={taskSlot} onChange={e => setTaskSlot(e.target.value)} /></label>
+        <label>Task name<input aria-label="Matching task name" className="ml-1 w-40 rounded border border-slate-600 bg-slate-900 px-2 py-1" value={taskLabel} onChange={e => setTaskLabel(e.target.value)} /></label>
+        <button type="button" data-testid="matching-save-progress" className="rounded border border-slate-600 px-3 py-1" disabled={!progressLocation || !runCurrent || working || publishing} onClick={() => void saveProgress()}>Save Progress</button>
+        <button type="button" className="rounded border border-slate-600 px-3 py-1" disabled={!runCurrent || working || publishing || reviewFinished || !run || (stats?.reviewed ?? 0) !== run.leftTotal || (stats?.deferred ?? 0) > 0} onClick={() => void saveProgress(true)}>Finish Review</button>
+        <select aria-label="Saved Matching tasks" className="rounded border border-slate-600 bg-slate-900 px-2 py-1" value={resumeSlot} onChange={e=>setResumeSlot(e.target.value)}><option value="">Resume saved task…</option>{savedTasks.map(task=><option key={task.slot} value={task.slot}>{task.label} ({task.reviewed}/{task.leftTotal})</option>)}</select>
+        <button type="button" className="rounded border border-slate-600 px-3 py-1" disabled={!resumeSlot || !progressLocation || working || publishing} onClick={() => void resumeProgress()}>Resume</button>
+        {!progressLocation && <span className="text-amber-300">Save project file first to enable durable progress.</span>}
+      </div>
     </header>
     <div className="grid min-h-0 flex-1 grid-cols-[minmax(260px,320px)_minmax(0,1fr)]">
       <aside className="space-y-3 overflow-y-auto border-r border-slate-700 p-3 text-xs">
@@ -275,7 +400,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>
             {previousRun && <div className="mt-1 text-xs text-slate-400">Previous run: {previousRun.proposedSources} proposed → {run.proposedSources}; {previousRun.ambiguousSources} ambiguous → {run.ambiguousSources}. Different source snapshots may invalidate comparison.</div>}
             {comparison && <div className="mt-1 text-xs text-amber-300">Indicative relationship A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys. Snapshot verified: no.</div>}
-            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || !runCurrent || !eligibleBulk} title={!eligibleBulk ? "No proposed matches above threshold; review below-threshold candidates individually" : "Confirm all eligible unambiguous proposals across all result pages"} onClick={() => void confirmClear()}>Confirm all eligible ({run.proposedSources})</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>{!eligibleBulk && <span className="text-xs text-amber-300">No auto-eligible proposals; inspect candidates and confirm a pair manually.</span>}
+            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || reviewFinished || !runCurrent || !eligibleBulk} title={!eligibleBulk ? "No proposed matches above threshold; review below-threshold candidates individually" : "Confirm all eligible unambiguous proposals across all result pages"} onClick={() => void confirmClear()}>Confirm all eligible ({run.proposedSources})</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>{!eligibleBulk && <span className="text-xs text-amber-300">No auto-eligible proposals; inspect candidates and confirm a pair manually.</span>}
               <label className="ml-auto flex items-center gap-1 text-xs">Result filter
                 <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);closeDetails();}).catch(e => setError(safeMessage(e))); }}>
                   <option value="all">All</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="source_conflict">Source attributes conflict</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
@@ -288,7 +413,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
               <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state}</td></tr>)}</tbody></table></div>
               <div className="flex shrink-0 items-center justify-between border-t border-slate-700 p-2 text-xs"><span>Rows {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows?.total ?? 0)} / {rows?.total ?? 0}</span><div className="flex gap-2"><button className={btn} disabled={page === 0 || working} onClick={() => void reload(run, page - 1)}>Previous</button><button className={btn} disabled={!rows || (page + 1) * PAGE_SIZE >= rows.total || working} onClick={() => void reload(run, page + 1)}>Next</button></div></div>
             </div>
-            {selected && <><button type="button" aria-label="Close Matching details backdrop" className="absolute inset-0 z-10 bg-slate-950/25" onClick={closeDetails} /><aside role="dialog" aria-modal="false" aria-label="Matching candidate details" className="absolute inset-y-0 right-0 z-20 w-[min(420px,90%)] overflow-y-auto border-l border-slate-600 bg-[#101d2c] p-3 text-xs shadow-2xl"><div className="flex items-center justify-between gap-2"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><button type="button" aria-label="Close Matching details" className={`${btn} text-base`} onClick={closeDetails}>×</button></div><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside></>}
+            {selected && <><button type="button" aria-label="Close Matching details backdrop" className="absolute inset-0 z-10 bg-slate-950/25" onClick={closeDetails} /><aside role="dialog" aria-modal="false" aria-label="Matching candidate details" className="absolute inset-y-0 right-0 z-20 w-[min(420px,90%)] overflow-y-auto border-l border-slate-600 bg-[#101d2c] p-3 text-xs shadow-2xl"><div className="flex items-center justify-between gap-2"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><button type="button" aria-label="Close Matching details" className={`${btn} text-base`} onClick={closeDetails}>×</button></div><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || reviewFinished || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || reviewFinished || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || reviewFinished || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || reviewFinished || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside></>}
           </div>
           {onSaveMapping && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-700 bg-[#101b29] p-3 text-xs" data-testid="matching-save-panel">
             <strong className="text-teal-100">Save Mapping</strong>
@@ -297,8 +422,13 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
               <option value="__new__">+ Create new seed Mapping…</option>
             </select>
             {savingNewMap && <input type="text" aria-label="New Mapping name" placeholder="Mapping name" className={cn} value={newMapName} onChange={e => setNewMapName(e.target.value)} />}
-            <button type="button" data-testid="matching-save" className={`${btn} border-teal-500 bg-teal-900/30 font-semibold text-teal-100`} disabled={working || !runCurrent || !stats?.confirmed || (savingNewMap ? !newMapName.trim() : !mapId)} onClick={() => void saveMapping()}>Save Mapping ({stats?.confirmed ?? 0})</button>
-            <span className="text-slate-400">Seed: save in project. Source: guarded table write. Project file Save is separate.</span>
+            <button type="button" data-testid="matching-save" className={`${btn} border-teal-500 bg-teal-900/30 font-semibold text-teal-100`} disabled={working || publishing || !runCurrent || !stats?.confirmed || (sourceMap && !savingNewMap && !progressLocation) || (savingNewMap ? !newMapName.trim() : !mapId)} onClick={() => void (sourceMap && !savingNewMap ? publishSource() : saveMapping())}>{sourceMap && !savingNewMap ? `Publish Confirmed (${stats?.confirmed ?? 0})` : `Save Mapping (${stats?.confirmed ?? 0})`}</button>
+            {publishing && <button type="button" className={btn} onClick={() => { continuePublish.current = false; }}>Stop after current batch</button>}
+            {sourceMap && <span className="text-amber-200">{publishedCount} published so far. Each Source batch commits independently; retry resumes via Host ledger.</span>}
+            <span className="text-slate-400">Seed: project Save (not yet streaming). Source: Host-side bounded publication. Review progress: Save Progress. Project file Save is separate.</span>
+            {publicationHistory.length > 0 && <div className="w-full text-slate-400" aria-label="Publication history">
+              Publication history: {publicationHistory.map(row => `${row.mapId}: ${row.publishedKeys} keys (last ${new Date(row.lastPublishedMs).toLocaleString()})`).join(" · ")}
+            </div>}
             {saved && <p role="status" data-testid="matching-saved-receipt" className="w-full text-teal-200">Saved {saved.count} pairs to {saved.mapName} ({saved.destination}). Opened Mapping editor to inspect the result. Save the project file to make it durable on disk.</p>}
           </div>}
         </>}

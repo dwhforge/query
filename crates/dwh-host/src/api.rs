@@ -20,8 +20,10 @@ use dwh_engine::{
     preview_prepared_join_side_filtered as run_preview_prepared_join_side_filtered,
     preview_workspace_limited as run_preview_workspace_limited,
     set_extensions_dir, set_prepare_progress, test_postgres_connection as run_test_postgres_connection,
-    DatasetMatchingRequest, estimate_dataset_matching, evaluate_dataset_matching,
+    DatasetMatchingRequest, DatasetMatchingRun, estimate_dataset_matching, evaluate_dataset_matching,
     dataset_matching_page, dataset_matching_candidates, drop_dataset_matching_run,
+    checkpoint_dataset_matching, restore_dataset_matching, list_matching_progress,
+    publish_confirmed_source, matching_publication_history,
     DatasetReviewRequest, dataset_matching_decide,
     dataset_matching_confirm_unambiguous, dataset_matching_review_stats,
     dataset_matching_approved_page, compare_dataset_matching,
@@ -54,6 +56,20 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 
 static FIXTURES_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Durable review data lives beside the saved project, never in a renderer
+/// cache. Transfer the project file plus sibling `.matching` directory for
+/// another operator. Neither the slot nor the project UID may escape the root.
+fn matching_progress_root(project_file: &str, project_uid: &str) -> Result<PathBuf, String> {
+    if project_uid.is_empty() || project_uid.len() > 128 ||
+        !project_uid.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
+        return Err("Invalid project UID for Matching progress".into());
+    }
+    let path = fs::canonicalize(project_file).map_err(|_| "Save the project file to disk before saving Matching progress".to_string())?;
+    if !path.is_file() { return Err("Matching progress requires a saved project file".into()); }
+    let filename = path.file_name().and_then(|x| x.to_str()).ok_or("Invalid project file name")?;
+    Ok(path.with_file_name(format!("{filename}.matching")).join(project_uid))
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -864,6 +880,37 @@ struct MatchingDatasetPageArgs {
 fn matching_default_page_size() -> u64 { 50 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MatchingProgressArgs {
+    project_file: String,
+    project_uid: String,
+    slot: String,
+    #[serde(default)] label: Option<String>,
+    #[serde(default)] run: Option<DatasetMatchingRun>,
+    #[serde(default)] plan: Option<Value>,
+    #[serde(default)] finished: bool,
+    #[serde(default)] expected_revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MatchingProgressListArgs {
+    project_file: String,
+    project_uid: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MatchingPublishSourceArgs {
+    run_id: String,
+    workspace: Workspace,
+    key_map_id: String,
+    connection_string: String,
+    #[serde(default)] import_registry: Option<dwh_pipeline::PgImportRegistry>,
+    #[serde(default)] max_batches: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PreviewArgs {
     workspace: Option<Workspace>,
@@ -1560,6 +1607,11 @@ impl HostState {
                 | "matching_dataset_review_stats"
                 | "matching_dataset_approved_page"
                 | "matching_dataset_compare"
+                | "matching_progress_save"
+                | "matching_progress_restore"
+                | "matching_progress_list"
+                | "matching_dataset_publish_source"
+                | "matching_dataset_publication_history"
                 | "matching_verify_join_candidates"
                 | "prepare_join_inputs"
                 | "preview_prepared_join_side"
@@ -1576,7 +1628,9 @@ impl HostState {
             }
             "read_key_map" | "write_key_map" |
             "matching_dataset_decide" | "matching_dataset_confirm_clear" |
-            "matching_dataset_drop" => HeavyLane::Mutation,
+            "matching_dataset_drop" |
+            "matching_progress_save" | "matching_progress_restore" |
+            "matching_dataset_publish_source" => HeavyLane::Mutation,
             _ => HeavyLane::Analysis,
         }
     }
@@ -1588,7 +1642,7 @@ impl HostState {
 
     /// After KeyMap/warehouse writes: drop stale preview + join-prepare caches.
     fn invalidate_caches_after_mutation(&self, cmd: &str) {
-        if cmd != "write_key_map" {
+        if cmd != "write_key_map" && cmd != "matching_dataset_publish_source" {
             return;
         }
         if let Ok(mut cache) = self.preview_cache.lock() {
@@ -2265,6 +2319,47 @@ impl HostState {
                 let a: MatchingDatasetPageArgs = serde_json::from_value(args)
                     .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
                 serde_json::to_value(compare_dataset_matching(&db, &a.run_id, &a.other_run_id.ok_or("otherRunId required")?)?)
+                    .map_err(|e| RpcError::from(e.to_string()))
+            }
+            "matching_progress_save" | "matching_progress_restore" => {
+                let a: MatchingProgressArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                let root = matching_progress_root(&a.project_file, &a.project_uid)?;
+                if cmd == "matching_progress_save" {
+                    let run = a.run.ok_or("Matching Save Progress requires run")?;
+                    let plan = a.plan.ok_or("Matching Save Progress requires plan and input fingerprint")?;
+                    serde_json::to_value(checkpoint_dataset_matching(
+                        &db, &root, &a.slot, a.label.as_deref().unwrap_or(&a.slot), plan,
+                        &run, a.finished, a.expected_revision.as_deref(),
+                    )?).map_err(|e| RpcError::from(e.to_string()))
+                } else {
+                    serde_json::to_value(restore_dataset_matching(&db, &root, &a.slot)?)
+                        .map_err(|e| RpcError::from(e.to_string()))
+                }
+            }
+            "matching_progress_list" => {
+                let a: MatchingProgressListArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                let root = matching_progress_root(&a.project_file, &a.project_uid)?;
+                serde_json::to_value(list_matching_progress(&root)?)
+                    .map_err(|e| RpcError::from(e.to_string()))
+            }
+            "matching_dataset_publication_history" => {
+                let a: MatchingDatasetPageArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                serde_json::to_value(matching_publication_history(&db,&a.run_id)?)
+                    .map_err(|e| RpcError::from(e.to_string()))
+            }
+            "matching_dataset_publish_source" => {
+                let a: MatchingPublishSourceArgs = serde_json::from_value(args)
+                    .map_err(|e| RpcError::from(HostError::validation(e.to_string())))?;
+                let map = a.workspace.key_maps.iter().find(|m| m.id == a.key_map_id)
+                    .ok_or("Source Mapping no longer exists in the project workspace")?;
+                if let Some(reason) = dwh_pipeline::pg_import::import_write_refusal(a.import_registry.as_ref(), &map.id) {
+                    return Err(HostError::validation(reason).into());
+                }
+                serde_json::to_value(publish_confirmed_source(&db, &a.run_id, map,
+                    &a.connection_string, a.max_batches.unwrap_or(25))?)
                     .map_err(|e| RpcError::from(e.to_string()))
             }
             "matching_dataset_decide" => {

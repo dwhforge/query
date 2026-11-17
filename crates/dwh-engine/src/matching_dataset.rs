@@ -45,7 +45,7 @@ pub struct DatasetMatchingEstimate {
     pub warning: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatasetMatchingRun {
     pub run_id: String,
@@ -315,6 +315,7 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
         db.with_conn(|conn| conn.execute_batch(&format!(
             "CREATE TEMP TABLE __dwh_match_d_{suffix} (left_id BIGINT PRIMARY KEY, right_id BIGINT, action VARCHAR NOT NULL);"
         )).map_err(|e| e.to_string()))?;
+        crate::ensure_matching_publication_journal(db, &suffix)?;
         let candidate_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs}"))?;
         let above_threshold_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs} WHERE score >= {}", req.minimum_score))?;
         if above_threshold_pairs > candidate_pairs { return Err("matching candidate score invariant violated".into()); }
@@ -334,7 +335,7 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
             inputs_transactionally_snapshotted: false, minimum_score: req.minimum_score })
     })();
     if response.is_err() {
-        let _ = db.with_conn(|c| c.execute_batch(&format!("DROP TABLE IF EXISTS {pairs}; DROP TABLE IF EXISTS {results}; DROP TABLE IF EXISTS __dwh_match_d_{suffix}")).map_err(|e| e.to_string()));
+        let _ = db.with_conn(|c| c.execute_batch(&format!("DROP TABLE IF EXISTS {pairs}; DROP TABLE IF EXISTS {results}; DROP TABLE IF EXISTS __dwh_match_d_{suffix}; DROP TABLE IF EXISTS __dwh_match_pub_{suffix}")).map_err(|e| e.to_string()));
         drop_staging(db, &lt, &rt);
     } else {
         // The materialized relationships carry the display and review evidence.
@@ -382,7 +383,7 @@ pub fn dataset_matching_candidates(db: &DbSession, run_id: &str, left_id: i64, p
 
 pub fn drop_dataset_matching_run(db: &DbSession, run_id: &str) -> Result<(), String> {
     safe_run_id(run_id)?;
-    db.with_conn(|conn| conn.execute_batch(&format!("DROP TABLE IF EXISTS __dwh_match_p_{run_id}; DROP TABLE IF EXISTS __dwh_match_s_{run_id}; DROP TABLE IF EXISTS __dwh_match_d_{run_id}")).map_err(|e| e.to_string()))
+    db.with_conn(|conn| conn.execute_batch(&format!("DROP TABLE IF EXISTS __dwh_match_p_{run_id}; DROP TABLE IF EXISTS __dwh_match_s_{run_id}; DROP TABLE IF EXISTS __dwh_match_d_{run_id}; DROP TABLE IF EXISTS __dwh_match_pub_{run_id}")).map_err(|e| e.to_string()))
 }
 
 /// Review decisions are stored with the materialized run, never in the preview page.
@@ -408,6 +409,12 @@ pub fn dataset_matching_decide(db: &DbSession, request: &DatasetReviewRequest) -
     let d = format!("__dwh_match_d_{}", request.run_id);
     let s = format!("__dwh_match_s_{}", request.run_id);
     let p = format!("__dwh_match_p_{}", request.run_id);
+    crate::ensure_matching_publication_journal(db, &request.run_id)?;
+    // Published decisions are immutable: changing their target or withdrawing
+    // approval cannot silently rewrite a source table already committed.
+    if scalar(db, &format!("SELECT count(*) FROM __dwh_match_pub_{} WHERE left_id = {}", request.run_id, request.left_id))? > 0 {
+        return Err("This Matching key has already been published; create a new reviewed revision before changing its decision".into());
+    }
     if scalar(db, &format!("SELECT count(*) FROM {s} WHERE left_id = {}", request.left_id))? != 1 {
         return Err("stale review: LEFT row is not in run".into());
     }

@@ -39,7 +39,10 @@ export function parseApprovedValues(value: string, expectedArity: number, label:
   return decoded as string[];
 }
 
-/** Read all approved pairs, never a visible page; refuse inconsistent exports. */
+/** Seed-only bounded export. Source Mapping uses Host-side streaming publication.
+ * Never attempt an unbounded renderer Map of confirmed keys. */
+const MAX_RENDERER_SEED_KEYS = 10_000;
+
 export async function loadApprovedPairs(intent: SaveMatchingIntent, ports: Pick<SaveMatchingPorts, "approvedPage">): Promise<Map<string, { from: string[]; to: string[] }>> {
   const keys = new Map<string, { from: string[]; to: string[] }>();
   let total: number | null = null;
@@ -50,6 +53,9 @@ export async function loadApprovedPairs(intent: SaveMatchingIntent, ports: Pick<
       throw new Error("Approved Mapping export changed during pagination; re-evaluate and review again.");
     }
     total = result.total;
+    if (total > MAX_RENDERER_SEED_KEYS) {
+      throw new Error(`Seed Mapping currently supports at most ${MAX_RENDERER_SEED_KEYS} approved keys per Save. Use a source-backed Mapping for Host-side scalable publication; no source rows have been written.`);
+    }
     if (!result.rows.length && received < total) throw new Error("Approved Mapping export returned an incomplete page.");
     received += result.rows.length;
     if (received > total) throw new Error("Approved Mapping export exceeded its declared total.");
@@ -153,6 +159,9 @@ export async function saveDatasetMatching(intent: SaveMatchingIntent, ports: Sav
       to_column: intent.plan.outputs[0]!, output_columns: [...intent.plan.outputs] };
   }
   ensureShape(map, intent);
+  if ((map.storage?.kind ?? "seed") === "source") {
+    throw new Error("Source Matching publication must use the Host-side bounded publisher, not renderer-side loadApprovedPairs().");
+  }
   if (ports.editorBusy(map.id)) throw new Error("This Mapping has unsaved or in-flight editor changes. Save/discard those first.");
   const pairs = await loadApprovedPairs(intent, ports);
   if (!ports.current()) throw new Error("Project changed during Mapping approval read; no write performed.");

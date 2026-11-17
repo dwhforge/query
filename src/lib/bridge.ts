@@ -100,6 +100,44 @@ export function matchingDatasetReviewStats(runId: string): Promise<DatasetReview
 export function matchingDatasetApprovedPage(runId: string, page = 0, pageSize = 200): Promise<DatasetApprovedMappingPage> {
   return invoke<DatasetApprovedMappingPage>("matching_dataset_approved_page", { runId, page, pageSize });
 }
+/** Durable SQL-backed review checkpoints; the Host persists Parquet without
+ * sending candidate sets or decision arrays to the renderer. */
+export type MatchingCheckpoint = {
+  schemaVersion: number; revision: string; run: DatasetMatchingRun;
+  plan: { matchingPlan: DatasetMatchingPlan; inputFingerprint: string; targetMapId?: string | null };
+  label: string; updatedAtMs: number; reviewed: number; finished: boolean;
+};
+export type MatchingProgressSummary = {
+  slot: string; revision: string; label: string; updatedAtMs: number;
+  leftTotal: number; reviewed: number; finished: boolean;
+};
+export function matchingProgressSave(args: { projectFile: string; projectUid: string;
+  slot: string; label: string; run: DatasetMatchingRun; plan: MatchingCheckpoint["plan"]; finished: boolean;
+  expectedRevision?: string | null;
+}): Promise<MatchingCheckpoint> {
+  return invoke<MatchingCheckpoint>("matching_progress_save", args);
+}
+export function matchingProgressRestore(args: { projectFile: string; projectUid: string; slot: string }): Promise<MatchingCheckpoint> {
+  return invoke<MatchingCheckpoint>("matching_progress_restore", args);
+}
+export function matchingProgressList(args: { projectFile: string; projectUid: string }): Promise<MatchingProgressSummary[]> {
+  return invoke<MatchingProgressSummary[]>("matching_progress_list", args);
+}
+export type MatchingPublicationReceipt = {
+  mapId: string; eligible: number; newlyPublished: number; previouslyPublished: number;
+  rowsWritten: number; complete: boolean; destination: string;
+};
+export function matchingDatasetPublishSource(args: { runId: string;
+  workspace: Workspace; keyMapId: string; connectionString: string;
+  importRegistry?: import("./pgImport").PgImportRegistry | null; maxBatches: number;
+}): Promise<MatchingPublicationReceipt> {
+  return invoke<MatchingPublicationReceipt>("matching_dataset_publish_source", args);
+}
+export type MatchingPublicationHistoryRow = { mapId: string; publishedKeys: number;
+  firstPublishedMs: number; lastPublishedMs: number };
+export function matchingDatasetPublicationHistory(runId: string): Promise<MatchingPublicationHistoryRow[]> {
+  return invoke<MatchingPublicationHistoryRow[]>("matching_dataset_publication_history", { runId });
+}
 export type DatasetMatchingComparison = {
   firstRun: string; secondRun: string; commonKeys: number; changedTarget: number;
   becameMatched: number; becameUnmatched: number; firstOnly: number; secondOnly: number;

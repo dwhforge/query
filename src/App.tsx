@@ -128,7 +128,7 @@ import { MatchingWorkspace } from "./components/MatchingWorkspace";
 import { DatasetMatchingWorkspace } from "./components/matching/DatasetMatchingWorkspace";
 import { fullJoinContext } from "./app/matching/fullJoinContext";
 import { matchingDatasetApprovedPage } from "./lib/bridge";
-import { fromColumnsEff, outputColumnsEff, fromPartsEff, outputValuesEff } from "./lib/keyMap";
+import { saveDatasetMatching } from "./app/matching/saveDatasetMapping";
 import { createMatchingDemoSession } from "./app/matching/executionPolicy";
 import { buildLensMatchingPlan } from "./app/matching/planDefaults";
 import { matchingSaveRevision, persistMatchingSession } from "./app/matching/persistSave";
@@ -5488,64 +5488,35 @@ function App() {
                       projectRef={projectRefContext(project)}
                       initialPlan={fullJoin?.plan}
                       lockedBindings={fullJoin?.locked}
-                      initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
-                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
-                    onStageToMapping={async (runId, targetMapId, plan) => {
-                      // Staging is a draft-only operation; never bypass KeyMapEditor Save/Apply.
-                      if (fullJoin && (!basicContextCurrent(tab) || matchingWriteRefusal(tab))) throw new Error("Original JOIN context changed; reopen Matching and evaluate again.");
-                      const projectNow = projectRef.current;
-                      const map = projectNow.workspace.key_maps?.find(m => m.id === targetMapId);
-                      if (!map) throw new Error("Selected Mapping no longer exists.");
-                      if ((map.storage?.kind ?? "seed") !== "seed" || map.time_mode === "range_scd") throw new Error("Only seed Mapping can be staged here; source/ref/query/range authoring must use its dedicated guarded editor.");
-                      const tab = keyMapTabsLiveRef.current.find(t => t.map.id === map.id);
-                      if (tab?.localDraft || dirtyDeltaHasChanges(tab?.dirtyDelta) || tab?.saveInFlight) throw new Error("Save or discard existing Mapping editor changes before staging.");
-                      const fromCols = fromColumnsEff(map);
-                      const toCols = outputColumnsEff(map);
-                      if (fromCols.length !== plan.mapKeyFields.length || toCols.length !== plan.outputs.length) {
-                        throw new Error("Selected Mapping From/To arity is incompatible with the evaluated plan.");
-                      }
-                      // Paged RPC reads ALL confirmed rows, not the current UI page.
-                      const approved = [] as { mapKey: string; outputs: string; targetIdentity: string }[];
-                      for (let index = 0; ; index++) {
-                        const page = await matchingDatasetApprovedPage(runId, index, 200);
-                        approved.push(...page.rows);
-                        if (approved.length >= page.total) break;
-                        if (page.rows.length === 0) throw new Error("Confirmed Mapping export incomplete: Host returned a short page.");
-                      }
-                      if (!approved.length) throw new Error("No confirmed pairs to stage.");
-                      const staged = new Map<string, string[]>();
-                      for (const row of approved) {
-                        const from = JSON.parse(row.mapKey) as unknown;
-                        const outs = JSON.parse(row.outputs) as unknown;
-                        if (!Array.isArray(from) || !Array.isArray(outs) || from.length !== fromCols.length || outs.length !== toCols.length ||
-                            !from.every(x => typeof x === "string") || !outs.every(x => typeof x === "string")) {
-                          throw new Error("Invalid/NULL Mapping identity or outputs in confirmed evaluation.");
+                      initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
+                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
+                      onSaveMapping={async intent => {
+                        const snapshot = projectRef.current;
+                        const owner = matchingTabsLiveRef.current.find(s => s.id === tab.id);
+                        if (!owner || (owner.joinBinding && (!basicContextCurrent(owner) || matchingWriteRefusal(owner)))) {
+                          throw new Error("Matching JOIN context changed; reopen Matching and evaluate again.");
                         }
-                        const token = JSON.stringify(from);
-                        const old = staged.get(token);
-                        if (old && JSON.stringify(old) !== JSON.stringify(outs)) throw new Error(`Conflicting confirmed target for ${token}`);
-                        staged.set(token, outs as string[]);
-                      }
-                      const original = new Map(map.entries.map(entry => [JSON.stringify(fromPartsEff(entry)), outputValuesEff(entry)]));
-                      for (const [token, next] of staged) {
-                        const prior = original.get(token);
-                        if (prior && prior.some(x => x.trim()) && JSON.stringify(prior) !== JSON.stringify(next)) {
-                          throw new Error(`Existing filled Mapping entry differs for ${token}; explicit replacement required in Mapping editor.`);
-                        }
-                      }
-                      if (projectRef.current !== projectNow) throw new Error("Project changed while preparing Matching Mapping draft; reevaluate against current context.");
-                      const entries = [...map.entries];
-                      for (const [token, outs] of staged) {
-                        const parts = JSON.parse(token) as string[];
-                        const index = entries.findIndex(entry => JSON.stringify(fromPartsEff(entry)) === token);
-                        const entry = { from: parts[0]!, from_parts: parts, to: outs[0]!, output_values: outs };
-                        if (index >= 0) entries[index] = { ...entries[index]!, ...entry };
-                        else entries.push(entry);
-                      }
-                      const draft = { ...map, entries };
-                      openKeyMapEditor(draft);
-                      patchKeyMapTab(map.id, current => ({ ...current, map: draft, localDraft: true }));
-                    }}
+                        return saveDatasetMatching(intent, {
+                          maps: snapshot.workspace.key_maps ?? [],
+                          current: () => projectRef.current === snapshot &&
+                            matchingTabsLiveRef.current.some(s => s.id === tab.id && s === owner),
+                          editorBusy: id => {
+                            const editor = keyMapTabsLiveRef.current.find(t => t.map.id === id);
+                            return !!editor && (!!editor.localDraft || dirtyDeltaHasChanges(editor.dirtyDelta) || !!editor.saveInFlight);
+                          },
+                          approvedPage: matchingDatasetApprovedPage,
+                          save: (map, opts) => saveKeyMapToProject(map, opts),
+                          writableSourceDsn: map => {
+                            const refusal = importWriteRefusal(snapshot.pg_import, map.id);
+                            if (refusal) throw new Error(refusal);
+                            const resolved = resolveKeyMapConnection(snapshot, map, snapshot.connections ?? [], true);
+                            if (!resolved.ok) throw new Error(resolved.error);
+                            return resolved.dsn;
+                          },
+                          readSource: (map, dsn, opts) => readKeyMap(map, dsn, opts),
+                          openSaved: map => openKeyMapEditor(map),
+                        });
+                      }}
                     />
                   ) : (
                   <MatchingWorkspace

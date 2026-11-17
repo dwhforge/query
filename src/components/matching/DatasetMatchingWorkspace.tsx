@@ -18,7 +18,8 @@ type Props = {
   connections: ConnectionDef[];
   sources: SourceDef[];
   projectRef: ProjectRefContext;
-  onStageToMapping?: (runId: string, targetMapId: string, plan: DatasetMatchingRequest["plan"]) => Promise<void>;
+  onSaveMapping?: (args: { runId: string; targetMapId: string | null; newMapName: string | null;
+    plan: DatasetMatchingRequest["plan"] }) => Promise<{ mapId: string; mapName: string; count: number; destination: string; message: string }>;
   mapOptions?: { id: string; name: string }[];
   /** Original JOIN binding is preserved while comparisons may be edited. */
   initialPlan?: DatasetMatchingRequest["plan"];
@@ -36,7 +37,7 @@ function displayTuple(raw: string | null | undefined) {
 function safeMessage(e: unknown) { return e instanceof Error ? e.message : String(e); }
 
 /** Independent Matching uses full Host-evaluated datasets. No UI page is ever an engine input. */
-export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onStageToMapping, initialPlan, lockedBindings, initialMapId }: Props) {
+export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, initialPlan, lockedBindings, initialMapId }: Props) {
   const queries = workspace.queries ?? [];
   const [left, setLeft] = useState(initialPlan?.sourceRef ?? queries[0]?.id ?? "");
   const [right, setRight] = useState(initialPlan?.targetRef ?? queries[1]?.id ?? "");
@@ -57,6 +58,10 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   const [evaluatedPlan, setEvaluatedPlan] = useState<DatasetMatchingRequest["plan"] | null>(null);
   const [evaluatedFingerprint, setEvaluatedFingerprint] = useState<string | null>(null);
   const liveRuns = useRef<string[]>([]);
+  const candidateFetchEpoch = useRef(0);
+  const [savingNewMap, setSavingNewMap] = useState(false);
+  const [newMapName, setNewMapName] = useState("");
+  const [saved, setSaved] = useState<{ mapId: string; mapName: string; count: number; destination: string; message: string } | null>(null);
   useEffect(() => () => { for (const id of liveRuns.current) void matchingDatasetDrop(id).catch(() => undefined); }, []);
   const [page, setPage] = useState(0);
   const [filter, setFilter] = useState("all");
@@ -119,6 +124,15 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     [plan, score, workspace.queries, connections, sources, projectRef.projectFile, projectRef.projectUid,
       projectRef.references, projectRef.connectionBindings]);
   const runCurrent = !!run && evaluatedFingerprint === evaluationFingerprint;
+  const eligibleBulk = (run?.proposedSources ?? 0) > 0;
+  useEffect(() => {
+    if (!selected) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { candidateFetchEpoch.current++; setSelected(null); setCandidatePage(null); }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [selected]);
   const editRule = (idx: number, next: Partial<FieldRule>) => setComparisons(before => before.map((r, i) => i === idx ? { ...r, ...next } : r));
 
   const reload = useCallback(async (active: DatasetMatchingRun, index: number) => {
@@ -145,17 +159,25 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
         liveRuns.current.push(next.runId);
         setEvaluatedPlan(JSON.parse(JSON.stringify(plan)) as DatasetMatchingRequest["plan"]);
         setEvaluatedFingerprint(evaluationFingerprint);
-        setRun(next); setSelected(null); setCandidatePage(null);
+        setRun(next); setSelected(null); setCandidatePage(null); setSaved(null); candidateFetchEpoch.current++;
         await reload(next, 0);
       }
     } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
   }
+  function closeDetails() {
+    candidateFetchEpoch.current++;
+    setSelected(null); setCandidatePage(null);
+  }
   async function chooseRow(row: DatasetMatchRow) {
+    if (selected?.leftId === row.leftId) { closeDetails(); return; }
+    const requestEpoch = ++candidateFetchEpoch.current;
     setSelected(row); setCandidateIndex(0); setCandidatePage(null); setError(null);
     if (!run) return;
-    try { setCandidatePage(await matchingDatasetCandidates(run.runId, row.leftId, 0, PAGE_SIZE)); }
-    catch (e) { setError(safeMessage(e)); }
+    try {
+      const response = await matchingDatasetCandidates(run.runId, row.leftId, 0, PAGE_SIZE);
+      if (candidateFetchEpoch.current === requestEpoch) setCandidatePage(response);
+    } catch (e) { if (candidateFetchEpoch.current === requestEpoch) setError(safeMessage(e)); }
   }
   async function nextCandidates(index: number) {
     if (!run || !selected) return;
@@ -167,24 +189,41 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     setWorking(true); setError(null);
     try {
       const updated = await matchingDatasetDecide({ runId: run.runId, leftId: selected.leftId, rightId: action === "confirm" ? target : null, action });
-      setStats(updated); await reload(run, page); setMessage(`Reviewed ${updated.reviewed} source rows. No Mapping was modified.`);
+      setStats(updated); await reload(run, page); setSaved(null);
+      const fresh = await matchingDatasetPage(run.runId, page, PAGE_SIZE, filter);
+      setSelected(fresh.rows.find(row => row.leftId === selected.leftId) ?? null);
+      setMessage(`Reviewed ${updated.reviewed} Mapping keys; ${updated.confirmed} confirmed in this evaluation. Nothing saved to Mapping yet.`);
     } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
   }
   async function confirmClear() {
-    if (!run || !runCurrent || working) return;
+    if (!run || !runCurrent || working || !eligibleBulk) return;
     setWorking(true); setError(null);
     try {
+      const before = stats?.confirmed ?? 0;
       const updated = await matchingDatasetConfirmClear(run.runId);
-      setStats(updated); await reload(run, page); setMessage(`Confirmed ${updated.confirmed} unambiguous evaluated rows, not merely the visible page. Review before Mapping.`);
+      setStats(updated); await reload(run, page); setSaved(null);
+      const gained = Math.max(0, updated.confirmed - before);
+      setMessage(gained > 0
+        ? `Confirmed ${gained} new unambiguous Mapping keys (${updated.confirmed} total). Save Mapping to persist these decisions.`
+        : "No additional unambiguous proposals are eligible. Below-threshold candidates require individual review.");
     } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
   }
-  async function stage() {
-    if (!run || !runCurrent || !mapId || !onStageToMapping || !evaluatedPlan || working) return;
+  async function saveMapping() {
+    if (!run || !runCurrent || !onSaveMapping || !evaluatedPlan || !stats?.confirmed || working) return;
+    const name = newMapName.trim();
+    if (savingNewMap && !name) { setError("Enter a name for the new Mapping."); return; }
+    if (!savingNewMap && !mapId) { setError("Select an existing Mapping or choose Create new Mapping."); return; }
+    const targetMapId = savingNewMap ? null : mapId;
+    const destination = targetMapId ? mapOptions.find(m => m.id === targetMapId)?.name ?? targetMapId : name;
+    if (!window.confirm(`Save ${stats.confirmed} explicitly confirmed mappings to ${destination}? Existing non-empty values will not be overwritten. Source Mapping may write to its database table.`)) return;
     setWorking(true); setError(null);
-    try { await onStageToMapping(run.runId, mapId, evaluatedPlan); setMessage("Confirmed matches staged in Mapping editor. Check, Save, then Apply explicitly."); }
-    catch (e) { setError(safeMessage(e)); }
+    try {
+      const receipt = await onSaveMapping({ runId: run.runId, targetMapId, newMapName: savingNewMap ? name : null, plan: evaluatedPlan });
+      setSaved(receipt); setMessage(receipt.message);
+      setMapId(receipt.mapId); setSavingNewMap(false); setNewMapName("");
+    } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
   }
 
@@ -236,22 +275,32 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>
             {previousRun && <div className="mt-1 text-xs text-slate-400">Previous run: {previousRun.proposedSources} proposed → {run.proposedSources}; {previousRun.ambiguousSources} ambiguous → {run.ambiguousSources}. Different source snapshots may invalidate comparison.</div>}
             {comparison && <div className="mt-1 text-xs text-amber-300">Indicative relationship A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys. Snapshot verified: no.</div>}
-            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || !runCurrent} onClick={() => void confirmClear()}>Review: confirm all unambiguous</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>
+            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || !runCurrent || !eligibleBulk} title={!eligibleBulk ? "No proposed matches above threshold; review below-threshold candidates individually" : "Confirm all eligible unambiguous proposals across all result pages"} onClick={() => void confirmClear()}>Confirm all eligible ({run.proposedSources})</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>{!eligibleBulk && <span className="text-xs text-amber-300">No auto-eligible proposals; inspect candidates and confirm a pair manually.</span>}
               <label className="ml-auto flex items-center gap-1 text-xs">Result filter
-                <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);setSelected(null);}).catch(e => setError(safeMessage(e))); }}>
+                <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);closeDetails();}).catch(e => setError(safeMessage(e))); }}>
                   <option value="all">All</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="source_conflict">Source attributes conflict</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
                 </select>
               </label>
             </div>
           </div>
-          <div className="flex min-h-0 flex-1">
+          <div className="relative flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Candidates evaluated</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.alternatives}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state}</td></tr>)}</tbody></table></div>
+              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state}</td></tr>)}</tbody></table></div>
               <div className="flex shrink-0 items-center justify-between border-t border-slate-700 p-2 text-xs"><span>Rows {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows?.total ?? 0)} / {rows?.total ?? 0}</span><div className="flex gap-2"><button className={btn} disabled={page === 0 || working} onClick={() => void reload(run, page - 1)}>Previous</button><button className={btn} disabled={!rows || (page + 1) * PAGE_SIZE >= rows.total || working} onClick={() => void reload(run, page + 1)}>Next</button></div></div>
             </div>
-            {selected && <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-slate-700 p-3 text-xs"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside>}
+            {selected && <><button type="button" aria-label="Close Matching details backdrop" className="absolute inset-0 z-10 bg-slate-950/25" onClick={closeDetails} /><aside role="dialog" aria-modal="false" aria-label="Matching candidate details" className="absolute inset-y-0 right-0 z-20 w-[min(420px,90%)] overflow-y-auto border-l border-slate-600 bg-[#101d2c] p-3 text-xs shadow-2xl"><div className="flex items-center justify-between gap-2"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><button type="button" aria-label="Close Matching details" className={`${btn} text-base`} onClick={closeDetails}>×</button></div><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside></>}
           </div>
-          {onStageToMapping && <div className="flex shrink-0 items-center gap-2 border-t border-slate-700 p-2 text-xs"><span>Stage confirmed pairs into existing Mapping draft:</span><select className={cn} aria-label="Target Mapping" value={mapId} onChange={e => setMapId(e.target.value)}><option value="">Select Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className={btn} disabled={!runCurrent || !mapId || !stats?.confirmed || working} onClick={() => void stage()}>Stage into Mapping editor</button><span className="text-slate-500">Review, Save and Apply remain separate.</span></div>}
+          {onSaveMapping && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-700 bg-[#101b29] p-3 text-xs" data-testid="matching-save-panel">
+            <strong className="text-teal-100">Save Mapping</strong>
+            <select className={cn} aria-label="Target Mapping" value={savingNewMap ? "__new__" : mapId} onChange={e => { const next = e.target.value; setSavingNewMap(next === "__new__"); if (next !== "__new__") setMapId(next); }}>
+              <option value="">Select existing Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              <option value="__new__">+ Create new seed Mapping…</option>
+            </select>
+            {savingNewMap && <input type="text" aria-label="New Mapping name" placeholder="Mapping name" className={cn} value={newMapName} onChange={e => setNewMapName(e.target.value)} />}
+            <button type="button" data-testid="matching-save" className={`${btn} border-teal-500 bg-teal-900/30 font-semibold text-teal-100`} disabled={working || !runCurrent || !stats?.confirmed || (savingNewMap ? !newMapName.trim() : !mapId)} onClick={() => void saveMapping()}>Save Mapping ({stats?.confirmed ?? 0})</button>
+            <span className="text-slate-400">Seed: save in project. Source: guarded table write. Project file Save is separate.</span>
+            {saved && <p role="status" data-testid="matching-saved-receipt" className="w-full text-teal-200">Saved {saved.count} pairs to {saved.mapName} ({saved.destination}). Opened Mapping editor to inspect the result. Save the project file to make it durable on disk.</p>}
+          </div>}
         </>}
       </main>
     </div>

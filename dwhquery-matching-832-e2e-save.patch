@@ -1,0 +1,551 @@
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -127,5 +127,5 @@
+ import { DatasetMatchingWorkspace } from "./components/matching/DatasetMatchingWorkspace";
+ import { fullJoinContext } from "./app/matching/fullJoinContext";
+ import { matchingDatasetApprovedPage } from "./lib/bridge";
+-import { fromColumnsEff, outputColumnsEff, fromPartsEff, outputValuesEff } from "./lib/keyMap";
++import { saveDatasetMatching } from "./app/matching/saveDatasetMapping";
+ import { createMatchingDemoSession } from "./app/matching/executionPolicy";
+@@ -5488,62 +5489,33 @@
+                       projectRef={projectRefContext(project)}
+                       initialPlan={fullJoin?.plan}
+                       lockedBindings={fullJoin?.locked}
+-                      initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
+-                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
+-                    onStageToMapping={async (runId, targetMapId, plan) => {
+-                      // Staging is a draft-only operation; never bypass KeyMapEditor Save/Apply.
+-                      if (fullJoin && (!basicContextCurrent(tab) || matchingWriteRefusal(tab))) throw new Error("Original JOIN context changed; reopen Matching and evaluate again.");
+-                      const projectNow = projectRef.current;
+-                      const map = projectNow.workspace.key_maps?.find(m => m.id === targetMapId);
+-                      if (!map) throw new Error("Selected Mapping no longer exists.");
+-                      if ((map.storage?.kind ?? "seed") !== "seed" || map.time_mode === "range_scd") throw new Error("Only seed Mapping can be staged here; source/ref/query/range authoring must use its dedicated guarded editor.");
+-                      const tab = keyMapTabsLiveRef.current.find(t => t.map.id === map.id);
+-                      if (tab?.localDraft || dirtyDeltaHasChanges(tab?.dirtyDelta) || tab?.saveInFlight) throw new Error("Save or discard existing Mapping editor changes before staging.");
+-                      const fromCols = fromColumnsEff(map);
+-                      const toCols = outputColumnsEff(map);
+-                      if (fromCols.length !== plan.mapKeyFields.length || toCols.length !== plan.outputs.length) {
+-                        throw new Error("Selected Mapping From/To arity is incompatible with the evaluated plan.");
+-                      }
+-                      // Paged RPC reads ALL confirmed rows, not the current UI page.
+-                      const approved = [] as { mapKey: string; outputs: string; targetIdentity: string }[];
+-                      for (let index = 0; ; index++) {
+-                        const page = await matchingDatasetApprovedPage(runId, index, 200);
+-                        approved.push(...page.rows);
+-                        if (approved.length >= page.total) break;
+-                        if (page.rows.length === 0) throw new Error("Confirmed Mapping export incomplete: Host returned a short page.");
+-                      }
+-                      if (!approved.length) throw new Error("No confirmed pairs to stage.");
+-                      const staged = new Map<string, string[]>();
+-                      for (const row of approved) {
+-                        const from = JSON.parse(row.mapKey) as unknown;
+-                        const outs = JSON.parse(row.outputs) as unknown;
+-                        if (!Array.isArray(from) || !Array.isArray(outs) || from.length !== fromCols.length || outs.length !== toCols.length ||
+-                            !from.every(x => typeof x === "string") || !outs.every(x => typeof x === "string")) {
+-                          throw new Error("Invalid/NULL Mapping identity or outputs in confirmed evaluation.");
++                      initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
++                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
++                      onSaveMapping={async intent => {
++                        const snapshot = projectRef.current;
++                        const owner = matchingTabsLiveRef.current.find(s => s.id === tab.id);
++                        if (!owner || (owner.joinBinding && (!basicContextCurrent(owner) || matchingWriteRefusal(owner)))) {
++                          throw new Error("Matching JOIN context changed; reopen Matching and evaluate again.");
+                         }
+-                        const token = JSON.stringify(from);
+-                        const old = staged.get(token);
+-                        if (old && JSON.stringify(old) !== JSON.stringify(outs)) throw new Error(`Conflicting confirmed target for ${token}`);
+-                        staged.set(token, outs as string[]);
+-                      }
+-                      const original = new Map(map.entries.map(entry => [JSON.stringify(fromPartsEff(entry)), outputValuesEff(entry)]));
+-                      for (const [token, next] of staged) {
+-                        const prior = original.get(token);
+-                        if (prior && prior.some(x => x.trim()) && JSON.stringify(prior) !== JSON.stringify(next)) {
+-                          throw new Error(`Existing filled Mapping entry differs for ${token}; explicit replacement required in Mapping editor.`);
+-                        }
+-                      }
+-                      if (projectRef.current !== projectNow) throw new Error("Project changed while preparing Matching Mapping draft; reevaluate against current context.");
+-                      const entries = [...map.entries];
+-                      for (const [token, outs] of staged) {
+-                        const parts = JSON.parse(token) as string[];
+-                        const index = entries.findIndex(entry => JSON.stringify(fromPartsEff(entry)) === token);
+-                        const entry = { from: parts[0]!, from_parts: parts, to: outs[0]!, output_values: outs };
+-                        if (index >= 0) entries[index] = { ...entries[index]!, ...entry };
+-                        else entries.push(entry);
+-                      }
+-                      const draft = { ...map, entries };
+-                      openKeyMapEditor(draft);
+-                      patchKeyMapTab(map.id, current => ({ ...current, map: draft, localDraft: true }));
+-                    }}
++                        return saveDatasetMatching(intent, {
++                          maps: snapshot.workspace.key_maps ?? [],
++                          current: () => projectRef.current === snapshot &&
++                            matchingTabsLiveRef.current.some(s => s.id === tab.id && s === owner),
++                          editorBusy: id => {
++                            const editor = keyMapTabsLiveRef.current.find(t => t.map.id === id);
++                            return !!editor && (!!editor.localDraft || dirtyDeltaHasChanges(editor.dirtyDelta) || !!editor.saveInFlight);
++                          },
++                          approvedPage: matchingDatasetApprovedPage,
++                          save: (map, opts) => saveKeyMapToProject(map, opts),
++                          writableSourceDsn: map => {
++                            const refusal = importWriteRefusal(snapshot.pg_import, map.id);
++                            if (refusal) throw new Error(refusal);
++                            const resolved = resolveKeyMapConnection(snapshot, map, snapshot.connections ?? [], true);
++                            if (!resolved.ok) throw new Error(resolved.error);
++                            return resolved.dsn;
++                          },
++                          readSource: (map, dsn, opts) => readKeyMap(map, dsn, opts),
++                          openSaved: map => openKeyMapEditor(map),
++                        });
++                      }}
+                     />
+--- a/src/components/matching/DatasetMatchingWorkspace.tsx
++++ b/src/components/matching/DatasetMatchingWorkspace.tsx
+@@ -18,7 +18,8 @@
+   connections: ConnectionDef[];
+   sources: SourceDef[];
+   projectRef: ProjectRefContext;
+-  onStageToMapping?: (runId: string, targetMapId: string, plan: DatasetMatchingRequest["plan"]) => Promise<void>;
++  onSaveMapping?: (args: { runId: string; targetMapId: string | null; newMapName: string | null;
++    plan: DatasetMatchingRequest["plan"] }) => Promise<{ mapId: string; mapName: string; count: number; destination: string; message: string }>;
+   mapOptions?: { id: string; name: string }[];
+   /** Original JOIN binding is preserved while comparisons may be edited. */
+   initialPlan?: DatasetMatchingRequest["plan"];
+@@ -36,7 +37,7 @@
+ function safeMessage(e: unknown) { return e instanceof Error ? e.message : String(e); }
+ 
+ /** Independent Matching uses full Host-evaluated datasets. No UI page is ever an engine input. */
+-export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onStageToMapping, initialPlan, lockedBindings, initialMapId }: Props) {
++export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, initialPlan, lockedBindings, initialMapId }: Props) {
+   const queries = workspace.queries ?? [];
+   const [left, setLeft] = useState(initialPlan?.sourceRef ?? queries[0]?.id ?? "");
+   const [right, setRight] = useState(initialPlan?.targetRef ?? queries[1]?.id ?? "");
+@@ -57,6 +58,10 @@
+   const [evaluatedPlan, setEvaluatedPlan] = useState<DatasetMatchingRequest["plan"] | null>(null);
+   const [evaluatedFingerprint, setEvaluatedFingerprint] = useState<string | null>(null);
+   const liveRuns = useRef<string[]>([]);
++  const candidateFetchEpoch = useRef(0);
++  const [savingNewMap, setSavingNewMap] = useState(false);
++  const [newMapName, setNewMapName] = useState("");
++  const [saved, setSaved] = useState<{ mapId: string; mapName: string; count: number; destination: string; message: string } | null>(null);
+   useEffect(() => () => { for (const id of liveRuns.current) void matchingDatasetDrop(id).catch(() => undefined); }, []);
+   const [page, setPage] = useState(0);
+   const [filter, setFilter] = useState("all");
+@@ -119,6 +124,15 @@
+     [plan, score, workspace.queries, connections, sources, projectRef.projectFile, projectRef.projectUid,
+       projectRef.references, projectRef.connectionBindings]);
+   const runCurrent = !!run && evaluatedFingerprint === evaluationFingerprint;
++  const eligibleBulk = (run?.proposedSources ?? 0) > 0;
++  useEffect(() => {
++    if (!selected) return;
++    const keydown = (event: KeyboardEvent) => {
++      if (event.key === "Escape") { candidateFetchEpoch.current++; setSelected(null); setCandidatePage(null); }
++    };
++    window.addEventListener("keydown", keydown);
++    return () => window.removeEventListener("keydown", keydown);
++  }, [selected]);
+   const editRule = (idx: number, next: Partial<FieldRule>) => setComparisons(before => before.map((r, i) => i === idx ? { ...r, ...next } : r));
+ 
+   const reload = useCallback(async (active: DatasetMatchingRun, index: number) => {
+@@ -145,17 +159,25 @@
+         liveRuns.current.push(next.runId);
+         setEvaluatedPlan(JSON.parse(JSON.stringify(plan)) as DatasetMatchingRequest["plan"]);
+         setEvaluatedFingerprint(evaluationFingerprint);
+-        setRun(next); setSelected(null); setCandidatePage(null);
++        setRun(next); setSelected(null); setCandidatePage(null); setSaved(null); candidateFetchEpoch.current++;
+         await reload(next, 0);
+       }
+     } catch (e) { setError(safeMessage(e)); }
+     finally { setWorking(false); }
+   }
++  function closeDetails() {
++    candidateFetchEpoch.current++;
++    setSelected(null); setCandidatePage(null);
++  }
+   async function chooseRow(row: DatasetMatchRow) {
++    if (selected?.leftId === row.leftId) { closeDetails(); return; }
++    const requestEpoch = ++candidateFetchEpoch.current;
+     setSelected(row); setCandidateIndex(0); setCandidatePage(null); setError(null);
+     if (!run) return;
+-    try { setCandidatePage(await matchingDatasetCandidates(run.runId, row.leftId, 0, PAGE_SIZE)); }
+-    catch (e) { setError(safeMessage(e)); }
++    try {
++      const response = await matchingDatasetCandidates(run.runId, row.leftId, 0, PAGE_SIZE);
++      if (candidateFetchEpoch.current === requestEpoch) setCandidatePage(response);
++    } catch (e) { if (candidateFetchEpoch.current === requestEpoch) setError(safeMessage(e)); }
+   }
+   async function nextCandidates(index: number) {
+     if (!run || !selected) return;
+@@ -167,24 +189,41 @@
+     setWorking(true); setError(null);
+     try {
+       const updated = await matchingDatasetDecide({ runId: run.runId, leftId: selected.leftId, rightId: action === "confirm" ? target : null, action });
+-      setStats(updated); await reload(run, page); setMessage(`Reviewed ${updated.reviewed} source rows. No Mapping was modified.`);
++      setStats(updated); await reload(run, page); setSaved(null);
++      const fresh = await matchingDatasetPage(run.runId, page, PAGE_SIZE, filter);
++      setSelected(fresh.rows.find(row => row.leftId === selected.leftId) ?? null);
++      setMessage(`Reviewed ${updated.reviewed} Mapping keys; ${updated.confirmed} confirmed in this evaluation. Nothing saved to Mapping yet.`);
+     } catch (e) { setError(safeMessage(e)); }
+     finally { setWorking(false); }
+   }
+   async function confirmClear() {
+-    if (!run || !runCurrent || working) return;
++    if (!run || !runCurrent || working || !eligibleBulk) return;
+     setWorking(true); setError(null);
+     try {
++      const before = stats?.confirmed ?? 0;
+       const updated = await matchingDatasetConfirmClear(run.runId);
+-      setStats(updated); await reload(run, page); setMessage(`Confirmed ${updated.confirmed} unambiguous evaluated rows, not merely the visible page. Review before Mapping.`);
++      setStats(updated); await reload(run, page); setSaved(null);
++      const gained = Math.max(0, updated.confirmed - before);
++      setMessage(gained > 0
++        ? `Confirmed ${gained} new unambiguous Mapping keys (${updated.confirmed} total). Save Mapping to persist these decisions.`
++        : "No additional unambiguous proposals are eligible. Below-threshold candidates require individual review.");
+     } catch (e) { setError(safeMessage(e)); }
+     finally { setWorking(false); }
+   }
+-  async function stage() {
+-    if (!run || !runCurrent || !mapId || !onStageToMapping || !evaluatedPlan || working) return;
++  async function saveMapping() {
++    if (!run || !runCurrent || !onSaveMapping || !evaluatedPlan || !stats?.confirmed || working) return;
++    const name = newMapName.trim();
++    if (savingNewMap && !name) { setError("Enter a name for the new Mapping."); return; }
++    if (!savingNewMap && !mapId) { setError("Select an existing Mapping or choose Create new Mapping."); return; }
++    const targetMapId = savingNewMap ? null : mapId;
++    const destination = targetMapId ? mapOptions.find(m => m.id === targetMapId)?.name ?? targetMapId : name;
++    if (!window.confirm(`Save ${stats.confirmed} explicitly confirmed mappings to ${destination}? Existing non-empty values will not be overwritten. Source Mapping may write to its database table.`)) return;
+     setWorking(true); setError(null);
+-    try { await onStageToMapping(run.runId, mapId, evaluatedPlan); setMessage("Confirmed matches staged in Mapping editor. Check, Save, then Apply explicitly."); }
+-    catch (e) { setError(safeMessage(e)); }
++    try {
++      const receipt = await onSaveMapping({ runId: run.runId, targetMapId, newMapName: savingNewMap ? name : null, plan: evaluatedPlan });
++      setSaved(receipt); setMessage(receipt.message);
++      setMapId(receipt.mapId); setSavingNewMap(false); setNewMapName("");
++    } catch (e) { setError(safeMessage(e)); }
+     finally { setWorking(false); }
+   }
+ 
+@@ -236,22 +275,32 @@
+             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>
+             {previousRun && <div className="mt-1 text-xs text-slate-400">Previous run: {previousRun.proposedSources} proposed → {run.proposedSources}; {previousRun.ambiguousSources} ambiguous → {run.ambiguousSources}. Different source snapshots may invalidate comparison.</div>}
+             {comparison && <div className="mt-1 text-xs text-amber-300">Indicative relationship A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys. Snapshot verified: no.</div>}
+-            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || !runCurrent} onClick={() => void confirmClear()}>Review: confirm all unambiguous</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>
++            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || !runCurrent || !eligibleBulk} title={!eligibleBulk ? "No proposed matches above threshold; review below-threshold candidates individually" : "Confirm all eligible unambiguous proposals across all result pages"} onClick={() => void confirmClear()}>Confirm all eligible ({run.proposedSources})</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>{!eligibleBulk && <span className="text-xs text-amber-300">No auto-eligible proposals; inspect candidates and confirm a pair manually.</span>}
+               <label className="ml-auto flex items-center gap-1 text-xs">Result filter
+-                <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);setSelected(null);}).catch(e => setError(safeMessage(e))); }}>
++                <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);closeDetails();}).catch(e => setError(safeMessage(e))); }}>
+                   <option value="all">All</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="source_conflict">Source attributes conflict</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
+                 </select>
+               </label>
+             </div>
+           </div>
+-          <div className="flex min-h-0 flex-1">
++          <div className="relative flex min-h-0 flex-1">
+             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+-              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Candidates evaluated</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.alternatives}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state}</td></tr>)}</tbody></table></div>
++              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state}</td></tr>)}</tbody></table></div>
+               <div className="flex shrink-0 items-center justify-between border-t border-slate-700 p-2 text-xs"><span>Rows {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows?.total ?? 0)} / {rows?.total ?? 0}</span><div className="flex gap-2"><button className={btn} disabled={page === 0 || working} onClick={() => void reload(run, page - 1)}>Previous</button><button className={btn} disabled={!rows || (page + 1) * PAGE_SIZE >= rows.total || working} onClick={() => void reload(run, page + 1)}>Next</button></div></div>
+             </div>
+-            {selected && <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-slate-700 p-3 text-xs"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside>}
++            {selected && <><button type="button" aria-label="Close Matching details backdrop" className="absolute inset-0 z-10 bg-slate-950/25" onClick={closeDetails} /><aside role="dialog" aria-modal="false" aria-label="Matching candidate details" className="absolute inset-y-0 right-0 z-20 w-[min(420px,90%)] overflow-y-auto border-l border-slate-600 bg-[#101d2c] p-3 text-xs shadow-2xl"><div className="flex items-center justify-between gap-2"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><button type="button" aria-label="Close Matching details" className={`${btn} text-base`} onClick={closeDetails}>×</button></div><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside></>}
+           </div>
+-          {onStageToMapping && <div className="flex shrink-0 items-center gap-2 border-t border-slate-700 p-2 text-xs"><span>Stage confirmed pairs into existing Mapping draft:</span><select className={cn} aria-label="Target Mapping" value={mapId} onChange={e => setMapId(e.target.value)}><option value="">Select Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className={btn} disabled={!runCurrent || !mapId || !stats?.confirmed || working} onClick={() => void stage()}>Stage into Mapping editor</button><span className="text-slate-500">Review, Save and Apply remain separate.</span></div>}
++          {onSaveMapping && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-700 bg-[#101b29] p-3 text-xs" data-testid="matching-save-panel">
++            <strong className="text-teal-100">Save Mapping</strong>
++            <select className={cn} aria-label="Target Mapping" value={savingNewMap ? "__new__" : mapId} onChange={e => { const next = e.target.value; setSavingNewMap(next === "__new__"); if (next !== "__new__") setMapId(next); }}>
++              <option value="">Select existing Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
++              <option value="__new__">+ Create new seed Mapping…</option>
++            </select>
++            {savingNewMap && <input type="text" aria-label="New Mapping name" placeholder="Mapping name" className={cn} value={newMapName} onChange={e => setNewMapName(e.target.value)} />}
++            <button type="button" data-testid="matching-save" className={`${btn} border-teal-500 bg-teal-900/30 font-semibold text-teal-100`} disabled={working || !runCurrent || !stats?.confirmed || (savingNewMap ? !newMapName.trim() : !mapId)} onClick={() => void saveMapping()}>Save Mapping ({stats?.confirmed ?? 0})</button>
++            <span className="text-slate-400">Seed: save in project. Source: guarded table write. Project file Save is separate.</span>
++            {saved && <p role="status" data-testid="matching-saved-receipt" className="w-full text-teal-200">Saved {saved.count} pairs to {saved.mapName} ({saved.destination}). Opened Mapping editor to inspect the result. Save the project file to make it durable on disk.</p>}
++          </div>}
+         </>}
+       </main>
+     </div>
+--- a/src/app/matching/saveDatasetMapping.ts
++++ b/src/app/matching/saveDatasetMapping.ts
+@@ -0,0 +1,189 @@
++/** Commit the explicitly approved, paginated Matching run through the existing Mapping save owner.
++ * The renderer never constructs SQL or writes a source table directly.
++ * Source-backed writes use the same guarded dirty-delta path as KeyMapEditor.
++ */
++import type { KeyMapDef, KeyMapEntry } from "../../types/pipeline";
++import type { DatasetMatchingPlan, DatasetApprovedMappingPage, KeyMapSaveResult,
++  KeyMapDirtyDelta, KeyMapDirtyBaseline, KeyMapReadResult } from "../../lib/bridge";
++import { emptyKeyMap, fromColumnsEff, fromPartsEff, outputColumnsEff, outputValuesEff } from "../../lib/keyMap";
++
++export type SaveMatchingIntent = {
++  runId: string;
++  targetMapId: string | null;
++  newMapName: string | null;
++  plan: DatasetMatchingPlan;
++};
++export type SavedMatchingReceipt = {
++  mapId: string; mapName: string; count: number; destination: string; message: string;
++};
++export type SaveMatchingPorts = {
++  /** These must be the project and editor versions captured at the start of Save. */
++  maps: readonly KeyMapDef[];
++  current: () => boolean;
++  editorBusy: (mapId: string) => boolean;
++  approvedPage: (runId: string, page: number, size: number) => Promise<DatasetApprovedMappingPage>;
++  /** Existing App-level Mapping Save/guard owner. */
++  save: (map: KeyMapDef, opts?: { dirtyDelta?: KeyMapDirtyDelta }) => Promise<KeyMapSaveResult>;
++  /** Existing connection resolver; must enforce source write permission. */
++  writableSourceDsn: (map: KeyMapDef) => string;
++  readSource: (map: KeyMapDef, dsn: string, opts: { fromExact: string[][] }) => Promise<KeyMapReadResult>;
++  openSaved: (map: KeyMapDef) => void;
++};
++
++export function parseApprovedValues(value: string, expectedArity: number, label: string): string[] {
++  let decoded: unknown;
++  try { decoded = JSON.parse(value); } catch { throw new Error(`Invalid ${label}: not JSON`); }
++  if (!Array.isArray(decoded) || decoded.length !== expectedArity || !decoded.every(v => typeof v === "string")) {
++    throw new Error(`Invalid ${label}: Mapping requires ${expectedArity} non-NULL strings`);
++  }
++  return decoded as string[];
++}
++
++/** Read all approved pairs, never a visible page; refuse inconsistent exports. */
++export async function loadApprovedPairs(intent: SaveMatchingIntent, ports: Pick<SaveMatchingPorts, "approvedPage">): Promise<Map<string, { from: string[]; to: string[] }>> {
++  const keys = new Map<string, { from: string[]; to: string[] }>();
++  let total: number | null = null;
++  let received = 0;
++  for (let page = 0; ; page++) {
++    const result = await ports.approvedPage(intent.runId, page, 200);
++    if (!Number.isSafeInteger(result.total) || result.total < 0 || (total !== null && total !== result.total)) {
++      throw new Error("Approved Mapping export changed during pagination; re-evaluate and review again.");
++    }
++    total = result.total;
++    if (!result.rows.length && received < total) throw new Error("Approved Mapping export returned an incomplete page.");
++    received += result.rows.length;
++    if (received > total) throw new Error("Approved Mapping export exceeded its declared total.");
++    for (const row of result.rows) {
++      const from = parseApprovedValues(row.mapKey, intent.plan.mapKeyFields.length, "LEFT Mapping key");
++      const to = parseApprovedValues(row.outputs, intent.plan.outputs.length, "RIGHT output");
++      const token = JSON.stringify(from);
++      const old = keys.get(token);
++      if (old && JSON.stringify(old.to) !== JSON.stringify(to)) {
++        throw new Error(`Multiple confirmed outputs for one Mapping key ${token}`);
++      }
++      keys.set(token, { from, to });
++    }
++    if (received === total) break;
++  }
++  if (!keys.size) throw new Error("No reviewed and confirmed pairs to save. Confirm candidates first.");
++  return keys;
++}
++
++function mapEntry(from: string[], to: string[], prior?: KeyMapEntry): KeyMapEntry {
++  return { ...prior, from: from[0]!, from_parts: [...from], to: to[0]!, output_values: [...to] };
++}
++function checkNotReplacing(from: string[], prior: KeyMapEntry | undefined, to: string[]): boolean {
++  if (!prior) return false;
++  const existing = outputValuesEff(prior);
++  if (JSON.stringify(existing) === JSON.stringify(to)) return true;
++  if (existing.some(value => value.trim() !== "")) {
++    throw new Error(`Refused to overwrite a populated Mapping value for ${JSON.stringify(from)}; edit it explicitly in the Mapping editor.`);
++  }
++  return false;
++}
++
++function ensureShape(map: KeyMapDef, intent: SaveMatchingIntent) {
++  if (map.time_mode === "range_scd" || !["seed", "source"].includes(map.storage?.kind ?? "seed")) {
++    throw new Error("Only seed and writable source Mapping can be committed here; use the dedicated editor for ref/query/range-SCD.");
++  }
++  if (fromColumnsEff(map).length !== intent.plan.mapKeyFields.length ||
++      outputColumnsEff(map).length !== intent.plan.outputs.length) {
++    throw new Error("Mapping key/output arity differs from the evaluated Matching plan.");
++  }
++}
++
++function buildSeedDraft(map: KeyMapDef, pairs: Map<string, { from: string[]; to: string[] }>): KeyMapDef {
++  const rows = [...map.entries];
++  const byKey = new Map(rows.map((entry, index) => [JSON.stringify(fromPartsEff(entry)), index]));
++  for (const [token, pair] of pairs) {
++    const index = byKey.get(token);
++    const old = index === undefined ? undefined : rows[index];
++    if (checkNotReplacing(pair.from, old, pair.to)) continue;
++    if (index === undefined) { byKey.set(token, rows.length); rows.push(mapEntry(pair.from, pair.to)); }
++    else rows[index] = mapEntry(pair.from, pair.to, old);
++  }
++  return { ...map, entries: rows };
++}
++
++async function buildSourceDelta(map: KeyMapDef, pairs: Map<string, { from: string[]; to: string[] }>, dsn: string,
++  readSource: SaveMatchingPorts["readSource"]): Promise<KeyMapDirtyDelta> {
++  const known = new Map<string, KeyMapEntry>();
++  const keys = [...pairs.values()].map(pair => pair.from);
++  for (let i = 0; i < keys.length; i += 200) {
++    const result = await readSource(map, dsn, { fromExact: keys.slice(i, i + 200) });
++    for (const row of result.entries) {
++      const token = JSON.stringify(fromPartsEff(row));
++      if (!pairs.has(token)) throw new Error("Source read returned an unexpected Mapping key.");
++      if (known.has(token)) throw new Error(`Duplicate rows in source Mapping table for ${token}`);
++      known.set(token, row);
++    }
++  }
++  const upserts: KeyMapEntry[] = [];
++  const baselines: KeyMapDirtyBaseline[] = [];
++  const names = outputColumnsEff(map);
++  for (const [token, pair] of pairs) {
++    const before = known.get(token);
++    if (checkNotReplacing(pair.from, before, pair.to)) continue;
++    const values = before ? outputValuesEff(before) : [];
++    upserts.push(mapEntry(pair.from, pair.to, before));
++    baselines.push({
++      fromParts: [...pair.from], existed: !!before, to: values[0] ?? "",
++      outputs: Object.fromEntries(names.map((name, i) => [name, values[i] ?? ""])),
++      ...(before?.attrs ? { attrs: Object.fromEntries(Object.entries(before.attrs).map(([k,v]) => [k,v])) } : {}),
++    });
++  }
++  return { upserts, deletedFroms: [], deletedFromParts: [], baselines };
++}
++
++export async function saveDatasetMatching(intent: SaveMatchingIntent, ports: SaveMatchingPorts): Promise<SavedMatchingReceipt> {
++  if (!ports.current()) throw new Error("Project/Matching context changed; reopen Matching before saving.");
++  let map: KeyMapDef;
++  if (intent.targetMapId) {
++    const found = ports.maps.find(row => row.id === intent.targetMapId);
++    if (!found) throw new Error("Target Mapping no longer exists.");
++    map = found;
++  } else {
++    const name = intent.newMapName?.trim();
++    if (!name) throw new Error("Provide a name for the new Mapping.");
++    if (ports.maps.some(row => row.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
++      throw new Error("A Mapping with this name already exists. Select it or choose a different name.");
++    }
++    map = { ...emptyKeyMap(name),
++      from_column: intent.plan.mapKeyFields[0]!, from_columns: [...intent.plan.mapKeyFields],
++      to_column: intent.plan.outputs[0]!, output_columns: [...intent.plan.outputs] };
++  }
++  ensureShape(map, intent);
++  if (ports.editorBusy(map.id)) throw new Error("This Mapping has unsaved or in-flight editor changes. Save/discard those first.");
++  const pairs = await loadApprovedPairs(intent, ports);
++  if (!ports.current()) throw new Error("Project changed during Mapping approval read; no write performed.");
++
++  if ((map.storage?.kind ?? "seed") === "seed") {
++    const draft = buildSeedDraft(map, pairs);
++    if (!ports.current()) throw new Error("Project changed during Mapping Save; no write performed.");
++    const result = await ports.save(draft);
++    ports.openSaved(draft);
++    if (result.external === "error" || result.external === "conflict") {
++      throw new Error(`Mapping saved in project, but external seed sync failed: ${result.message}`);
++    }
++    return { mapId: draft.id, mapName: draft.name, count: pairs.size,
++      destination: result.external === "synced" ? "project + dbt seed" : "project (seed)",
++      message: `${pairs.size} confirmed Mapping keys saved to '${draft.name}'. ${result.message} Save the project file separately.` };
++  }
++
++  const dsn = ports.writableSourceDsn(map);
++  const delta = await buildSourceDelta(map, pairs, dsn, ports.readSource);
++  if (!ports.current()) throw new Error("Project changed during source Mapping verification; no write performed.");
++  if (delta.upserts.length === 0) {
++    ports.openSaved(map);
++    return { mapId: map.id, mapName: map.name, count: pairs.size, destination: "source table (already current)",
++      message: `All ${pairs.size} confirmed keys already have the same values in '${map.name}'; no table changes were necessary.` };
++  }
++  // Existing App save owner invokes writeKeyMap with contentHash and per-row baselines.
++  const result = await ports.save(map, { dirtyDelta: delta });
++  if (result.external !== "synced") {
++    throw new Error(`Source Mapping write was not confirmed: ${result.message} (status ${result.external}).`);
++  }
++  ports.openSaved(map);
++  return { mapId: map.id, mapName: map.name, count: pairs.size, destination: "source table",
++    message: `Saved ${delta.upserts.length} changed keys (${pairs.size} confirmed) directly to the source table of '${map.name}'. ${result.message}` };
++}
+--- a/src/app/matching/saveDatasetMapping.test.ts
++++ b/src/app/matching/saveDatasetMapping.test.ts
+@@ -0,0 +1,91 @@
++import assert from "node:assert/strict";
++import type { KeyMapDef, KeyMapEntry } from "../../types/pipeline";
++import { loadApprovedPairs, saveDatasetMatching, type SaveMatchingIntent,
++  type SaveMatchingPorts } from "./saveDatasetMapping";
++
++const plan: SaveMatchingIntent["plan"] = {
++  sourceRef: "sales", targetRef: "product", mapKeyFields: ["sku"],
++  targetIdentityFields: ["id"], outputs: ["erp_id"],
++  comparisons: [{ sourceField: "name", targetField: "name", role: "soft_signal" }],
++  normalization: ["trim", "casefold"], ambiguity: "leave_for_manual", scope: "full",
++  semanticRevision: 1, uiRevision: 0,
++};
++const intent = (mapId: string | null): SaveMatchingIntent => ({
++  runId: "r55", targetMapId: mapId, newMapName: mapId ? null : "Product relationships", plan,
++});
++const seed = (): KeyMapDef => ({ id: "m1", name: "Products", entries: [],
++  storage: { kind: "seed" }, from_column: "sku", from_columns: ["sku"],
++  to_column: "erp_id", output_columns: ["erp_id"] });
++const source = (): KeyMapDef => ({ ...seed(), id: "m_source", storage: { kind: "source", source: "warehouse", table: "product_map" } });
++const pages = [
++  { rows: [{ mapKey: '["A"]', outputs: '["R1"]', targetIdentity: '["R1"]' }], page: 0, pageSize: 200, total: 2 },
++  { rows: [{ mapKey: '["B"]', outputs: '["R2"]', targetIdentity: '["R2"]' }], page: 1, pageSize: 200, total: 2 },
++];
++function harness(map: KeyMapDef) {
++  const calls: { map: KeyMapDef; delta?: unknown }[] = [];
++  const opened: KeyMapDef[] = [];
++  let rows: KeyMapEntry[] = [];
++  const ports: SaveMatchingPorts = {
++    maps: [map], current: () => true, editorBusy: () => false,
++    approvedPage: async (_id, page) => pages[page] ?? { rows: [], page, pageSize: 200, total: 2 },
++    save: async (next, options) => { calls.push({map:next, delta:options?.dirtyDelta});
++      return { local:"saved", external: next.storage?.kind === "source" ? "synced" : "none", message:"Saved" }; },
++    writableSourceDsn: () => "postgres://mock",
++    readSource: async () => ({ entries: rows, content_hash: "hash" }),
++    openSaved: map => { opened.push(map); },
++  };
++  return { ports, calls, opened, setRows: (next: KeyMapEntry[]) => { rows = next; } };
++}
++
++async function tests() {
++  const h = harness(seed());
++  const receipt = await saveDatasetMatching(intent("m1"), h.ports);
++  assert.equal(receipt.count, 2);
++  assert.equal(h.calls.length, 1);
++  assert.deepEqual(h.calls[0]!.map.entries.map(row => row.output_values), [["R1"], ["R2"]]);
++  assert.equal(h.opened.length, 1);
++
++  const inserted = harness(source());
++  await saveDatasetMatching(intent("m_source"), inserted.ports);
++  assert.deepEqual((inserted.calls[0]!.delta as {upserts: KeyMapEntry[]}).upserts.map(e => e.to), ["R1", "R2"]);
++  const bs = (inserted.calls[0]!.delta as {baselines: {existed:boolean}[]}).baselines;
++  assert.deepEqual(bs.map(b => b.existed), [false, false]);
++
++  const unchanged = harness(source());
++  unchanged.setRows([{from:"A",from_parts:["A"],to:"R1",output_values:["R1"]},
++    {from:"B",from_parts:["B"],to:"R2",output_values:["R2"]}]);
++  const same = await saveDatasetMatching(intent("m_source"), unchanged.ports);
++  assert.equal(unchanged.calls.length, 0);
++  assert.match(same.message, /no table changes/i);
++
++  const conflict = harness(source());
++  conflict.setRows([{from:"A",from_parts:["A"],to:"WRONG",output_values:["WRONG"]}]);
++  await assert.rejects(saveDatasetMatching(intent("m_source"), conflict.ports), /overwrite/i);
++  assert.equal(conflict.calls.length, 0);
++
++  const dirty = harness(source());
++  dirty.ports.editorBusy = () => true;
++  await assert.rejects(saveDatasetMatching(intent("m_source"), dirty.ports), /unsaved or in-flight/i);
++
++  const malformed = harness(seed());
++  malformed.ports.approvedPage = async (_id, page) => page === 0
++    ? {rows:[{mapKey:'["A"]',outputs:'["R1"]',targetIdentity:'["R1"]'}],page:0,pageSize:200,total:2}
++    : {rows:[],page,pageSize:200,total:2};
++  await assert.rejects(saveDatasetMatching(intent("m1"), malformed.ports), /incomplete page/i);
++  assert.equal(malformed.calls.length, 0);
++
++  const duplicate = harness(seed());
++  duplicate.ports.approvedPage = async () => ({rows:[
++    {mapKey:'["A"]', outputs:'["R1"]', targetIdentity:'["R1"]'},
++    {mapKey:'["A"]', outputs:'["R2"]', targetIdentity:'["R2"]'},
++  ], page:0, pageSize:200, total:2});
++  await assert.rejects(loadApprovedPairs(intent("m1"), duplicate.ports), /Multiple confirmed outputs/);
++
++  const created = harness(seed());
++  const made = await saveDatasetMatching(intent(null), created.ports);
++  assert.equal(made.mapName, "Product relationships");
++  assert.deepEqual(created.calls[0]!.map.from_columns, ["sku"]);
++  assert.deepEqual(created.calls[0]!.map.output_columns, ["erp_id"]);
++  console.log("Dataset Matching Save: seed/new, source delta, exact baselines, no-op, conflict, dirty editor, pagination, duplicate output passed");
++}
++void tests();

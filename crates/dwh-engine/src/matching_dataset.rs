@@ -352,6 +352,9 @@ pub fn dataset_matching_page(db: &DbSession, run_id: &str, page: u64, page_size:
     let decisions = format!("__dwh_match_d_{run_id}");
     let where_clause = match filter.unwrap_or("all") {
         "all" => String::new(),
+        // Includes below-threshold and no-candidate cases, but excludes keys
+        // blocked by unresolved source attribute conflicts.
+        "needs_review" => "WHERE d.left_id IS NULL AND s.state <> 'source_conflict'".to_string(),
         "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "source_conflict" | "confirm" | "reject" | "defer" | "no_target" =>
             format!("WHERE coalesce(d.action, s.state) = '{}'", filter.unwrap_or("all")),
         _ => return Err("invalid matching result filter".into()),
@@ -491,6 +494,10 @@ pub struct DatasetMatchingComparison {
     pub second_run: String,
     pub common_keys: u64,
     pub changed_target: u64,
+    pub changed_score: u64,
+    pub changed_status: u64,
+    pub changed_candidate_count: u64,
+    pub changed_source_rows: u64,
     pub became_matched: u64,
     pub became_unmatched: u64,
     pub first_only: u64,
@@ -517,6 +524,10 @@ pub fn compare_dataset_matching(db: &DbSession, first: &str, second: &str) -> Re
         first_run: first.into(), second_run: second.into(),
         common_keys: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL")?,
         changed_target: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND (a.outputs IS DISTINCT FROM b.outputs OR a.target_identity IS DISTINCT FROM b.target_identity)")?,
+        changed_score: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND a.score IS DISTINCT FROM b.score")?,
+        changed_status: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND a.state IS DISTINCT FROM b.state")?,
+        changed_candidate_count: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND a.alternatives IS DISTINCT FROM b.alternatives")?,
+        changed_source_rows: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND a.source_rows IS DISTINCT FROM b.source_rows")?,
         became_matched: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND a.right_id IS NULL AND b.right_id IS NOT NULL")?,
         became_unmatched: count("a.left_id IS NOT NULL AND b.left_id IS NOT NULL AND a.right_id IS NOT NULL AND b.right_id IS NULL")?,
         first_only: count("a.left_id IS NOT NULL AND b.left_id IS NULL")?,
@@ -531,6 +542,25 @@ mod tests {
     #[test] fn run_identifier_never_enters_sql_unsanitized() { assert!(safe_run_id("r123_abc").is_ok()); assert!(safe_run_id("r1;DROP TABLE x").is_err()); }
     #[test] fn default_estimate_percentage_is_five() { assert_eq!(sample_default(), 5); assert_eq!(right_sample_default(), 100); assert_eq!(sample_size(6, 5), 1); assert_eq!(sample_size(0, 5), 0); assert_eq!(sample_size(500, 20), 100); }
     #[test] fn page_limit_is_bounded() { assert_eq!(MAX_PAGE_SIZE, 200); }
+
+    #[test]
+    fn ab_comparison_reports_score_status_and_coverage_changes() {
+        let db = DbSession::new().unwrap();
+        db.with_conn(|conn| conn.execute_batch(
+            "CREATE TEMP TABLE __dwh_match_s_r901 (left_id BIGINT, map_key VARCHAR, outputs VARCHAR, target_identity VARCHAR, right_id BIGINT, score DOUBLE, state VARCHAR, alternatives BIGINT, source_rows BIGINT); \
+             INSERT INTO __dwh_match_s_r901 VALUES (1, '[\"A\"]', '[\"X\"]', '[\"X\"]', 1, 0.8, 'proposed', 2, 3); \
+             CREATE TEMP TABLE __dwh_match_s_r902 AS SELECT * FROM __dwh_match_s_r901; \
+             UPDATE __dwh_match_s_r902 SET score=0.9, state='ambiguous', alternatives=3, source_rows=4;"
+        ).map_err(|e| e.to_string())).unwrap();
+        let result = compare_dataset_matching(&db, "r901", "r902").unwrap();
+        assert_eq!(result.common_keys, 1);
+        assert_eq!(result.changed_target, 0);
+        assert_eq!(result.changed_score, 1);
+        assert_eq!(result.changed_status, 1);
+        assert_eq!(result.changed_candidate_count, 1);
+        assert_eq!(result.changed_source_rows, 1);
+    }
+
 
     #[test]
     fn dataset_evaluate_covers_more_than_old_trial_and_mass_caps() {

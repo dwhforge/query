@@ -5,7 +5,7 @@
     "title": "Shipments ↔ sales",
     "tagline": "Plant SKUs vs commercial codes — map, then explain qty and revenue gaps by month.",
     "teaches": [
-      "Why a plain Join fails when two systems name the same product differently",
+      "Why spelling similarity between commercial and plant product codes does not prove identity",
       "Partial KeyMap + Join Lens on unmatched commercial SKUs",
       "Monthly reconciliation after ApplyKeyMap"
     ],
@@ -21,9 +21,9 @@
     "id": "name_id_match",
     "track": "start",
     "title": "Two lists · match by name → id seed",
-    "tagline": "CRM and ERP catalogs share names, not ids. Auto matches on name; the seed stores id→id with name attrs for later edits.",
+    "tagline": "CRM and ERP catalogs share names, not ids. Select name ↔ name evidence in Matching, then save reviewed id→id correspondences.",
     "teaches": [
-      "Join on id fails across systems; Join Lens Auto scores sibling name columns",
+      "Join on id fails across systems; choose name ↔ name similarity instead of comparing technical identifiers",
       "Apply accepted writes crm_id → erp_id (not the display names)",
       "Edit the map later via from_name / to_name attrs — Apply still joins on ids"
     ],

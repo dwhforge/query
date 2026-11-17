@@ -46,7 +46,7 @@ export const FALLBACK_LAB_CATALOG: HelpLabCard[] = [
     tagline:
       "Plant SKUs vs commercial codes — map, then explain qty and revenue gaps by month.",
     teaches: [
-      "Why a plain Join fails when two systems name the same product differently",
+      "Why code similarity cannot prove that commercial and plant SKUs describe the same product",
       "Partial Mapping + Join Lens on unmatched commercial SKUs",
       "Monthly reconciliation after Apply Mapping",
     ],

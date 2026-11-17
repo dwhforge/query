@@ -140,6 +140,7 @@ export function matchingDatasetPublicationHistory(runId: string): Promise<Matchi
 }
 export type DatasetMatchingComparison = {
   firstRun: string; secondRun: string; commonKeys: number; changedTarget: number;
+  changedScore: number; changedStatus: number; changedCandidateCount: number; changedSourceRows: number;
   becameMatched: number; becameUnmatched: number; firstOnly: number; secondOnly: number;
   snapshotVerified: false;
 };

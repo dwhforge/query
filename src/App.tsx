@@ -5488,6 +5488,7 @@ function App() {
                       projectRef={projectRefContext(project)}
                       initialPlan={fullJoin?.plan}
                       lockedBindings={fullJoin?.locked}
+                      onSaveProject={() => { void handleSaveProject(); }}
                       initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
                       mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id, kind: m.storage?.kind ?? "seed" }))}
                       onOpenSavedMap={mapId => {

@@ -24,6 +24,7 @@ type Props = {
     plan: DatasetMatchingRequest["plan"] }) => Promise<{ mapId: string; mapName: string; count: number; destination: string; message: string }>;
   mapOptions?: { id: string; name: string; kind?: string }[];
   onOpenSavedMap?: (mapId: string) => void;
+  onSaveProject?: () => void;
   onPublishSource?: (runId: string, mapId: string, maxBatches: number) => Promise<{
     eligible: number; newlyPublished: number; previouslyPublished: number; rowsWritten: number; complete: boolean;
   }>;
@@ -43,7 +44,7 @@ function displayTuple(raw: string | null | undefined) {
 function safeMessage(e: unknown) { return e instanceof Error ? e.message : String(e); }
 
 /** Independent Matching uses full Host-evaluated datasets. No UI page is ever an engine input. */
-export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, onPublishSource, onOpenSavedMap, initialPlan, lockedBindings, initialMapId }: Props) {
+export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, onPublishSource, onOpenSavedMap, onSaveProject, initialPlan, lockedBindings, initialMapId }: Props) {
   const queries = workspace.queries ?? [];
   const [left, setLeft] = useState(initialPlan?.sourceRef ?? queries[0]?.id ?? "");
   const [right, setRight] = useState(initialPlan?.targetRef ?? queries[1]?.id ?? "");
@@ -108,6 +109,11 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   }, [left, right, workspace, connections, sources, projectRef.projectFile, projectRef.projectUid]);
 
   const attributeSuggestion = useMemo(() => suggestSharedDescriptiveField(leftColumns, rightColumns), [leftColumns, rightColumns]);
+  const reconLab = left === "dirty_recon" && right === "dim_product";
+  const nameLab = left === "dirty_by_id" && right === "erp_products";
+  const regionLab = left === "dirty_exact_pair";
+  const identityOnlyScoring = comparisons.some(c => c.role === "soft_signal" &&
+    textList(mapKeys).includes(c.sourceField) && textList(outputs).includes(c.targetField));
 
   const plan = useMemo<DatasetMatchingRequest["plan"]>(() => ({
     sourceRef: left,
@@ -165,6 +171,18 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
       if (kind === "estimate") {
         setEstimate(await matchingDatasetEstimate(workspace, connections, sources, projectRef, request));
       } else {
+        // A new Evaluate is a new Review. Preserve any reviewed decisions
+        // before replacing the active run; a failed checkpoint aborts the action.
+        if (run && (stats?.reviewed ?? 0) > 0) {
+          if (!progressLocation) throw new Error("Your current Evaluation has reviewed decisions. Save the project file first, then Evaluate again: the old Review must be checkpointed before it can be replaced.");
+          if (!evaluatedPlan || !evaluatedFingerprint) throw new Error("Previous Review has no evaluation identity; refusing to replace reviewed decisions.");
+          const preserved = await matchingProgressSave({ ...progressLocation, run,
+            slot: taskSlot, label: taskLabel,
+            plan: { matchingPlan: evaluatedPlan, inputFingerprint: evaluatedFingerprint, targetMapId: mapId },
+            finished: reviewFinished, expectedRevision: progressRevision });
+          setProgressRevision(preserved.revision);
+          await reloadTasks();
+        }
         const next = await matchingDatasetEvaluate(workspace, connections, sources, projectRef, request);
         // Keep one prior run for indicative comparison. Do not call this snapshot-verified A/B.
         if (run) {
@@ -182,6 +200,9 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
         setTaskLabel(`${left} → ${right}`);
         setPublicationHistory([]); setPublishedCount(0); setSaved(null); candidateFetchEpoch.current++;
         await reload(next, 0);
+        if (run && (stats?.reviewed ?? 0) > 0) {
+          setMessage("Previous Review saved as a resumable task before re-evaluation. New run starts with no decisions; use Resume to return to your earlier work.");
+        }
       }
     } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
@@ -258,16 +279,19 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   useEffect(() => { void reloadTasks().catch(() => undefined); }, [reloadTasks]);
 
   async function saveProgress(finished = false) {
-    if (!run || !runCurrent || !progressLocation || working || publishing) return;
+    // Allow preserving previously reviewed evidence even after moving/saving the
+    // project makes the evaluation stale. Stale evidence stays non-publishable.
+    if (!run || !progressLocation || working || publishing) return;
     setWorking(true); setError(null);
     try {
+      if (finished && !runCurrent) throw new Error("Cannot Finish Review using stale input definitions; Save Progress is still available.");
       if (finished && ((stats?.reviewed ?? 0) < run.leftTotal || (stats?.deferred ?? 0) > 0)) throw new Error("Finish Review requires decisions for all LEFT Mapping keys with no deferred rows; Save Progress does not.");
       const checkpoint = await matchingProgressSave({ ...progressLocation, run, slot: taskSlot, label: taskLabel,
         plan: { matchingPlan: evaluatedPlan ?? plan, inputFingerprint: evaluatedFingerprint, targetMapId: mapId }, finished: finished || reviewFinished,
         expectedRevision: progressRevision });
       setProgressRevision(checkpoint.revision);
       if (finished) setReviewFinished(true);
-      setMessage(`${finished ? "Review finished" : "Progress saved"}: ${checkpoint.reviewed}/${checkpoint.run.leftTotal} decisions. Transfer the project file and its sibling .matching directory for handoff.`);
+      setMessage(`${finished ? "Review finished" : "Progress saved"}: ${checkpoint.reviewed}/${checkpoint.run.leftTotal} decisions. ${runCurrent ? "" : "This Evaluation is stale and read-only until re-evaluated. "}Transfer the project file and its sibling .matching directory for handoff.`);
       await reloadTasks();
     } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
@@ -276,6 +300,15 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     if (!progressLocation || !resumeSlot || working || publishing) return;
     setWorking(true); setError(null);
     try {
+      // Never abandon another in-progress Review when opening a saved task.
+      if (run && (stats?.reviewed ?? 0) > 0) {
+        if (!evaluatedPlan || !evaluatedFingerprint) throw new Error("Current Review has no evaluation identity; refusing to replace reviewed decisions.");
+        const preserved = await matchingProgressSave({ ...progressLocation, run,
+          slot: taskSlot, label: taskLabel,
+          plan: { matchingPlan: evaluatedPlan, inputFingerprint: evaluatedFingerprint, targetMapId: mapId },
+          finished: reviewFinished, expectedRevision: progressRevision });
+        setProgressRevision(preserved.revision);
+      }
       const snapshot: MatchingCheckpoint = await matchingProgressRestore({ ...progressLocation, slot: resumeSlot });
       const stored = snapshot.plan.matchingPlan;
       if (!stored || !snapshot.plan.inputFingerprint) throw new Error("Checkpoint missing its Matching plan or input fingerprint.");
@@ -352,13 +385,22 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
       <div className="mt-2 flex flex-wrap items-end gap-2 text-xs" aria-label="Matching progress controls">
         <label>Task ID<input aria-label="Matching task ID" className="ml-1 w-32 rounded border border-slate-600 bg-slate-900 px-2 py-1" value={taskSlot} onChange={e => setTaskSlot(e.target.value)} /></label>
         <label>Task name<input aria-label="Matching task name" className="ml-1 w-40 rounded border border-slate-600 bg-slate-900 px-2 py-1" value={taskLabel} onChange={e => setTaskLabel(e.target.value)} /></label>
-        <button type="button" data-testid="matching-save-progress" className="rounded border border-slate-600 px-3 py-1" disabled={!progressLocation || !runCurrent || working || publishing} onClick={() => void saveProgress()}>Save Progress</button>
+        <button type="button" data-testid="matching-save-progress" className="rounded border border-slate-600 px-3 py-1" disabled={!progressLocation || !run || working || publishing} onClick={() => void saveProgress()}>Save Progress</button>
         <button type="button" className="rounded border border-slate-600 px-3 py-1" disabled={!runCurrent || working || publishing || reviewFinished || !run || (stats?.reviewed ?? 0) !== run.leftTotal || (stats?.deferred ?? 0) > 0} onClick={() => void saveProgress(true)}>Finish Review</button>
         <select aria-label="Saved Matching tasks" className="rounded border border-slate-600 bg-slate-900 px-2 py-1" value={resumeSlot} onChange={e=>setResumeSlot(e.target.value)}><option value="">Resume saved task…</option>{savedTasks.map(task=><option key={task.slot} value={task.slot}>{task.label} ({task.reviewed}/{task.leftTotal})</option>)}</select>
         <button type="button" className="rounded border border-slate-600 px-3 py-1" disabled={!resumeSlot || !progressLocation || working || publishing} onClick={() => void resumeProgress()}>Resume</button>
-        {!progressLocation && <span className="text-amber-300">Save project file first to enable durable progress.</span>}
+        {!progressLocation && <span className="flex items-center gap-2 text-amber-300">Save project file first to enable durable progress.
+          {onSaveProject && <button type="button" className="rounded border border-amber-600 px-2 py-1 hover:bg-amber-900/30" onClick={onSaveProject}>Save project…</button>}
+        </span>}
       </div>
     </header>
+    {(reconLab || nameLab || regionLab) && <details open className="shrink-0 border-b border-sky-900/60 bg-sky-950/20 px-4 py-2 text-xs text-sky-100" data-testid="matching-lab-guide">
+      <summary className="cursor-pointer font-semibold">Help Lab · Matching workflow</summary>
+      <p className="mt-1 text-sky-200/90">1. Save the project file before a long review (enables durable progress). 2. Check identity fields and matching rules. 3. Evaluate full scope. 4. Review and confirm only defensible pairs. 5. Save confirmed pairs to Mapping and Save Progress; Resume later if unfinished.</p>
+      {reconLab && <p className="mt-1 text-amber-200">This lab's LEFT sales rows have only <code>commercial_sku</code>, not a product name; RIGHT has <code>product_name</code>. Code similarity is NOT evidence of product equivalence. Review candidates manually, or enrich LEFT with names before using name similarity. Do not lower the threshold merely to produce proposals.</p>}
+      {nameLab && <p className="mt-1 text-sky-200">Both CRM and ERP catalogs provide <code>name</code>. Keep IDs as Mapping keys/outputs; compare product names as a soft signal before Evaluate.</p>}
+      {regionLab && <p className="mt-1 text-sky-200">Region belongs to the Mapping key: same vendor name in US and DE can mean different entities. Preserve both fields, inspect ambiguities, save confirmed pairs, then verify the mapped mart and the original JOIN counts.</p>}
+    </details>}
     <div className="grid min-h-0 flex-1 grid-cols-[minmax(260px,320px)_minmax(0,1fr)]">
       <aside className="space-y-3 overflow-y-auto border-r border-slate-700 p-3 text-xs">
         <div className="font-semibold uppercase text-slate-400">Datasets &amp; identity</div>
@@ -375,6 +417,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
           title="Use the shared descriptive field for similarity while leaving Mapping identities and outputs unchanged">
           Compare by {attributeSuggestion.sourceField} ↔ {attributeSuggestion.targetField}
         </button>}
+        {identityOnlyScoring && <div role="note" className="rounded border border-amber-800/70 bg-amber-950/25 p-2 text-amber-200">Current similarity compares Mapping identifiers. Similar strings are not proof of identical entities. Prefer descriptive evidence where available; otherwise review pairs manually.</div>}
         {comparisons.map((rule, i) => <div key={i} className="space-y-1 rounded border border-slate-700 p-2">
           <select aria-label={`LEFT field ${i + 1}`} className={`w-full ${cn}`} value={rule.sourceField} onChange={e => editRule(i, { sourceField: e.target.value })}><option value="">LEFT field</option>{leftColumns.map(f => <option key={f} value={f}>{f}</option>)}</select>
           <select aria-label={`RIGHT field ${i + 1}`} className={`w-full ${cn}`} value={rule.targetField} onChange={e => editRule(i, { targetField: e.target.value })}><option value="">RIGHT field</option>{rightColumns.map(f => <option key={f} value={f}>{f}</option>)}</select>
@@ -399,18 +442,18 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
             <div className="flex flex-wrap gap-4 text-sm"><strong className="text-teal-200">{run.leftTotal.toLocaleString()} LEFT keys / {run.leftSourceRows.toLocaleString()} source rows</strong><span>{run.rightTotal.toLocaleString()} RIGHT</span><span>{run.proposedSources} proposed</span><span className="text-amber-300">{run.ambiguousSources} ambiguous</span><span className="text-amber-200">{run.belowThresholdSources} below threshold</span><span>{run.unmatchedSources} no candidates</span><span className="text-amber-300">{run.conflictingSourceKeys} source attribute conflicts</span><span>{run.candidatePairs} candidate pairs evaluated</span><span>{run.aboveThresholdPairs} pairs above threshold</span><span className="text-amber-200">{run.reusedTargets} reused RIGHT identities</span></div>
             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>
             {previousRun && <div className="mt-1 text-xs text-slate-400">Previous run: {previousRun.proposedSources} proposed → {run.proposedSources}; {previousRun.ambiguousSources} ambiguous → {run.ambiguousSources}. Different source snapshots may invalidate comparison.</div>}
-            {comparison && <div className="mt-1 text-xs text-amber-300">Indicative relationship A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys. Snapshot verified: no.</div>}
-            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || reviewFinished || !runCurrent || !eligibleBulk} title={!eligibleBulk ? "No proposed matches above threshold; review below-threshold candidates individually" : "Confirm all eligible unambiguous proposals across all result pages"} onClick={() => void confirmClear()}>Confirm all eligible ({run.proposedSources})</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>{!eligibleBulk && <span className="text-xs text-amber-300">No auto-eligible proposals; inspect candidates and confirm a pair manually.</span>}
+            {comparison && <div className="mt-1 text-xs text-amber-300">Indicative evaluation A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys · {comparison.changedScore} changed score · {comparison.changedStatus} changed classification · {comparison.changedCandidateCount} changed candidate count · {comparison.changedSourceRows} changed source-row count. Review decisions are not compared. Snapshot verified: no.</div>}
+            <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || reviewFinished || !runCurrent || !eligibleBulk} title={!eligibleBulk ? "No proposed matches above threshold; review below-threshold candidates individually" : "Confirm unreviewed eligible proposals across all result pages"} onClick={() => void confirmClear()}>Confirm unreviewed proposals (up to {run.proposedSources})</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>{!eligibleBulk && <span className="text-xs text-amber-300">No auto-eligible proposals; inspect candidates and confirm a pair manually.</span>}
               <label className="ml-auto flex items-center gap-1 text-xs">Result filter
                 <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);closeDetails();}).catch(e => setError(safeMessage(e))); }}>
-                  <option value="all">All</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="source_conflict">Source attributes conflict</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
+                  <option value="all">All</option><option value="needs_review">Needs review</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="source_conflict">Source attributes conflict</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
                 </select>
               </label>
             </div>
           </div>
           <div className="relative flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state}</td></tr>)}</tbody></table></div>
+              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state === "confirm" ? "Confirmed" : row.state === "defer" ? "Deferred" : row.state === "reject" ? "Rejected" : row.state === "no_target" ? "No suitable RIGHT" : row.state}</td></tr>)}</tbody></table></div>
               <div className="flex shrink-0 items-center justify-between border-t border-slate-700 p-2 text-xs"><span>Rows {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows?.total ?? 0)} / {rows?.total ?? 0}</span><div className="flex gap-2"><button className={btn} disabled={page === 0 || working} onClick={() => void reload(run, page - 1)}>Previous</button><button className={btn} disabled={!rows || (page + 1) * PAGE_SIZE >= rows.total || working} onClick={() => void reload(run, page + 1)}>Next</button></div></div>
             </div>
             {selected && <><button type="button" aria-label="Close Matching details backdrop" className="absolute inset-0 z-10 bg-slate-950/25" onClick={closeDetails} /><aside role="dialog" aria-modal="false" aria-label="Matching candidate details" className="absolute inset-y-0 right-0 z-20 w-[min(420px,90%)] overflow-y-auto border-l border-slate-600 bg-[#101d2c] p-3 text-xs shadow-2xl"><div className="flex items-center justify-between gap-2"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><button type="button" aria-label="Close Matching details" className={`${btn} text-base`} onClick={closeDetails}>×</button></div><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || reviewFinished || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || reviewFinished || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || reviewFinished || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || reviewFinished || !runCurrent || selected.state === "source_conflict" || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside></>}

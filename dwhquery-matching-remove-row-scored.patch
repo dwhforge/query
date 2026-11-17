@@ -1,0 +1,17 @@
+diff --git a/src/components/matching/MatchingSetView.tsx b/src/components/matching/MatchingSetView.tsx
+index 8b0ef51..5a45015 100644
+--- a/src/components/matching/MatchingSetView.tsx
++++ b/src/components/matching/MatchingSetView.tsx
+@@ -171,11 +171,7 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
+           <td className="p-2">{row.score === null ? "Unknown" : row.score.toFixed(3)}</td>
+           <td className="p-2"><span className={category(row) === "proposed" ? "text-teal-200" : category(row) === "incomplete" ? "text-amber-200" : "text-slate-300"}>
+             {labels[category(row)]}
+-          </span><div className="mt-0.5 text-[10px] text-slate-500">
+-            {evidenceCounts.get(row.id)?.scored ?? 0} scored
+-            {evidenceCounts.get(row.id)?.above != null ? ` · ${evidenceCounts.get(row.id)!.above} above threshold` : ""}
+-            {(evidenceCounts.get(row.id)?.unknown ?? 0) > 0 ? ` · ${evidenceCounts.get(row.id)!.unknown} unknown` : ""}
+-          </div></td>
++          </span></td>
+           <td className="p-2"><button type="button" className="rounded border border-slate-700 px-2 py-1 text-teal-100"
+             onClick={() => { setInspectedId(row.id); setSelectedCandidateId(null); }}>Details</button></td>
+         </tr>)}</tbody>

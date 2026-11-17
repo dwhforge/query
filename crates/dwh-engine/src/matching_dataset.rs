@@ -360,9 +360,12 @@ pub fn dataset_matching_page(db: &DbSession, run_id: &str, page: u64, page_size:
         _ => return Err("invalid matching result filter".into()),
     };
     let from = format!("FROM {table} s LEFT JOIN {decisions} d ON d.left_id=s.left_id {where_clause}");
+    // Only the visible rows need the chosen candidate. Keep the count query
+    // independent of the potentially very large scored-pairs relation.
+    let from_with_choice = format!("FROM {table} s LEFT JOIN {decisions} d ON d.left_id=s.left_id LEFT JOIN __dwh_match_p_{run_id} chosen ON d.action='confirm' AND chosen.left_id=d.left_id AND chosen.right_id=d.right_id {where_clause}");
     let total = scalar(db, &format!("SELECT count(*) {from}"))?;
     let rows = db.with_conn(|conn| {
-        let mut stmt = conn.prepare(&format!("SELECT s.left_id, s.map_key, s.source_rows, s.right_id, s.target_identity, s.outputs, s.score, s.alternatives, coalesce(d.action, s.state) AS state {from} ORDER BY s.left_id LIMIT {page_size} OFFSET {offset}")).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&format!("SELECT s.left_id, s.map_key, s.source_rows, CASE WHEN d.action='confirm' THEN chosen.right_id ELSE s.right_id END, CASE WHEN d.action='confirm' THEN chosen.target_identity ELSE s.target_identity END, CASE WHEN d.action='confirm' THEN chosen.outputs ELSE s.outputs END, CASE WHEN d.action='confirm' THEN chosen.score ELSE s.score END, s.alternatives, coalesce(d.action, s.state) AS state {from_with_choice} ORDER BY s.left_id LIMIT {page_size} OFFSET {offset}")).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |r| Ok(DatasetMatchRow { left_id: r.get(0)?, map_key: r.get(1)?, source_rows: r.get::<_, i64>(2)? as u64, right_id: r.get(3)?, target_identity: r.get(4)?, outputs: r.get(5)?, score: r.get(6)?, alternatives: r.get::<_, i64>(7)? as u64, state: r.get(8)? })).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     })?;

@@ -88,7 +88,7 @@ export function matchingDatasetCandidates(runId: string, leftId: number, page = 
 export function matchingDatasetDrop(runId: string): Promise<{ released: boolean }> {
   return invoke<{ released: boolean }>("matching_dataset_drop", { runId });
 }
-export function matchingDatasetDecide(args: { runId: string; leftId: number; rightId?: number | null; action: "confirm" | "reject" | "defer" | "no_target" }): Promise<DatasetReviewStats> {
+export function matchingDatasetDecide(args: { runId: string; leftId: number; rightId?: number | null; action: "confirm" | "reject" | "defer" | "no_target" | "clear" }): Promise<DatasetReviewStats> {
   return invoke<DatasetReviewStats>("matching_dataset_decide", args);
 }
 export function matchingDatasetConfirmClear(runId: string): Promise<DatasetReviewStats> {

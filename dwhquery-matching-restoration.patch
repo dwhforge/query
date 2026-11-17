@@ -1,0 +1,88 @@
+diff --git a/crates/dwh-engine/src/matching_dataset.rs b/crates/dwh-engine/src/matching_dataset.rs
+--- a/crates/dwh-engine/src/matching_dataset.rs
++++ b/crates/dwh-engine/src/matching_dataset.rs
+@@ -412,3 +412,3 @@
+-    if !matches!(request.action.as_str(), "confirm" | "reject" | "defer" | "no_target") {
++    if !matches!(request.action.as_str(), "confirm" | "reject" | "defer" | "no_target" | "clear") {
+         return Err("invalid review action".into());
+     }
+@@ -436,8 +436,17 @@
+         return Err("non-confirm review must not set rightId".into());
+     }
+-    db.with_conn(|conn| conn.execute(
+-        &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
+-        duckdb::params![request.left_id, request.right_id, request.action],
+-    ).map(|_| ()).map_err(|e| e.to_string()))?;
++    if request.action == "clear" {
++        // Evidence is immutable; removing the review row reveals its original
++        // classification and best-scored candidate in dataset_matching_page.
++        db.with_conn(|conn| conn.execute(
++            &format!("DELETE FROM {d} WHERE left_id = ?1"),
++            duckdb::params![request.left_id],
++        ).map(|_| ()).map_err(|e| e.to_string()))?;
++    } else {
++        db.with_conn(|conn| conn.execute(
++            &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
++            duckdb::params![request.left_id, request.right_id, request.action],
++        ).map(|_| ()).map_err(|e| e.to_string()))?;
++    }
+     dataset_matching_review_stats(db, &request.run_id)
+ }
+@@ -658,2 +667,22 @@
+         assert_eq!(stats.confirmed, 1);
++        let cleared = dataset_matching_decide(&db, &DatasetReviewRequest {
++            run_id: run.run_id.clone(), left_id: first.left_id, right_id: None,
++            action: "clear".into(),
++        }).unwrap();
++        assert_eq!(cleared.confirmed, 0);
++        assert_eq!(cleared.reviewed, 0);
++        let reset_page = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
++        assert_eq!(reset_page.rows[0].state, first.state);
++        assert_eq!(reset_page.rows[0].right_id, first.right_id);
++        let rejected = dataset_matching_decide(&db, &DatasetReviewRequest {
++            run_id: run.run_id.clone(), left_id: first.left_id, right_id: None,
++            action: "reject".into(),
++        }).unwrap();
++        assert_eq!(rejected.rejected, 1);
++        let cleared = dataset_matching_decide(&db, &DatasetReviewRequest {
++            run_id: run.run_id.clone(), left_id: first.left_id, right_id: None,
++            action: "clear".into(),
++        }).unwrap();
++        assert_eq!(cleared.rejected, 0);
++        assert_eq!(cleared.reviewed, 0);
+         let all = dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap();
+diff --git a/src/lib/bridge.ts b/src/lib/bridge.ts
+--- a/src/lib/bridge.ts
++++ b/src/lib/bridge.ts
+@@ -91,1 +91,1 @@
+-export function matchingDatasetDecide(args: { runId: string; leftId: number; rightId?: number | null; action: "confirm" | "reject" | "defer" | "no_target" }): Promise<DatasetReviewStats> {
++export function matchingDatasetDecide(args: { runId: string; leftId: number; rightId?: number | null; action: "confirm" | "reject" | "defer" | "no_target" | "clear" }): Promise<DatasetReviewStats> {
+diff --git a/src/components/matching/DatasetMatchingWorkspace.tsx b/src/components/matching/DatasetMatchingWorkspace.tsx
+--- a/src/components/matching/DatasetMatchingWorkspace.tsx
++++ b/src/components/matching/DatasetMatchingWorkspace.tsx
+@@ -235,1 +235,1 @@
+-  async function decide(action: "confirm" | "reject" | "defer" | "no_target", target?: number) {
++  async function decide(action: "confirm" | "reject" | "defer" | "no_target" | "clear", target?: number) {
+@@ -247,1 +247,19 @@
++  // Undo affects the current Review only; it does not revert a saved Mapping.
++  async function undoDecision(row: DatasetMatchRow) {
++    if (!run || !runCurrent || working || publishing || reviewFinished ||
++        !["confirm", "reject", "defer", "no_target"].includes(row.state)) return;
++    setWorking(true); setError(null);
++    try {
++      const updated = await matchingDatasetDecide({
++        runId: run.runId, leftId: row.leftId, rightId: null, action: "clear",
++      });
++      const refreshed = await matchingDatasetPage(run.runId, page, PAGE_SIZE, filter);
++      setRows(refreshed); setStats(updated); setSaved(null);
++      if (selected?.leftId === row.leftId) {
++        setSelected(refreshed.rows.find(item => item.leftId === row.leftId) ?? null);
++      }
++      setMessage(`Decision cleared for ${displayTuple(row.mapKey)}. Original evaluated candidates remain available; saved Mapping is unchanged.`);
++    } catch (e) { setError(safeMessage(e)); }
++    finally { setWorking(false); }
++  }
+   // One-click review of the highest-scored candidate visible in the grid.
+@@ -486,1 +504,1 @@
+-              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2" title="Highest-scored RIGHT candidate, or the manually confirmed RIGHT">Best / confirmed RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th><th className="p-2">Review</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state === "confirm" ? "Confirmed" : row.state === "defer" ? "Deferred" : row.state === "reject" ? "Rejected" : row.state === "no_target" ? "No suitable RIGHT" : row.state}</td><td className="p-2"><div className="flex items-center gap-1"><button type="button" data-testid={`matching-confirm-best-${row.leftId}`} className={`${btn} whitespace-nowrap border-teal-700 text-teal-200`} disabled={working || publishing || reviewFinished || !runCurrent || row.rightId == null || !["proposed", "ambiguous", "below_threshold"].includes(row.state)} title="Confirm the highest-scored candidate shown in this row (Review only; no Mapping write)" onClick={e => { e.stopPropagation(); void confirmBest(row); }}>Confirm best</button><button type="button" className={`${btn} whitespace-nowrap`} onClick={e => { e.stopPropagation(); void chooseRow(row); }} aria-label={`Review alternatives for ${displayTuple(row.mapKey)}`}>Details</button></div></td></tr>)}</tbody></table></div>
++              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2" title="Highest-scored RIGHT candidate, or the manually confirmed RIGHT">Best / confirmed RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th><th className="p-2">Review</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} aria-selected={selected?.leftId === row.leftId} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}<div className="text-[10px] text-slate-500">{row.sourceRows} source {row.sourceRows === 1 ? "row" : "rows"}</div></td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "source_conflict" ? "Source attributes conflict" : row.state === "confirm" ? "Confirmed" : row.state === "defer" ? "Deferred" : row.state === "reject" ? "Rejected" : row.state === "no_target" ? "No suitable RIGHT" : row.state}</td><td className="p-2"><div className="flex items-center gap-1">{["confirm", "reject", "defer", "no_target"].includes(row.state) ? <button type="button" data-testid={`matching-undo-decision-${row.leftId}`} className={`${btn} whitespace-nowrap border-amber-700 text-amber-200`} disabled={working || publishing || reviewFinished || !runCurrent} title="Clear this Review decision without changing saved Mapping" onClick={e => { e.stopPropagation(); void undoDecision(row); }}>Undo decision</button> : <button type="button" data-testid={`matching-confirm-best-${row.leftId}`} className={`${btn} whitespace-nowrap border-teal-700 text-teal-200`} disabled={working || publishing || reviewFinished || !runCurrent || row.rightId == null || !["proposed", "ambiguous", "below_threshold"].includes(row.state)} title="Confirm the highest-scored candidate shown in this row (Review only; no Mapping write)" onClick={e => { e.stopPropagation(); void confirmBest(row); }}>Confirm best</button>}<button type="button" className={`${btn} whitespace-nowrap`} onClick={e => { e.stopPropagation(); void chooseRow(row); }} aria-label={`Review alternatives for ${displayTuple(row.mapKey)}`}>Details</button></div></td></tr>)}</tbody></table></div>

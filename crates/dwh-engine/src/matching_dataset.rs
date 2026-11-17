@@ -409,7 +409,7 @@ pub struct DatasetReviewStats { pub reviewed: u64, pub confirmed: u64, pub defer
 
 pub fn dataset_matching_decide(db: &DbSession, request: &DatasetReviewRequest) -> Result<DatasetReviewStats, String> {
     safe_run_id(&request.run_id)?;
-    if !matches!(request.action.as_str(), "confirm" | "reject" | "defer" | "no_target") {
+    if !matches!(request.action.as_str(), "confirm" | "reject" | "defer" | "no_target" | "clear") {
         return Err("invalid review action".into());
     }
     let d = format!("__dwh_match_d_{}", request.run_id);
@@ -435,10 +435,19 @@ pub fn dataset_matching_decide(db: &DbSession, request: &DatasetReviewRequest) -
     } else if request.right_id.is_some() {
         return Err("non-confirm review must not set rightId".into());
     }
-    db.with_conn(|conn| conn.execute(
-        &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
-        duckdb::params![request.left_id, request.right_id, request.action],
-    ).map(|_| ()).map_err(|e| e.to_string()))?;
+    if request.action == "clear" {
+        // Evidence is immutable; removing the review row reveals its original
+        // classification and best-scored candidate in dataset_matching_page.
+        db.with_conn(|conn| conn.execute(
+            &format!("DELETE FROM {d} WHERE left_id = ?1"),
+            duckdb::params![request.left_id],
+        ).map(|_| ()).map_err(|e| e.to_string()))?;
+    } else {
+        db.with_conn(|conn| conn.execute(
+            &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
+            duckdb::params![request.left_id, request.right_id, request.action],
+        ).map(|_| ()).map_err(|e| e.to_string()))?;
+    }
     dataset_matching_review_stats(db, &request.run_id)
 }
 
@@ -656,6 +665,26 @@ mod tests {
             action: "confirm".into(),
         }).unwrap();
         assert_eq!(stats.confirmed, 1);
+        let cleared = dataset_matching_decide(&db, &DatasetReviewRequest {
+            run_id: run.run_id.clone(), left_id: first.left_id, right_id: None,
+            action: "clear".into(),
+        }).unwrap();
+        assert_eq!(cleared.confirmed, 0);
+        assert_eq!(cleared.reviewed, 0);
+        let reset_page = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
+        assert_eq!(reset_page.rows[0].state, first.state);
+        assert_eq!(reset_page.rows[0].right_id, first.right_id);
+        let rejected = dataset_matching_decide(&db, &DatasetReviewRequest {
+            run_id: run.run_id.clone(), left_id: first.left_id, right_id: None,
+            action: "reject".into(),
+        }).unwrap();
+        assert_eq!(rejected.rejected, 1);
+        let cleared = dataset_matching_decide(&db, &DatasetReviewRequest {
+            run_id: run.run_id.clone(), left_id: first.left_id, right_id: None,
+            action: "clear".into(),
+        }).unwrap();
+        assert_eq!(cleared.rejected, 0);
+        assert_eq!(cleared.reviewed, 0);
         let all = dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap();
         assert_eq!(all.confirmed, 500);
         let approved = dataset_matching_approved_page(&db, &run.run_id, 0, 200).unwrap();

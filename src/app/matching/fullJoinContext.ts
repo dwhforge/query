@@ -32,7 +32,9 @@ export function fullJoinContext(workspace: Workspace, session: MatchingTabSessio
   if (step?.type !== "Join" ||
       JSON.stringify(step.payload.left_on) !== JSON.stringify(b.leftOn) ||
       JSON.stringify(step.payload.right_on) !== JSON.stringify(b.rightOn)) return null;
-  if (typeof step.payload.right_query_id === "string" && step.payload.right_query_id !== b.rightQueryId) return null;
+  // External reference IDs are not interchangeable with local query IDs.
+  // Falling back to a same-named local query would silently match the wrong RIGHT.
+  if (typeof step.payload.right_query_id !== "string" || step.payload.right_query_id !== b.rightQueryId) return null;
   const target = workspace.queries.find(q => q.id === b.rightQueryId);
   if (!target) return null;
   // No output or identity rewriting: the JOIN's ordered keys and outputs

@@ -44,4 +44,10 @@ assert.strictEqual(fullJoinContext(ws, session), context, "stable schema context
 assert.equal(fullJoinContext(ws, {...session, joinBinding: {...session.joinBinding!, rightQueryId: "fact"}}), null, "self-JOIN requires a distinct target");
 assert.equal(fullJoinContext(ws, {...session, joinBinding: {...session.joinBinding!, joinStepIndex: 2}}), null, "wrong Join step is refused");
 assert.equal(fullJoinContext(ws, {...session, executionMode: "demo"}), null, "fixtures cannot become live authority");
+const foreignRight = structuredClone(ws);
+const foreignJoin = foreignRight.queries.find(q => q.id === "fact")?.steps[1];
+assert.equal(foreignJoin?.type, "Join");
+if (foreignJoin?.type !== "Join") throw new Error("test requires a JOIN step");
+foreignJoin.payload.right_query_id = {scope: "reference", reference_id: "foreign", kind: "query", id: "dim"};
+assert.equal(fullJoinContext(foreignRight, session), null, "external RIGHT reference cannot be silently rebound to local dim");
 console.log("Full JOIN context: pre-JOIN isolation, immutable keys/outputs, validation passed");

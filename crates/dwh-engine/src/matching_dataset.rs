@@ -60,6 +60,10 @@ pub struct DatasetMatchingRun {
     pub ambiguous_sources: u64,
     pub below_threshold_sources: u64,
     pub unmatched_sources: u64,
+    /// Physical LEFT rows whose Mapping key appears in more than one source row.
+    /// These require review; automatic confirmation is always prohibited.
+    pub duplicate_key_sources: u64,
+    pub distinct_map_keys: u64,
     pub candidate_policy: String,
     pub source_coverage: String,
     pub candidate_search_exhaustive: bool,
@@ -279,7 +283,7 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
             "CREATE TEMP TABLE {pairs} AS SELECT l.__matching_row_id AS left_id, r.__matching_row_id AS right_id, {targets} AS target_identity, {outputs} AS outputs, CAST({score} AS DOUBLE) AS score FROM {lt} l JOIN {rt} r ON {join};"
         )).map_err(|e| e.to_string()))?;
         db.with_conn(|conn| conn.execute_batch(&format!(
-            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1) SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id;",
+            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1), classified AS (SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id), with_key_counts AS (SELECT *, count(*) OVER (PARTITION BY map_key) AS key_occurrences FROM classified) SELECT left_id, map_key, right_id, target_identity, outputs, score, alternatives, CASE WHEN key_occurrences > 1 THEN 'duplicate_key' ELSE state END AS state FROM with_key_counts;",
             req.minimum_score, req.minimum_score
         )).map_err(|e| e.to_string()))?;
         db.with_conn(|conn| conn.execute_batch(&format!(
@@ -293,8 +297,11 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
         let ambiguous_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'ambiguous'"))?;
         let below_threshold_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'below_threshold'"))?;
         let unmatched_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'unmatched'"))?;
-        if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources != left_total { return Err("matching coverage invariant violated".into()); }
-        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
+        let duplicate_key_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'duplicate_key'"))?;
+        let distinct_map_keys = scalar(db, &format!("SELECT count(*) FROM (SELECT DISTINCT map_key FROM {results}) keys"))?;
+        if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources + duplicate_key_sources != left_total { return Err("matching coverage invariant violated".into()); }
+        if duplicate_key_sources == 0 && distinct_map_keys != left_total { return Err("matching key uniqueness invariant violated".into()); }
+        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources, duplicate_key_sources, distinct_map_keys,
             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
             source_coverage: "complete".into(), candidate_search_exhaustive:
                 !req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint),
@@ -318,7 +325,7 @@ pub fn dataset_matching_page(db: &DbSession, run_id: &str, page: u64, page_size:
     let decisions = format!("__dwh_match_d_{run_id}");
     let where_clause = match filter.unwrap_or("all") {
         "all" => String::new(),
-        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "confirm" | "reject" | "defer" | "no_target" =>
+        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "duplicate_key" | "confirm" | "reject" | "defer" | "no_target" =>
             format!("WHERE coalesce(d.action, s.state) = '{}'", filter.unwrap_or("all")),
         _ => return Err("invalid matching result filter".into()),
     };
@@ -386,10 +393,30 @@ pub fn dataset_matching_decide(db: &DbSession, request: &DatasetReviewRequest) -
     } else if request.right_id.is_some() {
         return Err("non-confirm review must not set rightId".into());
     }
-    db.with_conn(|conn| conn.execute(
-        &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
-        duckdb::params![request.left_id, request.right_id, request.action],
-    ).map(|_| ()).map_err(|e| e.to_string()))?;
+    // One Mapping key must not resolve to conflicting identities/outputs across
+    // physical LEFT rows. Check and write under the same DB connection lock.
+    db.with_conn(|conn| {
+        if request.action == "confirm" {
+            let conflict = format!(
+                "SELECT count(*) FROM {d} d JOIN {s} other ON other.left_id = d.left_id \
+                 JOIN {p} prior ON prior.left_id = d.left_id AND prior.right_id = d.right_id \
+                 JOIN {p} chosen ON chosen.left_id = {} AND chosen.right_id = {} \
+                 JOIN {s} current ON current.left_id = chosen.left_id \
+                 WHERE d.action = 'confirm' AND other.left_id <> current.left_id \
+                 AND other.map_key = current.map_key \
+                 AND (prior.outputs IS DISTINCT FROM chosen.outputs OR prior.target_identity IS DISTINCT FROM chosen.target_identity)",
+                request.left_id, request.right_id.unwrap(),
+            );
+            let conflicting: i64 = conn.query_row(&conflict, [], |r| r.get(0)).map_err(|e| e.to_string())?;
+            if conflicting > 0 {
+                return Err("conflicting reviewed target for the same Mapping key; resolve all duplicate-key rows consistently".into());
+            }
+        }
+        conn.execute(
+            &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
+            duckdb::params![request.left_id, request.right_id, request.action],
+        ).map(|_| ()).map_err(|e| e.to_string())
+    })?;
     dataset_matching_review_stats(db, &request.run_id)
 }
 
@@ -397,6 +424,8 @@ pub fn dataset_matching_confirm_unambiguous(db: &DbSession, run_id: &str) -> Res
     safe_run_id(run_id)?;
     let d = format!("__dwh_match_d_{run_id}");
     let s = format!("__dwh_match_s_{run_id}");
+    // Only uniquely keyed proposals are eligible; duplicate-key records remain
+    // visible in the Relationship Set but are never bulk-confirmed.
     db.with_conn(|conn| conn.execute_batch(&format!(
         "INSERT INTO {d}(left_id,right_id,action) SELECT left_id,right_id,'confirm' FROM {s} WHERE state='proposed' AND left_id NOT IN (SELECT left_id FROM {d})"
     )).map_err(|e| e.to_string()))?;
@@ -431,6 +460,16 @@ pub fn dataset_matching_approved_page(db: &DbSession, run_id: &str, page: u64, p
     let d = format!("__dwh_match_d_{run_id}");
     let p = format!("__dwh_match_p_{run_id}");
     let s = format!("__dwh_match_s_{run_id}");
+    // A Mapping key denotes one relationship, even when many physical source
+    // rows share it. Never export a partial decision for that logical key.
+    let partial = scalar(db, &format!(
+        "SELECT count(*) FROM (SELECT s.map_key FROM {s} s LEFT JOIN {d} d ON s.left_id=d.left_id \
+         GROUP BY s.map_key HAVING count(*) FILTER (WHERE d.action='confirm') > 0 \
+         AND count(*) FILTER (WHERE d.action='confirm') < count(*)) incomplete_keys"
+    ))?;
+    if partial > 0 {
+        return Err("Mapping export refused: partially confirmed duplicate Mapping keys remain; confirm every physical row sharing each approved key".into());
+    }
     let joined = format!("{d} d JOIN {p} p ON d.left_id=p.left_id AND d.right_id=p.right_id JOIN {s} s ON s.left_id=d.left_id");
     let total = scalar(db, &format!("SELECT count(*) FROM {joined} WHERE d.action='confirm'"))?;
     let rows = db.with_conn(|conn| {
@@ -648,6 +687,64 @@ R3,X2,Gamma
         let alternatives = dataset_matching_candidates(&db, &run.run_id, below.rows[0].left_id, 0, 50).unwrap();
         assert_eq!(alternatives.total, 1, "below-threshold evidence remains reviewable");
         assert_eq!(dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap().confirmed, 0);
+        drop_dataset_matching_run(&db, &run.run_id).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn duplicate_mapping_keys_are_never_bulk_confirmed_and_conflicting_manual_picks_are_rejected() {
+        use dwh_pipeline::{QueryDef, TransformationStep};
+        let base = std::env::temp_dir().join(format!("dwh_matching_duplicates_{}", NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&base).unwrap();
+        let left_path = base.join("left.csv");
+        let right_path = base.join("right.csv");
+        std::fs::write(&left_path, "code,name\nX,Product\nX,Product\nY,Unique\n").unwrap();
+        std::fs::write(&right_path, "id,code,name\nR1,X,Product\nR2,X,Produxt\nR3,Y,Unique\n").unwrap();
+        let ws = Workspace { queries: vec![
+            QueryDef { id: "left".into(), name: "left".into(), steps: vec![TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
+            QueryDef { id: "right".into(), name: "right".into(), steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
+        ], focus_query_id: "left".into(), key_maps: vec![] };
+        let request = DatasetMatchingRequest { plan: MatchingPlan {
+            source_ref: "left".into(), target_ref: "right".into(),
+            map_key_fields: vec!["code".into()], target_identity_fields: vec!["id".into()],
+            outputs: vec!["id".into()], comparisons: vec![
+                crate::MatchingPlanComparison { source_field: "code".into(), target_field: "code".into(), role: MatchingFieldRole::HardConstraint },
+                crate::MatchingPlanComparison { source_field: "name".into(), target_field: "name".into(), role: MatchingFieldRole::SoftSignal },
+            ], normalization: vec!["trim".into(), "casefold".into()],
+            ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
+            scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
+        }, sample_percent: 5, right_sample_percent: 100, max_candidate_pairs: 100, minimum_score: 0.7 };
+        let db = DbSession::new().unwrap();
+        let run = evaluate_dataset_matching(&db, &ws, &[], &[], &request).unwrap();
+        assert_eq!(run.left_total, 3);
+        assert_eq!(run.distinct_map_keys, 2);
+        assert_eq!(run.duplicate_key_sources, 2);
+        assert_eq!(run.proposed_sources, 1);
+        assert_eq!(run.candidate_pairs, 5);
+        let duplicate = dataset_matching_page(&db, &run.run_id, 0, 50, Some("duplicate_key")).unwrap();
+        assert_eq!(duplicate.total, 2);
+        assert!(duplicate.rows.iter().all(|row| row.score.is_some()));
+        let auto = dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap();
+        assert_eq!(auto.confirmed, 1, "only the unique Y key is bulk-confirmed");
+        assert_eq!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap().total, 1,
+            "unreviewed duplicate keys do not block export of unrelated complete keys");
+        let left0 = duplicate.rows[0].left_id;
+        let left1 = duplicate.rows[1].left_id;
+        let candidates0 = dataset_matching_candidates(&db, &run.run_id, left0, 0, 50).unwrap();
+        let candidates1 = dataset_matching_candidates(&db, &run.run_id, left1, 0, 50).unwrap();
+        assert_eq!(candidates0.total, 2);
+        assert_eq!(candidates1.total, 2);
+        let r1 = candidates0.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R1\"]")).unwrap().right_id;
+        let r2 = candidates1.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R2\"]")).unwrap().right_id;
+        let r1_again = candidates1.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R1\"]")).unwrap().right_id;
+        dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left0, right_id: r1, action: "confirm".into() }).unwrap();
+        assert!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap_err().contains("partially confirmed"),
+            "an approved row is not yet an approved Mapping key if duplicate physical rows remain unresolved");
+        let refusal = dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left1, right_id: r2, action: "confirm".into() }).unwrap_err();
+        assert!(refusal.contains("conflicting reviewed target"), "{refusal}");
+        assert_eq!(dataset_matching_review_stats(&db, &run.run_id).unwrap().confirmed, 2);
+        dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left1, right_id: r1_again, action: "confirm".into() }).unwrap();
+        assert_eq!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap().total, 3);
         drop_dataset_matching_run(&db, &run.run_id).unwrap();
         std::fs::remove_dir_all(base).unwrap();
     }

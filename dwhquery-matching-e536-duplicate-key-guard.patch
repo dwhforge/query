@@ -1,0 +1,246 @@
+--- a/crates/dwh-engine/src/matching_dataset.rs
++++ b/crates/dwh-engine/src/matching_dataset.rs
+@@ -60,6 +60,10 @@
+     pub ambiguous_sources: u64,
+     pub below_threshold_sources: u64,
+     pub unmatched_sources: u64,
++    /// Physical LEFT rows whose Mapping key appears in more than one source row.
++    /// These require review; automatic confirmation is always prohibited.
++    pub duplicate_key_sources: u64,
++    pub distinct_map_keys: u64,
+     pub candidate_policy: String,
+     pub source_coverage: String,
+     pub candidate_search_exhaustive: bool,
+@@ -279,7 +283,7 @@
+             "CREATE TEMP TABLE {pairs} AS SELECT l.__matching_row_id AS left_id, r.__matching_row_id AS right_id, {targets} AS target_identity, {outputs} AS outputs, CAST({score} AS DOUBLE) AS score FROM {lt} l JOIN {rt} r ON {join};"
+         )).map_err(|e| e.to_string()))?;
+         db.with_conn(|conn| conn.execute_batch(&format!(
+-            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1) SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id;",
++            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1), classified AS (SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id), with_key_counts AS (SELECT *, count(*) OVER (PARTITION BY map_key) AS key_occurrences FROM classified) SELECT left_id, map_key, right_id, target_identity, outputs, score, alternatives, CASE WHEN key_occurrences > 1 THEN 'duplicate_key' ELSE state END AS state FROM with_key_counts;",
+             req.minimum_score, req.minimum_score
+         )).map_err(|e| e.to_string()))?;
+         db.with_conn(|conn| conn.execute_batch(&format!(
+@@ -293,8 +297,11 @@
+         let ambiguous_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'ambiguous'"))?;
+         let below_threshold_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'below_threshold'"))?;
+         let unmatched_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'unmatched'"))?;
+-        if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources != left_total { return Err("matching coverage invariant violated".into()); }
+-        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
++        let duplicate_key_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'duplicate_key'"))?;
++        let distinct_map_keys = scalar(db, &format!("SELECT count(*) FROM (SELECT DISTINCT map_key FROM {results}) keys"))?;
++        if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources + duplicate_key_sources != left_total { return Err("matching coverage invariant violated".into()); }
++        if duplicate_key_sources == 0 && distinct_map_keys != left_total { return Err("matching key uniqueness invariant violated".into()); }
++        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources, duplicate_key_sources, distinct_map_keys,
+             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
+             source_coverage: "complete".into(), candidate_search_exhaustive:
+                 !req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint),
+@@ -318,7 +325,7 @@
+     let decisions = format!("__dwh_match_d_{run_id}");
+     let where_clause = match filter.unwrap_or("all") {
+         "all" => String::new(),
+-        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "confirm" | "reject" | "defer" | "no_target" =>
++        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "duplicate_key" | "confirm" | "reject" | "defer" | "no_target" =>
+             format!("WHERE coalesce(d.action, s.state) = '{}'", filter.unwrap_or("all")),
+         _ => return Err("invalid matching result filter".into()),
+     };
+@@ -386,10 +393,30 @@
+     } else if request.right_id.is_some() {
+         return Err("non-confirm review must not set rightId".into());
+     }
+-    db.with_conn(|conn| conn.execute(
+-        &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
+-        duckdb::params![request.left_id, request.right_id, request.action],
+-    ).map(|_| ()).map_err(|e| e.to_string()))?;
++    // One Mapping key must not resolve to conflicting identities/outputs across
++    // physical LEFT rows. Check and write under the same DB connection lock.
++    db.with_conn(|conn| {
++        if request.action == "confirm" {
++            let conflict = format!(
++                "SELECT count(*) FROM {d} d JOIN {s} other ON other.left_id = d.left_id \
++                 JOIN {p} prior ON prior.left_id = d.left_id AND prior.right_id = d.right_id \
++                 JOIN {p} chosen ON chosen.left_id = {} AND chosen.right_id = {} \
++                 JOIN {s} current ON current.left_id = chosen.left_id \
++                 WHERE d.action = 'confirm' AND other.left_id <> current.left_id \
++                 AND other.map_key = current.map_key \
++                 AND (prior.outputs IS DISTINCT FROM chosen.outputs OR prior.target_identity IS DISTINCT FROM chosen.target_identity)",
++                request.left_id, request.right_id.unwrap(),
++            );
++            let conflicting: i64 = conn.query_row(&conflict, [], |r| r.get(0)).map_err(|e| e.to_string())?;
++            if conflicting > 0 {
++                return Err("conflicting reviewed target for the same Mapping key; resolve all duplicate-key rows consistently".into());
++            }
++        }
++        conn.execute(
++            &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
++            duckdb::params![request.left_id, request.right_id, request.action],
++        ).map(|_| ()).map_err(|e| e.to_string())
++    })?;
+     dataset_matching_review_stats(db, &request.run_id)
+ }
+ 
+@@ -397,6 +424,8 @@
+     safe_run_id(run_id)?;
+     let d = format!("__dwh_match_d_{run_id}");
+     let s = format!("__dwh_match_s_{run_id}");
++    // Only uniquely keyed proposals are eligible; duplicate-key records remain
++    // visible in the Relationship Set but are never bulk-confirmed.
+     db.with_conn(|conn| conn.execute_batch(&format!(
+         "INSERT INTO {d}(left_id,right_id,action) SELECT left_id,right_id,'confirm' FROM {s} WHERE state='proposed' AND left_id NOT IN (SELECT left_id FROM {d})"
+     )).map_err(|e| e.to_string()))?;
+@@ -431,6 +460,16 @@
+     let d = format!("__dwh_match_d_{run_id}");
+     let p = format!("__dwh_match_p_{run_id}");
+     let s = format!("__dwh_match_s_{run_id}");
++    // A Mapping key denotes one relationship, even when many physical source
++    // rows share it. Never export a partial decision for that logical key.
++    let partial = scalar(db, &format!(
++        "SELECT count(*) FROM (SELECT s.map_key FROM {s} s LEFT JOIN {d} d ON s.left_id=d.left_id \
++         GROUP BY s.map_key HAVING count(*) FILTER (WHERE d.action='confirm') > 0 \
++         AND count(*) FILTER (WHERE d.action='confirm') < count(*)) incomplete_keys"
++    ))?;
++    if partial > 0 {
++        return Err("Mapping export refused: partially confirmed duplicate Mapping keys remain; confirm every physical row sharing each approved key".into());
++    }
+     let joined = format!("{d} d JOIN {p} p ON d.left_id=p.left_id AND d.right_id=p.right_id JOIN {s} s ON s.left_id=d.left_id");
+     let total = scalar(db, &format!("SELECT count(*) FROM {joined} WHERE d.action='confirm'"))?;
+     let rows = db.with_conn(|conn| {
+@@ -653,6 +692,64 @@
+     }
+ 
+     #[test]
++    fn duplicate_mapping_keys_are_never_bulk_confirmed_and_conflicting_manual_picks_are_rejected() {
++        use dwh_pipeline::{QueryDef, TransformationStep};
++        let base = std::env::temp_dir().join(format!("dwh_matching_duplicates_{}", NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
++        std::fs::create_dir_all(&base).unwrap();
++        let left_path = base.join("left.csv");
++        let right_path = base.join("right.csv");
++        std::fs::write(&left_path, "code,name\nX,Product\nX,Product\nY,Unique\n").unwrap();
++        std::fs::write(&right_path, "id,code,name\nR1,X,Product\nR2,X,Produxt\nR3,Y,Unique\n").unwrap();
++        let ws = Workspace { queries: vec![
++            QueryDef { id: "left".into(), name: "left".into(), steps: vec![TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
++            QueryDef { id: "right".into(), name: "right".into(), steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
++        ], focus_query_id: "left".into(), key_maps: vec![] };
++        let request = DatasetMatchingRequest { plan: MatchingPlan {
++            source_ref: "left".into(), target_ref: "right".into(),
++            map_key_fields: vec!["code".into()], target_identity_fields: vec!["id".into()],
++            outputs: vec!["id".into()], comparisons: vec![
++                crate::MatchingPlanComparison { source_field: "code".into(), target_field: "code".into(), role: MatchingFieldRole::HardConstraint },
++                crate::MatchingPlanComparison { source_field: "name".into(), target_field: "name".into(), role: MatchingFieldRole::SoftSignal },
++            ], normalization: vec!["trim".into(), "casefold".into()],
++            ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
++            scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
++        }, sample_percent: 5, right_sample_percent: 100, max_candidate_pairs: 100, minimum_score: 0.7 };
++        let db = DbSession::new().unwrap();
++        let run = evaluate_dataset_matching(&db, &ws, &[], &[], &request).unwrap();
++        assert_eq!(run.left_total, 3);
++        assert_eq!(run.distinct_map_keys, 2);
++        assert_eq!(run.duplicate_key_sources, 2);
++        assert_eq!(run.proposed_sources, 1);
++        assert_eq!(run.candidate_pairs, 5);
++        let duplicate = dataset_matching_page(&db, &run.run_id, 0, 50, Some("duplicate_key")).unwrap();
++        assert_eq!(duplicate.total, 2);
++        assert!(duplicate.rows.iter().all(|row| row.score.is_some()));
++        let auto = dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap();
++        assert_eq!(auto.confirmed, 1, "only the unique Y key is bulk-confirmed");
++        assert_eq!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap().total, 1,
++            "unreviewed duplicate keys do not block export of unrelated complete keys");
++        let left0 = duplicate.rows[0].left_id;
++        let left1 = duplicate.rows[1].left_id;
++        let candidates0 = dataset_matching_candidates(&db, &run.run_id, left0, 0, 50).unwrap();
++        let candidates1 = dataset_matching_candidates(&db, &run.run_id, left1, 0, 50).unwrap();
++        assert_eq!(candidates0.total, 2);
++        assert_eq!(candidates1.total, 2);
++        let r1 = candidates0.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R1\"]")).unwrap().right_id;
++        let r2 = candidates1.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R2\"]")).unwrap().right_id;
++        let r1_again = candidates1.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R1\"]")).unwrap().right_id;
++        dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left0, right_id: r1, action: "confirm".into() }).unwrap();
++        assert!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap_err().contains("partially confirmed"),
++            "an approved row is not yet an approved Mapping key if duplicate physical rows remain unresolved");
++        let refusal = dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left1, right_id: r2, action: "confirm".into() }).unwrap_err();
++        assert!(refusal.contains("conflicting reviewed target"), "{refusal}");
++        assert_eq!(dataset_matching_review_stats(&db, &run.run_id).unwrap().confirmed, 2);
++        dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left1, right_id: r1_again, action: "confirm".into() }).unwrap();
++        assert_eq!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap().total, 3);
++        drop_dataset_matching_run(&db, &run.run_id).unwrap();
++        std::fs::remove_dir_all(base).unwrap();
++    }
++
++    #[test]
+     fn full_evaluation_refuses_budget_without_sampling() {
+         // Budget validation does not admit zero or excessively large silent runs.
+         let req: DatasetMatchingRequest = serde_json::from_value(serde_json::json!({
+--- a/src/lib/bridge.ts
++++ b/src/lib/bridge.ts
+@@ -2,6 +2,7 @@
+   runId: string; leftTotal: number; rightTotal: number; candidatePairs: number;
+   /** Evaluated pairs reaching the user-selected minimum score; not confirmations. */
+   aboveThresholdPairs: number;
++  duplicateKeySources: number; distinctMapKeys: number;
+   reusedTargets: number; proposedSources: number; ambiguousSources: number; belowThresholdSources: number; unmatchedSources: number;
+   candidatePolicy: string; sourceCoverage: string; candidateSearchExhaustive: boolean;
+   inputsTransactionallySnapshotted: boolean; minimumScore: number;
+@@ -9,5 +10,5 @@
+ export type DatasetMatchRow = {
+   leftId: number; mapKey: string; rightId: number | null;
+   targetIdentity: string | null; outputs: string | null; score: number | null;
+-  alternatives: number; state: "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "confirm" | "reject" | "defer" | "no_target";
++  alternatives: number; state: "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "duplicate_key" | "confirm" | "reject" | "defer" | "no_target";
+ };
+--- a/src/components/matching/DatasetMatchingWorkspace.tsx
++++ b/src/components/matching/DatasetMatchingWorkspace.tsx
+@@ -231,25 +231,26 @@
+         {run && !runCurrent && <div role="alert" className="border-b border-amber-800 bg-amber-950/40 p-2 text-xs text-amber-200">Evaluation is stale: rules, scoring or input definitions changed. Re-evaluate before Review or staging to Mapping. Existing materialized evidence remains read-only for inspection.</div>}
+         {!run ? <div className="m-auto max-w-lg p-8 text-center text-sm text-slate-500">Select two queries, choose identity and comparison rules, then Evaluate. UI previews cannot limit the requested scope.</div> : <>
+           <div className="shrink-0 border-b border-slate-700 p-3">
+-            <div className="flex flex-wrap gap-4 text-sm"><strong className="text-teal-200">{run.leftTotal.toLocaleString()} LEFT</strong><span>{run.rightTotal.toLocaleString()} RIGHT</span><span>{run.proposedSources} proposed</span><span className="text-amber-300">{run.ambiguousSources} ambiguous</span><span className="text-amber-200">{run.belowThresholdSources} below threshold</span><span>{run.unmatchedSources} no candidates</span><span>{run.candidatePairs} candidate pairs evaluated</span><span>{run.aboveThresholdPairs} pairs above threshold</span><span className="text-amber-200">{run.reusedTargets} reused RIGHT identities</span></div>
++            <div className="flex flex-wrap gap-4 text-sm"><strong className="text-teal-200">{run.leftTotal.toLocaleString()} LEFT</strong><span>{run.rightTotal.toLocaleString()} RIGHT</span><span>{run.proposedSources} proposed</span><span className="text-amber-300">{run.ambiguousSources} ambiguous</span><span className="text-amber-200">{run.belowThresholdSources} below threshold</span><span>{run.unmatchedSources} no candidates</span><span className="text-amber-200">{run.duplicateKeySources} rows with duplicate Mapping keys</span><span>{run.distinctMapKeys} distinct Mapping keys</span><span>{run.candidatePairs} candidate pairs evaluated</span><span>{run.aboveThresholdPairs} pairs above threshold</span><span className="text-amber-200">{run.reusedTargets} reused RIGHT identities</span></div>
+             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>
+             {previousRun && <div className="mt-1 text-xs text-slate-400">Previous run: {previousRun.proposedSources} proposed → {run.proposedSources}; {previousRun.ambiguousSources} ambiguous → {run.ambiguousSources}. Different source snapshots may invalidate comparison.</div>}
+             {comparison && <div className="mt-1 text-xs text-amber-300">Indicative relationship A/B: {comparison.commonKeys} shared keys · {comparison.changedTarget} changed target · {comparison.becameMatched} newly matched · {comparison.becameUnmatched} newly unmatched · {comparison.firstOnly}/{comparison.secondOnly} left/right-only keys. Snapshot verified: no.</div>}
+             <div className="mt-2 flex flex-wrap items-center gap-2"><button className={btn} disabled={working || !runCurrent} onClick={() => void confirmClear()}>Review: confirm all unambiguous</button><span className="text-xs">{stats?.confirmed ?? 0} confirmed · {stats?.reviewed ?? 0} reviewed</span>
+               <label className="ml-auto flex items-center gap-1 text-xs">Result filter
+                 <select className={cn} value={filter} onChange={e => { const next=e.target.value; setFilter(next); void matchingDatasetPage(run.runId,0,PAGE_SIZE,next).then(loaded => {setRows(loaded);setPage(0);setSelected(null);}).catch(e => setError(safeMessage(e))); }}>
+-                  <option value="all">All</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
++                  <option value="all">All</option><option value="proposed">Proposed</option><option value="ambiguous">Ambiguous</option><option value="below_threshold">Below threshold</option><option value="unmatched">No candidates found</option><option value="duplicate_key">Duplicate Mapping key</option><option value="confirm">Confirmed</option><option value="defer">Deferred</option><option value="reject">Rejected</option><option value="no_target">No target</option>
+                 </select>
+               </label>
+             </div>
+           </div>
+           <div className="flex min-h-0 flex-1">
+             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+-              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Candidates evaluated</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}</td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.alternatives}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state}</td></tr>)}</tbody></table></div>
++              <div className="min-h-0 flex-1 overflow-auto"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-900"><tr><th className="p-2">LEFT identity</th><th className="p-2">Candidate RIGHT</th><th className="p-2">Score</th><th className="p-2">Status</th></tr></thead><tbody>{rows?.rows.map(row => <tr key={row.leftId} onClick={() => void chooseRow(row)} className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${selected?.leftId === row.leftId ? "bg-slate-800" : ""}`}><td className="p-2">{displayTuple(row.mapKey)}</td><td className="p-2">{displayTuple(row.outputs)}</td><td className="p-2">{row.score == null ? "—" : row.score.toFixed(3)}</td><td className="p-2">{row.state === "below_threshold" ? "Candidates below threshold" : row.state === "unmatched" ? "No candidates found" : row.state === "ambiguous" ? "Ambiguous candidates" : row.state === "duplicate_key" ? "Duplicate Mapping key — review individually" : row.state}</td></tr>)}</tbody></table></div>
+               <div className="flex shrink-0 items-center justify-between border-t border-slate-700 p-2 text-xs"><span>Rows {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, rows?.total ?? 0)} / {rows?.total ?? 0}</span><div className="flex gap-2"><button className={btn} disabled={page === 0 || working} onClick={() => void reload(run, page - 1)}>Previous</button><button className={btn} disabled={!rows || (page + 1) * PAGE_SIZE >= rows.total || working} onClick={() => void reload(run, page + 1)}>Next</button></div></div>
+             </div>
+             {selected && <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-slate-700 p-3 text-xs"><h3 className="font-semibold text-teal-200">Review LEFT #{selected.leftId}</h3><p className="my-2 break-all text-slate-400">{displayTuple(selected.mapKey)}</p><div className="mb-3 flex flex-wrap gap-1"><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("defer")}>Defer</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("reject")}>Reject</button><button className={btn} disabled={working || !runCurrent} onClick={() => void decide("no_target")}>No suitable RIGHT</button></div><h4 className="mb-1 text-slate-400">Verified candidate list</h4>{candidatePage?.rows.map(row => <div className="mb-2 rounded border border-slate-700 p-2" key={row.rightId}><div>{displayTuple(row.targetIdentity)}</div><div className="text-slate-400">{displayTuple(row.outputs)} · {row.score?.toFixed(3)}</div><button className={`${btn} mt-1 text-teal-200`} disabled={working || !runCurrent || row.rightId == null} onClick={() => void decide("confirm", row.rightId ?? undefined)}>Confirm this pair</button></div>)}<div className="flex gap-2"><button className={btn} disabled={candidateIndex === 0} onClick={() => void nextCandidates(candidateIndex - 1)}>Back</button><button className={btn} disabled={!candidatePage || (candidateIndex + 1) * PAGE_SIZE >= candidatePage.total} onClick={() => void nextCandidates(candidateIndex + 1)}>More</button></div></aside>}
+           </div>
++          {run.duplicateKeySources > 0 && <p className="shrink-0 border-t border-amber-800/60 p-2 text-xs text-amber-200" role="status">Duplicate Mapping keys were found in {run.duplicateKeySources} physical LEFT rows. They are not eligible for bulk confirmation; inspect and resolve all rows sharing each key. All source rows were evaluated.</p>}
+           {onStageToMapping && <div className="flex shrink-0 items-center gap-2 border-t border-slate-700 p-2 text-xs"><span>Stage confirmed pairs into existing Mapping draft:</span><select className={cn} aria-label="Target Mapping" value={mapId} onChange={e => setMapId(e.target.value)}><option value="">Select Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className={btn} disabled={!runCurrent || !mapId || !stats?.confirmed || working} onClick={() => void stage()}>Stage into Mapping editor</button><span className="text-slate-500">Review, Save and Apply remain separate.</span></div>}
+         </>}
+       </main>
+--- a/src/app/matching/fullJoinContext.ts
++++ b/src/app/matching/fullJoinContext.ts
+@@ -32,7 +32,9 @@
+   if (step?.type !== "Join" ||
+       JSON.stringify(step.payload.left_on) !== JSON.stringify(b.leftOn) ||
+       JSON.stringify(step.payload.right_on) !== JSON.stringify(b.rightOn)) return null;
+-  if (typeof step.payload.right_query_id === "string" && step.payload.right_query_id !== b.rightQueryId) return null;
++  // External reference IDs are not interchangeable with local query IDs.
++  // Falling back to a same-named local query would silently match the wrong RIGHT.
++  if (typeof step.payload.right_query_id !== "string" || step.payload.right_query_id !== b.rightQueryId) return null;
+   const target = workspace.queries.find(q => q.id === b.rightQueryId);
+   if (!target) return null;
+   // No output or identity rewriting: the JOIN's ordered keys and outputs
+--- a/src/app/matching/fullJoinContext.test.ts
++++ b/src/app/matching/fullJoinContext.test.ts
+@@ -44,4 +44,10 @@
+ assert.equal(fullJoinContext(ws, {...session, joinBinding: {...session.joinBinding!, rightQueryId: "fact"}}), null, "self-JOIN requires a distinct target");
+ assert.equal(fullJoinContext(ws, {...session, joinBinding: {...session.joinBinding!, joinStepIndex: 2}}), null, "wrong Join step is refused");
+ assert.equal(fullJoinContext(ws, {...session, executionMode: "demo"}), null, "fixtures cannot become live authority");
++const foreignRight = structuredClone(ws);
++const foreignJoin = foreignRight.queries.find(q => q.id === "fact")?.steps[1];
++assert.equal(foreignJoin?.type, "Join");
++if (foreignJoin?.type !== "Join") throw new Error("test requires a JOIN step");
++foreignJoin.payload.right_query_id = {scope: "reference", reference_id: "foreign", kind: "query", id: "dim"};
++assert.equal(fullJoinContext(foreignRight, session), null, "external RIGHT reference cannot be silently rebound to local dim");
+ console.log("Full JOIN context: pre-JOIN isolation, immutable keys/outputs, validation passed");

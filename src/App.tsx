@@ -126,6 +126,7 @@ import { projectMatchingBaseline } from "./app/matching/relationships";
 import { explainJoinKey } from "./lib/bridge";
 import { MatchingWorkspace } from "./components/MatchingWorkspace";
 import { DatasetMatchingWorkspace } from "./components/matching/DatasetMatchingWorkspace";
+import { fullJoinContext } from "./app/matching/fullJoinContext";
 import { matchingDatasetApprovedPage } from "./lib/bridge";
 import { fromColumnsEff, outputColumnsEff, fromPartsEff, outputValuesEff } from "./lib/keyMap";
 import { createMatchingDemoSession } from "./app/matching/executionPolicy";
@@ -5472,21 +5473,26 @@ function App() {
             {matchingTabs.map((tab) => {
               const key = tabKey(matchingTab(tab.id));
               const on = sameTab(centerTab, matchingTab(tab.id));
+              const fullJoin = tab.joinBinding ? fullJoinContext(project.workspace, tab) : null;
               return (
                 <div
                   key={key}
                   className={on ? "flex min-h-0 flex-1 flex-col" : "hidden"}
                   aria-hidden={!on}
                 >
-                  {!tab.joinBinding && !tab.targetMapId ? (
+                  {((!tab.joinBinding && !tab.targetMapId) || fullJoin) && tab.executionMode === "live" ? (
                     <DatasetMatchingWorkspace
-                      workspace={project.workspace}
+                      workspace={fullJoin?.workspace ?? project.workspace}
                       connections={connections}
                       sources={sources}
                       projectRef={projectRefContext(project)}
+                      initialPlan={fullJoin?.plan}
+                      lockedBindings={fullJoin?.locked}
+                      initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
                       mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id }))}
                     onStageToMapping={async (runId, targetMapId, plan) => {
                       // Staging is a draft-only operation; never bypass KeyMapEditor Save/Apply.
+                      if (fullJoin && (!basicContextCurrent(tab) || matchingWriteRefusal(tab))) throw new Error("Original JOIN context changed; reopen Matching and evaluate again.");
                       const projectNow = projectRef.current;
                       const map = projectNow.workspace.key_maps?.find(m => m.id === targetMapId);
                       if (!map) throw new Error("Selected Mapping no longer exists.");

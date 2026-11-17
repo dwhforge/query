@@ -39,11 +39,12 @@ export type DatasetMatchingPlan = {
 export type DatasetMatchingRequest = {
   plan: DatasetMatchingPlan;
   samplePercent: number;
+  rightSamplePercent?: number;
   maxCandidatePairs: number;
   minimumScore: number;
 };
 export type DatasetMatchingEstimate = {
-  samplePercent: number; sampledLeft: number; leftTotal: number; rightTotal: number;
+  samplePercent: number; rightSamplePercent: number; sampledLeft: number; sampledRight: number; leftTotal: number; rightTotal: number;
   sampledCandidatePairs: number; estimatedCandidatePairs: number;
   candidatePolicy: string; complete: false; warning: string;
 };

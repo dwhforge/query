@@ -16,12 +16,16 @@ pub struct DatasetMatchingRequest {
     pub plan: MatchingPlan,
     #[serde(default = "sample_default")]
     pub sample_percent: u8,
+    /// RIGHT fraction used only by Estimate; Evaluate always reads 100%.
+    #[serde(default = "right_sample_default")]
+    pub right_sample_percent: u8,
     #[serde(default = "budget_default")]
     pub max_candidate_pairs: u64,
     #[serde(default = "score_default")]
     pub minimum_score: f64,
 }
 fn sample_default() -> u8 { 5 }
+fn right_sample_default() -> u8 { 100 }
 fn budget_default() -> u64 { DEFAULT_BUDGET }
 fn score_default() -> f64 { 0.70 }
 
@@ -29,7 +33,9 @@ fn score_default() -> f64 { 0.70 }
 #[serde(rename_all = "camelCase")]
 pub struct DatasetMatchingEstimate {
     pub sample_percent: u8,
+    pub right_sample_percent: u8,
     pub sampled_left: u64,
+    pub sampled_right: u64,
     pub left_total: u64,
     pub right_total: u64,
     pub sampled_candidate_pairs: u64,
@@ -97,7 +103,8 @@ fn safe_run_id(run_id: &str) -> Result<(), String> {
 }
 fn validate(req: &DatasetMatchingRequest) -> Result<(), String> {
     let p = &req.plan;
-    if !(1..=100).contains(&req.sample_percent) { return Err("Estimate sample must be 1..100%".into()); }
+    if !(1..=100).contains(&req.sample_percent) { return Err("LEFT Estimate sample must be 1..100%".into()); }
+    if !(1..=100).contains(&req.right_sample_percent) { return Err("RIGHT Estimate sample must be 1..100%".into()); }
     if req.max_candidate_pairs == 0 || req.max_candidate_pairs > 100_000_000 { return Err("invalid candidate budget".into()); }
     if !req.minimum_score.is_finite() || !(0.0..=1.0).contains(&req.minimum_score) { return Err("minimum score must be 0..1".into()); }
     if p.source_ref.is_empty() || p.target_ref.is_empty() || p.semantic_revision == 0 ||
@@ -197,12 +204,33 @@ fn stage(db: &DbSession, workspace: &Workspace, connections: &[ConnectionDef], s
 fn drop_staging(db: &DbSession, lt: &str, rt: &str) {
     let _ = db.with_conn(|c| c.execute_batch(&format!("DROP TABLE IF EXISTS {lt}; DROP TABLE IF EXISTS {rt}")).map_err(|e| e.to_string()));
 }
-fn count_candidate_pairs(db: &DbSession, lt: &str, rt: &str, req: &DatasetMatchingRequest, sample: bool) -> Result<u64, String> {
-    let sample_filter = if sample { format!("WHERE (l.__matching_row_id * 37 % 100) < {}", req.sample_percent) } else { String::new() };
-    let left = format!("(SELECT * FROM {lt} l {sample_filter}) l");
+/// Exact nonempty sample size; never silently produce zero rows from a tiny
+/// but nonempty dataset when the user requests 1..100%.
+fn sample_size(total: u64, percentage: u8) -> u64 {
+    if total == 0 { 0 } else {
+        (((total as u128 * percentage as u128) + 99) / 100) as u64
+    }
+}
+
+fn count_candidate_pairs(db: &DbSession, lt: &str, rt: &str, req: &DatasetMatchingRequest, sample_sizes: Option<(u64, u64)>) -> Result<u64, String> {
+    // ORDER BY identity hash makes sampling independent of renderer pages and
+    // query row order. The row id is only the deterministic tie-breaker inside
+    // an already materialized input. At 100% no sorting is performed.
+    let left = if let Some((size, _)) = sample_sizes {
+        if req.sample_percent == 100 { format!("{lt} l") } else {
+            let key = json_values("l", &req.plan.map_key_fields);
+            format!("(SELECT * FROM {lt} l ORDER BY hash({key}), l.__matching_row_id LIMIT {size}) l")
+        }
+    } else { format!("{lt} l") };
+    let right = if let Some((_, size)) = sample_sizes {
+        if req.right_sample_percent == 100 { format!("{rt} r") } else {
+            let key = json_values("r", &req.plan.target_identity_fields);
+            format!("(SELECT * FROM {rt} r ORDER BY hash({key}), r.__matching_row_id LIMIT {size}) r")
+        }
+    } else { format!("{rt} r") };
     let join = hard_predicate(req);
     // LIMIT stops the count early on broad Cartesian products: no silent truncation.
-    scalar(db, &format!("SELECT count(*) FROM (SELECT 1 FROM {left} JOIN {rt} r ON {join} LIMIT {}) counted", req.max_candidate_pairs + 1))
+    scalar(db, &format!("SELECT count(*) FROM (SELECT 1 FROM {left} JOIN {right} ON {join} LIMIT {}) counted", req.max_candidate_pairs + 1))
 }
 
 pub fn estimate_dataset_matching(db: &DbSession, workspace: &Workspace, connections: &[ConnectionDef], sources: &[SourceDef], req: &DatasetMatchingRequest) -> Result<DatasetMatchingEstimate, String> {
@@ -212,14 +240,20 @@ pub fn estimate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
     let result = (|| {
         let left_total = scalar(db, &format!("SELECT count(*) FROM {lt}"))?;
         let right_total = scalar(db, &format!("SELECT count(*) FROM {rt}"))?;
-        let sampled_left = scalar(db, &format!("SELECT count(*) FROM {lt} l WHERE (l.__matching_row_id * 37 % 100) < {}", req.sample_percent))?;
-        let candidates = count_candidate_pairs(db, &lt, &rt, req, true)?;
+        let sampled_left = sample_size(left_total, req.sample_percent);
+        let sampled_right = sample_size(right_total, req.right_sample_percent);
+        let candidates = count_candidate_pairs(db, &lt, &rt, req, Some((sampled_left, sampled_right)))?;
         if candidates > req.max_candidate_pairs { return Err("Estimate refused: sampled candidate set exceeds budget".into()); }
-        let estimate = if sampled_left == 0 { 0 } else { ((candidates as u128 * left_total as u128) / sampled_left as u128).min(u64::MAX as u128) as u64 };
-        Ok(DatasetMatchingEstimate { sample_percent: req.sample_percent, sampled_left, left_total, right_total,
+        let estimate = if sampled_left == 0 || sampled_right == 0 { 0 } else {
+            ((candidates as u128 * left_total as u128 * right_total as u128)
+             / (sampled_left as u128 * sampled_right as u128)).min(u64::MAX as u128) as u64
+        };
+        Ok(DatasetMatchingEstimate { sample_percent: req.sample_percent,
+            right_sample_percent: req.right_sample_percent,
+            sampled_left, sampled_right, left_total, right_total,
             sampled_candidate_pairs: candidates, estimated_candidate_pairs: estimate,
             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
-            complete: false, warning: "Estimate is not matching coverage. Approximate candidate count; not a completed Evaluate.".into() })
+            complete: false, warning: "Cost estimate only, not Matching coverage or recall. Sampling RIGHT may omit true matches; a zero observed count does not prove zero candidates.".into() })
     })();
     drop_staging(db, &lt, &rt);
     result
@@ -234,7 +268,7 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
     let response = (|| {
         let left_total = scalar(db, &format!("SELECT count(*) FROM {lt}"))?;
         let right_total = scalar(db, &format!("SELECT count(*) FROM {rt}"))?;
-        let comparisons = count_candidate_pairs(db, &lt, &rt, req, false)?;
+        let comparisons = count_candidate_pairs(db, &lt, &rt, req, None)?;
         if comparisons > req.max_candidate_pairs { return Err(format!("Evaluate refused: {comparisons}+ candidate pairs exceeds budget {}; use stronger hard constraints or increase explicit budget", req.max_candidate_pairs)); }
         let join = hard_predicate(req);
         let score = score_expression(req);
@@ -452,7 +486,7 @@ pub fn compare_dataset_matching(db: &DbSession, first: &str, second: &str) -> Re
 mod tests {
     use super::*;
     #[test] fn run_identifier_never_enters_sql_unsanitized() { assert!(safe_run_id("r123_abc").is_ok()); assert!(safe_run_id("r1;DROP TABLE x").is_err()); }
-    #[test] fn default_estimate_percentage_is_five() { assert_eq!(sample_default(), 5); }
+    #[test] fn default_estimate_percentage_is_five() { assert_eq!(sample_default(), 5); assert_eq!(right_sample_default(), 100); assert_eq!(sample_size(6, 5), 1); assert_eq!(sample_size(0, 5), 0); assert_eq!(sample_size(500, 20), 100); }
     #[test] fn page_limit_is_bounded() { assert_eq!(MAX_PAGE_SIZE, 200); }
 
     #[test]
@@ -485,15 +519,28 @@ mod tests {
                 ], normalization: vec!["trim".into(), "casefold".into()],
                 ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
                 scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
-            }, sample_percent: 5, max_candidate_pairs: 1000, minimum_score: 0.7,
+            }, sample_percent: 5, right_sample_percent: 100, max_candidate_pairs: 1000, minimum_score: 0.7,
         };
         let db = DbSession::new().unwrap();
+        let mut invalid_right_sample = req.clone();
+        invalid_right_sample.right_sample_percent = 0;
+        assert!(validate(&invalid_right_sample).unwrap_err().contains("RIGHT Estimate"));
+        invalid_right_sample.right_sample_percent = 101;
+        assert!(validate(&invalid_right_sample).unwrap_err().contains("RIGHT Estimate"));
         let mut small_budget = req.clone();
         small_budget.max_candidate_pairs = 100;
         let refusal = evaluate_dataset_matching(&db, &ws, &[], &[], &small_budget).unwrap_err();
         assert!(refusal.contains("budget"), "{refusal}");
         let estimate = estimate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
         assert_eq!(estimate.sample_percent, 5);
+        assert_eq!(estimate.right_sample_percent, 100);
+        assert_eq!(estimate.sampled_right, 500);
+        let mut both_sampled = req.clone();
+        both_sampled.right_sample_percent = 20;
+        let cost = estimate_dataset_matching(&db, &ws, &[], &[], &both_sampled).unwrap();
+        assert_eq!(cost.sampled_left, 25);
+        assert_eq!(cost.sampled_right, 100);
+        assert_eq!(cost.right_sample_percent, 20);
         assert!(!estimate.complete);
         let run = evaluate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
         assert_eq!(run.left_total, 500);
@@ -503,6 +550,17 @@ mod tests {
         assert_eq!(run.below_threshold_sources, 0);
         assert_eq!(run.candidate_pairs, 500);
         assert_eq!(run.above_threshold_pairs, 500);
+        // Full Evaluate ignores BOTH Estimate fractions. Changing sampling cannot
+        // alter completed relationship or pair statistics.
+        let mut different_samples = req.clone();
+        different_samples.sample_percent = 100;
+        different_samples.right_sample_percent = 1;
+        let another = evaluate_dataset_matching(&db, &ws, &[], &[], &different_samples).unwrap();
+        assert_eq!(another.left_total, run.left_total);
+        assert_eq!(another.right_total, run.right_total);
+        assert_eq!(another.candidate_pairs, run.candidate_pairs);
+        assert_eq!(another.proposed_sources, run.proposed_sources);
+        drop_dataset_matching_run(&db, &another.run_id).unwrap();
         let p0 = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
         let p9 = dataset_matching_page(&db, &run.run_id, 9, 50, None).unwrap();
         assert_eq!(p0.total, 500);
@@ -574,7 +632,7 @@ R3,X2,Gamma
             ], normalization: vec!["trim".into(), "casefold".into()],
             ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
             scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
-        }, sample_percent: 5, max_candidate_pairs: 100, minimum_score: 0.9 };
+        }, sample_percent: 5, right_sample_percent: 100, max_candidate_pairs: 100, minimum_score: 0.9 };
         let db = DbSession::new().unwrap();
         let run = evaluate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
         assert_eq!(run.left_total, 3);

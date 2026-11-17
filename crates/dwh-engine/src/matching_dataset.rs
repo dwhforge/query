@@ -49,7 +49,12 @@ pub struct DatasetMatchingEstimate {
 #[serde(rename_all = "camelCase")]
 pub struct DatasetMatchingRun {
     pub run_id: String,
+    /// Number of distinct LEFT Mapping keys actually evaluated.
     pub left_total: u64,
+    /// Total physical LEFT rows represented by those keys.
+    pub left_source_rows: u64,
+    /// Keys whose source comparison attributes disagree across physical rows.
+    pub conflicting_source_keys: u64,
     pub right_total: u64,
     pub candidate_pairs: u64,
     /// Number of evaluated pairs reaching the configured suggestion threshold.
@@ -60,10 +65,6 @@ pub struct DatasetMatchingRun {
     pub ambiguous_sources: u64,
     pub below_threshold_sources: u64,
     pub unmatched_sources: u64,
-    /// Physical LEFT rows whose Mapping key appears in more than one source row.
-    /// These require review; automatic confirmation is always prohibited.
-    pub duplicate_key_sources: u64,
-    pub distinct_map_keys: u64,
     pub candidate_policy: String,
     pub source_coverage: String,
     pub candidate_search_exhaustive: bool,
@@ -76,6 +77,7 @@ pub struct DatasetMatchingRun {
 pub struct DatasetMatchRow {
     pub left_id: i64,
     pub map_key: String,
+    pub source_rows: u64,
     pub right_id: Option<i64>,
     pub target_identity: Option<String>,
     pub outputs: Option<String>,
@@ -186,8 +188,28 @@ fn stage(db: &DbSession, workspace: &Workspace, connections: &[ConnectionDef], s
     let lfields = fields(req, true);
     let rfields = fields(req, false);
     let select = |cols: &[String]| cols.iter().map(|s| quote_ident(s)).collect::<Vec<_>>().join(", ");
+    // The unit of Mapping is a complete LEFT key, not a fact row. Retain the
+    // number of physical rows and explicitly detect disagreement in attributes
+    // used for matching. Never choose an arbitrary row and call it authoritative.
+    let key_json = json_values("l", &req.plan.map_key_fields);
+    let evidence_fields = req.plan.comparisons.iter()
+        .filter(|c| c.role != MatchingFieldRole::ReferenceContext)
+        .map(|c| norm("l", &c.source_field, &req.plan))
+        .collect::<Vec<_>>().join(", ");
+    let evidence_json = format!("CAST(to_json(list_value({evidence_fields})) AS VARCHAR)");
     let run = || db.with_conn(|conn| {
-        conn.execute_batch(&format!("CREATE TEMP TABLE {lt} AS SELECT row_number() OVER () AS __matching_row_id, {} FROM ({lsql}) AS src;", select(&lfields))).map_err(|e| e.to_string())?;
+        conn.execute_batch(&format!(
+            "CREATE TEMP TABLE {lt} AS WITH raw AS (SELECT {} FROM ({lsql}) src), keyed AS (
+               SELECT l.*, row_number() OVER (PARTITION BY {key_json} ORDER BY {key_json}) AS __key_rank,
+                 count(*) OVER (PARTITION BY {key_json}) AS __source_rows,
+                 min({evidence_json}) OVER (PARTITION BY {key_json}) AS __evidence_min,
+                 max({evidence_json}) OVER (PARTITION BY {key_json}) AS __evidence_max
+               FROM raw l
+             ) SELECT row_number() OVER () AS __matching_row_id, {}, __source_rows,
+               (__evidence_min IS DISTINCT FROM __evidence_max) AS __source_conflict
+               FROM keyed WHERE __key_rank = 1;",
+            select(&lfields), select(&lfields)
+        )).map_err(|e| e.to_string())?;
         conn.execute_batch(&format!("CREATE TEMP TABLE {rt} AS SELECT row_number() OVER () AS __matching_row_id, {} FROM ({rsql}) AS src;", select(&rfields))).map_err(|e| e.to_string())?;
         Ok(())
     });
@@ -234,7 +256,9 @@ fn count_candidate_pairs(db: &DbSession, lt: &str, rt: &str, req: &DatasetMatchi
     } else { format!("{rt} r") };
     let join = hard_predicate(req);
     // LIMIT stops the count early on broad Cartesian products: no silent truncation.
-    scalar(db, &format!("SELECT count(*) FROM (SELECT 1 FROM {left} JOIN {right} ON {join} LIMIT {}) counted", req.max_candidate_pairs + 1))
+    // Exclude contradictory source-key groups just as Evaluate does; otherwise
+    // the preflight budget can refuse work that will never be scored.
+    scalar(db, &format!("SELECT count(*) FROM (SELECT 1 FROM {left} JOIN {right} ON ({join}) AND NOT l.__source_conflict LIMIT {}) counted", req.max_candidate_pairs + 1))
 }
 
 pub fn estimate_dataset_matching(db: &DbSession, workspace: &Workspace, connections: &[ConnectionDef], sources: &[SourceDef], req: &DatasetMatchingRequest) -> Result<DatasetMatchingEstimate, String> {
@@ -271,6 +295,8 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
     let results = format!("__dwh_match_s_{suffix}");
     let response = (|| {
         let left_total = scalar(db, &format!("SELECT count(*) FROM {lt}"))?;
+        let left_source_rows = scalar(db, &format!("SELECT coalesce(sum(__source_rows),0) FROM {lt}"))?;
+        let conflicting_source_keys = scalar(db, &format!("SELECT count(*) FROM {lt} WHERE __source_conflict"))?;
         let right_total = scalar(db, &format!("SELECT count(*) FROM {rt}"))?;
         let comparisons = count_candidate_pairs(db, &lt, &rt, req, None)?;
         if comparisons > req.max_candidate_pairs { return Err(format!("Evaluate refused: {comparisons}+ candidate pairs exceeds budget {}; use stronger hard constraints or increase explicit budget", req.max_candidate_pairs)); }
@@ -280,10 +306,10 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
         let outputs = json_values("r", &req.plan.outputs);
         let source_key = json_values("l", &req.plan.map_key_fields);
         db.with_conn(|conn| conn.execute_batch(&format!(
-            "CREATE TEMP TABLE {pairs} AS SELECT l.__matching_row_id AS left_id, r.__matching_row_id AS right_id, {targets} AS target_identity, {outputs} AS outputs, CAST({score} AS DOUBLE) AS score FROM {lt} l JOIN {rt} r ON {join};"
+            "CREATE TEMP TABLE {pairs} AS SELECT l.__matching_row_id AS left_id, r.__matching_row_id AS right_id, {targets} AS target_identity, {outputs} AS outputs, CAST({score} AS DOUBLE) AS score FROM {lt} l JOIN {rt} r ON {join} WHERE NOT l.__source_conflict;"
         )).map_err(|e| e.to_string()))?;
         db.with_conn(|conn| conn.execute_batch(&format!(
-            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1), classified AS (SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id), with_key_counts AS (SELECT *, count(*) OVER (PARTITION BY map_key) AS key_occurrences FROM classified) SELECT left_id, map_key, right_id, target_identity, outputs, score, alternatives, CASE WHEN key_occurrences > 1 THEN 'duplicate_key' ELSE state END AS state FROM with_key_counts;",
+            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1) SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, l.__source_rows AS source_rows, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN l.__source_conflict THEN 'source_conflict' WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id;",
             req.minimum_score, req.minimum_score
         )).map_err(|e| e.to_string()))?;
         db.with_conn(|conn| conn.execute_batch(&format!(
@@ -297,11 +323,11 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
         let ambiguous_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'ambiguous'"))?;
         let below_threshold_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'below_threshold'"))?;
         let unmatched_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'unmatched'"))?;
-        let duplicate_key_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'duplicate_key'"))?;
-        let distinct_map_keys = scalar(db, &format!("SELECT count(*) FROM (SELECT DISTINCT map_key FROM {results}) keys"))?;
-        if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources + duplicate_key_sources != left_total { return Err("matching coverage invariant violated".into()); }
-        if duplicate_key_sources == 0 && distinct_map_keys != left_total { return Err("matching key uniqueness invariant violated".into()); }
-        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources, duplicate_key_sources, distinct_map_keys,
+        let conflicting_results = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'source_conflict'"))?;
+        if conflicting_results != conflicting_source_keys || proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources + conflicting_results != left_total || left_source_rows < left_total {
+            return Err("matching logical-key/physical-row coverage invariant violated".into());
+        }
+        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, left_source_rows, conflicting_source_keys, right_total, candidate_pairs, above_threshold_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
             source_coverage: "complete".into(), candidate_search_exhaustive:
                 !req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint),
@@ -325,15 +351,15 @@ pub fn dataset_matching_page(db: &DbSession, run_id: &str, page: u64, page_size:
     let decisions = format!("__dwh_match_d_{run_id}");
     let where_clause = match filter.unwrap_or("all") {
         "all" => String::new(),
-        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "duplicate_key" | "confirm" | "reject" | "defer" | "no_target" =>
+        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "source_conflict" | "confirm" | "reject" | "defer" | "no_target" =>
             format!("WHERE coalesce(d.action, s.state) = '{}'", filter.unwrap_or("all")),
         _ => return Err("invalid matching result filter".into()),
     };
     let from = format!("FROM {table} s LEFT JOIN {decisions} d ON d.left_id=s.left_id {where_clause}");
     let total = scalar(db, &format!("SELECT count(*) {from}"))?;
     let rows = db.with_conn(|conn| {
-        let mut stmt = conn.prepare(&format!("SELECT s.left_id, s.map_key, s.right_id, s.target_identity, s.outputs, s.score, s.alternatives, coalesce(d.action, s.state) AS state {from} ORDER BY s.left_id LIMIT {page_size} OFFSET {offset}")).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |r| Ok(DatasetMatchRow { left_id: r.get(0)?, map_key: r.get(1)?, right_id: r.get(2)?, target_identity: r.get(3)?, outputs: r.get(4)?, score: r.get(5)?, alternatives: r.get::<_, i64>(6)? as u64, state: r.get(7)? })).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&format!("SELECT s.left_id, s.map_key, s.source_rows, s.right_id, s.target_identity, s.outputs, s.score, s.alternatives, coalesce(d.action, s.state) AS state {from} ORDER BY s.left_id LIMIT {page_size} OFFSET {offset}")).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok(DatasetMatchRow { left_id: r.get(0)?, map_key: r.get(1)?, source_rows: r.get::<_, i64>(2)? as u64, right_id: r.get(3)?, target_identity: r.get(4)?, outputs: r.get(5)?, score: r.get(6)?, alternatives: r.get::<_, i64>(7)? as u64, state: r.get(8)? })).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     })?;
     Ok(DatasetMatchingPage { rows, page, page_size, total })
@@ -347,8 +373,8 @@ pub fn dataset_matching_candidates(db: &DbSession, run_id: &str, left_id: i64, p
     let source = format!("__dwh_match_s_{run_id}");
     let total = scalar(db, &format!("SELECT count(*) FROM {pairs} WHERE left_id = {left_id}"))?;
     let rows = db.with_conn(|conn| {
-        let mut stmt = conn.prepare(&format!("SELECT p.left_id, s.map_key, p.right_id, p.target_identity, p.outputs, p.score, s.alternatives, s.state FROM {pairs} p JOIN {source} s ON s.left_id = p.left_id WHERE p.left_id = {left_id} ORDER BY p.score DESC, p.right_id LIMIT {page_size} OFFSET {offset}")).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |r| Ok(DatasetMatchRow { left_id: r.get(0)?, map_key: r.get(1)?, right_id: r.get(2)?, target_identity: r.get(3)?, outputs: r.get(4)?, score: r.get(5)?, alternatives: r.get::<_, i64>(6)? as u64, state: r.get(7)? })).map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&format!("SELECT p.left_id, s.map_key, s.source_rows, p.right_id, p.target_identity, p.outputs, p.score, s.alternatives, s.state FROM {pairs} p JOIN {source} s ON s.left_id = p.left_id WHERE p.left_id = {left_id} ORDER BY p.score DESC, p.right_id LIMIT {page_size} OFFSET {offset}")).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok(DatasetMatchRow { left_id: r.get(0)?, map_key: r.get(1)?, source_rows: r.get::<_, i64>(2)? as u64, right_id: r.get(3)?, target_identity: r.get(4)?, outputs: r.get(5)?, score: r.get(6)?, alternatives: r.get::<_, i64>(7)? as u64, state: r.get(8)? })).map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     })?;
     Ok(DatasetMatchingPage { rows, page, page_size, total })
@@ -386,6 +412,9 @@ pub fn dataset_matching_decide(db: &DbSession, request: &DatasetReviewRequest) -
         return Err("stale review: LEFT row is not in run".into());
     }
     if request.action == "confirm" {
+        if scalar(db, &format!("SELECT count(*) FROM {s} WHERE left_id = {} AND state = 'source_conflict'", request.left_id))? != 0 {
+            return Err("conflicting LEFT matching attributes for this Mapping key; resolve source data before confirming".into());
+        }
         let target = request.right_id.ok_or("confirm needs exact rightId")?;
         if scalar(db, &format!("SELECT count(*) FROM {p} WHERE left_id = {} AND right_id = {target}", request.left_id))? != 1 {
             return Err("candidate is not present in evaluated evidence".into());
@@ -393,30 +422,10 @@ pub fn dataset_matching_decide(db: &DbSession, request: &DatasetReviewRequest) -
     } else if request.right_id.is_some() {
         return Err("non-confirm review must not set rightId".into());
     }
-    // One Mapping key must not resolve to conflicting identities/outputs across
-    // physical LEFT rows. Check and write under the same DB connection lock.
-    db.with_conn(|conn| {
-        if request.action == "confirm" {
-            let conflict = format!(
-                "SELECT count(*) FROM {d} d JOIN {s} other ON other.left_id = d.left_id \
-                 JOIN {p} prior ON prior.left_id = d.left_id AND prior.right_id = d.right_id \
-                 JOIN {p} chosen ON chosen.left_id = {} AND chosen.right_id = {} \
-                 JOIN {s} current ON current.left_id = chosen.left_id \
-                 WHERE d.action = 'confirm' AND other.left_id <> current.left_id \
-                 AND other.map_key = current.map_key \
-                 AND (prior.outputs IS DISTINCT FROM chosen.outputs OR prior.target_identity IS DISTINCT FROM chosen.target_identity)",
-                request.left_id, request.right_id.unwrap(),
-            );
-            let conflicting: i64 = conn.query_row(&conflict, [], |r| r.get(0)).map_err(|e| e.to_string())?;
-            if conflicting > 0 {
-                return Err("conflicting reviewed target for the same Mapping key; resolve all duplicate-key rows consistently".into());
-            }
-        }
-        conn.execute(
-            &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
-            duckdb::params![request.left_id, request.right_id, request.action],
-        ).map(|_| ()).map_err(|e| e.to_string())
-    })?;
+    db.with_conn(|conn| conn.execute(
+        &format!("INSERT INTO {d} (left_id, right_id, action) VALUES (?1, ?2, ?3) ON CONFLICT (left_id) DO UPDATE SET right_id = EXCLUDED.right_id, action = EXCLUDED.action"),
+        duckdb::params![request.left_id, request.right_id, request.action],
+    ).map(|_| ()).map_err(|e| e.to_string()))?;
     dataset_matching_review_stats(db, &request.run_id)
 }
 
@@ -424,8 +433,6 @@ pub fn dataset_matching_confirm_unambiguous(db: &DbSession, run_id: &str) -> Res
     safe_run_id(run_id)?;
     let d = format!("__dwh_match_d_{run_id}");
     let s = format!("__dwh_match_s_{run_id}");
-    // Only uniquely keyed proposals are eligible; duplicate-key records remain
-    // visible in the Relationship Set but are never bulk-confirmed.
     db.with_conn(|conn| conn.execute_batch(&format!(
         "INSERT INTO {d}(left_id,right_id,action) SELECT left_id,right_id,'confirm' FROM {s} WHERE state='proposed' AND left_id NOT IN (SELECT left_id FROM {d})"
     )).map_err(|e| e.to_string()))?;
@@ -460,16 +467,6 @@ pub fn dataset_matching_approved_page(db: &DbSession, run_id: &str, page: u64, p
     let d = format!("__dwh_match_d_{run_id}");
     let p = format!("__dwh_match_p_{run_id}");
     let s = format!("__dwh_match_s_{run_id}");
-    // A Mapping key denotes one relationship, even when many physical source
-    // rows share it. Never export a partial decision for that logical key.
-    let partial = scalar(db, &format!(
-        "SELECT count(*) FROM (SELECT s.map_key FROM {s} s LEFT JOIN {d} d ON s.left_id=d.left_id \
-         GROUP BY s.map_key HAVING count(*) FILTER (WHERE d.action='confirm') > 0 \
-         AND count(*) FILTER (WHERE d.action='confirm') < count(*)) incomplete_keys"
-    ))?;
-    if partial > 0 {
-        return Err("Mapping export refused: partially confirmed duplicate Mapping keys remain; confirm every physical row sharing each approved key".into());
-    }
     let joined = format!("{d} d JOIN {p} p ON d.left_id=p.left_id AND d.right_id=p.right_id JOIN {s} s ON s.left_id=d.left_id");
     let total = scalar(db, &format!("SELECT count(*) FROM {joined} WHERE d.action='confirm'"))?;
     let rows = db.with_conn(|conn| {
@@ -692,64 +689,6 @@ R3,X2,Gamma
     }
 
     #[test]
-    fn duplicate_mapping_keys_are_never_bulk_confirmed_and_conflicting_manual_picks_are_rejected() {
-        use dwh_pipeline::{QueryDef, TransformationStep};
-        let base = std::env::temp_dir().join(format!("dwh_matching_duplicates_{}", NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&base).unwrap();
-        let left_path = base.join("left.csv");
-        let right_path = base.join("right.csv");
-        std::fs::write(&left_path, "code,name\nX,Product\nX,Product\nY,Unique\n").unwrap();
-        std::fs::write(&right_path, "id,code,name\nR1,X,Product\nR2,X,Produxt\nR3,Y,Unique\n").unwrap();
-        let ws = Workspace { queries: vec![
-            QueryDef { id: "left".into(), name: "left".into(), steps: vec![TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
-            QueryDef { id: "right".into(), name: "right".into(), steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
-        ], focus_query_id: "left".into(), key_maps: vec![] };
-        let request = DatasetMatchingRequest { plan: MatchingPlan {
-            source_ref: "left".into(), target_ref: "right".into(),
-            map_key_fields: vec!["code".into()], target_identity_fields: vec!["id".into()],
-            outputs: vec!["id".into()], comparisons: vec![
-                crate::MatchingPlanComparison { source_field: "code".into(), target_field: "code".into(), role: MatchingFieldRole::HardConstraint },
-                crate::MatchingPlanComparison { source_field: "name".into(), target_field: "name".into(), role: MatchingFieldRole::SoftSignal },
-            ], normalization: vec!["trim".into(), "casefold".into()],
-            ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
-            scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
-        }, sample_percent: 5, right_sample_percent: 100, max_candidate_pairs: 100, minimum_score: 0.7 };
-        let db = DbSession::new().unwrap();
-        let run = evaluate_dataset_matching(&db, &ws, &[], &[], &request).unwrap();
-        assert_eq!(run.left_total, 3);
-        assert_eq!(run.distinct_map_keys, 2);
-        assert_eq!(run.duplicate_key_sources, 2);
-        assert_eq!(run.proposed_sources, 1);
-        assert_eq!(run.candidate_pairs, 5);
-        let duplicate = dataset_matching_page(&db, &run.run_id, 0, 50, Some("duplicate_key")).unwrap();
-        assert_eq!(duplicate.total, 2);
-        assert!(duplicate.rows.iter().all(|row| row.score.is_some()));
-        let auto = dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap();
-        assert_eq!(auto.confirmed, 1, "only the unique Y key is bulk-confirmed");
-        assert_eq!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap().total, 1,
-            "unreviewed duplicate keys do not block export of unrelated complete keys");
-        let left0 = duplicate.rows[0].left_id;
-        let left1 = duplicate.rows[1].left_id;
-        let candidates0 = dataset_matching_candidates(&db, &run.run_id, left0, 0, 50).unwrap();
-        let candidates1 = dataset_matching_candidates(&db, &run.run_id, left1, 0, 50).unwrap();
-        assert_eq!(candidates0.total, 2);
-        assert_eq!(candidates1.total, 2);
-        let r1 = candidates0.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R1\"]")).unwrap().right_id;
-        let r2 = candidates1.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R2\"]")).unwrap().right_id;
-        let r1_again = candidates1.rows.iter().find(|row| row.outputs.as_deref() == Some("[\"R1\"]")).unwrap().right_id;
-        dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left0, right_id: r1, action: "confirm".into() }).unwrap();
-        assert!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap_err().contains("partially confirmed"),
-            "an approved row is not yet an approved Mapping key if duplicate physical rows remain unresolved");
-        let refusal = dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left1, right_id: r2, action: "confirm".into() }).unwrap_err();
-        assert!(refusal.contains("conflicting reviewed target"), "{refusal}");
-        assert_eq!(dataset_matching_review_stats(&db, &run.run_id).unwrap().confirmed, 2);
-        dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: left1, right_id: r1_again, action: "confirm".into() }).unwrap();
-        assert_eq!(dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap().total, 3);
-        drop_dataset_matching_run(&db, &run.run_id).unwrap();
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
     fn full_evaluation_refuses_budget_without_sampling() {
         // Budget validation does not admit zero or excessively large silent runs.
         let req: DatasetMatchingRequest = serde_json::from_value(serde_json::json!({
@@ -762,4 +701,45 @@ R3,X2,Gamma
         })).unwrap();
         assert!(validate(&req).unwrap_err().contains("budget"));
     }
+    #[test]
+    fn grouped_left_preserves_physical_rows_and_refuses_conflicts() {
+        use dwh_pipeline::{QueryDef, TransformationStep};
+        let base = std::env::temp_dir().join(format!("dwh_matching_grouped_{}", NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&base).unwrap();
+        let left_path = base.join("left.csv");
+        let right_path = base.join("right.csv");
+        std::fs::write(&left_path, "code,name\nA,Alpha\nA,Alpha\nB,Beta\nB,Conflicting\nC,Gamma\nC,Gamma\nC,Gamma\n").unwrap();
+        std::fs::write(&right_path, "id,name\nR1,Alpha\nR2,Beta\nR3,Gamma\n").unwrap();
+        let ws = Workspace { queries: vec![
+            QueryDef { id: "left".into(), name: "left".into(), steps: vec![TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
+            QueryDef { id: "right".into(), name: "right".into(), steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
+        ], focus_query_id: "left".into(), key_maps: vec![] };
+        let req = DatasetMatchingRequest { plan: MatchingPlan {
+            source_ref: "left".into(), target_ref: "right".into(),
+            map_key_fields: vec!["code".into()], target_identity_fields: vec!["id".into()], outputs: vec!["id".into()],
+            comparisons: vec![crate::MatchingPlanComparison { source_field: "name".into(), target_field: "name".into(), role: MatchingFieldRole::SoftSignal }],
+            normalization: vec!["trim".into(), "casefold".into()], ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
+            scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
+        }, sample_percent: 5, right_sample_percent: 100, max_candidate_pairs: 6, minimum_score: 0.7 };
+        let db = DbSession::new().unwrap();
+        let run = evaluate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
+        assert_eq!(run.left_total, 3, "relationship-set rows are unique keys");
+        assert_eq!(run.left_source_rows, 7, "all physical rows remain accounted");
+        assert_eq!(run.conflicting_source_keys, 1);
+        assert_eq!(run.candidate_pairs, 6, "only two consistent keys are scored against 3 RIGHT rows");
+        let page = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.rows.iter().map(|r| r.source_rows).sum::<u64>(), 7);
+        let conflict = page.rows.iter().find(|r| r.map_key == r#"["B"]"#).unwrap();
+        assert_eq!(conflict.state, "source_conflict");
+        assert!(dataset_matching_decide(&db, &DatasetReviewRequest { run_id: run.run_id.clone(), left_id: conflict.left_id,
+            right_id: conflict.right_id, action: "confirm".into() }).is_err());
+        let reviewed = dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap();
+        assert_eq!(reviewed.confirmed, 2, "only nonconflicting keys can be bulk-confirmed");
+        let approved = dataset_matching_approved_page(&db, &run.run_id, 0, 50).unwrap();
+        assert_eq!(approved.total, 2);
+        drop_dataset_matching_run(&db, &run.run_id).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }

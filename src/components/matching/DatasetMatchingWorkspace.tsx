@@ -22,7 +22,7 @@ type Props = {
   projectRef: ProjectRefContext;
   onSaveMapping?: (args: { runId: string; targetMapId: string | null; newMapName: string | null;
     plan: DatasetMatchingRequest["plan"] }) => Promise<{ mapId: string; mapName: string; count: number; destination: string; message: string }>;
-  mapOptions?: { id: string; name: string; kind?: string }[];
+  mapOptions?: { id: string; name: string; kind?: string; fromArity: number; outputArity: number }[];
   onOpenSavedMap?: (mapId: string) => void;
   onSaveProject?: () => void;
   onPublishSource?: (runId: string, mapId: string, maxBatches: number) => Promise<{
@@ -91,7 +91,8 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   const [reviewFinished, setReviewFinished] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const continuePublish = useRef(true);
-  const sourceMap = mapOptions.find(m => m.id === mapId)?.kind === "source";
+  const selectedMapOption = mapOptions.find(m => m.id === mapId);
+  const sourceMap = selectedMapOption?.kind === "source";
 
   useEffect(() => {
     let live = true;
@@ -147,6 +148,11 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     [plan, score, workspace.queries, connections, sources, projectRef.projectFile, projectRef.projectUid,
       projectRef.references, projectRef.connectionBindings]);
   const runCurrent = !!run && evaluatedFingerprint === evaluationFingerprint;
+  // Preserve the target Mapping's existing relation schema; do not silently reshape it.
+  const saveShape = evaluatedPlan ?? plan;
+  const selectedMapCompatible = !selectedMapOption ||
+    (selectedMapOption.fromArity === saveShape.mapKeyFields.length &&
+     selectedMapOption.outputArity === saveShape.outputs.length);
   const eligibleBulk = (run?.proposedSources ?? 0) > 0;
   useEffect(() => {
     if (!selected) return;
@@ -279,6 +285,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     const name = newMapName.trim();
     if (savingNewMap && !name) { setError("Enter a name for the new Mapping."); return; }
     if (!savingNewMap && !mapId) { setError("Select an existing Mapping or choose Create new Mapping."); return; }
+    if (!savingNewMap && !selectedMapCompatible) { setError("Selected Mapping has an incompatible key/output shape. Choose a compatible Mapping or create a new seed Mapping."); return; }
     const targetMapId = savingNewMap ? null : mapId;
     const destination = targetMapId ? mapOptions.find(m => m.id === targetMapId)?.name ?? targetMapId : name;
     if (!window.confirm(`Save ${stats.confirmed} explicitly confirmed mappings to ${destination}? Existing non-empty values will not be overwritten. Source Mapping may write to its database table.`)) return;
@@ -356,6 +363,7 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   }
   async function publishSource() {
     if (!run || !runCurrent || !sourceMap || !mapId || !onPublishSource || publishing || working) return;
+    if (!selectedMapCompatible) { setError("Selected source Mapping has an incompatible key/output shape; publication refused."); return; }
     if (!progressLocation) { setError("Save the project file first: durable publication needs a checkpoint and journal."); return; }
     continuePublish.current = true;
     setPublishing(true); setError(null);
@@ -483,11 +491,12 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
           {onSaveMapping && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-700 bg-[#101b29] p-3 text-xs" data-testid="matching-save-panel">
             <strong className="text-teal-100">Save Mapping</strong>
             <select className={cn} aria-label="Target Mapping" value={savingNewMap ? "__new__" : mapId} onChange={e => { const next = e.target.value; setSavingNewMap(next === "__new__"); if (next !== "__new__") setMapId(next); }}>
-              <option value="">Select existing Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              <option value="">Select existing Mapping</option>{mapOptions.map(m => <option key={m.id} value={m.id}>{m.name} ({m.fromArity} keys → {m.outputArity} outputs){m.fromArity !== saveShape.mapKeyFields.length || m.outputArity !== saveShape.outputs.length ? " · incompatible" : ""}</option>)}
               <option value="__new__">+ Create new seed Mapping…</option>
             </select>
             {savingNewMap && <input type="text" aria-label="New Mapping name" placeholder="Mapping name" className={cn} value={newMapName} onChange={e => setNewMapName(e.target.value)} />}
-            <button type="button" data-testid="matching-save" className={`${btn} border-teal-500 bg-teal-900/30 font-semibold text-teal-100`} disabled={working || publishing || !runCurrent || !stats?.confirmed || (sourceMap && !savingNewMap && !progressLocation) || (savingNewMap ? !newMapName.trim() : !mapId)} onClick={() => void (sourceMap && !savingNewMap ? publishSource() : saveMapping())}>{sourceMap && !savingNewMap ? `Publish Confirmed (${stats?.confirmed ?? 0})` : `Save Mapping (${stats?.confirmed ?? 0})`}</button>
+            {!savingNewMap && selectedMapOption && !selectedMapCompatible && <div role="alert" data-testid="matching-save-shape-warning" className="w-full rounded border border-amber-700 bg-amber-950/30 px-2 py-1 text-amber-200">Selected Mapping has {selectedMapOption.fromArity} LEFT key column(s) and {selectedMapOption.outputArity} RIGHT output column(s); this Evaluation needs {saveShape.mapKeyFields.length} LEFT key column(s) and {saveShape.outputs.length} RIGHT output column(s). Select a compatible Mapping or choose “+ Create new seed Mapping…”. Your confirmed decisions are preserved.</div>}
+            <button type="button" data-testid="matching-save" className={`${btn} border-teal-500 bg-teal-900/30 font-semibold text-teal-100`} disabled={working || publishing || !runCurrent || !stats?.confirmed || (!savingNewMap && !selectedMapCompatible) || (sourceMap && !savingNewMap && !progressLocation) || (savingNewMap ? !newMapName.trim() : !mapId)} onClick={() => void (sourceMap && !savingNewMap ? publishSource() : saveMapping())}>{sourceMap && !savingNewMap ? `Publish Confirmed (${stats?.confirmed ?? 0})` : `Save Mapping (${stats?.confirmed ?? 0})`}</button>
             {publishing && <button type="button" className={btn} onClick={() => { continuePublish.current = false; }}>Stop after current batch</button>}
             {sourceMap && <span className="text-amber-200">{publishedCount} published so far. Each Source batch commits independently; retry resumes via Host ledger.</span>}
             <span className="text-slate-400">Seed: project Save (not yet streaming). Source: Host-side bounded publication. Review progress: Save Progress. Project file Save is separate.</span>

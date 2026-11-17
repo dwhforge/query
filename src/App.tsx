@@ -227,6 +227,8 @@ import {
   deleteKeyMapFromWorkspace,
   emptyKeyMap,
   findApplyKeyMapIdForJoin,
+  fromColumnsEff,
+  outputColumnsEff,
   resolveKeyMapConnection,
   type ApplySide,
 } from "./lib/keyMap";
@@ -5490,7 +5492,7 @@ function App() {
                       lockedBindings={fullJoin?.locked}
                       onSaveProject={() => { void handleSaveProject(); }}
                       initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
-                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id, kind: m.storage?.kind ?? "seed" }))}
+                      mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id, kind: m.storage?.kind ?? "seed", fromArity: fromColumnsEff(m).length, outputArity: outputColumnsEff(m).length }))}
                       onOpenSavedMap={mapId => {
                         const map = projectRef.current.workspace.key_maps?.find(m => m.id === mapId);
                         if (map) openKeyMapEditor(map);

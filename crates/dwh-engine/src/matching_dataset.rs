@@ -49,6 +49,7 @@ pub struct DatasetMatchingRun {
     pub reused_targets: u64,
     pub proposed_sources: u64,
     pub ambiguous_sources: u64,
+    pub below_threshold_sources: u64,
     pub unmatched_sources: u64,
     pub candidate_policy: String,
     pub source_coverage: String,
@@ -238,22 +239,23 @@ pub fn evaluate_dataset_matching(db: &DbSession, workspace: &Workspace, connecti
         let outputs = json_values("r", &req.plan.outputs);
         let source_key = json_values("l", &req.plan.map_key_fields);
         db.with_conn(|conn| conn.execute_batch(&format!(
-            "CREATE TEMP TABLE {pairs} AS SELECT l.__matching_row_id AS left_id, r.__matching_row_id AS right_id, {targets} AS target_identity, {outputs} AS outputs, CAST({score} AS DOUBLE) AS score FROM {lt} l JOIN {rt} r ON {join} WHERE ({score}) >= {};",
-            req.minimum_score
+            "CREATE TEMP TABLE {pairs} AS SELECT l.__matching_row_id AS left_id, r.__matching_row_id AS right_id, {targets} AS target_identity, {outputs} AS outputs, CAST({score} AS DOUBLE) AS score FROM {lt} l JOIN {rt} r ON {join};"
         )).map_err(|e| e.to_string()))?;
         db.with_conn(|conn| conn.execute_batch(&format!(
-            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1) SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.alternatives > 1 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id;"
+            "CREATE TEMP TABLE {results} AS WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score, count(*) OVER (PARTITION BY left_id) AS alternatives FROM {pairs}), winners AS (SELECT * FROM ranked WHERE rn = 1) SELECT l.__matching_row_id AS left_id, {source_key} AS map_key, w.right_id, w.target_identity, w.outputs, w.score, coalesce(w.alternatives, 0) AS alternatives, CASE WHEN w.right_id IS NULL THEN 'unmatched' WHEN w.score < {} THEN 'below_threshold' WHEN w.second_score >= {} AND w.score - w.second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END AS state FROM {lt} l LEFT JOIN winners w ON l.__matching_row_id = w.left_id;",
+            req.minimum_score, req.minimum_score
         )).map_err(|e| e.to_string()))?;
         db.with_conn(|conn| conn.execute_batch(&format!(
             "CREATE TEMP TABLE __dwh_match_d_{suffix} (left_id BIGINT PRIMARY KEY, right_id BIGINT, action VARCHAR NOT NULL);"
         )).map_err(|e| e.to_string()))?;
         let candidate_pairs = scalar(db, &format!("SELECT count(*) FROM {pairs}"))?;
-        let reused_targets = scalar(db, &format!("SELECT count(*) FROM (SELECT target_identity FROM {results} WHERE right_id IS NOT NULL GROUP BY target_identity HAVING count(*) > 1) reused"))?;
+        let reused_targets = scalar(db, &format!("SELECT count(*) FROM (SELECT target_identity FROM {results} WHERE state IN ('proposed', 'ambiguous') GROUP BY target_identity HAVING count(*) > 1) reused"))?;
         let proposed_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'proposed'"))?;
         let ambiguous_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'ambiguous'"))?;
+        let below_threshold_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'below_threshold'"))?;
         let unmatched_sources = scalar(db, &format!("SELECT count(*) FROM {results} WHERE state = 'unmatched'"))?;
-        if proposed_sources + ambiguous_sources + unmatched_sources != left_total { return Err("matching coverage invariant violated".into()); }
-        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, reused_targets, proposed_sources, ambiguous_sources, unmatched_sources,
+        if proposed_sources + ambiguous_sources + below_threshold_sources + unmatched_sources != left_total { return Err("matching coverage invariant violated".into()); }
+        Ok(DatasetMatchingRun { run_id: suffix.clone(), left_total, right_total, candidate_pairs, reused_targets, proposed_sources, ambiguous_sources, below_threshold_sources, unmatched_sources,
             candidate_policy: if req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint) { "hard_constraints" } else { "cartesian" }.into(),
             source_coverage: "complete".into(), candidate_search_exhaustive:
                 !req.plan.comparisons.iter().any(|c| c.role == MatchingFieldRole::HardConstraint),
@@ -277,7 +279,7 @@ pub fn dataset_matching_page(db: &DbSession, run_id: &str, page: u64, page_size:
     let decisions = format!("__dwh_match_d_{run_id}");
     let where_clause = match filter.unwrap_or("all") {
         "all" => String::new(),
-        "proposed" | "ambiguous" | "unmatched" | "confirm" | "reject" | "defer" | "no_target" =>
+        "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "confirm" | "reject" | "defer" | "no_target" =>
             format!("WHERE coalesce(d.action, s.state) = '{}'", filter.unwrap_or("all")),
         _ => return Err("invalid matching result filter".into()),
     };
@@ -493,6 +495,7 @@ mod tests {
         assert_eq!(run.right_total, 500);
         assert_eq!(run.proposed_sources, 500);
         assert_eq!(run.unmatched_sources, 0);
+        assert_eq!(run.below_threshold_sources, 0);
         assert_eq!(run.candidate_pairs, 500);
         let p0 = dataset_matching_page(&db, &run.run_id, 0, 50, None).unwrap();
         let p9 = dataset_matching_page(&db, &run.run_id, 9, 50, None).unwrap();
@@ -520,6 +523,68 @@ mod tests {
         assert_eq!(approved.rows.len(), 200);
         drop_dataset_matching_run(&db, &run.run_id).unwrap();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn candidate_evidence_survives_below_threshold() {
+        let db = DbSession::new().unwrap();
+        db.with_conn(|conn| conn.execute_batch("CREATE TEMP TABLE __test_scores(left_id BIGINT, right_id BIGINT, score DOUBLE); INSERT INTO __test_scores VALUES (1, 1, 0.50), (1, 2, 0.45), (2, 3, 0.93), (2, 4, 0.92), (3, 5, 0.95);").map_err(|e| e.to_string())).unwrap();
+        let classification = db.with_conn(|conn| {
+            let sql = "WITH ranked AS (SELECT *, row_number() OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS rn, lead(score) OVER (PARTITION BY left_id ORDER BY score DESC, right_id ASC) AS second_score FROM __test_scores) SELECT left_id, CASE WHEN score < 0.70 THEN 'below_threshold' WHEN second_score >= 0.70 AND score - second_score < 0.03 THEN 'ambiguous' ELSE 'proposed' END FROM ranked WHERE rn = 1 ORDER BY left_id";
+            let mut statement = conn.prepare(sql).map_err(|e| e.to_string())?;
+            let rows = statement.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        }).unwrap();
+        assert_eq!(classification, vec![(1, "below_threshold".into()), (2, "ambiguous".into()), (3, "proposed".into())]);
+    }
+
+    #[test]
+    fn live_dataset_evaluation_distinguishes_three_outcomes() {
+        use dwh_pipeline::{QueryDef, TransformationStep};
+        let base = std::env::temp_dir().join(format!("dwh_matching_states_{}", NEXT_RUN.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&base).unwrap();
+        let left_path = base.join("left.csv");
+        let right_path = base.join("right.csv");
+        std::fs::write(&left_path, "code,name
+X1,aaaa
+X2,Gamma
+X3,Orphan
+").unwrap();
+        std::fs::write(&right_path, "id,code,name
+R1,X1,zzzz
+R2,X2,Gamma
+R3,X2,Gamma
+").unwrap();
+        let ws = Workspace { queries: vec![
+            QueryDef { id: "left".into(), name: "left".into(), steps: vec![TransformationStep::LoadCsv { path: left_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
+            QueryDef { id: "right".into(), name: "right".into(), steps: vec![TransformationStep::LoadCsv { path: right_path.to_string_lossy().into(), path_kind: Default::default() }], execution: Default::default() },
+        ], focus_query_id: "left".into(), key_maps: vec![] };
+        let req = DatasetMatchingRequest { plan: MatchingPlan {
+            source_ref: "left".into(), target_ref: "right".into(),
+            map_key_fields: vec!["code".into()], target_identity_fields: vec!["id".into()],
+            outputs: vec!["id".into()], comparisons: vec![
+                crate::MatchingPlanComparison { source_field: "code".into(), target_field: "code".into(), role: MatchingFieldRole::HardConstraint },
+                crate::MatchingPlanComparison { source_field: "name".into(), target_field: "name".into(), role: MatchingFieldRole::SoftSignal },
+            ], normalization: vec!["trim".into(), "casefold".into()],
+            ambiguity: crate::MatchingAmbiguityPolicy::LeaveForManual,
+            scope: crate::MatchingScopeKind::Full, semantic_revision: 1, ui_revision: 0,
+        }, sample_percent: 5, max_candidate_pairs: 100, minimum_score: 0.9 };
+        let db = DbSession::new().unwrap();
+        let run = evaluate_dataset_matching(&db, &ws, &[], &[], &req).unwrap();
+        assert_eq!(run.left_total, 3);
+        assert_eq!(run.candidate_pairs, 3);
+        assert_eq!(run.below_threshold_sources, 1);
+        assert_eq!(run.ambiguous_sources, 1);
+        assert_eq!(run.unmatched_sources, 1);
+        assert_eq!(run.proposed_sources, 0);
+        let below = dataset_matching_page(&db, &run.run_id, 0, 50, Some("below_threshold")).unwrap();
+        assert_eq!(below.total, 1);
+        assert!(below.rows[0].score.unwrap() < 0.9);
+        let alternatives = dataset_matching_candidates(&db, &run.run_id, below.rows[0].left_id, 0, 50).unwrap();
+        assert_eq!(alternatives.total, 1, "below-threshold evidence remains reviewable");
+        assert_eq!(dataset_matching_confirm_unambiguous(&db, &run.run_id).unwrap().confirmed, 0);
+        drop_dataset_matching_run(&db, &run.run_id).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

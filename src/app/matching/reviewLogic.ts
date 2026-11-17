@@ -82,7 +82,7 @@ export function filterProposals(
       break;
     case "needs_decision":
       list = proposals.filter((p) =>
-        ["proposed", "ambiguous", "no_candidates", "incomplete_search"].includes(
+        ["proposed", "ambiguous", "no_candidates", "below_threshold", "incomplete_search"].includes(
           p.state,
         ),
       );
@@ -159,6 +159,7 @@ export type BulkConfirmPreview = {
 };
 
 const BULK_EXCLUDE_STATES: MatchingProposalState[] = [
+  "below_threshold",
   "ambiguous",
   "incomplete_search",
   "stale",
@@ -493,7 +494,7 @@ export function buildFinalDiff(
   for (const p of session.proposals) {
     const token = mapKeyToken(p.mapKey);
     if (decidedKeys.has(token)) continue;
-    if (["proposed", "ambiguous", "incomplete_search", "no_candidates"].includes(p.state)) {
+    if (["proposed", "ambiguous", "below_threshold", "incomplete_search", "no_candidates"].includes(p.state)) {
       rows.push({
         mapKey: p.mapKey,
         kind: "unresolved",

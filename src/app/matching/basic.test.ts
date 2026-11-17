@@ -99,6 +99,33 @@ for (const mutate of [
   assert.equal(deriveMatchingReview(stale).proposals[0].state, "stale");
   assert.strictEqual(applyDecision(stale, p.proposalId, "defer", null), stale);
 }
+{
+  const { seed, report } = example(1);
+  report.sources[0].candidates[0].score = .4;
+  report.sources[0].candidates[1].score = .2;
+  const below = adaptBasicReport(seed, report, "test:below");
+  assert.equal(below.proposals[0].state, "below_threshold");
+  assert.equal(below.proposals[0].proposedCandidateId, null);
+  assert.equal(below.proposals[0].alternativeCandidateIds.length, 2, "retain verified low scores for review");
+  assert.equal(previewBulkConfirm(below, "selection", [below.proposals[0].proposalId]).keyCount, 0, "no low-score auto-confirm");
+  const manual = applyDecision(below, below.proposals[0].proposalId, "choose_alternative", below.proposals[0].alternativeCandidateIds[0]);
+  assert.equal(manual.decisions.length, 1, "explicit manual choice is possible");
+  report.sources[0].candidates.pop();
+  const incomplete = adaptBasicReport(seed, report, "test:partial");
+  assert.equal(incomplete.proposals[0].state, "incomplete_search", "unknown competitors are not absence");
+  report.sources[0].candidates = [];
+  report.right_universe = [];
+  report.right_distinct_total = 0;
+  const missing = adaptBasicReport(seed, report, "test:none");
+  assert.equal(missing.proposals[0].state, "no_candidates");
+}
+{
+  const { seed, report } = example(1);
+  report.sources[0].candidates[0].score = .95;
+  report.sources[0].candidates[1].score = .94;
+  const ambiguous = adaptBasicReport(seed, report, "test:ambiguous");
+  assert.equal(ambiguous.proposals[0].state, "ambiguous");
+}
 console.log("Basic shared Matching model: nullable exact identity, arities 1–5/8, full competitors, ledger, bulk/undo, LLM merge and stale gates passed");
 
 {

@@ -8,7 +8,7 @@ export type SetTuple = readonly (string | null)[];
 export const setTupleKey = (parts: SetTuple): string => JSON.stringify(parts);
 
 export type EvaluationOutcome =
-  | "proposed" | "ambiguous" | "no_proposal" | "incomplete"
+  | "proposed" | "ambiguous" | "no_proposal" | "below_threshold" | "incomplete"
   | "confirmed_draft" | "deferred" | "rejected" | "saved" | "stale";
 
 export type SetEvaluationInput = {
@@ -56,6 +56,7 @@ export type SetEvaluation = {
     proposed: number;
     ambiguous: number;
     noProposal: number;
+    belowThreshold: number;
     incomplete: number;
     confirmedDraft: number;
     otherDecided: number;
@@ -113,6 +114,7 @@ export function evaluateSet(input: SetEvaluationInput): SetEvaluation {
       proposed: rows.filter(r => r.outcome === "proposed" && !r.searchIncomplete).length,
       ambiguous: count("ambiguous"),
       noProposal: count("no_proposal"),
+      belowThreshold: count("below_threshold"),
       incomplete: rows.filter(r => r.outcome === "incomplete" || (r.outcome === "proposed" && r.searchIncomplete)).length,
       confirmedDraft: count("confirmed_draft"),
       otherDecided: count("deferred") + count("rejected") + count("saved") + count("stale"),

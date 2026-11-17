@@ -49,14 +49,14 @@ export type DatasetMatchingEstimate = {
 };
 export type DatasetMatchingRun = {
   runId: string; leftTotal: number; rightTotal: number; candidatePairs: number;
-  reusedTargets: number; proposedSources: number; ambiguousSources: number; unmatchedSources: number;
+  reusedTargets: number; proposedSources: number; ambiguousSources: number; belowThresholdSources: number; unmatchedSources: number;
   candidatePolicy: string; sourceCoverage: string; candidateSearchExhaustive: boolean;
   inputsTransactionallySnapshotted: boolean; minimumScore: number;
 };
 export type DatasetMatchRow = {
   leftId: number; mapKey: string; rightId: number | null;
   targetIdentity: string | null; outputs: string | null; score: number | null;
-  alternatives: number; state: "proposed" | "ambiguous" | "unmatched" | "confirm" | "reject" | "defer" | "no_target";
+  alternatives: number; state: "proposed" | "ambiguous" | "below_threshold" | "unmatched" | "confirm" | "reject" | "defer" | "no_target";
 };
 export type DatasetMatchingPage = { rows: DatasetMatchRow[]; page: number; pageSize: number; total: number };
 export type DatasetReviewStats = { reviewed: number; confirmed: number; deferred: number; rejected: number };

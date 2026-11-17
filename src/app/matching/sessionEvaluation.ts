@@ -3,12 +3,13 @@ import type { MatchingTabSession, MatchingProposalView } from "./types";
 import { evaluateSet, setTupleKey, type EvaluationOutcome, type SetEvaluation } from "./setEvaluation";
 
 function status(p: MatchingProposalView): EvaluationOutcome {
-  if (p.searchIncomplete && ["proposed", "ambiguous", "no_candidates", "incomplete_search"].includes(p.state))
+  if (p.searchIncomplete && ["proposed", "ambiguous", "no_candidates", "below_threshold", "incomplete_search"].includes(p.state))
     return "incomplete";
   switch (p.state) {
     case "proposed": return p.searchIncomplete ? "incomplete" : "proposed";
     case "ambiguous": return "ambiguous";
     case "no_candidates": return p.searchIncomplete ? "incomplete" : "no_proposal";
+    case "below_threshold": return p.searchIncomplete ? "incomplete" : "below_threshold";
     case "incomplete_search": return "incomplete";
     case "confirmed_in_draft": return "confirmed_draft";
     case "deferred": return "deferred";
@@ -33,9 +34,12 @@ export function evaluationFromSession(session: MatchingTabSession): SetEvaluatio
   const targetComplete = advanced ? advanced.snapshot.acquisition.complete
     : report ? !report.right_truncated : null;
   const rows = session.proposals.map(p => {
-    const c = p.proposedCandidateId ? candidates.get(p.proposedCandidateId) : undefined;
-    const score = p.proposedCandidateId
-      ? p.edges?.find(e => e.candidateId === p.proposedCandidateId)?.score ?? null : null;
+    // Below-threshold evidence is inspectable but never a proposed relationship.
+    const displayedId = p.proposedCandidateId ??
+      (p.state === "below_threshold" ? p.alternativeCandidateIds[0] : null);
+    const c = displayedId ? candidates.get(displayedId) : undefined;
+    const score = displayedId
+      ? p.edges?.find(e => e.candidateId === displayedId)?.score ?? null : null;
     return {
       id: p.proposalId,
       left: [...p.mapKey], sourceRows: p.affectedSourceRows,

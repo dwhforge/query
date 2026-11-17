@@ -19,7 +19,7 @@ type Props = {
   onPin: (evaluation: SetEvaluation | null) => void;
 };
 
-const categories = ["all", "proposed", "ambiguous", "no_proposal", "incomplete", "confirmed_draft", "other"] as const;
+const categories = ["all", "proposed", "ambiguous", "below_threshold", "no_proposal", "incomplete", "confirmed_draft", "other"] as const;
 type Category = typeof categories[number];
 const tuple = (parts: readonly (string | null)[]) => parts.map(tupleCell).join(" / ");
 function category(row: SetEvaluationRow): Category {
@@ -64,12 +64,12 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
   const bulk = previewBulkConfirm(session, "selection", checked);
   const statusCount: Record<Category, number> = {
     all: stats.acquiredKeys, proposed: stats.proposed, ambiguous: stats.ambiguous,
-    no_proposal: stats.noProposal, incomplete: stats.incomplete,
+    no_proposal: stats.noProposal, below_threshold: stats.belowThreshold, incomplete: stats.incomplete,
     confirmed_draft: stats.confirmedDraft, other: stats.otherDecided,
   };
   const labels: Record<Category, string> = {
     all: "All", proposed: "Proposed", ambiguous: "Ambiguous",
-    no_proposal: "No proposal", incomplete: "Incomplete",
+    no_proposal: "No candidates found", below_threshold: "Candidates below threshold", incomplete: "Incomplete",
     confirmed_draft: "Confirmed draft", other: "Other decisions",
   };
   const complete = current.sourceComplete === true && current.targetComplete === true;
@@ -107,13 +107,13 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
       {activeEstimate && <p className="w-full text-amber-200" role="status" data-testid="matching-estimate-result">
         Sampled {activeEstimate.sampledKeys}/{activeEstimate.acquiredKeys} acquired LEFT keys ({activeEstimate.actualPercent.toFixed(1)}% actual).
         {" "}Observed in sample: {activeEstimate.sampled.proposed} proposed, {activeEstimate.sampled.ambiguous} ambiguous,
-        {" "}{activeEstimate.sampled.no_proposal} without proposal, {activeEstimate.sampled.incomplete} incomplete.
+        {" "}{activeEstimate.sampled.below_threshold} below threshold, {activeEstimate.sampled.no_proposal} with no candidates, {activeEstimate.sampled.incomplete} incomplete.
         {" "}Extrapolation is illustrative for acquired keys only, NOT a full-dataset result or a preflight Host cost estimate.
       </p>}
     </div>
-    <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-slate-800 p-2 sm:grid-cols-4 lg:grid-cols-7" aria-label="Matching evaluation statistics">
+    <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-slate-800 p-2 sm:grid-cols-4 lg:grid-cols-8" aria-label="Matching evaluation statistics">
       {([
-        ["Proposed", stats.proposed], ["Ambiguous", stats.ambiguous], ["No proposal", stats.noProposal],
+        ["Proposed", stats.proposed], ["Ambiguous", stats.ambiguous], ["Below threshold", stats.belowThreshold], ["No candidates found", stats.noProposal],
         ["Incomplete", stats.incomplete], ["Confirmed draft", stats.confirmedDraft],
         ["RIGHT outputs used", stats.distinctProposedOutputs], ["Many-to-one groups", stats.manyToOneOutputGroups],
       ] as [string, number][]).map(([label, value]) =>
@@ -144,7 +144,7 @@ export function MatchingSetView({ session, checked, onChecked, onChange, onCommi
       <table className="w-full border-collapse text-left text-[11px]">
         <thead className="sticky top-0 z-10 bg-[#0b1220] text-slate-400"><tr className="border-b border-slate-700">
           <th className="p-2"><input type="checkbox" aria-label="Select all visible LEFT keys" checked={allVisible} onChange={toggleAll} /></th>
-          <th className="p-2">LEFT key</th><th className="p-2">Proposed RIGHT outputs</th>
+          <th className="p-2">LEFT key</th><th className="p-2">Best RIGHT evidence / proposed output</th>
           <th className="p-2">Score</th><th className="p-2">Outcome</th><th className="p-2">Investigate</th>
         </tr></thead>
         <tbody>{filtered.map(row => <tr key={row.sourceKey} className="border-b border-slate-800 hover:bg-slate-900/70">

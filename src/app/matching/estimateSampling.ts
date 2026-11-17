@@ -36,7 +36,7 @@ export type SampleEstimate = {
 };
 
 const outcomes: readonly EvaluationOutcome[] = [
-  "proposed", "ambiguous", "no_proposal", "incomplete", "confirmed_draft",
+  "proposed", "ambiguous", "no_proposal", "below_threshold", "incomplete", "confirmed_draft",
   "deferred", "rejected", "saved", "stale",
 ];
 
@@ -53,7 +53,7 @@ export function estimateAcquiredEvaluation(
   const sampled = Object.fromEntries(outcomes.map(k => [k, 0])) as Record<EvaluationOutcome, number>;
   for (const row of selected) {
     // Incomplete evidence takes priority; never count it as an actionable proposal.
-    const outcome = row.searchIncomplete && ["proposed", "ambiguous", "no_proposal"].includes(row.outcome)
+    const outcome = row.searchIncomplete && ["proposed", "ambiguous", "no_proposal", "below_threshold"].includes(row.outcome)
       ? "incomplete" : row.outcome;
     sampled[outcome]++;
   }

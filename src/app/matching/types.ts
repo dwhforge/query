@@ -62,6 +62,7 @@ export type MatchingProposalState =
   | "proposed"
   | "ambiguous"
   | "no_candidates"
+  | "below_threshold"
   | "incomplete_search"
   | "confirmed_in_draft"
   | "deferred"

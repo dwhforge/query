@@ -1,6 +1,6 @@
 /** ADR-0051 Basic producer adapter. Legacy batch shapes are pure call values only. */
 import type { JoinTupleReport } from "../../lib/bridge";
-import { BATCH_HIGH_CONFIDENCE_SCORE, tupleBatchProposals, tupleBatchHighConfidenceTarget, tupleBatchLlmPrompt,
+import { BATCH_FUZZY_ALTERNATIVES, BATCH_HIGH_CONFIDENCE_SCORE, tupleBatchProposals, tupleBatchHighConfidenceTarget, tupleBatchLlmPrompt,
   parseSuggestedBatchTuplePairs, type TupleBatchProposal, type TupleBatchPrompt } from "../../lib/joinLensBatch";
 import { confirmTupleMapping, type LensTupleMapping } from "../../lib/joinLensConfirm";
 import { mapKeyToken, type MatchingTabSession, type MatchingProposalView } from "./types";
@@ -42,17 +42,28 @@ export function adaptBasicReport(session: MatchingTabSession, report: JoinTupleR
     const group = report.sources[p.sourceIndex]!;
     const best = p.alternatives[0];
     const safe = tupleBatchHighConfidenceTarget(report, p) !== null;
+    const scored = group.candidates.filter(c => c.score != null && Number.isFinite(c.score) && !!candidates[c.right_index]);
+    const unknown = group.candidates.some(c => c.score == null) || group.candidates.length < report.right_universe.length;
+    const belowThreshold = !best && scored.length > 0;
+    // Keep the strongest below-threshold evidence available for explicit manual review.
+    // This is NOT a suggested match and cannot be bulk-confirmed.
+    const reviewAlternatives = best ? p.alternatives.map(a => a.rightIndex)
+      : belowThreshold ? [...scored].sort((a, b) => b.score! - a.score! || a.right_index - b.right_index)
+          .slice(0, BATCH_FUZZY_ALTERNATIVES).map(c => c.right_index) : [];
+    const state = report.right_truncated || (!best && unknown) ? "incomplete_search"
+      : safe ? "proposed" : best ? "ambiguous" : belowThreshold ? "below_threshold" : "no_candidates";
     return {
       proposalId: p.id, mapKey: [...group.source.parts],
       sourceValues: Object.fromEntries(report.left_on.map((name, i) => [name, group.source.parts[i]])),
       affectedSourceRows: group.source.occurrences,
       proposedCandidateId: best ? candidates[best.rightIndex]!.candidateId : null,
-      alternativeCandidateIds: p.alternatives.map(a => candidates[a.rightIndex]!.candidateId),
-      state: safe ? "proposed" : report.right_truncated ? "incomplete_search" : best ? "ambiguous" : "no_candidates",
-      suggestionState: safe ? "proposed" : report.right_truncated ? "incomplete_search" : best ? "ambiguous" : "no_candidates",
+      alternativeCandidateIds: reviewAlternatives.map(i => candidates[i]!.candidateId),
+      state,
+      suggestionState: state,
       provenance: "fuzzy", semanticPlanRevision: session.plan!.semanticRevision,
-      evidenceRevision: revision, runId, searchIncomplete: report.right_truncated,
-      evidence: [{ field: "scope", note: "Bounded unmatched source tuples; scores are spelling similarity, not probabilities." }],
+      evidenceRevision: revision, runId, searchIncomplete: report.right_truncated || (!best && unknown),
+      evidence: [{ field: "scope", note: "Bounded unmatched source tuples; scores are spelling similarity, not probabilities." },
+        ...(belowThreshold ? [{ field: "threshold", note: `Scored candidates exist, but none reaches the ${scoreCutoff.toFixed(2)} suggestion threshold.` }] : [])],
       edges: group.candidates.filter(c => !!candidates[c.right_index]).map(c => ({
         candidateId: candidates[c.right_index]!.candidateId, metric: "join_tuple_similarity",
         score: c.score, fieldScores: [...c.field_scores], origins: ["fuzzy"],

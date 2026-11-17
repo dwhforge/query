@@ -32,6 +32,12 @@ type Props = {
   initialPlan?: DatasetMatchingRequest["plan"];
   lockedBindings?: { sourceRef: string; targetRef: string; mapKeyFields: string[]; outputs: string[] };
   initialMapId?: string;
+  /** Run the initial JOIN-bound Matching plan automatically on first opening. */
+  autoEvaluate?: boolean;
+  /** Hidden tabs must never begin evaluation. */
+  active?: boolean;
+  /** Show exercise instructions only in an active Help Lab workflow. */
+  showLabGuide?: boolean;
 };
 const INITIAL_RULE: FieldRule = { sourceField: "", targetField: "", role: "soft_signal" };
 const PAGE_SIZE = 50;
@@ -44,7 +50,7 @@ function displayTuple(raw: string | null | undefined) {
 function safeMessage(e: unknown) { return e instanceof Error ? e.message : String(e); }
 
 /** Independent Matching uses full Host-evaluated datasets. No UI page is ever an engine input. */
-export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, onPublishSource, onOpenSavedMap, onSaveProject, initialPlan, lockedBindings, initialMapId }: Props) {
+export function DatasetMatchingWorkspace({ workspace, connections, sources, projectRef, mapOptions = [], onSaveMapping, onPublishSource, onOpenSavedMap, onSaveProject, initialPlan, lockedBindings, initialMapId, autoEvaluate = false, active = true, showLabGuide = false }: Props) {
   const queries = workspace.queries ?? [];
   const [left, setLeft] = useState(initialPlan?.sourceRef ?? queries[0]?.id ?? "");
   const [right, setRight] = useState(initialPlan?.targetRef ?? queries[1]?.id ?? "");
@@ -65,6 +71,8 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   const [evaluatedPlan, setEvaluatedPlan] = useState<DatasetMatchingRequest["plan"] | null>(null);
   const [evaluatedFingerprint, setEvaluatedFingerprint] = useState<string | null>(null);
   const liveRuns = useRef<string[]>([]);
+  const autoEvaluationStarted = useRef(false);
+  const [reviewControlsOpen, setReviewControlsOpen] = useState(false);
   const candidateFetchEpoch = useRef(0);
   const [savingNewMap, setSavingNewMap] = useState(false);
   const [newMapName, setNewMapName] = useState("");
@@ -213,6 +221,15 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
     } catch (e) { setError(safeMessage(e)); }
     finally { setWorking(false); }
   }
+  // Do not auto-evaluate a second time on tab reactivation, plan edits or
+  // after an evaluation failure. Manual Evaluate remains available for retry.
+  // Incomplete plans do not initiate a Host request.
+  useEffect(() => {
+    if (!autoEvaluate || !active || !initialPlan || !lockedBindings || !valid || autoEvaluationStarted.current) return;
+    autoEvaluationStarted.current = true;
+    void execute("evaluate");
+  }, [autoEvaluate, active, valid, initialPlan, lockedBindings]);
+
   function closeDetails() {
     candidateFetchEpoch.current++;
     setSelected(null); setCandidatePage(null);
@@ -411,28 +428,31 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
   return <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#0a111a] text-slate-200">
     <header className="shrink-0 border-b border-slate-700 px-4 py-3">
       <h2 className="text-base font-semibold text-teal-100">Matching <span className="ml-2 text-xs font-normal text-slate-400">{lockedBindings ? "Original pre-JOIN LEFT → RIGHT · full scope" : "Dataset → Dataset · full scope"}</span></h2>
-      <p className="mt-1 text-xs text-slate-400">Estimate is sampled. Evaluate reads every source row and every target row; pagination affects display only.</p>
-      <div className="mt-2 flex flex-wrap items-end gap-2 text-xs" aria-label="Matching progress controls">
-        <label>Task ID<input aria-label="Matching task ID" className="ml-1 w-32 rounded border border-slate-600 bg-slate-900 px-2 py-1" value={taskSlot} onChange={e => setTaskSlot(e.target.value)} /></label>
-        <label>Task name<input aria-label="Matching task name" className="ml-1 w-40 rounded border border-slate-600 bg-slate-900 px-2 py-1" value={taskLabel} onChange={e => setTaskLabel(e.target.value)} /></label>
-        <button type="button" data-testid="matching-save-progress" className="rounded border border-slate-600 px-3 py-1" disabled={!progressLocation || !run || working || publishing} onClick={() => void saveProgress()}>Save Progress</button>
-        <button type="button" className="rounded border border-slate-600 px-3 py-1" disabled={!runCurrent || working || publishing || reviewFinished || !run || (stats?.reviewed ?? 0) !== run.leftTotal || (stats?.deferred ?? 0) > 0} onClick={() => void saveProgress(true)}>Finish Review</button>
-        <select aria-label="Saved Matching tasks" className="rounded border border-slate-600 bg-slate-900 px-2 py-1" value={resumeSlot} onChange={e=>setResumeSlot(e.target.value)}><option value="">Resume saved task…</option>{savedTasks.map(task=><option key={task.slot} value={task.slot}>{task.label} ({task.reviewed}/{task.leftTotal})</option>)}</select>
-        <button type="button" className="rounded border border-slate-600 px-3 py-1" disabled={!resumeSlot || !progressLocation || working || publishing} onClick={() => void resumeProgress()}>Resume</button>
-        {!progressLocation && <span className="flex items-center gap-2 text-amber-300">Save project file first to enable durable progress.
-          {onSaveProject && <button type="button" className="rounded border border-amber-600 px-2 py-1 hover:bg-amber-900/30" onClick={onSaveProject}>Save project…</button>}
-        </span>}
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-xs" aria-label="Matching progress controls">
+        <span className="min-w-0 truncate text-slate-400">{working ? "Evaluating or updating review…" : run ? `${stats?.reviewed ?? 0} / ${run.leftTotal} reviewed` : "Ready to evaluate"}</span>
+        <button type="button" data-testid="matching-save-progress" className={btn} disabled={!progressLocation || !run || working || publishing} onClick={() => void saveProgress()}>Save review</button>
+        <button type="button" className={btn} disabled={!runCurrent || working || publishing || reviewFinished || !run || (stats?.reviewed ?? 0) !== run.leftTotal || (stats?.deferred ?? 0) > 0} onClick={() => void saveProgress(true)}>Finish review</button>
+        <button type="button" className={`${btn} ml-auto`} aria-expanded={reviewControlsOpen} aria-controls="matching-review-controls" onClick={() => setReviewControlsOpen(x => !x)}>Saved reviews {reviewControlsOpen ? "▴" : "▾"}</button>
       </div>
+      {!progressLocation && <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-xs text-amber-300">
+        <span>Save the project to enable review checkpoints.</span>
+        {onSaveProject && <button type="button" className="shrink-0 rounded border border-amber-600 px-2 py-1 hover:bg-amber-900/30" onClick={onSaveProject}>Save project…</button>}
+      </div>}
+      {reviewControlsOpen && <div id="matching-review-controls" className="mt-2 flex min-w-0 flex-wrap items-center gap-2 rounded border border-slate-700 bg-slate-900/40 p-2 text-xs">
+        <label className="flex min-w-0 flex-1 items-center gap-2">Review name<input aria-label="Matching task name" className={`${cn} min-w-0 flex-1`} value={taskLabel} onChange={e => setTaskLabel(e.target.value)} /></label>
+        <select aria-label="Saved Matching tasks" className={`${cn} min-w-0 max-w-full flex-1`} value={resumeSlot} onChange={e => setResumeSlot(e.target.value)}><option value="">Choose saved review…</option>{savedTasks.map(task => <option key={task.slot} value={task.slot}>{task.label} ({task.reviewed}/{task.leftTotal})</option>)}</select>
+        <button type="button" className={`${btn} shrink-0`} disabled={!resumeSlot || !progressLocation || working || publishing} onClick={() => void resumeProgress()}>Resume</button>
+      </div>}
     </header>
-    {(reconLab || nameLab || regionLab) && <details open className="shrink-0 border-b border-sky-900/60 bg-sky-950/20 px-4 py-2 text-xs text-sky-100" data-testid="matching-lab-guide">
+    {showLabGuide && (reconLab || nameLab || regionLab) && <details className="shrink-0 border-b border-sky-900/60 bg-sky-950/20 px-4 py-2 text-xs text-sky-100" data-testid="matching-lab-guide">
       <summary className="cursor-pointer font-semibold">Help Lab · Matching workflow</summary>
-      <p className="mt-1 text-sky-200/90">1. Save the project file before a long review (enables durable progress). 2. Check identity fields and matching rules. 3. Evaluate full scope. 4. Review and confirm only defensible pairs. 5. Save confirmed pairs to Mapping and Save Progress; Resume later if unfinished.</p>
+      <p className="mt-1 text-sky-200/90">1. Save the project file before a long review (enables durable progress). 2. Check identity fields and matching rules. 3. Evaluate (automatic when opening from Join Lens). 4. Review and confirm only defensible pairs. 5. Save confirmed pairs to Mapping and Save Progress; Resume later if unfinished.</p>
       {reconLab && <p className="mt-1 text-amber-200">This lab's LEFT sales rows have only <code>commercial_sku</code>, not a product name; RIGHT has <code>product_name</code>. Code similarity is NOT evidence of product equivalence. Review candidates manually, or enrich LEFT with names before using name similarity. Do not lower the threshold merely to produce proposals.</p>}
       {nameLab && <p className="mt-1 text-sky-200">Both CRM and ERP catalogs provide <code>name</code>. Keep IDs as Mapping keys/outputs; compare product names as a soft signal before Evaluate.</p>}
       {regionLab && <p className="mt-1 text-sky-200">Region belongs to the Mapping key: same vendor name in US and DE can mean different entities. Preserve both fields, inspect ambiguities, save confirmed pairs, then verify the mapped mart and the original JOIN counts.</p>}
     </details>}
-    <div className="grid min-h-0 flex-1 grid-cols-[minmax(260px,320px)_minmax(0,1fr)]">
-      <aside className="space-y-3 overflow-y-auto border-r border-slate-700 p-3 text-xs">
+    <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)]">
+      <aside className="min-w-0 space-y-3 overflow-x-hidden overflow-y-auto border-b border-slate-700 p-3 text-xs lg:border-b-0 lg:border-r">
         <div className="font-semibold uppercase text-slate-400">Datasets &amp; identity</div>
         <label className="block">LEFT query<select aria-label="LEFT dataset" className={`mt-1 w-full ${cn}`} value={left} disabled={!!lockedBindings} onChange={e => setLeft(e.target.value)}>{queries.map(q => <option key={q.id} value={q.id}>{q.name || q.id}</option>)}</select></label>
         <label className="block">RIGHT query<select aria-label="RIGHT dataset" className={`mt-1 w-full ${cn}`} value={right} disabled={!!lockedBindings} onChange={e => setRight(e.target.value)}>{queries.map(q => <option key={q.id} value={q.id}>{q.name || q.id}</option>)}</select></label>
@@ -453,21 +473,21 @@ export function DatasetMatchingWorkspace({ workspace, connections, sources, proj
           <select aria-label={`RIGHT field ${i + 1}`} className={`w-full ${cn}`} value={rule.targetField} onChange={e => editRule(i, { targetField: e.target.value })}><option value="">RIGHT field</option>{rightColumns.map(f => <option key={f} value={f}>{f}</option>)}</select>
           <div className="flex gap-1"><select aria-label={`Role ${i + 1}`} className={`min-w-0 flex-1 ${cn}`} value={rule.role} onChange={e => editRule(i, { role: e.target.value as FieldRule["role"] })}><option value="hard_constraint">Hard constraint / blocking</option><option value="soft_signal">Similarity score</option><option value="reference_context">Context only</option></select><button className={btn} type="button" disabled={comparisons.length === 1} onClick={() => setComparisons(cs => cs.filter((_, j) => i !== j))}>×</button></div>
         </div>)}
-        <div className="grid grid-cols-2 gap-2">
-          <label>LEFT Estimate sample %<input aria-label="LEFT sample percent" className={`mt-1 w-full ${cn}`} type="number" min={1} max={100} value={sample} onChange={e => setSample(Number(e.target.value))} /></label>
-          <label>RIGHT Estimate sample %<input aria-label="RIGHT sample percent" className={`mt-1 w-full ${cn}`} type="number" min={1} max={100} value={rightSample} onChange={e => setRightSample(Number(e.target.value))} /></label>
-          <label>Minimum score<input className={`mt-1 w-full ${cn}`} type="number" min={0} max={1} step={0.05} value={score} onChange={e => setScore(Number(e.target.value))} /></label>
+        <div className="grid grid-cols-1 gap-2">
+          <label>LEFT Estimate sample %<input aria-label="LEFT sample percent" className={`mt-1 w-full min-w-0 ${cn}`} type="number" min={1} max={100} value={sample} onChange={e => setSample(Number(e.target.value))} /></label>
+          <label>RIGHT Estimate sample %<input aria-label="RIGHT sample percent" className={`mt-1 w-full min-w-0 ${cn}`} type="number" min={1} max={100} value={rightSample} onChange={e => setRightSample(Number(e.target.value))} /></label>
+          <label>Minimum score<input className={`mt-1 w-full min-w-0 ${cn}`} type="number" min={0} max={1} step={0.05} value={score} onChange={e => setScore(Number(e.target.value))} /></label>
         </div>
-        <label className="block">Maximum comparisons before refusal<input className={`mt-1 w-full ${cn}`} type="number" min={1} max={100000000} value={maxPairs} onChange={e => setMaxPairs(Number(e.target.value))} /></label>
-        <div className="flex gap-2"><button className={btn} disabled={!valid || working} onClick={() => void execute("estimate")}>Estimate {sample}% LEFT / {rightSample}% RIGHT</button><button className={`${btn} border-teal-600 text-teal-200`} disabled={!valid || working} onClick={() => void execute("evaluate")}>Evaluate full scope</button></div>
+        <label className="block">Maximum comparisons before refusal<input className={`mt-1 w-full min-w-0 ${cn}`} type="number" min={1} max={100000000} value={maxPairs} onChange={e => setMaxPairs(Number(e.target.value))} /></label>
+        <div className="flex min-w-0 flex-wrap gap-2"><button className={btn} disabled={!valid || working} onClick={() => void execute("estimate")}>Estimate {sample}% LEFT / {rightSample}% RIGHT</button><button className={`${btn} border-teal-600 text-teal-200`} disabled={!valid || working} onClick={() => void execute("evaluate")}>Evaluate full scope</button></div>
         {estimate && <div className="rounded border border-amber-800 p-2 text-amber-200">Estimate cost only: {estimate.sampledLeft} / {estimate.leftTotal} LEFT Mapping keys and {estimate.sampledRight} / {estimate.rightTotal} RIGHT rows sampled. {estimate.sampledCandidatePairs.toLocaleString()} candidate pairs observed; ~{estimate.estimatedCandidatePairs.toLocaleString()} extrapolated. RIGHT sampling can miss true matches. No coverage claim.</div>}
       </aside>
-      <main className="flex min-h-0 flex-col overflow-hidden">
+      <main className="flex min-h-0 min-w-0 flex-col overflow-hidden">
         {error && <div role="alert" className="border-b border-red-800 bg-red-950 p-2 text-xs text-red-200">{error}</div>}
         {message && <div role="status" className="border-b border-teal-800 p-2 text-xs text-teal-200">{message}</div>}
         {run && run.conflictingSourceKeys > 0 && <div role="status" className="border-b border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-200">{run.conflictingSourceKeys} Mapping keys have conflicting LEFT matching attributes. Their candidates remain inspectable but cannot be confirmed until source attributes are reconciled.</div>}
         {run && !runCurrent && <div role="alert" className="border-b border-amber-800 bg-amber-950/40 p-2 text-xs text-amber-200">Evaluation is stale: rules, scoring or input definitions changed. Re-evaluate before Review or staging to Mapping. Existing materialized evidence remains read-only for inspection.</div>}
-        {!run ? <div className="m-auto max-w-lg p-8 text-center text-sm text-slate-500">Select two queries, choose identity and comparison rules, then Evaluate. UI previews cannot limit the requested scope.</div> : <>
+        {!run ? <div className="m-auto max-w-lg p-8 text-center text-sm text-slate-500">{working ? "Evaluating full dataset…" : "Select identity and comparison rules, then Evaluate. UI previews cannot limit the requested scope."}</div> : <>
           <div className="shrink-0 border-b border-slate-700 p-3">
             <div className="flex flex-wrap gap-4 text-sm"><strong className="text-teal-200">{run.leftTotal.toLocaleString()} LEFT keys / {run.leftSourceRows.toLocaleString()} source rows</strong><span>{run.rightTotal.toLocaleString()} RIGHT</span><span>{run.proposedSources} proposed</span><span className="text-amber-300">{run.ambiguousSources} ambiguous</span><span className="text-amber-200">{run.belowThresholdSources} below threshold</span><span>{run.unmatchedSources} no candidates</span><span className="text-amber-300">{run.conflictingSourceKeys} source attribute conflicts</span><span>{run.candidatePairs} candidate pairs evaluated</span><span>{run.aboveThresholdPairs} pairs above threshold</span><span className="text-amber-200">{run.reusedTargets} reused RIGHT identities</span></div>
             <p className="mt-1 text-xs text-slate-500">Source coverage: {run.sourceCoverage}; candidate policy: {run.candidatePolicy}; exhaustive search: {run.candidateSearchExhaustive ? "yes" : "no (hard-constrained)"}. A/B counts are indicative without a shared transactional snapshot.</p>

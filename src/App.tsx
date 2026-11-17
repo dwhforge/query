@@ -5490,6 +5490,9 @@ function App() {
                       projectRef={projectRefContext(project)}
                       initialPlan={fullJoin?.plan}
                       lockedBindings={fullJoin?.locked}
+                      autoEvaluate={tab.entry === "lens" && !!fullJoin}
+                      active={on}
+                      showLabGuide={!!activeLabTask}
                       onSaveProject={() => { void handleSaveProject(); }}
                       initialMapId={fullJoin && (project.workspace.key_maps ?? []).some(m => m.id === tab.targetMapId && (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd") ? tab.targetMapId : undefined}
                       mapOptions={(project.workspace.key_maps ?? []).filter(m => (!m.storage || m.storage.kind === "seed" || m.storage.kind === "source") && m.time_mode !== "range_scd").map(m => ({ id: m.id, name: m.name || m.id, kind: m.storage?.kind ?? "seed", fromArity: fromColumnsEff(m).length, outputArity: outputColumnsEff(m).length }))}

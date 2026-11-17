@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, symlinkSyn
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { tmpdir } from "node:os"
+import { createHash } from "node:crypto"
 
 const root = resolve(import.meta.dirname, "..")
 const install = join(root, "scripts/install-opencode-dwhquery.mjs")
@@ -73,7 +74,7 @@ test("OpenCode V2 tools use exact typed CLI argv with no shell and suppress row-
   const f = fixture()
   try {
     const tools = await loadPlugin(f.business)
-    assert.equal(tools.size, 14)
+    assert.equal(tools.size, 15)
     const res = await call(tools, "query_add", { project: "exists.json", name: "Sales; rm -rf /", sourceKind: "csv", source: "sales.csv" })
     const output = JSON.parse(res.content)
     assert.deepEqual(output.argv.slice(0, 6), ["query", "add", "--project", join(f.business, "exists.json"), "--name", "Sales; rm -rf /"])
@@ -83,6 +84,16 @@ test("OpenCode V2 tools use exact typed CLI argv with no shell and suppress row-
     assert.deepEqual(inspect.argv, ["project", "inspect", "--project", join(f.business, "exists.json")])
     const joinRes = JSON.parse((await call(tools, "query_join", {project: "exists.json", query: "q_sales", right: "q_products", pairs: [{ left: "customer_id", right: "id" }]})).content)
     assert.deepEqual(JSON.parse(joinRes.argv[joinRes.argv.indexOf("--on")+1]), [{ left: "customer_id", right: "id" }])
+    const groupSchema = tools.get("query_group_by").input
+    assert.deepEqual(groupSchema.required, ["project", "query", "dimensions", "aggregates"])
+    assert.equal(groupSchema.properties.aggregates.items.type, "string")
+    const group = JSON.parse((await call(tools, "query_group_by", {
+      project: "exists.json", query: "q_sales", dimensions: ["category"],
+      aggregates: ["COUNT(*) AS n_sales", "SUM(amount) AS amount"],
+    })).content)
+    assert.deepEqual(group.argv.slice(0, 2), ["query", "group-by"])
+    assert.deepEqual(JSON.parse(group.argv[group.argv.indexOf("--dimensions") + 1]), ["category"])
+    assert.deepEqual(JSON.parse(group.argv[group.argv.indexOf("--aggregates") + 1]), ["COUNT(*) AS n_sales", "SUM(amount) AS amount"])
     const preview = JSON.parse((await call(tools, "query_preview", {project: "exists.json", query: "q_sales"})).content)
     assert.equal(preview.argv.includes("--include-rows"), false)
     // OpenCode's process.execPath is its Bun/OpenCode executable, not node.
@@ -101,27 +112,55 @@ test("OpenCode V2 tools use exact typed CLI argv with no shell and suppress row-
 })
 
 
-test("installer upgrades only the exact first published adapter and preserves custom files", () => {
+test("installer upgrades both published adapter versions, preserving user customizations", () => {
   const f = fixture()
   try {
     const dir = join(f.business, ".opencode")
     const pluginFile = join(dir, "plugins/dwhquery.js")
     const configFile = join(dir, "dwhquery-adapter.json")
+    const skillFile = join(dir, "skills/dwhquery/SKILL.md")
     const newest = readFileSync(pluginFile, "utf8")
-    const legacy = newest
+    const start = newest.indexOf('      toolSpec(editor, "query_group_by"')
+    const end = newest.indexOf('      toolSpec(editor, "query_join"', start)
+    assert.ok(start > 0 && end > start)
+    const nodeRuntime = newest.slice(0, start).concat(newest.slice(end))
+      .replace('DWHQuery [${parsed.code ?? "tool_error"}]:', 'DWHQuery:')
+      .replace('Call capabilities to inspect stepSchemas; GroupBy requires dimensions:string[] and aggregates:string[] with SQL AS aliases. ', '')
+      .replace('SQL expression steps require operator DWHQ_ALLOW_SQL=1.', 'SQL expression steps need operator DWHQ_ALLOW_SQL=1.')
+    assert.equal(createHash("sha256").update(nodeRuntime).digest("hex"),
+      "eb7a3052909d54a0019a06909b3ea41616794394afdd74ca5e55fb241ade40cf")
+    const bunRuntime = nodeRuntime
       .replace('typeof cfg.host !== "string" || typeof cfg.node !== "string" ||', 'typeof cfg.host !== "string" ||')
       .replace('!isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !isAbsolute(cfg.node) ||\n      !existsSync(cfg.cli) || !existsSync(cfg.host) || !existsSync(cfg.node)', '!isAbsolute(cfg.cli) || !isAbsolute(cfg.host) || !existsSync(cfg.cli) || !existsSync(cfg.host)')
       .replace('spawn(cfg.node, [cfg.cli, ...argv]', 'spawn(process.execPath, [cfg.cli, ...argv]')
-    assert.notEqual(legacy, newest)
-    writeFileSync(pluginFile, legacy)
-    writeFileSync(configFile, `${JSON.stringify({ version: 1, cli: f.cli, host: f.host }, null, 2)}\n`)
-    const result = spawnSync(process.execPath, [install, f.business], { env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8" })
-    assert.equal(result.status, 0, result.stderr)
-    assert.equal(readFileSync(pluginFile, "utf8"), newest)
-    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).node, process.execPath)
-    // Reinstalling the current version remains idempotent.
-    const again = spawnSync(process.execPath, [install, f.business], { env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8" })
+    assert.equal(createHash("sha256").update(bunRuntime).digest("hex"),
+      "a21b30fdfb42509e74e2a702311c84e6d6f4415ca5ec02c93b2414b75c2b9b48")
+    const newestSkill = readFileSync(skillFile, "utf8")
+    const oldSkill = newestSkill
+      .replace('For aggregation **prefer `dwhquery_query_group_by`**: pass `dimensions` as column-name strings and `aggregates` as SQL-expression strings **with explicit `AS` aliases** (for example `["COUNT(*) AS n_sales", "SUM(amount) AS amount"]`). `group`/`measures` objects are not the DWHQuery `GroupBy` payload. `dwhquery_capabilities` exposes `stepSchemas` for the generic step tool. SQL expressions require an explicit operator `DWHQ_ALLOW_SQL=1`; do not bypass the refusal with another tool. Distinguish `invalid_step_payload`, `unsupported_step`, and `sql_opt_in_required` before deciding a transform is unavailable.', 'SQL expressions require an explicit operator `DWHQ_ALLOW_SQL=1`; do not bypass the refusal with another tool.')
+      .replace('After a GroupBy, verify the resulting columns with `dwhquery_query_describe` and compare computed totals to source totals. ', '')
+    assert.equal(createHash("sha256").update(oldSkill).digest("hex"),
+      "b405245599424093349cd0ff2a0478821701de1658b281ab4e36cc61b2fd6217")
+    for (const old of [nodeRuntime, bunRuntime]) {
+      writeFileSync(skillFile, oldSkill)
+      writeFileSync(pluginFile, old)
+      writeFileSync(configFile, `${JSON.stringify({version:1, cli:f.cli, host:f.host}, null, 2)}\n`)
+      const upgraded = spawnSync(process.execPath, [install, f.business],
+        {env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8"})
+      assert.equal(upgraded.status, 0, upgraded.stderr)
+      assert.equal(readFileSync(pluginFile, "utf8"), newest)
+      assert.equal(readFileSync(skillFile, "utf8"), newestSkill)
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).node, process.execPath)
+    }
+    // Reinstall of current version is idempotent.
+    const again = spawnSync(process.execPath, [install, f.business],
+      {env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8"})
     assert.equal(again.status, 0, again.stderr)
+    writeFileSync(pluginFile, `${newest}\n// custom change\n`)
+    const refused = spawnSync(process.execPath, [install, f.business],
+      {env: {...process.env, DWHQ_CLI_BIN:f.cli, DWHQ_HOST_BIN:f.host}, encoding:"utf8"})
+    assert.notEqual(refused.status, 0)
+    assert.match(refused.stderr, /Refusing to overwrite/)
   } finally { rmSync(f.work, {recursive: true, force: true}) }
 })
 

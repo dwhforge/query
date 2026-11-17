@@ -49,13 +49,15 @@ const server = net.createServer(socket => {
 server.listen(0, '127.0.0.1', () => console.log('DWH_HOST_READY tcp ' + server.address().port));
 `;
 
-function invoke(host, ...args) {
-  const result = spawnSync(process.execPath, [cli, ...args], {encoding: "utf8", env: {...process.env, DWHQ_HOST_BIN: host}, timeout: 20_000});
+function invokeWithEnv(host, overrides, ...args) {
+  const result = spawnSync(process.execPath, [cli, ...args], {encoding: "utf8", env: {...process.env, DWHQ_HOST_BIN: host, ...overrides}, timeout: 20_000});
   const output = JSON.parse(result.stdout.trim());
   return {status: result.status, output};
 }
 
-test("agent creates a project, queries, a JOIN, inspects metadata, and previews without leaking rows", () => {
+function invoke(host, ...args) { return invokeWithEnv(host, {}, ...args); }
+
+test("agent creates a project, queries, a JOIN, aggregates, and previews without leaking rows", () => {
   const dir = mkdtempSync(join(tmpdir(), "dwhq-agent-poc-"));
   try {
     const host = join(dir, "fake-host.cjs");
@@ -77,9 +79,38 @@ test("agent creates a project, queries, a JOIN, inspects metadata, and previews 
     const joined = invoke(host, "query", "join", "--project", project, "--query", left,
       "--right", right, "--on", JSON.stringify([{left: "contract_id", right: "contract_id"}]));
     assert.equal(joined.status, 0, JSON.stringify(joined.output));
+    const schemas = invoke(host, "tools");
+    assert.equal(schemas.status, 0);
+    assert.deepEqual(schemas.output.stepSchemas.GroupBy.payload.required, ["dimensions", "aggregates"]);
+    assert.deepEqual(schemas.output.stepSchemas.GroupBy.example.payload.aggregates, ["COUNT(*) AS n_sales", "SUM(amount) AS amount"]);
+    const missingOptIn = invokeWithEnv(host, {DWHQ_ALLOW_SQL: ""}, "query", "group-by", "--project", project,
+      "--query", left, "--dimensions", '["contract_id"]', "--aggregates", '["SUM(amount) AS amount"]');
+    assert.equal(missingOptIn.status, 1);
+    assert.equal(missingOptIn.output.code, "sql_opt_in_required");
+    const badShape = invokeWithEnv(host, {DWHQ_ALLOW_SQL: "1"}, "query", "step", "--project", project,
+      "--query", left, "--step", JSON.stringify({type: "GroupBy", payload: {group: ["contract_id"], measures: [{fn: "sum", column: "amount"}]}}));
+    assert.equal(badShape.status, 1);
+    assert.equal(badShape.output.code, "invalid_step_payload");
+    const malformed = invokeWithEnv(host, {DWHQ_ALLOW_SQL: "1"}, "query", "group-by", "--project", project,
+      "--query", left, "--dimensions", "not-json", "--aggregates", '["SUM(amount) AS amount"]');
+    assert.equal(malformed.status, 1);
+    assert.equal(malformed.output.code, "invalid_step_payload");
+    const badAlias = invokeWithEnv(host, {DWHQ_ALLOW_SQL: "1"}, "query", "group-by", "--project", project,
+      "--query", left, "--dimensions", '["contract_id"]', "--aggregates", '["SUM(amount)"]');
+    assert.equal(badAlias.status, 1);
+    assert.equal(badAlias.output.code, "invalid_step_payload");
+    const unsupported = invoke(host, "query", "step", "--project", project,
+      "--query", left, "--step", JSON.stringify({type: "Aggregate", payload: {}}));
+    assert.equal(unsupported.status, 1);
+    assert.equal(unsupported.output.code, "unsupported_step");
+    const grouped = invokeWithEnv(host, {DWHQ_ALLOW_SQL: "1"}, "query", "group-by", "--project", project,
+      "--query", left, "--dimensions", '["contract_id"]',
+      "--aggregates", '["COUNT(*) AS n_sales","SUM(amount) AS amount"]');
+    assert.equal(grouped.status, 0, JSON.stringify(grouped.output));
     const inspect = invoke(host, "project", "inspect", "--project", project);
     assert.equal(inspect.status, 0);
     assert.equal(inspect.output.summary.queries[0].steps[1].type, "Join");
+    assert.equal(inspect.output.summary.queries[0].steps[2].type, "GroupBy");
     const preview = invoke(host, "query", "preview", "--project", project, "--query", left);
     assert.equal(preview.status, 0);
     assert.equal(preview.output.returnedRows, 1);

@@ -32,9 +32,13 @@ for (const part of [".opencode", ".opencode/plugins", ".opencode/skills", ".open
 const toolsPath = join(destination, ".opencode/plugins/dwhquery.js")
 const skillPath = join(destination, ".opencode/skills/dwhquery/SKILL.md")
 const configPath = join(destination, ".opencode/dwhquery-adapter.json")
-// Pinned SHA-256 of the first published adapter (ADR-0053). Upgrade only that exact
-// adapter; never clobber user-customized plugins, config, or skills.
-const legacyPluginSha256 = "a21b30fdfb42509e74e2a702311c84e6d6f4415ca5ec02c93b2414b75c2b9b48"
+// Allow upgrades only from published, byte-for-byte pinned adapters, never custom plugins.
+// The first entry is the original Bun runtime adapter, the second is its Node runtime fix.
+const previousSkillSha256 = "b405245599424093349cd0ff2a0478821701de1658b281ab4e36cc61b2fd6217"
+const publishedPluginSha256 = new Set([
+  "a21b30fdfb42509e74e2a702311c84e6d6f4415ca5ec02c93b2414b75c2b9b48",
+  "eb7a3052909d54a0019a06909b3ea41616794394afdd74ca5e55fb241ade40cf",
+])
 const cliPath = await realpath(cli)
 const hostPath = await realpath(host)
 const nodePath = await realpath(node)
@@ -45,7 +49,8 @@ const ownFile = async (path, expected) => {
   const current = await readFile(path, "utf8")
   if (current === expected) return
   if (path === configPath && current === legacyCfg) return
-  if (path === toolsPath && createHash("sha256").update(current).digest("hex") === legacyPluginSha256) return
+  if (path === toolsPath && publishedPluginSha256.has(createHash("sha256").update(current).digest("hex"))) return
+  if (path === skillPath && createHash("sha256").update(current).digest("hex") === previousSkillSha256) return
   throw new Error(`Refusing to overwrite an existing custom file: ${path}`)
 }
 await mkdir(dirname(toolsPath), { recursive: true })

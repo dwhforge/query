@@ -62,12 +62,14 @@ The fixture intentionally has an unmatched sale (see `examples/opencode-sales/RE
 
 ## Registered tools and boundaries
 
-The V2 server plugin registers 14 tools under the `dwhquery` namespace: `capabilities`, `project_create`, `project_inspect`, `connection_add`, `query_add`, `query_derive`, `query_step`, `query_join`, `query_focus`, `query_describe`, `query_preview`, `join_diagnose`, `project_validate`, `project_export`. It follows the official `ctx.tool.transform` plugin API: <https://opencode.ai/docs/build/plugins/server/>.
+The V2 server plugin registers 15 tools under the `dwhquery` namespace: `capabilities`, `project_create`, `project_inspect`, `connection_add`, `query_add`, `query_derive`, `query_step`, `query_group_by`, `query_join`, `query_focus`, `query_describe`, `query_preview`, `join_diagnose`, `project_validate`, `project_export`. It follows the official `ctx.tool.transform` plugin API: <https://opencode.ai/docs/build/plugins/server/>.
 
 Each tool calls `spawn(configuredNodeBinary, [cli, ...argv])` with **no shell**; OpenCode runs under Bun, so `process.execPath` must **not** be used to launch the Node CLI. Inputs use JSON Schemas; paths are constrained to the business workspace (including symlink resolution). No agent can call arbitrary Rust Host RPC through these tools. Results are bounded in size/time and operations support cancellation. IDs should be read from `project_inspect`; generated IDs must not be guessed.
 
 - Project writes: only projects created by the CLI can be modified by default, via its UID ownership marker. Editing any other project requires **operator-set** `DWHQ_ALLOW_EXISTING_PROJECT_EDITS=1`. The CLI uses a file lock/checksum but does not provide a transaction against a concurrently open Electron session.
 - SQL expressions: `Filter`, SQL-mode `DeriveColumn` etc. require **operator-set** `DWHQ_ALLOW_SQL=1`; that is an opt-in, **not** SQL sandboxing. Use read-only external database credentials.
+- GroupBy: use **`query_group_by`** rather than guessing a generic `query_step` payload. Its `dimensions` and `aggregates` are arrays of strings; aggregates are SQL fragments with explicit aliases, e.g. `["COUNT(*) AS n_sales", "SUM(amount) AS amount"]`. This requires `DWHQ_ALLOW_SQL=1` in the OpenCode server environment. `capabilities` / `dwhq tools` now returns `stepSchemas`; CLI errors distinguish `invalid_step_payload`, `unsupported_step` and `sql_opt_in_required`.
+- For reproducible category summaries, call `query_describe` before and after `query_group_by`, then `project_validate`, `query_preview` and `project_export`. Passing `project_validate` proves query compilation, **not** a successful `dbt build` or materialized aggregation. Use the real Host/DuckDB E2E test and inspect exported SQL before claiming computation is complete.
 - PostgreSQL connections: use a pre-provisioned environment variable name such as `DWHQ_PG_CONTRACTS_DSN`. Do not put DSNs or passwords into user prompts, source files or tool arguments.
 - Rows: previews and JOIN diagnostics return summary counts without row values by default. `includeRows: true` requires both **operator-set** `DWHQ_ALLOW_ROW_DATA=1` and an OpenCode `dwhquery_row_data` permission check (`ask` unless a rule overrides it). This may transmit confidential data to the selected model. Avoid granting it for real sensitive datasets without reviewing model/privacy controls and other OpenCode permissions.
 - Publishing: `project_export` creates dbt files in a new or empty directory; it does **not** run dbt build, modify external warehouse tables or confirm business correctness.
@@ -79,6 +81,8 @@ Each tool calls `spawn(configuredNodeBinary, [cli, ...argv])` with **no shell**;
 ```bash
 node --test tests/opencode-dwhquery.spec.mjs
 npm run cli:test
+# Requires built Rust host + compiled CLI and actual CSVs, opt in explicitly:
+DWHQ_RUN_REAL_E2E=1 node --test tests/dwhq-sales-e2e.spec.mjs
 ```
 
 Adapter tests use a fake CLI and mock OpenCode V2 tool editor; web-launcher tests use a fake OpenCode binary. **They do not prove a real OpenCode V2 plugin load or a Rust/DuckDB E2E run**. Acceptance requires an installed OpenCode 2.x, model-provider credentials, real Host + CSV fixture, browser tool discovery, saved project, dbt export, and opening the project in Electron. These dependencies were not exercised by the adapter unit tests.

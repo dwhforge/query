@@ -13,6 +13,29 @@ import { createQueryEditingService } from "../../src/app/queryEditing/service";
 type Dict = Record<string, string | boolean>;
 type Result = Record<string, unknown>;
 
+class AgentCommandError extends Error {
+  constructor(readonly code: string, message: string) { super(message); this.name = "AgentCommandError"; }
+}
+
+// These contracts are intentionally discoverable without starting Rust or opening a project.
+// Keep them aligned with src/types/pipeline.ts and the CLI payload validators.
+const nonemptyString = {type: "string", minLength: 1};
+const strings = {type: "array", items: nonemptyString, minItems: 1};
+const stepSchemas = {
+  Filter: {payload: {type: "object", required: ["condition"], properties: {condition: nonemptyString}}, requiresSqlOptIn: true},
+  SelectColumns: {payload: {type: "object", required: ["columns"], properties: {columns: strings}}},
+  RenameColumn: {payload: {type: "object", required: ["from", "to"], properties: {from: nonemptyString, to: nonemptyString}}},
+  DeriveColumn: {payload: {type: "object", required: ["name"], properties: {name: nonemptyString, expression: nonemptyString, mode: {enum: ["sql", "op"]}, op: {type: "object"}}}, sqlExpressionRequiresOptIn: true},
+  GroupBy: {payload: {type: "object", required: ["dimensions", "aggregates"], additionalProperties: false,
+    properties: {dimensions: strings, aggregates: strings}}, requiresSqlOptIn: true,
+    example: {type: "GroupBy", payload: {dimensions: ["category"], aggregates: ["COUNT(*) AS n_sales", "SUM(amount) AS amount"]}},
+    note: "aggregates are SQL expressions with explicit AS aliases, NOT objects; use query_group_by to avoid guessing"},
+  SortBy: {payload: {type: "object", required: ["column", "descending"], properties: {column: nonemptyString, descending: {type: "boolean"}}}},
+  Limit: {payload: {type: "object", required: ["n"], properties: {n: {type: "integer", minimum: 1}}}},
+  NormalizeKey: {payload: {type: "object", required: ["columns", "ops"], properties: {columns: strings,
+    ops: {type: "array", minItems: 1, items: {enum: ["trim", "lower", "upper", "collapse_space", "ltrim_zeros"]}}}}},
+};
+
 const tools = [
   {command: "project create", about: "Create an empty, openable DWHQuery project", required: ["project", "name"]},
   {command: "project inspect", about: "Inspect source/query graph without credentials or row data", required: ["project"]},
@@ -21,7 +44,8 @@ const tools = [
   {command: "connection add", about: "Register PostgreSQL or DuckDB connection; secret only from env", required: ["project", "name", "kind"]},
   {command: "query add", about: "Create query with a CSV, Parquet or PostgreSQL root", required: ["project", "name"]},
   {command: "query derive", about: "Create a derived query using existing Query Editing service", required: ["project", "query"]},
-  {command: "query step", about: "Append a typed transformation step through Query Editing service", required: ["project", "query", "step"]},
+  {command: "query step", about: "Append a typed transformation step through Query Editing service; inspect stepSchemas first", required: ["project", "query", "step"]},
+  {command: "query group-by", about: "Append a GroupBy; JSON string arrays --dimensions and --aggregates; SQL opt-in required", required: ["project", "query", "dimensions", "aggregates"]},
   {command: "query join", about: "Add a JOIN through validated Query Editing service", required: ["project", "query", "right", "on"]},
   {command: "query focus", about: "Select focus Query for previews and default output", required: ["project", "query"]},
   {command: "query describe", about: "Describe query result schema with the Rust compiler", required: ["project", "query"]},
@@ -63,7 +87,11 @@ function flag(o: Dict, name: string): boolean {
 function projectPath(o: Dict): string { return resolve(required(o, "project")); }
 function asJson(o: Dict, key: string): unknown {
   try { return JSON.parse(required(o, key)) as unknown; }
-  catch { throw new Error(`--${key} must be valid JSON`); }
+  catch {
+    if (["step", "dimensions", "aggregates"].includes(key))
+      throw new AgentCommandError("invalid_step_payload", `--${key} must be valid JSON; see stepSchemas in 'dwhq tools'`);
+    throw new Error(`--${key} must be valid JSON`);
+  }
 }
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -146,13 +174,25 @@ function parseRoot(o: Dict): TransformationStep {
   return {type: "LoadPostgres", payload: {schema: parts[0]!, table_name: parts[1]!, connection_id: required(o, "connection")}};
 }
 function parseStep(value: unknown): TransformationStep {
-  if (!object(value) || typeof value.type !== "string" || !object(value.payload)) throw new Error("Step requires {type,payload}");
-  const allowed = ["Filter", "SelectColumns", "RenameColumn", "DeriveColumn", "GroupBy", "SortBy", "Limit", "NormalizeKey"];
-  if (!allowed.includes(value.type)) throw new Error(`Unsupported step ${value.type}; use query join for JOIN and query add for sources`);
+  if (!object(value) || typeof value.type !== "string" || !object(value.payload))
+    throw new AgentCommandError("invalid_step_payload", "Step requires {type,payload}; run 'dwhq tools' to see stepSchemas");
+  if (!Object.prototype.hasOwnProperty.call(stepSchemas, value.type))
+    throw new AgentCommandError("unsupported_step", `Unsupported step ${value.type}; run 'dwhq tools' for supported stepSchemas`);
+  if (value.type === "GroupBy") {
+    const p = value.payload;
+    const valid = (x: unknown): x is string[] => Array.isArray(x) && x.length > 0 &&
+      x.every(y => typeof y === "string" && y.trim().length > 0);
+    if (!valid(p.dimensions) || !valid(p.aggregates) || Object.keys(p).some(k => !["dimensions", "aggregates"].includes(k)))
+      throw new AgentCommandError("invalid_step_payload", "GroupBy payload requires {dimensions: string[], aggregates: string[]}; e.g. {dimensions:[\"category\"],aggregates:[\"COUNT(*) AS n_sales\",\"SUM(amount) AS amount\"]}. Do not use group/measures.");
+    // Raw aggregate expressions without aliases cannot expose stable downstream schema.
+    if (!p.aggregates.every(a => /\s+AS\s+[a-zA-Z_][a-zA-Z0-9_]*\s*$/i.test(a)))
+      throw new AgentCommandError("invalid_step_payload", "GroupBy aggregates must have explicit AS aliases, e.g. SUM(amount) AS total_amount");
+  }
   // Expressions are executable SQL snippets. An operator must explicitly opt in.
   if ((["Filter", "GroupBy"].includes(value.type) ||
     (value.type === "DeriveColumn" && typeof value.payload.expression === "string")) &&
-    process.env.DWHQ_ALLOW_SQL !== "1") throw new Error("SQL expressions require DWHQ_ALLOW_SQL=1 (operator opt-in)");
+    process.env.DWHQ_ALLOW_SQL !== "1")
+    throw new AgentCommandError("sql_opt_in_required", "This step executes SQL expressions; operator must set DWHQ_ALLOW_SQL=1 before starting OpenCode");
   return value as TransformationStep;
 }
 async function run(command: string, o: Dict): Promise<Result> {
@@ -163,11 +203,12 @@ async function run(command: string, o: Dict): Promise<Result> {
       "query add --project /tmp/work.json --name Contracts --postgres public.contracts --connection conn_main",
       "query join --project /tmp/work.json --query q_payments --right q_contracts --on '[{\"left\":\"contract_id\",\"right\":\"id\"}]'",
       "query step --project /tmp/work.json --query q_payments --step '{\"type\":\"Limit\",\"payload\":{\"n\":50}}'",
+      "query group-by --project /tmp/work.json --query q_payments --dimensions '[\"category\"]' --aggregates '[\"COUNT(*) AS n_sales\",\"SUM(amount) AS amount\"]'",
       "project validate --project /tmp/work.json",
       "join diagnose --project /tmp/work.json --query q_payments --index 1",
       "project export --project /tmp/work.json --output-dir /tmp/empty_export_dir",
     ], policy: {externalWrites: false, rowData: "opt-in DWHQ_ALLOW_ROW_DATA=1",
-      rawSql: "opt-in DWHQ_ALLOW_SQL=1"}, tools};
+      rawSql: "opt-in DWHQ_ALLOW_SQL=1"}, tools, stepSchemas};
   const path = projectPath(o);
   if (command === "project create") {
     if (existsSync(path)) throw new Error(`Project already exists: ${path}`);
@@ -210,8 +251,18 @@ async function run(command: string, o: Dict): Promise<Result> {
       workspace: {...p.workspace, queries, focus_query_id: p.workspace.focus_query_id || id}};
   });
   if (command === "query derive") return mutate(path, async (_host, p) => ensureEdit(createQueryEditingService(p).deriveQuery({queryId: required(o, "query")})));
-  if (command === "query step") return mutate(path, async (_host, p) =>
-    ensureEdit(createQueryEditingService(p).appendStep({queryId: required(o, "query"), step: parseStep(asJson(o, "step"))})));
+  if (command === "query step") {
+    const step = parseStep(asJson(o, "step"));
+    return mutate(path, async (_host, p) =>
+      ensureEdit(createQueryEditingService(p).appendStep({queryId: required(o, "query"), step})));
+  }
+  if (command === "query group-by") {
+    const dimensions = asJson(o, "dimensions");
+    const aggregates = asJson(o, "aggregates");
+    const step = parseStep({type: "GroupBy", payload: {dimensions, aggregates}});
+    return mutate(path, async (_host, p) =>
+      ensureEdit(createQueryEditingService(p).appendStep({queryId: required(o, "query"), step})));
+  }
   if (command === "query join") return mutate(path, async (_host, p) => {
     const pairs = asJson(o, "on");
     if (!Array.isArray(pairs) || pairs.length < 1 || pairs.length > 5 ||
@@ -293,7 +344,7 @@ async function main(): Promise<void> {
     const result = await run(command, opts);
     process.stdout.write(`${JSON.stringify({ok: true, ...result})}\n`);
   } catch (error) {
-    process.stdout.write(`${JSON.stringify({ok: false, code: "tool_error", message: error instanceof Error ? error.message : "Unknown error"})}\n`);
+    process.stdout.write(`${JSON.stringify({ok: false, code: error instanceof AgentCommandError ? error.code : "tool_error", message: error instanceof Error ? error.message : "Unknown error"})}\n`);
     process.exitCode = 1;
   }
 }

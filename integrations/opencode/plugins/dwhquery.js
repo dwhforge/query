@@ -98,7 +98,7 @@ function run(argv, signal) {
       let parsed
       try { parsed = JSON.parse(stdout.trim()) }
       catch { return settle(new Error(`DWHQuery returned invalid JSON (exit ${status}; ${killed ?? "no signal"})`)) }
-      if (status !== 0 || parsed.ok !== true) return settle(new Error(`DWHQuery: ${parsed.message ?? "command failed"}`))
+      if (status !== 0 || parsed.ok !== true) return settle(new Error(`DWHQuery [${parsed.code ?? "tool_error"}]: ${parsed.message ?? "command failed"}`))
       settle(null, { content: JSON.stringify(parsed) })
     })
   })
@@ -153,9 +153,16 @@ export default Plugin.define({
       toolSpec(editor, "query_derive", "Create a new Query derived from an existing Query without rewriting the workspace.",
         schema({ project: str("Existing project"), query: str("Existing source Query ID, obtained from project_inspect") }, ["project", "query"]),
         (a, c) => run([...argsProject("query derive", project(a.project)), "--query", a.query], c.signal))
-      toolSpec(editor, "query_step", "Append a typed transformation (Filter, SelectColumns, RenameColumn, DeriveColumn, GroupBy, SortBy, Limit, NormalizeKey). SQL expression steps need operator DWHQ_ALLOW_SQL=1. Never invent column names; describe them first.",
+      toolSpec(editor, "query_step", "Append a typed transformation (Filter, SelectColumns, RenameColumn, DeriveColumn, GroupBy, SortBy, Limit, NormalizeKey). Call capabilities to inspect stepSchemas; GroupBy requires dimensions:string[] and aggregates:string[] with SQL AS aliases. SQL expression steps require operator DWHQ_ALLOW_SQL=1. Never invent column names; describe them first.",
         schema({ project: str("Existing project"), query: str("Existing Query ID"), step: { type: "object", description: "DWHQuery TransformationStep with type and payload", required: ["type", "payload"], properties: { type: str("Transformation type"), payload: { type: "object", additionalProperties: true } }, additionalProperties: false } }, ["project", "query", "step"]),
         (a, c) => run([...argsProject("query step", project(a.project)), "--query", a.query, "--step", encodeJson(a.step, "step")], c.signal))
+      toolSpec(editor, "query_group_by", "Aggregate a Query by dimensions. Each aggregate is one SQL expression WITH an explicit AS alias, e.g. COUNT(*) AS n_sales, SUM(amount) AS amount. Requires operator DWHQ_ALLOW_SQL=1; run query_describe to confirm exact column names. After creation, query_describe and project_validate to check compilation.",
+        schema({ project: str("Existing project"), query: str("Existing Query ID obtained from project_inspect"),
+          dimensions: {type: "array", minItems: 1, items: str("Existing group-by dimension column")},
+          aggregates: {type: "array", minItems: 1, items: str("SQL aggregate expression with AS alias, e.g. SUM(amount) AS amount")} },
+          ["project", "query", "dimensions", "aggregates"]),
+        (a, c) => run([...argsProject("query group-by", project(a.project)), "--query", a.query,
+          "--dimensions", encodeJson(a.dimensions, "dimensions"), "--aggregates", encodeJson(a.aggregates, "aggregates")], c.signal))
       toolSpec(editor, "query_join", "Create or replace a JOIN using exact inspected Query IDs and 1–5 field pairs; do not guess keys.",
         schema({ project: str("Existing project"), query: str("LEFT Query ID"), right: str("RIGHT Query ID"), pairs: { type: "array", minItems: 1, maxItems: 5, items: schema({ left: str("LEFT column"), right: str("RIGHT column") }, ["left", "right"]) }, joinType: { type: "string", enum: ["inner", "left", "right", "full"] } }, ["project", "query", "right", "pairs"]),
         (a, c) => run([...argsProject("query join", project(a.project)), "--query", a.query, "--right", a.right, "--on", encodeJson(a.pairs, "pairs"), "--join-type", a.joinType ?? "left"], c.signal))

@@ -10,6 +10,8 @@
     "build": "tsc && node scripts/vite-build-electron.mjs",
     "preview": "vite preview",
     "host:build": "cargo build -p dwh-host --release",
+    "cli:build": "node scripts/build-dwhq-cli.mjs",
+    "cli:test": "npm run cli:build && node --test tests/dwhq-cli.spec.mjs",
     "types:generate": "bash scripts/export-ts-types.sh",
     "types:check": "bash scripts/check-generated-types.sh",
     "test:unit": "node scripts/run-unit-tests.mjs",
@@ -33,6 +35,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.7.0",
+    "esbuild": "^0.25.12",
     "tailwindcss": "^4.1.13",
     "typescript": "~5.8.3",
     "vite": "^6.3.5"

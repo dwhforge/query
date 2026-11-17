@@ -2776,6 +2776,14 @@ impl HostState {
                 )?;
                 serde_json::to_value(out).map_err(|e| RpcError::from(e.to_string()))
             }
+            // Standalone tool saves must not alter Electron's last-opened project.
+            "save_project_tool" => {
+                drop(db);
+                let a: commands::project::SaveProjectArgs =
+                    serde_json::from_value(args).map_err(|e| RpcError::from(e.to_string()))?;
+                let saved = commands::project::save_project(a)?;
+                serde_json::to_value(saved).map_err(|e| RpcError::from(e.to_string()))
+            }
             "save_project" => {
                 drop(db);
                 let a: commands::project::SaveProjectArgs =

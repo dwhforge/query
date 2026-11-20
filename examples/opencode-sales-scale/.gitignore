@@ -1,0 +1,4 @@
+# Outputs are generated on demand outside the repository.
+__pycache__/
+*.pyc
+.generated/
